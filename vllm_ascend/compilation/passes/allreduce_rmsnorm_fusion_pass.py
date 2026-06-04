@@ -15,8 +15,7 @@
 # limitations under the License.
 #
 import torch
-from torch._inductor.pattern_matcher import Match, PatternMatcherPass, PatternPrettyPrinter
-from vllm.compilation.passes.inductor_pass import get_pass_context
+from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
@@ -25,18 +24,9 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THRESHOLD = 512
-
-
-def get_compile_range_and_extra_stream_check():
-    def check_func(match: Match) -> bool:
-        compile_range = get_pass_context().compile_range
-        return extra_stream_scope_check(match) and compile_range.start > ALLREDUCE_NORM_FUSE_THRESHOLD
-
-    return check_func
 
 
 class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
@@ -67,10 +57,10 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
         def pattern(x, weight, residual, rms_norm_weight):
             mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
             all_reduce_ = tensor_model_parallel_all_reduce(mm)
-            output = torch.ops._C_ascend.npu_add_rms_norm_bias(all_reduce_, residual, rms_norm_weight, None)
+            chunked_residual = torch.ops.vllm.maybe_chunk_residual(all_reduce_, residual)
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(all_reduce_, chunked_residual, rms_norm_weight, None)
             out0 = output[0]
             out1 = output[2]
-
             return out0, out1
 
         return pattern
@@ -92,9 +82,6 @@ class MiddleLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
             return out0, out1
 
         return replacement
-
-    def get_extra_stream_scope_check(self):
-        return get_compile_range_and_extra_stream_check()
 
 
 class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
@@ -119,8 +106,8 @@ class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
         def pattern(x, weight, residual, rms_norm_weight):
             mm = torch.ops.vllm.unquantized_gemm(x, weight, None)
             all_reduce_ = tensor_model_parallel_all_reduce(mm)
-            output = torch.ops._C_ascend.npu_add_rms_norm_bias(all_reduce_, residual, rms_norm_weight, None)
-
+            chunked_residual = torch.ops.vllm.maybe_chunk_residual(all_reduce_, residual)
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(all_reduce_, chunked_residual, rms_norm_weight, None)
             return output[0]
 
         return pattern
@@ -139,11 +126,9 @@ class LastLayerMatmulAllReduceAddRMSNormPattern(BasePattern):
                 True,
                 False,
             )
+            return out0
 
         return replacement
-
-    def get_extra_stream_scope_check(self):
-        return get_compile_range_and_extra_stream_check()
 
 
 class MatmulAllReduceAddRMSNormPass(VllmInductorPass):

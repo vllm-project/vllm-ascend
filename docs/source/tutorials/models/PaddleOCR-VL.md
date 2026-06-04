@@ -28,7 +28,7 @@ Select an image based on your machine type and start the docker image on your no
 
 ```{code-block} bash
    :substitutions:
-export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0rc1
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
@@ -48,7 +48,7 @@ docker run --rm \
 ```
 
 :::{note}
-The 310P device is supported from version 0.15.0rc1. You need to select the corresponding image for installation.
+The Atlas 300 inference products are supported from version 0.15.0rc1. You need to select the corresponding image for installation.
 :::
 
 ## Deployment
@@ -57,7 +57,7 @@ The 310P device is supported from version 0.15.0rc1. You need to select the corr
 
 #### Single NPU (PaddleOCR-VL)
 
-PaddleOCR-VL supports single-node single-card deployment on the 910B4 and 310P platform. Follow these steps to start the inference service:
+PaddleOCR-VL supports single-node single-card deployment on the 910B4 and Atlas 300 inference products platform. Follow these steps to start the inference service:
 
 1. Prepare model weights: Ensure the downloaded model weights are stored in the `PaddleOCR-VL` directory.
 2. Create and execute the deployment script (save as `deploy.sh`):
@@ -72,7 +72,7 @@ Run the following script to start the vLLM server on single 910B4:
 
 ```shell
 #!/bin/sh
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
 export TASK_QUEUE_ENABLE=1
 export CPU_AFFINITY_CONF=1
@@ -90,14 +90,14 @@ vllm serve ${MODEL_PATH} \
 ```
 
 ::::
-::::{tab-item} 310P
-:sync: 310P
+::::{tab-item} Atlas 300 inference products
+:sync: Atlas 300 inference products
 
-Run the following script to start the vLLM server on single 310P:
+Run the following script to start the vLLM server on single Atlas 300 inference products:
 
 ```shell
 #!/bin/sh
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
 
 vllm serve ${MODEL_PATH} \
@@ -112,7 +112,7 @@ vllm serve ${MODEL_PATH} \
 ```
 
 :::{note}
-The `--max_model_len` option is added to prevent errors when generating the attention operator mask on the 310P device.
+The `--max_model_len` option is added to prevent errors when generating the attention operator mask on the Atlas 300 inference products.
 :::
 
 ::::
@@ -215,52 +215,52 @@ The 910B4 device supports inference using the PaddlePaddle framework.
 
 1. Pull the PaddlePaddle-compatible CANN image
 
-```bash
-docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84
-```
+    ```bash
+    docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84
+    ```
 
-Start the container using the following command:
+    Start the container using the following command:
 
-```bash
-docker run -it --name paddle-npu-dev -v $(pwd):/work \
-    --privileged --network=host --shm-size=128G -w=/work \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -e ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
-    ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-$(uname -m)-gcc84 /bin/bash
-```
+    ```bash
+    docker run -it --name paddle-npu-dev -v $(pwd):/work \
+        --privileged --network=host --shm-size=128G -w=/work \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -e ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
+        ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-$(uname -m)-gcc84 /bin/bash
+    ```
 
 2. Install [PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined) and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
 
-```bash
-python -m pip install paddlepaddle==3.2.0
-wget https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
-pip  install  paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
-python -m pip install -U "paddleocr[doc-parser]"
-pip install safetensors
-```
+    ```bash
+    python -m pip install paddlepaddle==3.2.0
+    wget https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+    pip  install  paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+    python -m pip install -U "paddleocr[doc-parser]"
+    pip install safetensors
+    ```
 
-:::{note}
-The OpenCV component may be missing:
+    :::{note}
+    The OpenCV component may be missing:
 
-```bash
-apt-get update
-apt-get install -y libgl1 libglib2.0-0
-```
+    ```bash
+    apt-get update
+    apt-get install -y libgl1 libglib2.0-0
+    ```
 
-CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is recommended to install the specified versions.
+    CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is recommended to install the specified versions.
 
-```bash
-python -m pip install numpy==1.26.4
-python -m pip install opencv-python==3.4.18.65
-```
+    ```bash
+    python -m pip install numpy==1.26.4
+    python -m pip install opencv-python==3.4.18.65
+    ```
 
 ::::
 ::::{tab-item} OM inference
 :sync: om
 
-The 310P device supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
+The Atlas 300 inference products support only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
 
 ::::
 :::::

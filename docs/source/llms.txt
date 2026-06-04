@@ -36,7 +36,7 @@ Documentation: https://docs.vllm.ai/projects/ascend/en/latest/index.html
 
 ## Developer Guide
 - [Contribution Guide](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html): setup and contribution workflow.
-- [Developer Feature Guide](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/feature_guide/index.html): developer-side feature docs.
+- [Developer Design Documents](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/index.html): developer-side feature docs.
 - [Evaluation Guide](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/index.html): evaluation workflow.
 - [Performance and Debug Index](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/performance_and_debug/index.html): profiling and debugging docs.
 

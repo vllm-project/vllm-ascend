@@ -19,6 +19,7 @@
 
 import copy
 import gc
+import logging
 from types import NoneType
 
 import torch
@@ -45,7 +46,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
@@ -53,12 +54,15 @@ from vllm_ascend.cpu_binding import bind_cpus, get_cpu_binding_rank
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
     enable_sp,
     get_ascend_device_type,
     register_ascend_customop,
+    setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -124,7 +128,10 @@ class NPUWorker(WorkerBase):
 
         # Profiler is lazily initialized on first profile(is_start=True) call (RFC #6954)
         self.profiler_config = vllm_config.profiler_config
-        self.profiler = None
+        self.profiler: TorchNPUProfilerWrapper | None = None
+        self.torch_reserved = 0
+        self.torch_allocated = 0
+        self.npugraph_memory_bytes = 0
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
@@ -136,6 +143,9 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+        if self.use_v2_model_runner and vllm_version_is("0.20.2"):
+            logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.20.2; falling back to v1 model runner.")
+            self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -207,10 +217,11 @@ class NPUWorker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        nz_mode = get_ascend_config().weight_nz_mode
+        if nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0."
+                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
@@ -262,6 +273,9 @@ class NPUWorker(WorkerBase):
 
         gc.collect()
         torch.npu.empty_cache()
+
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot()
@@ -391,12 +405,23 @@ class NPUWorker(WorkerBase):
 
         return int(self.available_kv_cache_memory_bytes)
 
+    def profile_memory(self) -> None:
+        """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
+        self.torch_reserved = torch.npu.memory_reserved()
+        self.torch_allocated = torch.npu.memory_allocated()
+        logger.debug(
+            "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB",
+            self.torch_reserved / GiB_bytes,
+            self.torch_allocated / GiB_bytes,
+        )
+
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        self.profile_memory()
         # enable msMonitor to monitor the performance of vllm-ascend
-        if envs_ascend.MSMONITOR_USE_DAEMON:
+        if get_ascend_config().msmonitor_use_daemon:
             dp.step()
 
         if self._pp_send_work:
@@ -422,6 +447,9 @@ class NPUWorker(WorkerBase):
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
+
+        if self.profiler is not None:
+            self.profiler.step()
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
@@ -470,7 +498,7 @@ class NPUWorker(WorkerBase):
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         if not self.model_config.enforce_eager:
@@ -513,6 +541,7 @@ class NPUWorker(WorkerBase):
                 + self.non_torch_memory
                 + npugraph_memory_bytes
             )
+            self.npugraph_memory_bytes = npugraph_memory_bytes
             suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
             suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
             msg = (
@@ -554,7 +583,16 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-        return self.vllm_config.compilation_config.compilation_time
+        return CompilationTimes(
+            language_model=self.vllm_config.compilation_config.compilation_time,
+            # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
+            # back to 0.0 so the older release still constructs CompilationTimes.
+            encoder=getattr(
+                self.vllm_config.compilation_config,
+                "encoder_compilation_time",
+                0.0,
+            ),
+        )
 
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()
@@ -618,12 +656,13 @@ class NPUWorker(WorkerBase):
 
         # Log for debugging in PP mode
         if not is_first_pp_rank:
-            logger.debug(
-                "[ProfilingChunk] PP rank %d: profiled %d tokens, latency=%.2f ms (not used)",
-                get_pp_group().rank_in_group,
-                num_tokens,
-                latency_ms,
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[ProfilingChunk] PP rank %d: profiled %d tokens, latency=%.2f ms (not used)",
+                    get_pp_group().rank_in_group,
+                    num_tokens,
+                    latency_ms,
+                )
 
         return latency_ms
 
@@ -686,7 +725,7 @@ class NPUWorker(WorkerBase):
             trace_name = f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
 
             if self.profiler is None:
-                self.profiler = self._create_profiler(trace_name)
+                self.profiler = TorchNPUProfilerWrapper(self.profiler_config, trace_name)
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
                 self.profiler.start()  # type: ignore[attr-defined]
             else:
@@ -715,6 +754,7 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
+        self.profile_memory()
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:
@@ -731,46 +771,6 @@ class NPUWorker(WorkerBase):
         )
         init_ascend_model_parallel(self.parallel_config)
         ensure_ec_transfer_initialized(self.vllm_config)
-
-    def _create_profiler(self, trace_name: str):
-        """Create torch_npu profiler with trace naming for unique files per worker (RFC #6954)."""
-        profiler_config = self.profiler_config
-
-        if profiler_config.profiler != "torch":
-            raise RuntimeError(f"Unrecognized profiler: {profiler_config.profiler}")
-        if not profiler_config.torch_profiler_dir:
-            raise RuntimeError("torch_profiler_dir cannot be empty.")
-        if envs_ascend.MSMONITOR_USE_DAEMON:
-            raise RuntimeError("MSMONITOR_USE_DAEMON and torch profiler cannot be both enabled at the same time.")
-
-        experimental_config = torch_npu.profiler._ExperimentalConfig(
-            export_type=torch_npu.profiler.ExportType.Text,
-            profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
-            msprof_tx=False,
-            aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
-            l2_cache=False,
-            op_attr=False,
-            data_simplification=True,
-            record_op_args=False,
-            gc_detect_threshold=None,
-        )
-
-        return torch_npu.profiler.profile(
-            activities=[
-                torch_npu.profiler.ProfilerActivity.CPU,
-                torch_npu.profiler.ProfilerActivity.NPU,
-            ],
-            with_stack=False,
-            profile_memory=profiler_config.torch_profiler_with_memory,
-            # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
-            # The with_stack option in torch_npu.profiler introduces significant time overhead.
-            with_modules=profiler_config.torch_profiler_with_stack,
-            experimental_config=experimental_config,
-            on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
-                profiler_config.torch_profiler_dir,
-                worker_name=trace_name,
-            ),
-        )
 
     def get_supported_pooling_tasks(self):
         return self.model_runner.get_supported_pooling_tasks()
@@ -797,13 +797,13 @@ class NPUWorker(WorkerBase):
                 parse_text_output(result.stdout)
                 logger.info("check_health success!")
             else:
-                logger.info(f"query NPU card {self.local_rank} fail: {result.stderr}")
+                logger.info("query NPU card %s fail: %s", self.local_rank, result.stderr)
         except subprocess.TimeoutExpired:
-            logger.info(f"query NPU card  {self.local_rank} timeout.")
+            logger.info("query NPU card  %s timeout.", self.local_rank)
         except FileNotFoundError:
             logger.info("npu-smi tool not found.")
         except Exception as e:
-            logger.info(f"query NPU card {self.local_rank} fail: {e}")
+            logger.info("query NPU card %s fail: %s", self.local_rank, e)
         return
 
 

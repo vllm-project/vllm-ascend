@@ -13,6 +13,8 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
 from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
 
+MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
+
 
 class TestCumsumGroupList(unittest.TestCase):
     glist_dict: ClassVar[dict[int, torch.Tensor]]
@@ -45,6 +47,19 @@ class TestCumsumGroupList(unittest.TestCase):
                 with self.assertRaises(NotImplementedError) as excinfo:
                     cumsum_group_list(self.glist_dict[0], src_list_type, dst_list_type)
                 self.assertIn("This feature is under development.", str(excinfo.exception))
+
+
+class TestW4A8RuntimeFlags(unittest.TestCase):
+    def test_w4a8_per_channel_gmm_swiglu_flag(self):
+        self.assertTrue(
+            MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True).use_w4a8_per_channel_gmm_swiglu
+        )
+        self.assertFalse(
+            MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=False).use_w4a8_per_channel_gmm_swiglu
+        )
+        self.assertFalse(
+            MoEQuantParams(quant_type=QuantType.W8A8, is_per_channel_weight=True).use_w4a8_per_channel_gmm_swiglu
+        )
 
 
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
@@ -83,6 +98,57 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         mock_quant.assert_not_called()
 
     def test_request_quant_path(self):
+        for quant_type, mxfp_dtype in (
+            (QuantType.MXFP8, torch.float8_e4m3fn),
+            (QuantType.MXFP4, MXFP4_TEST_DTYPE),
+        ):
+            with self.subTest(quant_type=quant_type):
+                hidden_states = torch.randn(2, 8)
+                expected = torch.randn(2, 8)
+                mlp_compute_input = MoEMlpComputeInput(
+                    hidden_states=hidden_states,
+                    group_list=torch.tensor([2, 2], dtype=torch.int64),
+                    group_list_type=1,
+                    dynamic_scale=torch.randn(2, 1),
+                    topk_scales=None,
+                    weights=MoEWeights(
+                        w1=torch.randn(1, 16, 8),
+                        w2=torch.randn(1, 8, 8),
+                        w1_scale=[torch.randn(1)],
+                        w2_scale=[torch.randn(1)],
+                    ),
+                    quant=MoEQuantParams(
+                        quant_type=quant_type,
+                        mxfp=MoEMxfpParams(
+                            act_quant_type=mxfp_dtype,
+                            weight_quant_type=mxfp_dtype,
+                            use_bf16=False,
+                        ),
+                    ),
+                    fusion=True,
+                    activation="silu",
+                    need_trans=False,
+                    dynamic_eplb=True,
+                )
+
+                with (
+                    patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp", return_value=expected) as mock_quant,
+                    patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp") as mock_unquant,
+                ):
+                    output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+                self.assertTrue(output is expected)
+                mock_quant.assert_called_once()
+                quant_kwargs = mock_quant.call_args.kwargs
+                self.assertTrue(quant_kwargs["use_mxfp_quant"])
+                self.assertTrue(quant_kwargs["fusion"])
+                self.assertTrue(quant_kwargs["dynamic_eplb"])
+                self.assertEqual(quant_kwargs["act_quant_type"], mxfp_dtype)
+                self.assertEqual(quant_kwargs["weight_quant_type"], mxfp_dtype)
+                self.assertFalse(quant_kwargs["use_bf16"])
+                mock_unquant.assert_not_called()
+
+    def test_request_quant_path_passes_w4a8_per_channel_flag(self):
         hidden_states = torch.randn(2, 8)
         expected = torch.randn(2, 8)
         mlp_compute_input = MoEMlpComputeInput(
@@ -94,21 +160,14 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
             weights=MoEWeights(
                 w1=torch.randn(1, 16, 8),
                 w2=torch.randn(1, 8, 8),
-                w1_scale=[torch.randn(1)],
-                w2_scale=[torch.randn(1)],
+                w1_scale=[torch.randn(1, 16)],
+                w2_scale=[torch.randn(1, 8)],
             ),
-            quant=MoEQuantParams(
-                quant_type=QuantType.MXFP8,
-                mxfp=MoEMxfpParams(
-                    act_quant_type=torch.float8_e4m3fn,
-                    weight_quant_type=torch.float8_e4m3fn,
-                    use_bf16=False,
-                ),
-            ),
-            fusion=True,
+            quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True),
+            fusion=False,
             activation="silu",
             need_trans=False,
-            dynamic_eplb=True,
+            dynamic_eplb=False,
         )
 
         with (
@@ -118,12 +177,8 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
             output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
         self.assertTrue(output is expected)
-        mock_quant.assert_called_once()
         quant_kwargs = mock_quant.call_args.kwargs
-        self.assertTrue(quant_kwargs["use_mxfp_quant"])
-        self.assertTrue(quant_kwargs["fusion"])
-        self.assertTrue(quant_kwargs["dynamic_eplb"])
-        self.assertFalse(quant_kwargs["use_bf16"])
+        self.assertTrue(quant_kwargs["use_w4a8_per_channel_gmm_swiglu"])
         mock_unquant.assert_not_called()
 
 

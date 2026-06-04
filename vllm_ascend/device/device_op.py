@@ -19,10 +19,13 @@ import torch
 import torch_npu
 
 from vllm_ascend.device.mxfp_compat import (
-    FLOAT4_E2M1FN_X2_DTYPE,
     FLOAT8_E8M0FNU_DTYPE,
-    HIFLOAT8_DTYPE,
+    QUANT_DTYPES,
+    SCALE_DTYPES,
 )
+from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
+from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
@@ -101,7 +104,7 @@ class BaseDeviceAdaptor:
         use_mxfp_quant: bool = False,
     ):
         if use_mxfp_quant:
-            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+            raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
         if dynamic_scale is None:
             return torch_npu.npu_dynamic_quant(hidden_states)
@@ -118,17 +121,22 @@ class BaseDeviceAdaptor:
         x_scale: torch.Tensor,
         bias=None,
         use_mxfp_quant: bool = False,
+        act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
+        weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
+        swiglu_limit: int = 0,
+        mxfp_quant_dtype: QuantType | None = None,
     ):
         if use_mxfp_quant:
-            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+            raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
-        return torch_npu.npu_grouped_matmul_swiglu_quant(
+        return torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
             x=x,
             weight=weight,
-            bias=bias,
-            group_list=group_list,
             weight_scale=weight_scale,
             x_scale=x_scale,
+            group_list=group_list,
+            bias=bias,
+            swiglu_limit=swiglu_limit,
         )
 
     @staticmethod
@@ -143,7 +151,7 @@ class BaseDeviceAdaptor:
         use_mxfp_quant: bool = False,
     ) -> dict:
         if use_mxfp_quant:
-            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+            raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
         return {
             "output_dtype": input_dtype if input_dtype in [torch.bfloat16, torch.float16] else torch.bfloat16,
@@ -168,9 +176,10 @@ class BaseDeviceAdaptor:
         use_mxfp_quant: bool = False,
         bias=None,
         fallback_output_dtype: torch.dtype | None = None,
+        mxfp_quant_dtype: QuantType | None = None,
     ) -> torch.Tensor:
         if use_mxfp_quant:
-            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+            raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
         if fallback_output_dtype is None:
             fallback_output_dtype = weight_scale[0].dtype if isinstance(weight_scale, list) else weight_scale.dtype
@@ -188,7 +197,7 @@ class BaseDeviceAdaptor:
         )[0]
 
     @staticmethod
-    def mla_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+    def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
         torch_npu.atb.npu_paged_cache_load(
             cache_kv_c,
             cache_k_pe,
@@ -198,6 +207,169 @@ class BaseDeviceAdaptor:
             key=key,
             value=value,
         )
+
+    @staticmethod
+    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+        bsz = attn_metadata.num_decode_tokens
+        hidden_states = hidden_states[:bsz]
+
+        cos_shape = attn_metadata.decode.cos.shape
+        cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
+        sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
+
+        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+        dequant_scale_q_nope = None
+        if atten_obj.fa_quant_layer:
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = torch_npu.npu_mla_prolog_v2(
+                quantized_x,
+                atten_obj.wd_q,
+                atten_obj.wu_q,
+                atten_obj.W_UK_T,
+                atten_obj.wd_kv,
+                atten_obj.gamma1,
+                atten_obj.gamma2,
+                sin,
+                cos,
+                attn_metadata.slot_mapping[:bsz].to(torch.int64),
+                decode_k_nope,
+                decode_k_pe,
+                dequant_scale_x=pertoken_scale.view(-1, 1),
+                dequant_scale_w_dq=atten_obj.dequant_scale_w_dq,
+                dequant_scale_w_uq_qr=atten_obj.dequant_scale_w_uq_qr,
+                dequant_scale_w_dkv_kr=atten_obj.dequant_scale_w_dkv_kr,
+                quant_scale_ckv=atten_obj.quant_kscale,
+                cache_mode="PA_NZ",
+            )
+        else:
+            decode_q_nope = torch.empty(
+                (hidden_states.shape[0], atten_obj.W_UK_T.shape[0], decode_k_nope.shape[-1]),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            decode_q_pe = torch.empty(
+                (hidden_states.shape[0], atten_obj.W_UK_T.shape[0], decode_k_pe.shape[-1]),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+
+            torch.ops._C_ascend.mla_preprocess(
+                hidden_states,
+                atten_obj.wd_qkv,
+                atten_obj.deq_scale_qkv,
+                atten_obj.gamma1,
+                atten_obj.beta1,
+                atten_obj.wu_q,
+                atten_obj.qb_deq_scl,
+                atten_obj.gamma2,
+                cos,
+                sin,
+                atten_obj.W_UK_T,
+                decode_k_nope,
+                decode_k_pe,
+                attn_metadata.slot_mapping[:bsz],
+                quant_scale0=atten_obj.quant_scale0,
+                quant_offset0=atten_obj.quant_offset0,
+                bias0=atten_obj.quant_bias_qkv,
+                quant_scale1=atten_obj.quant_scale1,
+                quant_offset1=atten_obj.quant_offset1,
+                bias1=atten_obj.qb_qt_bias,
+                ctkv_scale=atten_obj.ctkv_scale,
+                q_nope_scale=atten_obj.q_nope_scale,
+                cache_mode="nzcache" if atten_obj.enable_kv_nz else "krope_ctkv",
+                quant_mode="per_tensor_quant_asymm",
+                q_out0=decode_q_nope,
+                kv_cache_out0=decode_k_nope,
+                q_out1=decode_q_pe,
+                kv_cache_out1=decode_k_pe,
+                enable_inner_out=False,
+                inner_out=torch.tensor([], device=hidden_states.device),
+            )
+            decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
+            decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
+
+        decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
+
+        from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
+
+        decode_preprocess_res = DecodeMLAPreprocessResult(
+            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+        )
+        return decode_preprocess_res, None
+
+    def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
+        context_layer = torch.empty_like(query)
+
+        torch_npu._npu_flash_attention_unpad(
+            query=query,
+            key=key,
+            value=value,
+            seq_len=seq_lens_cpu,
+            scale_value=scale_value,
+            num_heads=head_num,
+            num_kv_heads=num_kv_heads,
+            out=context_layer,
+        )
+
+        return context_layer
+
+    @staticmethod
+    def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
+        chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
+            k=k,
+            beta=beta,
+            g_cumsum=g_cumsum,
+            A=A,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            B=B,
+            H=H,
+            Hg=Hg,
+            K=K,
+            BT=BT,
+            BK=BK,
+            num_warps=8,
+            num_stages=3,
+            multibuffer=True,
+        )
+
+        return A
+
+    @staticmethod
+    def solve_tril_16x16(
+        A,
+        Ad,
+        cu_seqlens,
+        chunk_indices,
+        T,
+        H,
+        BT,
+        LARGE_BLOCK_T,
+        NT,
+        B,
+    ):
+        extract_slice_stride_1 = LARGE_BLOCK_T // 32
+        solve_tril_16x16_kernel[NT, B * H](
+            A=A,
+            Ad=Ad,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=H,
+            BT=BT,
+            LARGE_BLOCK_T=LARGE_BLOCK_T,
+            EXTRACT_SLICE_STRIDE_1=extract_slice_stride_1,
+            num_warps=1,
+            num_stages=4,
+        )
+
+        return Ad
+
+    @staticmethod
+    def npu_gemma_rms_norm(x, weight, variance_epsilon):
+        x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, weight, variance_epsilon)
+        return x
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
@@ -209,6 +381,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             key_cache=key_cache,
             value_cache=value_cache,
             slot_mapping=slot_mapping.contiguous(),
+            cache_mode="Norm",
         )
 
     @staticmethod
@@ -241,7 +414,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if scale is None or scale.ndim != 2:
             return scale
         if scale.shape[-1] % 2 != 0:
-            raise ValueError(f"Invalid MXFP8 scale shape: {tuple(scale.shape)}")
+            raise ValueError(f"Invalid MXFP scale shape: {tuple(scale.shape)}")
         return scale.reshape(scale.shape[0], scale.shape[1] // 2, 2)
 
     @staticmethod
@@ -307,31 +480,60 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         x_scale: torch.Tensor,
         bias=None,
         use_mxfp_quant: bool = False,
+        act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
+        weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
+        swiglu_limit: int = 0,
+        mxfp_quant_dtype: QuantType | None = None,
     ):
         if not use_mxfp_quant:
-            return BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+            return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=x,
                 weight=weight,
                 group_list=group_list,
                 weight_scale=weight_scale,
                 x_scale=x_scale,
                 bias=bias,
+                swiglu_limit=swiglu_limit,
                 use_mxfp_quant=False,
             )
 
-        out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-            x=x,
-            weight=[weight],
-            group_list=group_list,
-            weight_scale=[weight_scale],
-            x_scale=x_scale,
-            dequant_mode=2,
-            quant_mode=2,
-            dequant_dtype=torch.float32,
-            quant_dtype=torch.float8_e4m3fn,
-            weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-            x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-        )
+        # W4A8 mxfp
+        if mxfp_quant_dtype == QuantType.W4A8MXFP:
+            hidden_states = torch_npu.npu_grouped_matmul(
+                x=[x],
+                weight=[weight],
+                scale=None,
+                antiquant_scale=[weight_scale],
+                scale_dtype=None,
+                per_token_scale=[x_scale],
+                per_token_scale_dtype=torch.float8_e8m0fnu,
+                split_item=2,
+                group_type=0,
+                group_list=group_list,
+                x_dtype=torch.float8_e4m3fn,
+                weight_dtype=torch_npu.float4_e2m1fn_x2,
+                output_dtype=torch.bfloat16,
+            )[0]
+            hidden_states = torch_npu.npu_swiglu(hidden_states)
+            out, out_scale = torch_npu.npu_dynamic_mx_quant(
+                hidden_states, dst_type=torch.float8_e4m3fn, round_mode="rint"
+            )
+        else:
+            out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                x=x,
+                weight=[weight],
+                group_list=group_list,
+                weight_scale=[weight_scale],
+                x_scale=x_scale,
+                dequant_mode=2,
+                quant_mode=2,
+                dequant_dtype=torch.float32,
+                quant_dtype=act_quant_type,
+                x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
+                weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
+                weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            )
         return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale), None
 
     @staticmethod
@@ -356,9 +558,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 use_mxfp_quant=False,
             )
 
-        quant_dtypes = tuple(dtype for dtype in (FLOAT4_E2M1FN_X2_DTYPE, HIFLOAT8_DTYPE) if dtype is not None)
-        scale_dtypes = tuple(dtype for dtype in (FLOAT8_E8M0FNU_DTYPE,) if dtype is not None)
-
         output_dtype = (
             input_dtype
             if input_dtype in [torch.bfloat16, torch.float16]
@@ -366,10 +565,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
         return {
-            "scale_dtype": scale_type if scale_type in scale_dtypes else None,
-            "per_token_scale_dtype": per_token_scale_type if per_token_scale_type in scale_dtypes else None,
-            "x_dtype": act_quant_type if act_quant_type in quant_dtypes else None,
-            "weight_dtype": weight_quant_type if weight_quant_type in quant_dtypes else None,
+            "scale_dtype": scale_type if scale_type in SCALE_DTYPES else None,
+            "per_token_scale_dtype": per_token_scale_type if per_token_scale_type in SCALE_DTYPES else None,
+            "x_dtype": act_quant_type if act_quant_type in QUANT_DTYPES else None,
+            "weight_dtype": weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
             "output_dtype": output_dtype,
         }
 
@@ -392,6 +591,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_mxfp_quant: bool = False,
         bias=None,
         fallback_output_dtype: torch.dtype | None = None,
+        mxfp_quant_dtype: QuantType | None = None,
     ) -> torch.Tensor:
         if not use_mxfp_quant:
             return BaseDeviceAdaptor.npu_grouped_matmul_gmm2(
@@ -430,6 +630,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
 
+        if mxfp_quant_dtype == QuantType.W4A8MXFP:
+            gmm2_scale = None  # type: ignore[assignment]
+            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
+
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=gmm2_weight,
@@ -445,16 +649,133 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )[0]
 
     @staticmethod
-    def mla_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+    def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
             block_table,
-            context_seq_len_npu,
+            context_seq_len_npu.contiguous(),
             seq_offset=seq_offset,
             key=key,
             value=value,
         )
+
+    @staticmethod
+    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
+        bsz = attn_metadata.num_decode_tokens
+        hidden_states = hidden_states[:bsz].unsqueeze(1)
+        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
+        dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0] * hidden_states.shape[1], -1)
+        cos_shape = attn_metadata.decode.cos.shape
+        cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
+        sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
+        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
+        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = torch_npu.npu_mla_prolog_v3(
+            token_x=hidden_states,
+            weight_dq=atten_obj.weight_dq,
+            weight_uq_qr=atten_obj.weight_uq_qr,
+            weight_uk=atten_obj.W_UK_T,
+            weight_dkv_kr=atten_obj.weight_dkv_kr,
+            rmsnorm_gamma_cq=atten_obj.q_a_layernorm.weight.data,
+            rmsnorm_gamma_ckv=atten_obj.kv_a_layernorm.weight.data,
+            rope_sin=sin,
+            rope_cos=cos,
+            kv_cache=decode_k_nope,
+            kr_cache=decode_k_pe,
+            cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
+            dequant_scale_x=dynamic_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_dq=atten_obj.weight_dq_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_dkv_kr=atten_obj.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
+            cache_mode="PA_BSND",
+            query_quant_mode=1 if atten_obj.fa_quant_layer else 0,
+            weight_quant_mode=3,
+            kv_cache_quant_mode=1 if atten_obj.fa_quant_layer else 0,
+            quant_scale_ckv=atten_obj.fak_descale_reciprocal if atten_obj.fa_quant_layer else None,
+        )
+        decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
+        decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
+
+        decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
+        from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
+
+        decode_preprocess_res = DecodeMLAPreprocessResult(
+            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+        )
+        return decode_preprocess_res, None
+
+    def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
+        seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
+
+        context_layer = torch_npu.npu_fusion_attention(
+            query=query,
+            key=key,
+            value=value,
+            actual_seq_qlen=seq_lens_cpu,
+            actual_seq_kvlen=seq_lens_cpu,
+            head_num=head_num,
+            scale=scale_value,
+            input_layout="TND",
+        )[0]
+
+        return context_layer
+
+    @staticmethod
+    def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
+        chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
+            k=k,
+            beta=beta,
+            g_cumsum=g_cumsum,
+            A=A,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            B=B,
+            H=H,
+            Hg=Hg,
+            K=K,
+            BT=BT,
+            BK=BK,
+            num_warps=8,
+            num_stages=3,
+            multibuffer=True,
+            disable_tightly_coupled_buffer_reuse=True,
+        )
+        return A
+
+    @staticmethod
+    def solve_tril_16x16(
+        A,
+        Ad,
+        cu_seqlens,
+        chunk_indices,
+        T,
+        H,
+        BT,
+        LARGE_BLOCK_T,
+        NT,
+        B,
+    ):
+        solve_tril_16x16_kernel[NT, B * H](
+            A=A,
+            Ad=Ad,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=H,
+            BT=BT,
+            LARGE_BLOCK_T=LARGE_BLOCK_T,
+            EXTRACT_SLICE_STRIDE_1=1,
+            num_warps=1,
+            num_stages=4,
+        )
+
+        return Ad
+
+    @staticmethod
+    def npu_gemma_rms_norm(x, weight, variance_epsilon):
+        x, _ = torch_npu.npu_rms_norm(x, 1.0 + weight, variance_epsilon)
+        return x
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:

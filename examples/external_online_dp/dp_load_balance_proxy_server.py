@@ -252,22 +252,22 @@ async def stream_service_response_with_retry(
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             if attempt < max_retries:
-                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
+                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
+                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                 raise e
         except Exception as e:
             # If any chunk has been sent, do not retry, just log and drop
             if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
+                logger.error("Streaming to client interrupted after response started: %s", e)
                 return
             else:
                 if attempt < max_retries:
-                    logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
+                    logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
                     await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 else:
-                    logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
+                    logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                     raise e
 
 
@@ -277,14 +277,17 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     ignore_eos = req_data.get("ignore_eos", False)
     priority_score = proxy_state.calculate_request_score(request_length, max_tokens=max_tokens, ignore_eos=ignore_eos)
     logger.debug(
-        f"Request length: {request_length}, max tokens: {max_tokens}, "
-        f"ignore_eos: {ignore_eos}, Priority score: {priority_score}"
+        "Request length: %s, max tokens: %s, ignore_eos: %s, Priority score: %s",
+        request_length,
+        max_tokens,
+        ignore_eos,
+        priority_score,
     )
     request_id = await proxy_state.next_req_id()
     # Select dp server based on priority score
     server_idx = proxy_state.select_server(priority_score)
     chosen_server = proxy_state.dp_servers[server_idx]
-    logger.debug(f"Choose server {chosen_server.url} to process request {request_id}")
+    logger.debug("Choose server %s to process request %s", chosen_server.url, request_id)
     return InstanceInfo(
         request_id=request_id, server_idx=server_idx, priority_score=priority_score, server_state=chosen_server
     )
@@ -320,8 +323,10 @@ async def _handle_completions(api: str, request: Request):
                     yield chunk
             except Exception as e:
                 logger.error(
-                    f"Error during streaming from server {instance_info.server_state.url}: {str(e)}, "
-                    f"the aborted request is: {instance_info.request_id}."
+                    "Error during streaming from server %s: %s, the aborted request is: %s.",
+                    instance_info.server_state.url,
+                    e,
+                    instance_info.request_id,
                 )
 
             # After streaming done, release tokens

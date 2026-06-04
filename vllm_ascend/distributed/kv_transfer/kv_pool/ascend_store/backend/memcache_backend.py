@@ -1,9 +1,11 @@
+# Standard
 import os
+import threading
 import time
 from enum import Enum
+from typing import Any
 
 import torch
-
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
@@ -48,8 +50,38 @@ class MemcacheBackend(Backend):
         memcache_client_cpus=None,
         local_rank: int | None = None,
         init_bm: bool = True,
-        defer_init: bool = False,
+        lazy_init: bool = False,
     ):
+        self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
+        self.memcache_client_cpus = memcache_client_cpus
+        self._init_bm = init_bm
+        self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
+        self._lazy_init = lazy_init and not self._is_a2
+
+        self.store: Any | None = None
+        self._store_initialized = False
+        self._store_init_lock = threading.Lock()
+        self._registered_buffers: tuple[list[int], list[int]] | None = None
+        self._buffers_registered = False
+
+        if not self._lazy_init:
+            self.store = self._setup_store()
+            self._store_initialized = True
+
+    def _ensure_initialized(self):
+        if self._store_initialized:
+            return
+
+        with self._store_init_lock:
+            if self._store_initialized:
+                return
+
+            logger.info("Initializing Memcache store on first put.")
+            self.store = self._setup_store()
+            self._store_initialized = True
+            self._register_buffers_if_needed()
+
+    def _setup_store(self):
         try:
             from memcache_hybrid import DistributedObjectStore  # type: ignore
         except ImportError as e:
@@ -58,19 +90,43 @@ class MemcacheBackend(Backend):
                 "https://gitee.com/ascend/memfabric_hybrid "  # noqa: E501
                 "to run vLLM with MemcacheConnector."
             ) from e
+
+        client_cpu_affinity = self._get_client_cpu_affinity()
+        client_cpus = self._parse_cpu_affinity(client_cpu_affinity)
+
+        if self._init_bm and self._is_a2:
+            tmp_tensor = torch.zeros(1, device="npu")
+            output_tensor_list = [torch.empty_like(tmp_tensor) for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather(output_tensor_list, tmp_tensor, group=get_world_group().device_group)
+
+        store = DistributedObjectStore()
+
+        original_cpus = os.sched_getaffinity(0)
+        expanded_cpus = original_cpus | set(client_cpus)
+        affinity_changed = False
+        if client_cpus and expanded_cpus != original_cpus:
+            affinity_changed = self._set_current_thread_affinity(expanded_cpus)
+            if affinity_changed:
+                logger.info(
+                    "Temporarily expanded current thread CPUs from %s to %s "
+                    "while initializing MemCache store.",
+                    sorted(original_cpus),
+                    sorted(expanded_cpus),
+                )
         try:
-            self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
-            self.memcache_client_cpus = memcache_client_cpus
-            self._distributed_object_store_cls = DistributedObjectStore
-            self.store = None
-            if not defer_init:
-                self.init_store(init_bm=init_bm)
-        except ValueError as e:
-            logger.error("Configuration loading failed: %s", e)
-            raise
-        except Exception as exc:
-            logger.error("An error occurred while loading the configuration: %s", exc)
-            raise
+            before_thread_ids = self._list_thread_ids()
+            res = store.init(self.local_rank, init_bm=self._init_bm)
+        finally:
+            if affinity_changed and self._set_current_thread_affinity(original_cpus):
+                logger.info(
+                    "Restored current thread CPUs to %s after initializing MemCache store.",
+                    sorted(original_cpus),
+                )
+
+        assert res == 0
+        time.sleep(MEMCACHE_THREAD_START_WAIT_S)
+        self._bind_new_memcache_threads(before_thread_ids, client_cpus)
+        return store
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
@@ -193,52 +249,40 @@ class MemcacheBackend(Backend):
     def init_store(self, init_bm: bool = True):
         if self.store is not None:
             return
-        client_cpu_affinity = self._get_client_cpu_affinity()
-        client_cpus = self._parse_cpu_affinity(client_cpu_affinity)
-        soc_version = get_ascend_device_type()
-        if init_bm and soc_version in {AscendDeviceType.A2}:
-            tmp_tensor = torch.zeros(1, device="npu")
-            output_tensor_list = [torch.empty_like(tmp_tensor) for _ in range(torch.distributed.get_world_size())]
-            torch.distributed.all_gather(output_tensor_list, tmp_tensor, group=get_world_group().device_group)
-        self.store = self._distributed_object_store_cls()
-        original_cpus = os.sched_getaffinity(0)
-        expanded_cpus = original_cpus | set(client_cpus)
-        affinity_changed = False
-        if client_cpus and expanded_cpus != original_cpus:
-            affinity_changed = self._set_current_thread_affinity(expanded_cpus)
-            if affinity_changed:
-                logger.info(
-                    "Temporarily expanded current thread CPUs from %s to %s "
-                    "while initializing MemCache store.",
-                    sorted(original_cpus),
-                    sorted(expanded_cpus),
-                )
-        try:
-            before_thread_ids = self._list_thread_ids()
-            res = self.store.init(self.local_rank, init_bm=init_bm)
-        finally:
-            if affinity_changed and self._set_current_thread_affinity(original_cpus):
-                logger.info(
-                    "Restored current thread CPUs to %s after initializing MemCache store.",
-                    sorted(original_cpus),
-                )
-        assert res == 0
-        time.sleep(MEMCACHE_THREAD_START_WAIT_S)
-        self._bind_new_memcache_threads(before_thread_ids, client_cpus)
+        self._init_bm = init_bm
+        self.store = self._setup_store()
+        self._store_initialized = True
+        self._register_buffers_if_needed()
 
     def set_device(self):
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
-        soc_version = get_ascend_device_type()
-        if soc_version in {AscendDeviceType.A2}:
-            for ptr, size in zip(ptrs, sizes):
-                self.store.register_buffer(ptr, size)
-        else:
-            pass
+        self._registered_buffers = (list(ptrs), list(sizes))
+        self._register_buffers_if_needed()
+
+    def _register_buffers_if_needed(self):
+        if not self._is_a2:
+            return
+        if self._registered_buffers is None or self._buffers_registered:
+            return
+        if not self._store_initialized:
+            return
+        assert self.store is not None
+        ptrs, sizes = self._registered_buffers
+        for ptr, size in zip(ptrs, sizes):
+            self.store.register_buffer(ptr, size)
+        self._buffers_registered = True
 
     def exists(self, keys: list[str]) -> list[int]:
+        if self._lazy_init and not self._store_initialized:
+            logger.debug(
+                "MemcacheBackend.exists called before store initialization; treating %d keys as missing.",
+                len(keys),
+            )
+            return [0] * len(keys)
+        assert self.store is not None
         return self.store.batch_is_exist(keys)
 
     def batch_get_key_info(self, keys: list[str]):
@@ -248,19 +292,31 @@ class MemcacheBackend(Backend):
         return self.store.batch_alloc(keys, sizes)
 
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
+        if self._lazy_init and not self._store_initialized:
+            logger.error("MemcacheBackend.get called before store initialization, keys=%s", key)
+            return
+        assert self.store is not None
         try:
             res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
             for value in res:
                 if value != 0:
-                    logger.error(f"Failed to get key {key},res:{res}")
+                    logger.error("Failed to get key %s,res:%s", key, res)
+            return res
         except Exception as e:
-            logger.error(f"Failed to get key {key}. {e}")
+            logger.error("Failed to get key %s. %s", key, e)
+            return None
 
     def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         try:
+            self._ensure_initialized()
+            assert self.store is not None
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             for value in res:
                 if value != 0:
-                    logger.error(f"Failed to get key {key},res:{res}")
+                    logger.error("Failed to put key %s,res:%s", key, res)
+                    if self._lazy_init:
+                        logger.error("If this is the first DSV4(compress) request, this failure is expected.")
         except Exception as e:
-            logger.error(f"Failed to put key {key},error:{e}")
+            logger.error("Failed to put key %s,error:%s", key, e)
+            if self._lazy_init:
+                logger.error("If this is the first DSV4(compress) request, this failure is expected.")

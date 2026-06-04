@@ -1,17 +1,8 @@
 # EPD disaggregated deployment Guide
 
-## Environmental Dependencies
-
-* Software:
-    * Python >= 3.10, < 3.12
-    * CANN == 8.5.0
-    * PyTorch == 2.8.0, torch-npu == 2.8.0
-    * vLLM (same version as vllm-ascend and >=0.13.0)
-    * mooncake-transfer-engine reference documentation(pd disaggregated needed): <https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md>
-
 ## run
 
-The EPD disaggregated technology accelerates model inference by decoupling the visual encoding computation and LLM computation stages. Currently, the EPD separation feature can achieve different data transmissions between E and P/PD nodes by configuring different connector backends. Vllm-ascend currently supports the ECexample-connector backend implemented on vllm, and will support Mooncake as well as shared memory(SHM) backend transmission methods in the future.
+The EPD disaggregated technology accelerates model inference by decoupling the visual encoding computation and LLM computation stages. Currently, the EPD separation feature can achieve different data transmissions between E and P/PD nodes by configuring different connector backends. Vllm-ascend currently supports the ECExampleConnector backend implemented on vllm, and will support Mooncake as well as shared memory(SHM) backend transmission methods in the future.
 
 ### ECexample-connector deployment guide
 
@@ -79,7 +70,7 @@ export ASCEND_RT_VISIBLE_DEVICES=1
 
 vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
     --gpu-memory-utilization 0.7 \
-    --port "33003" \
+    --port "33005" \
     --enforce-eager \
     --enable-request-id-headers \
     --served-model-name qwenvl \
@@ -114,7 +105,7 @@ python3 epd_load_balance_proxy_layerwise_server_example.py \
     --port 8001
 ```
 
-TODO: explain the param.<br>
+The parameters are explained as follows:<br>
 `--encoder-hosts`: E node IP address.<br>
 `--encoder-ports`: The E node port number. It needs to be consistent with the --port in the E node's startup script.<br>
 `--pd-hosts`: PD node IP address.<br>
@@ -133,7 +124,7 @@ curl http://localhost:8001/v1/chat/completions \
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustrate?"}
+        {"type": "text", "text": "What is the text in the illustration?"}
     ]}
     ]
     }'
@@ -285,7 +276,7 @@ Content of the run_proxy.sh script
 ```shell
 python3 epd_load_balance_proxy_layerwise_server_example.py \
     --encoder-hosts 127.0.0.1 \
-    --encoder-ports 23001 23002 \
+    --encoder-ports 23001 \
     --prefiller-hosts 127.0.0.1 \
     --prefiller-ports 33003 \
     --decoder-hosts 127.0.0.1 \
@@ -310,7 +301,7 @@ curl http://localhost:8001/v1/chat/completions \
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustrate?"}
+        {"type": "text", "text": "What is the text in the illustration?"}
     ]}
     ]
     }'

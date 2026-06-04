@@ -8,7 +8,7 @@ Welcome to the tutorial on optimizing Qwen Dense models in the vLLM-Ascend envir
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, accuracy and performance evaluation.
 
-The Qwen3 Dense models is first supported in [v0.8.4rc2](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---20250429). This example requires version **v0.11.0rc2**. Earlier versions may lack certain features.
+The Qwen3 Dense models are first supported in [v0.8.4rc2](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---20250429). This example requires version **v0.11.0rc2**. Earlier versions may lack certain features.
 
 ## Supported Features
 
@@ -174,7 +174,6 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 vllm serve vllm-ascend/Qwen3-32B-W8A8 \
   --served-model-name qwen3 \
   --trust-remote-code \
-  --async-scheduling \
   --quantization ascend \
   --distributed-executor-backend mp \
   --tensor-parallel-size 4 \
@@ -288,7 +287,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3-32B-W8A8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -362,8 +361,6 @@ The configuration compilation_config = { "cudagraph_mode": "FULL_DECODE_ONLY"} i
 ### 8. Asynchronous Scheduling
 
 Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
-
-This optimization is enabled by setting `--async-scheduling`.
 
 ## Optimization Highlights
 

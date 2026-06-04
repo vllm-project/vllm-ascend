@@ -2,7 +2,7 @@
 
 ## Overview
 
-Expert balancing for MoE models in LLM serving is essential for optimal performance. Dynamically changing experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Time Per Output Token) due to stop-the-world operations. SwiftBalancer enables asynchronous expert load balancing with zero-overhead expert movement, ensuring seamless service continuity.
+Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language) serving is essential for optimal performance. Dynamically changing experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Time Per Output Token) due to stop-the-world operations. SwiftBalancer enables asynchronous expert load balancing with zero-overhead expert movement, ensuring seamless service continuity.
 
 ## EPLB Effects
 
@@ -21,12 +21,13 @@ DeepSeekV3/V3.1/R1, Qwen3-MoE
 ### MOE QuantType
 
 W8A8-Dynamic
+W4A8 (with fused MC2 enabled)
 
 ## How to Use EPLB
 
 ### Dynamic EPLB
 
-We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM EPLB. Enable dynamic balancing with auto-tuned parameters. Adjust expert_heat_collection_interval and algorithm_execution_interval based on workload patterns.
+We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM EPLB. Enable dynamic balancing with auto-tuned parameters. Adjust expert_heat_collection_interval and algorithm_execution_interval based on workload patterns. In the current version, we recommend using the following: policy of swift balancer(2).
 
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
@@ -34,8 +35,10 @@ vllm serve Qwen/Qwen3-235B-A22 \
   --enable-expert-parallel \
   --additional-config '{ "eplb_config": {
     "dynamic_eplb": true,
-    "expert_heat_collection_interval": 400,
-    "algorithm_execution_interval": 30
+    "expert_heat_collection_interval": 600,
+    "algorithm_execution_interval": 50,
+    "eplb_policy_type": 2,
+    "num_redundant_experts": {ep_size},
     }}'
 ```
 
@@ -83,7 +86,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 
 3. Model Compatibility:
    - Only MoE models with explicit expert parallelism support (e.g., Qwen3 MoE models) are compatible.
-   - Verify model architecture supports dynamic expert routing through --enable-expert-parallel.
+   - Verify model architecture supports dynamic expert routing through `--enable-expert-parallel`.
 
 4. Monitoring & Validation:
    - Track metrics: expert_load_balance_ratio, ttft_p99, tpot_avg, and gpu_utilization.

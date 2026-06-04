@@ -21,7 +21,7 @@ set -eo errexit
 
 . $(dirname "$0")/common.sh
 
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 export MODELSCOPE_HUB_FILE_LOCK=false
 export HF_HUB_OFFLINE=1
 

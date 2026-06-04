@@ -103,7 +103,7 @@ Your model files look like:
 |-- modeling_deepseek.py
 |-- tiktoken.model
 |-- tokenization_kimi.py
-`-- tokenizer_config.json
+|-- tokenizer_config.json
 ```
 
 ## Online Inference on Multi-NPU
@@ -112,25 +112,10 @@ Run the following script to start the vLLM server on Multi-NPU:
 
 For an Atlas 800 A3 (64G*16) node, tensor-parallel-size should be at least 16.
 
-```bash
-#!/bin/bash
-export VLLM_USE_MODELSCOPE=True
-export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
-export OMP_PROC_BIND=false
-export HCCL_OP_EXPANSION_MODE=AIV
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-
-vllm serve "moonshotai/Kimi-K2-Thinking" \
-  --tensor-parallel-size 16 \
-  --port 8000 \
-  --max-model-len 8192 \
-  --max-num-batched-tokens 8192 \
-  --max-num-seqs 12 \
-  --gpu-memory-utilization 0.9 \
-  --trust-remote-code \
-  --enable-expert-parallel \
-  --no-enable-prefix-caching
+```{model-code}
+:block_name: kimi_k2_thinking_single_node
+:converter_tag: single_node
+:test_case_path: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
 ```
 
 Once your server is started, you can query the model with input prompts.

@@ -20,8 +20,8 @@ import os
 
 import torch
 import torch_npu
+import vllm.envs as envs
 from vllm.logger import logger
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.triton_utils import HAS_TRITON
 
 # in case recursive call in reduce_sum.
@@ -74,13 +74,12 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
 
 
 def override_envs_for_invariance():
-    # enabling NZ mode introduces NZ format input to the triton operator,
-    # resulting in accuracy anomalies.
-    os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
-    # fused operator can't ensure batch invariant, so we disable it.
-    os.environ["VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE"] = "0"
+    from vllm_ascend.ascend_config import get_ascend_config
 
-    # communication determinism settings
+    ascend_config = get_ascend_config()
+    ascend_config.weight_nz_mode = 0
+    ascend_config.enable_matmul_allreduce = False
+
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"
 
@@ -136,7 +135,7 @@ def init_batch_invariance():
     Call this function early in your application, or set VLLM_BATCH_INVARIANT=1
     environment variable to enable automatically.
     """
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         if HAS_TRITON or HAS_ASCENDC_BATCH_INVARIANT:
             logger.info(
                 "Enabling batch-invariant mode for vLLM on Ascend NPU.",

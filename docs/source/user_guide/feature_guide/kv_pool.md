@@ -10,6 +10,17 @@
 
 ### KV Pool Parameter Description
 
+#### `kv_load_failure_policy`: KV Load Failure Handling Policy
+
+`kv_load_failure_policy` is a top-level field in `kv-transfer-config`.
+
+* `recompute`: When KV loading fails, vLLM rolls the request back to the last valid prefix and reschedules it to recompute the failed KV blocks.
+* `fail`: When KV loading fails, the affected request is terminated directly with an error.
+
+The default value in vLLM is `fail`. If you want the request to fall back to recomputation after a KV load failure, set it to `recompute`.
+
+When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiConnector` top-level `kv-transfer-config` instead of the child connectors.
+
 #### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
 
 | Parameter | Description |
@@ -95,9 +106,9 @@ export PYTHONHASHSEED=0
 
 | Hardware | HDK & CANN versions | Export Command | Description |
 | :--- | :--- | :--- | :--- |
-| 800 I/T A3 series | HDK >= 26.0.0<br>CANN >= 9.0.0 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. |
+| 800 I/T A3 series | HDK >= 25.5<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. |
 | 800 I/T A3 series | 25.5.0<=HDK<26.0.0 | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
-| 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission cheme on 800 I/T A2 series|
+| 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
 ### FAQ for HIXL (ascend_direct) backend
 
@@ -116,15 +127,19 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "protocol": "ascend",
     "device_name": "",
     "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
+    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824),
+    "preferred_segment": false,
+    "prefer_alloc_in_same_node": true
 }
 ```
 
 **metadata_server**: Configured as **P2PHANDSHAKE**.  
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
-**master_server_address**: Configured with the IP and port of the master service.  
-**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.**
+**master_server_address**: Configured with the IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).  
+**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.  
+**preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.  
+**prefer_alloc_in_same_node**: Whether to prefer allocating KV on the same node. Defaults to **true**.
 
 #### 2.Start mooncake_master
 
@@ -153,7 +168,7 @@ The content of the multi_producer.sh script:
 
 ```shell
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -163,7 +178,7 @@ export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
 
-#Minimum retransmission timeout of the RDMA，equals 4.096 μs * 2 ^ timeout.
+#Minimum retransmission timeout of the RDMA, equals 4.096 μs * 2 ^ timeout.
 #Needs to satisfy the equation: ASCEND_TRANSFER_TIMEOUT > RDMA_TIMEOUT * 7, where 7 is the default number of retry for RDMA transfer.
 #HCCL_RDMA_TIMEOUT also affects collective communication behavior and should be configured carefully.
 export HCCL_RDMA_TIMEOUT=17
@@ -191,6 +206,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "connectors": [
             {
@@ -232,7 +248,7 @@ The content of multi_consumer.sh:
 ```shell
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
 export ACL_OP_INIT_MODE=1
@@ -259,6 +275,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "connectors": [
         {
@@ -295,6 +312,7 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
 {
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port": "0",
         "backend": "mooncake",
@@ -349,7 +367,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export ACL_OP_INIT_MODE=1
 #A3
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
@@ -374,6 +392,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port":"1",
         "backend": "mooncake"
@@ -409,151 +428,30 @@ This is because HCCL one-sided communication connections are created lazily afte
 
 **MemCache depends on MemFabric. Therefore, MemFabric must be installed.Installing the memcache after the memfabric is installed.**
 
-* **memfabric_hybrid**: <https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>
-
-* **memcache**: <https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>
-
-### Configuring the memcache Config File
-
-    config Path：/usr/local/memcache_hybrid/latest/config/
-    **Config file parameters description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>
-
-    Set TLS certificate configurations. If TLS is disabled, you do not need to upload a certificate. If TLS is enabled, you need to upload a certificate.
-
 ```shell
-# mmc-meta.conf
-ock.mmc.tls.enable = false
-ock.mmc.config_store.tls.enable = false
-
-# mmc-local.conf
-ock.mmc.tls.enable = false
-ock.mmc.config_store.tls.enable = false
-ock.mmc.local_service.hcom.tls.enable = false
+pip install memfabric-hybrid
+pip install memcache-hybrid
 ```
 
-You are advised to copy mmc-local.conf and mmc-meta.conf to your own path and modify them, and set the MMC_META_CONFIG_PATH environment variable to the path of your own mmc-meta.conf file.
+### Configuring the memcache Config File
 
 **mmc-meta.conf：**
 
 ```shell
-# Meta service start-up url
-# It will automatically modified to PodIP at Pod startup in K8s meta service cluster master-standby high availability scenario
 ock.mmc.meta_service_url = tcp://xx.xx.xx.xx:5000
-# config store url, It will automatically modified to PodIP at Pod startup in K8s
 ock.mmc.meta_service.config_store_url = tcp://xx.xx.xx.xx:6000
-# Enable or disable high availability deployment
-ock.mmc.meta.ha.enable = false
-# Log level: debug, info, warn, error
 ock.mmc.log_level = error
-# Log directory path, supports both relative and absolute paths, the system will automatically append 'logs' directory.
-# The absolute log path at default value is '/path/to/mmc_meta_service/../logs'
-# If the path of mmc_meta_service is '/usr/local/mxc/memfabric_hybrid/latest/aarch64-linux/bin'
-# Then the path of log is '/usr/local/mxc/memfabric_hybrid/latest/aarch64-linux/logs'
-ock.mmc.log_path = .
-# Log rotation file size, unit is MB, value range [1,500]
-ock.mmc.log_rotation_file_size = 20
-# Log rotation file count, value range [1,50]
-ock.mmc.log_rotation_file_count = 50
-
-# The threshold that triggers eviction, measured as a percentage of space usage
-# 'put' operation will trigger eviction when the threshold is exceeded
-ock.mmc.evict_threshold_high = 90
-# The target threshold of eviction, measured as a percentage of space usage
-ock.mmc.evict_threshold_low = 80
-
-# TLS configuration for metaservice
-ock.mmc.tls.enable = false
-ock.mmc.tls.ca.path = /opt/ock/security/certs/ca.cert.pem
-ock.mmc.tls.ca.crl.path = /opt/ock/security/certs/ca.crl.pem
-ock.mmc.tls.cert.path = /opt/ock/security/certs/server.cert.pem
-ock.mmc.tls.key.path = /opt/ock/security/certs/server.private.key.pem
-ock.mmc.tls.key.pass.path = /opt/ock/security/certs/server.passphrase
-ock.mmc.tls.package.path = /opt/ock/security/libs/
-ock.mmc.tls.decrypter.path =
-
-# TLS configuration for config store
-ock.mmc.config_store.tls.enable = false
-ock.mmc.config_store.tls.ca.path = /opt/ock/security/certs/ca.cert.pem
-ock.mmc.config_store.tls.ca.crl.path = /opt/ock/security/certs/ca.crl.pem
-ock.mmc.config_store.tls.cert.path = /opt/ock/security/certs/server.cert.pem
-ock.mmc.config_store.tls.key.path = /opt/ock/security/certs/server.private.key.pem
-ock.mmc.config_store.tls.key.pass.path = /opt/ock/security/certs/server.passphrase
-ock.mmc.config_store.tls.package.path = /opt/ock/security/libs/
-ock.mmc.config_store.tls.decrypter.path =
 ```
-
-**Key Focuses：**
-
-| Parameter | Description |
-| :--- | :--- |
-| `ock.mmc.meta_service_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
-| `ock.mmc.meta_service.config_store_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
-| `ock.mmc.meta.ha.enable` | Set to `false` to disable TLS authentication modification. |
-| `ock.mmc.config_store.tls.enable` | Set to `false` to disable TLS authentication modification. |
 
 **mmc-local.conf：**
 
 ```shell
-# Meta service start-up url
-# K8s meta service cluster master-standby high availability scenario: ClusterIP address
-# Non-HA scenario: keep consistent with the same name configuration in mmc-meta.conf
 ock.mmc.meta_service_url = tcp://xx.xx.xx.xx:5000
-# Log level: debug, info, warn, error
-ock.mmc.log_level = error
-
-# TLS configurations for metaservice
-ock.mmc.tls.enable = false
-ock.mmc.tls.ca.path = /opt/ock/security/certs/ca.cert.pem
-ock.mmc.tls.ca.crl.path = /opt/ock/security/certs/ca.crl.pem
-ock.mmc.tls.cert.path = /opt/ock/security/certs/client.cert.pem
-ock.mmc.tls.key.path = /opt/ock/security/certs/client.private.key.pem
-ock.mmc.tls.key.pass.path = /opt/ock/security/certs/client.passphrase
-ock.mmc.tls.package.path = /opt/ock/security/libs/
-ock.mmc.tls.decrypter.path =
-
-# Total count of local service, including services that will be add in the future
-ock.mmc.local_service.world_size = 256
-# config store url, it will automatically modified to PodIP at Pod startup in HA scenario
-# keep consistent with the same name configuration in mmc-meta.conf
 ock.mmc.local_service.config_store_url = tcp://xx.xx.xx.xx:6000
-# TLS configurations for config_store
-ock.mmc.config_store.tls.enable = false
-ock.mmc.config_store.tls.ca.path = /opt/ock/security/certs/ca.cert.pem
-ock.mmc.config_store.tls.ca.crl.path = /opt/ock/security/certs/ca.crl.pem
-ock.mmc.config_store.tls.cert.path = /opt/ock/security/certs/client.cert.pem
-ock.mmc.config_store.tls.key.path = /opt/ock/security/certs/client.private.key.pem
-ock.mmc.config_store.tls.key.pass.path = /opt/ock/security/certs/client.passphrase
-ock.mmc.config_store.tls.package.path = /opt/ock/security/libs/
-ock.mmc.config_store.tls.decrypter.path =
-
-# Data transfer protocol, 'host_rdma': rdma over host; 'host_tcp': tcp over host; 'device_rdma': rdma over device; 'device_sdma': sdma over device
+ock.mmc.log_level = error
+ock.mmc.local_service.world_size = 256
 ock.mmc.local_service.protocol = device_sdma
-# HBM/DRAM space usage, configuration type supports 134217728, 2048KB/2048K, 200MB/200mb/200m, 2.5GB or 1TB, case-insensitive, the maximum value is 1TB
-# The system automatically calculates and aligns downwards to 2MB (host_sdma or host_tcp) or 1GB (device_sdma or device_rdma)
-# After alignment, the HBM size and DRAM size cannot both be 0 at the same time
-ock.mmc.local_service.dram.size = 2GB
-ock.mmc.local_service.hbm.size = 0
-
-# If the protocol is host_rdma, the ip needs to be set as RDMA network card ip. Use 'show_gids' command to query it
-ock.mmc.local_service.hcom_url = tcp://127.0.0.1:7000
-# HCOM TLS config
-ock.mmc.local_service.hcom.tls.enable = false
-ock.mmc.local_service.hcom.tls.ca.path = /opt/ock/security/certs/ca.cert.pem
-ock.mmc.local_service.hcom.tls.ca.crl.path = /opt/ock/security/certs/ca.crl.pem
-ock.mmc.local_service.hcom.tls.cert.path = /opt/ock/security/certs/client.cert.pem
-ock.mmc.local_service.hcom.tls.key.path = /opt/ock/security/certs/client.private.key.pem
-ock.mmc.local_service.hcom.tls.key.pass.path = /opt/ock/security/certs/client.passphrase
-ock.mmc.local_service.hcom.tls.decrypter.path =
-
-# The total retry duration (retry interval is 200ms) when client requests meta service and the connection does not exist
-# Default value is 0, means no-retry and return immediately, value range [0, 600000]
-ock.mmc.client.retry_milliseconds = 0
-
-ock.mmc.client.timeout.seconds = 60
-
-# read/write thread pool size, value range [1, 64]
-ock.mmc.client.read_thread_pool.size = 16
-ock.mmc.client.write_thread_pool.size = 2
+ock.mmc.local_service.dram.size = 1GB
 ```
 
 **Key Focuses：**
@@ -563,41 +461,17 @@ ock.mmc.client.write_thread_pool.size = 2
 | `ock.mmc.meta_service_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
 | `ock.mmc.local_service.config_store_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
 | `ock.mmc.local_service.world_size` | Total count of local service, including services that will be added in the future. |
-| `ock.mmc.local_service.protocol` | `host_rdma` (default), `device_rdma` (supported for A2 and A3 when device ROCE available, recommended for A2), `device_sdma` (supported for A3 when HCCS available, recommended for A3). Currently does not support heterogeneous protocol setting.|
+| `ock.mmc.local_service.protocol` | `device_rdma` (supported for A2 and A3 when device ROCE available, recommended for A2), `device_sdma` (supported for A3 when HCCS available, recommended for A3). Currently does not support heterogeneous protocol setting.|
 | `ock.mmc.local_service.dram.size` | Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card. |
-| `ock.mmc.meta.ha.enable` | Set to `false` to disable TLS authentication modification. |
-| `ock.mmc.config_store.tls.enable` | Set to `false` to disable TLS authentication modification. |
-
-### Memcache environment variables
-
-```shell
-source /usr/local/memcache_hybrid/set_env.sh
-source /usr/local/memfabric_hybrid/set_env.sh
-# Configuring Environment Variables in the Configuration File
-export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
-```
 
 ### Run Memcache Master
 
 Starting the MetaService service.
 
 ```shell
-1. Set environment variables for the configuration file.
 export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
 
-2. Access the Python console or compile the following Python script to start the process:
-from memcache_hybrid import MetaService
-MetaService.main()
-```
-
-Method 2 for starting the MetaService service.
-
-```shell
-source /usr/local/memcache_hybrid/set_env.sh
-source /usr/local/memfabric_hybrid/set_env.sh
-export MMC_META_CONFIG_PATH=/home/memcache/shell/mmc-meta.conf # Set it to the path of your own configuration file.
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/python3.11.10/lib/
-/usr/local/memcache_hybrid/latest/aarch64-linux/bin/mmc_meta_service
+python -c "from memcache_hybrid import MetaService; MetaService.main()"
 ```
 
 ### PD Disaggregation Scenario
@@ -606,29 +480,57 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/python3.11.10/lib/
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` enables KV Cache Pool
 
-#### 800I A2/800T A2 Series
+#### 800I A2/800T A2/800I A3/800T A3 Series
 
-`prefill` Node：
+**run_prefill.sh/run_decode.sh:**
 
 ```shell
-rm -rf /root/ascend/log/*
+#!/bin/bash
 
-source /usr/local/memfabric_hybrid/set_env.sh
-source /usr/local/memcache_hybrid/set_env.sh
+ROLE="prefill"              # prefill / decode
+HARDWARE_SERIES="A2"        # A2 (800I/800T A2) or A3 (800I/800T A3)
+LOCAL_IP="xx.xx.xx.xx"
+NIC_NAME="xxxxxx"
 
-# memcache:
-echo 200000 > /proc/sys/vm/nr_hugepages
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
+MODEL_PATH="xxxxxxx/Qwen3-32B"
+SERVED_MODEL_NAME="qwen3"
+DATA_PARALLEL_SIZE=1
+TENSOR_PARALLEL_SIZE=8
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
 export MMC_LOCAL_CONFIG_PATH=/home/memcache/mmc-local.conf
 
-# nic_name can be looked up in ifconfig
-nic_name="xxxxxx"
-local_ip="xx.xx.xx.xx"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+if [ "$ROLE" == "prefill" ]; then
+    KV_ROLE="kv_producer"
+    KV_PORT="20001"
+    LOOKUP_RPC_PORT="0"
+else
+    KV_ROLE="kv_consumer"
+    KV_PORT="20002"
+    LOOKUP_RPC_PORT="1"
+fi
+
+echo "Starting vLLM on Series: $HARDWARE_SERIES, Role: $ROLE"
+
+rm -rf /root/ascend/log/*
+rm -rf ./connector.log
+
+if [ "$HARDWARE_SERIES" == "A2" ]; then
+    echo 200000 > /proc/sys/vm/nr_hugepages
+    export HCCL_IF_IP=$LOCAL_IP
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export TP_SOCKET_IFNAME=$NIC_NAME
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+
+elif [ "$HARDWARE_SERIES" == "A3" ]; then
+    export ACL_OP_INIT_MODE=1
+else
+    echo "Error: Invalid HARDWARE_SERIES. Set to 'A2' or 'A3'."
+    exit 1
+fi
+
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
 
 export PYTHONHASHSEED=0
 export HCCL_BUFFSIZE=1024
@@ -637,274 +539,57 @@ export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_USE_V1=1
 
-rm -rf ./connector.log
-vllm serve xxxxxxx/Qwen3-32B \
-  --host 0.0.0.0 \
-  --port 30050 \
-  --enforce-eager \
-  --data-parallel-size 2 \
-  --tensor-parallel-size 4 \
-  --seed 1024 \
-  --served-model-name qwen3 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --max-num_seqs 20 \
-  --no-enable-prefix-caching \
-  --kv-transfer-config \
-    '{
-            "kv_connector": "MultiConnector",
-            "kv_role": "kv_producer",
-            "engine_id": "2",
-            "kv_connector_extra_config": {
-                "connectors": [
-                {
-                            "kv_connector": "MooncakeConnectorV1",
-                            "kv_role": "kv_producer",
-                            "kv_port": "20001",
-                            "kv_connector_extra_config": {
-                                    "prefill": {
-                                            "dp_size": 2,
-                                            "tp_size": 4
-                                    },
-                                    "decode": {
-                                            "dp_size": 2,
-                                            "tp_size": 4
-                                    }
-                            }
-                    },
-                    {
-                            "kv_connector": "AscendStoreConnector",
-                            "kv_role": "kv_producer",
-                            "kv_connector_extra_config":{
-                                    "backend": "memcache",
-                                    "lookup_rpc_port":"0"
-                            }
-                    }  
-                ]
-            }
-    }' > log_p.log 2>&1
-```
-
-`decode` Node：
-
-```shell
-rm -rf /root/ascend/log/*
-
-source /usr/local/memfabric_hybrid/set_env.sh
-source /usr/local/memcache_hybrid/set_env.sh
-
-# memcache:
-echo 200000 > /proc/sys/vm/nr_hugepages
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-export MMC_LOCAL_CONFIG_PATH=/home/memcache/mmc-local.conf
-
-# nic_name can be looked up in ifconfig
-nic_name="xxxxxx"
-local_ip="xx.xx.xx.xx"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-
-export PYTHONHASHSEED=0
-export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_USE_V1=1
-
-rm -rf ./connector.log
-vllm serve xxxxxxx/Qwen3-32B \
-  --host 0.0.0.0 \
-  --port 30060 \
-  --enforce-eager \
-  --data-parallel-size 2 \
-  --tensor-parallel-size 4 \
-  --seed 1024 \
-  --served-model-name qwen3 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --max-num_seqs 20 \
-  --no-enable-prefix-caching \
-  --kv-transfer-config \
-  '{
-        "kv_connector": "MultiConnector",
-        "kv_role": "kv_consumer",
-        "kv_connector_extra_config": {
-                "connectors": [
-                {
-                                "kv_connector": "MooncakeConnectorV1",
-                                "kv_role": "kv_consumer",
-                                "kv_port": "20002",
-                                "kv_connector_extra_config": {
-                                        "prefill": {
-                                                "dp_size": 2,
-                                                "tp_size": 4
-                                        },
-                                        "decode": {
-                                                "dp_size": 2,
-                                                "tp_size": 4
-                                        }
-                                }
-                    } ,
-            {  
-                               "kv_connector": "AscendStoreConnector",
-                               "kv_role": "kv_consumer",
-                               "kv_connector_extra_config":{
-                                    "backend": "memcache",
-                                    "lookup_rpc_port":"1"
-                               }
-                       }  
-
-                ]
-        }
-  }' > log_d.log 2>&1
-```
-
-#### 800I A3/800T A3 Series
-
-`prefill` Node：
-
-```shell
-rm -rf /root/ascend/log/*
-
-# memcache:
-echo 200000 > /proc/sys/vm/nr_hugepages
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-export MMC_LOCAL_CONFIG_PATH=/home/memcache/shell/mmc-local.conf
-
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export ACL_OP_INIT_MODE=1
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-
-export PYTHONHASHSEED=0
-export HCCL_BUFFSIZE=1024
-
-
-python -m vllm.entrypoints.openai.api_server \
-  --model=xxxxxxxxx/DeepSeek-R1 \
-  --served-model-name dsv3 \
-  --trust-remote-code \
-  --enforce-eager \
-  --data-parallel-size 2 \
-  --tensor-parallel-size 8 \
-  --port 30050 \
-  --max-num_seqs 20 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --enable_expert_parallel \
-  --quantization ascend \
-  --gpu-memory-utilization 0.90 \
-  --no-enable-prefix-caching \
-  --kv-transfer-config \
- '{
+KV_CONFIG='{
   "kv_connector": "MultiConnector",
-  "kv_role": "kv_producer",
+  "kv_role": "'$KV_ROLE'",
   "engine_id": "2",
   "kv_connector_extra_config": {
-   "connectors": [
-   {
-     "kv_connector": "MooncakeConnectorV1",
-     "kv_role": "kv_producer",
-     "kv_port": "20001",
-     "kv_connector_extra_config": {
-      "prefill": {
-       "dp_size": 2,
-       "tp_size": 8
+    "connectors": [
+      {
+        "kv_connector": "MooncakeConnectorV1",
+        "kv_role": "'$KV_ROLE'",
+        "kv_port": "'$KV_PORT'",
+        "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": '$DATA_PARALLEL_SIZE',
+            "tp_size": '$TENSOR_PARALLEL_SIZE'
+          },
+          "decode": {
+            "dp_size": '$DATA_PARALLEL_SIZE',
+            "tp_size": '$TENSOR_PARALLEL_SIZE'
+          }
+        }
       },
-      "decode": {
-       "dp_size": 2,
-       "tp_size": 8
+      {
+        "kv_connector": "AscendStoreConnector",
+        "kv_role": "'$KV_ROLE'",
+        "kv_connector_extra_config": {
+          "backend": "memcache",
+          "lookup_rpc_port": "'$LOOKUP_RPC_PORT'"
+        }
       }
-     }
-    },
-    {
-     "kv_connector": "AscendStoreConnector",
-     "kv_role": "kv_producer",
-     "kv_connector_extra_config":{
-      "backend": "memcache",
-      "lookup_rpc_port":"0"
-     }
-    }  
-   ]
+    ]
   }
- }' > log_p.log 2>&1 
-```
+}'
 
-`decode` Node：
+CMD_ARGS=(
+  --model "$MODEL_PATH"
+  --served-model-name "$SERVED_MODEL_NAME"
+  --trust-remote-code
+  --enforce-eager
+  --data-parallel-size "$DATA_PARALLEL_SIZE"
+  --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
+  --port 30050
+  --max-num_seqs 20
+  --max-model-len 32768
+  --max-num-batched-tokens 16384
+  --gpu-memory-utilization 0.9
+  --kv-transfer-config "$KV_CONFIG"
+)
 
-```shell
-rm -rf /root/ascend/log/*
+python -m vllm.entrypoints.openai.api_server "${CMD_ARGS[@]}" > log_${ROLE}.log 2>&1
 
-# memcache:
-echo 200000 > /proc/sys/vm/nr_hugepages
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-export MMC_LOCAL_CONFIG_PATH=/home/memcache/shell/mmc-local.conf
-
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export ACL_OP_INIT_MODE=1
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-
-export PYTHONHASHSEED=0
-export HCCL_BUFFSIZE=1024
-
-python -m vllm.entrypoints.openai.api_server \
-  --model=xxxxxxxxxxxxxxxx/DeepSeek \
-  --served-model-name dsv3 \
-  --trust-remote-code \
-  --data-parallel-size 2 \
-  --tensor-parallel-size 8 \
-  --port 30060 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --enforce-eager\
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --max-num_seqs 20 \
-  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --enable_expert_parallel \
-  --gpu-memory-utilization 0.9 \
-  --kv-transfer-config \
-  '{
- "kv_connector": "MultiConnector",
- "kv_role": "kv_consumer",
- "kv_connector_extra_config": {
-  "connectors": [
-  {
-    "kv_connector": "MooncakeConnectorV1",
-    "kv_role": "kv_consumer",
-    "kv_port": "20002",
-    "kv_connector_extra_config": {
-     "prefill": {
-      "dp_size": 2,
-      "tp_size": 8
-     },
-     "decode": {
-      "dp_size": 2,
-      "tp_size": 8
-     }
-    }
-   },
-    {
-    "kv_connector": "AscendStoreConnector",
-    "kv_role": "kv_consumer",
-    "kv_connector_extra_config":{
-                "backend": "memcache",
-                "lookup_rpc_port":"1"
-    }
-   }  
-  ]
- }
-  }' > log_d.log 2>&1
+echo "vLLM started. Log file: log_${ROLE}.log"
 ```
 
 #### [2、Start proxy_server](#2start-proxy_server)
@@ -915,32 +600,46 @@ python -m vllm.entrypoints.openai.api_server \
 
 #### 1.Run Mixed Department Script
 
-#### 800I A2/800T A2 Series
+#### 800I A2/800T A2/800I A3/800T A3 Series
 
-The deepseek model needs to be run in a two-node cluster.
-
-**Run_pd_mix_1.sh:**
+**Run_pd_mix.sh:**
 
 ```shell
-rm -rf /root/ascend/log/*
+#!/bin/bash
 
-source /usr/local/memfabric_hybrid/set_env.sh
-source /usr/local/memcache_hybrid/set_env.sh
+HARDWARE_SERIES="A2"        # A2 (800I/800T A2) or A3 (800I/800T A3)
+LOCAL_IP="xx.xx.xx.xx"
+NIC_NAME="xxxxxx"
 
-# memcache:
-echo 200000 > /proc/sys/vm/nr_hugepages
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
+MODEL_PATH="xxxxxxx/Qwen3-32B"
+SERVED_MODEL_NAME="qwen3"
+DATA_PARALLEL_SIZE=1
+TENSOR_PARALLEL_SIZE=8
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
 export MMC_LOCAL_CONFIG_PATH=/home/memcache/mmc-local.conf
 
-# nic_name can be looked up in ifconfig
-nic_name="xxxxxxx"
-local_ip="xx.xx.xx.xx"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+echo "Starting vLLM on Series: $HARDWARE_SERIES"
 
+rm -rf /root/ascend/log/*
+rm -rf ./connector.log
+
+if [ "$HARDWARE_SERIES" == "A2" ]; then
+    echo 200000 > /proc/sys/vm/nr_hugepages
+    export HCCL_IF_IP=$LOCAL_IP
+    export GLOO_SOCKET_IFNAME=$NIC_NAME
+    export TP_SOCKET_IFNAME=$NIC_NAME
+    export HCCL_SOCKET_IFNAME=$NIC_NAME
+
+elif [ "$HARDWARE_SERIES" == "A3" ]; then
+    export ACL_OP_INIT_MODE=1
+else
+    echo "Error: Invalid HARDWARE_SERIES. Set to 'A2' or 'A3'."
+    exit 1
+fi
+
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
 
 export PYTHONHASHSEED=0
 export HCCL_BUFFSIZE=1024
@@ -949,156 +648,33 @@ export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_USE_V1=1
 
-rm -rf ./connector.log
-vllm serve xxxxxxx/DeepSeek-R1 \
-  --host 0.0.0.0 \
-  --port 30050 \
-  --enforce-eager \
-  --data-parallel-size 2 \
-  --data-parallel-size-local 1 \
-  --api-server-count 2 \
-  --data-parallel-address 141.61.33.167 \
-  --data-parallel-rpc-port 13348  \
-  --tensor-parallel-size 8 \
-  --seed 1024 \
-  --served-model-name deepseek \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --quantization ascend \
-  --max-num_seqs 20 \
-  --enable-expert-parallel \
-  --no-enable-prefix-caching \
-  --kv-transfer-config \
-  '{
-        "kv_connector": "AscendStoreConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {
-                "backend": "memcache",
-                "lookup_rpc_port":"0"
-           }
-  }' > log_pd_mix_1.log 2>&1
+KV_CONFIG='{
+  "kv_connector": "AscendStoreConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+     "backend": "memcache",
+     "lookup_rpc_port": "0"
+  }
+}'
 
-```
+CMD_ARGS=(
+  --model "$MODEL_PATH"
+  --served-model-name "$SERVED_MODEL_NAME"
+  --trust-remote-code
+  --enforce-eager
+  --data-parallel-size "$DATA_PARALLEL_SIZE"
+  --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
+  --port 30050
+  --max-num_seqs 20
+  --max-model-len 32768
+  --max-num-batched-tokens 16384
+  --gpu-memory-utilization 0.9
+  --kv-transfer-config "$KV_CONFIG"
+)
 
-**Run_pd_mix_2.sh:**
+python -m vllm.entrypoints.openai.api_server "${CMD_ARGS[@]}" > log_mix.log 2>&1
 
-```shell
-rm -rf /root/ascend/log/*
-
-source /usr/local/memfabric_hybrid/set_env.sh
-source /usr/local/memcache_hybrid/set_env.sh
-
-# memcache:
-echo 200000 > /proc/sys/vm/nr_hugepages
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-export MMC_LOCAL_CONFIG_PATH=/home/memcache/mmc-local.conf
-
-# nic_name can be looked up in ifconfig
-nic_name="xxxxxxx"
-local_ip="xx.xx.xx.xx"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-
-export PYTHONHASHSEED=0
-export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_USE_V1=1
-# export VLLM_TORCH_PROFILER_DIR="./vllm-profiling"
-# export VLLM_TORCH_PROFILER_WITH_STACK=0
-
-rm -rf ./connector.log
-vllm serve xxxxxxx/DeepSeek-R1 \
-  --host 0.0.0.0 \
-  --port 30050 \
-  --headless  \
-  --enforce-eager \
-  --data-parallel-size 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-start-rank 1 \
-  --data-parallel-address 141.61.33.167 \
-  --data-parallel-rpc-port 13348  \
-  --tensor-parallel-size 8 \
-  --seed 1024 \
-  --served-model-name deepseek \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --quantization ascend \
-  --max-num_seqs 20 \
-  --enable-expert-parallel \
-  --no-enable-prefix-caching \
-  --kv-transfer-config \
-   '{
-        "kv_connector": "AscendStoreConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {
-                "backend": "memcache",
-                "lookup_rpc_port":"0"
-           }
-  }' > log_pd_mix_2.log 2>&1
-
-```
-
-#### 800I A3/800T A3 Series
-
-```shell
-bash pd_mix.sh
-```
-
-Content of pd_mix.sh:
-
-```shell
-rm -rf /root/ascend/log/*
-
-# memcache:
-echo 200000 > /proc/sys/vm/nr_hugepages
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-export MMC_LOCAL_CONFIG_PATH=/home/memcache/shell/mmc-local.conf
-
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export ACL_OP_INIT_MODE=1
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-
-export PYTHONHASHSEED=0
-export HCCL_BUFFSIZE=1024
-
-
-python -m vllm.entrypoints.openai.api_server \
-  --model=xxxxxxx/DeepSeek-R1 \
-  --served-model-name dsv3 \
-  --trust-remote-code \
-  --enforce-eager \
-  -dp 2 \
-  -tp 8 \
-  --port 30050 \
-  --max-num_seqs 20 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
-  --compilation_config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --enable_expert_parallel \
-  --quantization ascend \
-  --gpu-memory-utilization 0.90 \
-  --no-enable-prefix-caching \
-  --kv-transfer-config \
-  '{
-      "kv_connector": "AscendStoreConnector",
-      "kv_role": "kv_both",
-      "kv_connector_extra_config": {
-        "backend": "memcache",
-        "lookup_rpc_port":"0"
-      }
-  }' > log_pd_mix.log 2>&1 
+echo "vLLM started. Log file: log_mix.log"
 
 ```
 
@@ -1114,6 +690,11 @@ python -m vllm.entrypoints.openai.api_server \
 ```bash
 pip install openyuanrong-datasystem
 ```
+
+If the prebuilt package does not match the CANN or Ascend driver version in
+your environment, build Yuanrong Datasystem from source in the vLLM Ascend
+image. Follow the official Yuanrong Datasystem build instructions:
+<https://atomgit.com/openeuler/yuanrong-datasystem>
 
 ### Start etcd
 
@@ -1147,7 +728,7 @@ etcdctl --endpoints "${ETCD_IP}:2379" get key
 ```
 
 For production environments, refer to the official etcd clustering
-documentation: <https://etcd.io/docs/current/op-guide/clustering/>
+documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>
 
 ### Start Datasystem Worker
 
@@ -1157,7 +738,8 @@ Start a Datasystem worker on each node by using `dscli`:
 dscli start -w \
   --worker_address "${WORKER_IP}:31501" \
   --etcd_address "${ETCD_IP}:2379" \
-  --shared_memory_size_mb 20480
+  --shared_memory_size_mb 40960 \
+  --enable_worker_worker_batch_get=true
 ```
 
 The `--worker_address` value is consumed later by `DS_WORKER_ADDR`, so keep
@@ -1182,7 +764,7 @@ Set the following environment variables on each node before starting vLLM:
 | `PYTHONHASHSEED` | Yes | `0` | Must be consistent across all nodes to guarantee uniform hash generation. |
 | `DS_WORKER_ADDR` | Yes | N/A | Datasystem worker address in `<host>:<port>` format. This must match the local `dscli start --worker_address` value. |
 | `DS_ENABLE_EXCLUSIVE_CONNECTION` | No | `0` | Passed to Yuanrong `HeteroClient.enable_exclusive_connection`. Use `1` to enable the exclusive connection mode when required by your deployment. |
-| `DS_ENABLE_REMOTE_H2D` | No | `0` | Passed to Yuanrong `HeteroClient.enable_remote_h2d`. Use `1` only when remote host-to-device transfer is enabled in your Datasystem deployment. |
+| `DS_ENABLE_REMOTE_H2D` | No | `0` | Passed to Yuanrong `HeteroClient.enable_remote_h2d`. Use `1` only after the Remote H2D requirements below are met. |
 
 ```bash
 export PYTHONHASHSEED=0
@@ -1190,6 +772,66 @@ export DS_WORKER_ADDR="${WORKER_IP}:31501"
 export DS_ENABLE_EXCLUSIVE_CONNECTION=0
 export DS_ENABLE_REMOTE_H2D=0
 ```
+
+#### Remote H2D Requirements
+
+Set `DS_ENABLE_REMOTE_H2D=1` only when Remote Host-to-Device transfer is
+enabled and verified in the Yuanrong Datasystem deployment:
+
+* Reserve enough 2 MiB HugeTLB pages before starting the worker. For 40 GiB
+  shared memory, reserve at least 20480 2 MiB huge pages.
+* Start each Datasystem worker with Remote H2D enabled. The worker start
+  command must include `--remote_h2d_device_ids`, `--enable_huge_tlb true`,
+  `--arena_per_tenant 1`, and `--enable_fallocate false`. Using multiple
+  available NPU device IDs is recommended, for example `"0,1,2,3,4,5,6,7"` on
+  an 8-NPU node.
+
+```bash
+dscli start -w \
+  --worker_address "${WORKER_IP}:31501" \
+  --etcd_address "${ETCD_IP}:2379" \
+  --shared_memory_size_mb 40960 \
+  --arena_per_tenant 1 \
+  --enable_huge_tlb true \
+  --enable_fallocate false \
+  --remote_h2d_device_ids "0,1,2,3,4,5,6,7" \
+  --enable_worker_worker_batch_get=true
+```
+
+* Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong
+  Remote H2D are installed and visible to the worker process. In containers,
+  mount the Ascend driver path, `npu-smi`, `hccn_tool`, `/etc/hccn.conf`,
+  `/etc/ascend_install.info`, and the required `/dev/davinci*` devices.
+* Verify the NPU and RoCE environment before enabling the client flag:
+
+```bash
+# Check the current 2 MiB HugeTLB page size, total count, and free count.
+grep -E "HugePages_Total|HugePages_Free|Hugepagesize" /proc/meminfo
+
+# Optional: check 2 MiB HugeTLB pages on each NUMA node.
+for node in /sys/devices/system/node/node*/hugepages/hugepages-2048kB; do
+  echo "$node total=$(cat "$node/nr_hugepages") free=$(cat "$node/free_hugepages")"
+done
+
+# Check that NPU devices and the driver are visible to the worker environment.
+npu-smi info
+
+# Check that the NPU topology is visible.
+npu-smi info -t topo
+
+# Check optical module detection on the selected local NPU.
+hccn_tool -i <local_npu_id> -optical -g
+
+# Check RoCE physical link status. The expected link status is UP.
+for i in {0..7}; do hccn_tool -i $i -link -g; done
+
+# Check the selected NPU IP address and reachability to the remote NPU.
+hccn_tool -i <local_npu_id> -ip -g
+hccn_tool -i <local_npu_id> -ping -g address <remote_npu_ip>
+```
+
+If these checks fail, keep `DS_ENABLE_REMOTE_H2D=0` and use the default
+Datasystem transfer path.
 
 ### Run AscendStoreConnector with Yuanrong backend
 
@@ -1211,6 +853,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port": "1",
         "backend": "yuanrong"

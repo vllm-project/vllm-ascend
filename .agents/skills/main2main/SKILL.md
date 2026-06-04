@@ -1,277 +1,258 @@
 ---
 name: main2main
-description: "The main2main skill guides an AI agent to adapt the latest vLLM main branch code for vLLM Ascend project."
+description: >-
+  Adapt vLLM-Ascend to track upstream vLLM main branch changes incrementally:
+  detect commit drift, plan steps, adapt code, run CI, and commit verified
+  changes. Use whenever the user mentions main2main, upgrading or syncing
+  vllm-ascend to a newer vLLM commit, vLLM API changes breaking vllm-ascend,
+  or provides both a vllm path and vllm-ascend path for syncing. Also triggers
+  on: "vLLM broke our plugin", "bump the vLLM commit", "ascend CI failing
+  after upstream update".
 ---
 
-# main2main Skill
+# main2main
 
-This skill guides AI agents to adapt the latest vLLM main branch code for the vLLM Ascend project.
+vllm-ascend is a hardware adaptation plugin that sits on top of vLLM. When upstream vLLM changes — function signatures, config fields, module paths, base class methods, etc. — vllm-ascend breaks. This skill's job is to absorb those upstream changes incrementally: split the commit range into manageable steps, adapt vllm-ascend for each step, verify via CI, and commit only verified code.
 
-## Workflow
+The two hardest parts are **figuring out what to adapt** and **diagnosing why CI fails after adapting**. Everything else (detecting commits, planning steps, running CI, committing) is mechanical and handled by scripts. This document focuses on the judgment calls.
 
-### 1. Get Current vLLM Version Information for vLLM Ascend
+## Inputs
 
-Find the vLLM version information for the **main branch** in `docs/source/community/versioning_policy.md` under the `Release compatibility matrix` section:
+- **vllm_path**: local vLLM repository (upstream reference, read-only)
+- **vllm_ascend_path**: local vllm-ascend repository (this is what we modify)
 
-- **Current adapted vLLM commit**: Format like `83b47f67b1dfad505606070ae4d9f83e50ad4ebd, v0.15.0 tag`
-- **Compatible vLLM version**: From the table, e.g., `v0.15.0`
+## Guardrails
 
-### 2. Get the Latest vLLM Code
+These protect the repo. The reasoning behind each one matters more than the rule:
 
-Retrieve the latest commit from the local vLLM git repository:
+- **Only modify vllm-ascend.** vLLM is the upstream reference. If a fix seems to require changing vLLM code, the adaptation approach is wrong — step back and rethink.
+
+- **Intermediate files go in /tmp/main2main/.** Patches, logs, analysis reports inside the repo will get accidentally committed. This has happened before.
+
+- **`git add <files>`, never `git add .`.** Debug artifacts, log files, and analysis documents sitting in the working tree will silently enter the commit.
+
+- **Commit only after CI passes.** Unverified code in main breaks other developers. If CI won't pass, save a `.patch` file instead.
+
+- **Advance vllm after each step.** Each step's CI must run against the correct upstream version. If vllm stays on an old commit, tests pass for the wrong reasons.
+
+- **Do not stop because the run is long.** Estimated duration, session length, model cost, or the number of remaining steps is not a stop condition. After a step is committed and vllm is advanced, immediately continue to the next planned step.
+
+---
+
+## Adaptation and CI Diagnosis
+
+Each step has two phases: **adapt** (proactively modify vllm-ascend based on upstream.patch) and **fix** (react to CI failures your adaptation missed).
+
+The detailed workflows, file mapping tables, error pattern references, and stop conditions are in `reference/adapt-guide.md` and `reference/diagnosis-guide.md`. Read them at every step and fix round — they contain per-step lookup tables that surface different vllm-ascend files for each step's patch, not one-time background reading.
+
+The core judgment call in both phases: upstream changes to **abstract methods, function signatures, config field locations, and import paths** always need vllm-ascend follow-up, because vllm-ascend overrides or reads these directly. Changes to **internal implementation** of methods vllm-ascend doesn't override can be skipped — unless vllm-ascend calls that method and depends on its return value, side effects, or error behavior.
+
+No-op adapt is allowed, but it does not skip CI: every step must run CI after the commit reference is updated.
+
+The only valid partial-stop reasons are the stop conditions listed in `reference/diagnosis-guide.md` Step 4. Do not create a partial final summary because the remaining steps would take many hours, because the current session is long, or because additional CI runs are required.
+
+**Context management:** CI logs can be 10K+ lines. Never read raw logs into context — use the `round-N-summary.json` produced by `run_main2main_ci.py` first. If you need a specific log section, filter with `grep -A 10 '<pattern>' <log> | head -30`.
+
+---
+
+## Version Compatibility Rules
+
+When code must work with both the release version and upstream main:
+
+```python
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.19.0"):
+    # release version API
+else:
+    # upstream main API
+```
+The version info source of truth is `vllm-ascend/docs/source/conf.py`. The compatible release version for `vllm_version_is()` guards comes from the `main_vllm_tag` .
+
+Three rules that prevent subtle maintenance debt:
+
+1. **Use `vllm_version_is()` — not `hasattr()`, not `try/except`, not a boolean flag.** The version string is the source of truth. `hasattr` hides the version boundary and makes future cleanup impossible to grep for.
+
+2. **Call it at each branch point.** If two files diverge by version, each one imports and calls `vllm_version_is()` directly. Don't set a flag in one place and read it elsewhere — that turns a version boundary into a capability toggle that future maintainers won't know to delete.
+
+3. **When in doubt, grep the existing codebase.** `grep -rn 'vllm_version_is' vllm_ascend/` shows how other version guards are structured. Follow the established pattern.
+
+---
+
+## Execution playbook
+
+Most of this is scripted — scripts have `--help` for argument details.
+
+### Phase 1: Detect drift and Plan steps (once)
 
 ```bash
-# The vLLM git repository is typically located in the parent directory
-cd ../vllm
-git log -1 --format="%H %s"
+# Detect base/target commits
+python3 <skill_dir>/scripts/detect_commits.py \
+  --vllm-path <vllm_path> --ascend-path <ascend_path>
+
+# Plan steps (reads detect.json, outputs steps.json)
+python3 <skill_dir>/scripts/plan_steps.py \
+  --vllm-path <vllm_path> \
+  --base-commit <base> --target-commit <target>
 ```
 
-If the vLLM repository is not found at the default location, prompt the user to specify the exact path to the vLLM git repository.
+If `has_drift` is false, stop — nothing to do.
 
-### 3. Compare vLLM Changes
+Record `last_verified_head` before starting.
 
-Compare the differences between the vLLM commit currently adapted by vLLM Ascend and the latest commit:
+### Phase 2: Step-wise adaptation and verification
+
+For each step in `steps.json`:
+
+1. **Generate upstream patch** 
+```bash
+git -C <vllm_path> diff <step_start>..<step_end> \
+  > /tmp/main2main/steps/<step-id>/upstream.patch
+git -C <vllm_path> diff --name-only <step_start>..<step_end> \
+  > /tmp/main2main/steps/<step-id>/changed-files.txt
+```
+
+2. **Update commit references.** 
+Replace the previous vLLM commit hash with this step's target commit before CI — tests may depend on the correct version reference.
+```bash
+python3 <skill_dir>/scripts/update_commit_reference.py \
+  --ascend-path <ascend_path> \
+  --old-commit <step_start_commit> \
+  --new-commit <step_end_commit>
+```
+
+3. **Adapt.**
+Read `reference/adapt-guide.md` and follow its Steps 1-3. The guide contains
+file mapping tables and key area lists that identify different vllm-ascend
+files for each step's patch — this lookup must happen every step, not just
+the first. If no code adaptation is needed, record that conclusion and
+continue to CI.
+
+4. **Verify by CI (mandatory for every step)**
+Run CI after the commit reference update and adapt phase, even when adapt made no extra code changes. A step is only complete after CI passes.
 
 ```bash
-# View file changes between two commits
-git diff <old_commit> <new_commit> --name-only
-
-# View detailed code changes
-git log --oneline <old_commit>..<new_commit>
+python3 <skill_dir>/scripts/run_main2main_ci.py \
+  --ascend-path <ascend_path> \
+  --step-id <step-id> \
+  --suite e2e-singlecard-light \
+  --suite e2e-2card-light \
+  --suite e2e-4card-light \
+  --round 1
 ```
 
-### 4. Analyze vLLM Changes and Generate Change Report
+The wrapper writes:
+- `/tmp/main2main/steps/<step-id>/ci/round-1.log`
+- `/tmp/main2main/steps/<step-id>/ci/round-1-summary.json`
+- `/tmp/main2main/steps/<step-id>/ci/round-1-result.json`
 
-Create a file named `vllm_changes.md` to save the list of changes in vLLM that are relevant to vLLM Ascend. This file will be used to guide the adaptation process and should be removed after all work is done.
+Run the CI wrapper in the foreground and wait for it to finish; do not read raw
+CI logs or `/tmp/claude-*/tasks/*.output` for progress monitoring.
 
-#### 4.1 Identify Key vLLM Source Files
+Use `round-1-result.json` as the CI source of truth. It preserves the raw
+`run_suite.py` status in `run_suite_exit_code` and classifies the main2main
+outcome in `ci_result`.
 
-Focus on vLLM source files under `vllm/vllm/` directory, especially:
+CI result labels:
+- `passed`: `ci_result` is `passed`; `run_suite_exit_code` is 0.
+- `env_flake_pass`: `ci_result` is `env_flake_pass`; `run_suite_exit_code`
+  is non-zero, but the summary has only `env_flakes` and no `code_bugs`. This
+  may proceed to commit, but do not call it `passed`.
+- `failed`: `ci_result` is `failed`; CI failed and the summary is available for
+  diagnosis.
+- `summary_error`: `ci_result` is `summary_error`; do not commit. Fix the
+  summary/log extraction issue or treat the step as a partial stop if no
+  actionable diagnosis can be produced.
 
+5. **If CI result allows commit, commit and advance.**
+Proceed only when `ci_result` is `passed` or `env_flake_pass`.
+Run `scripts/check_and_commit.py` to commit the changes (including the updated commit reference). Then checkout the step's end commit in the vLLM repo so the next step runs against the correct upstream.
 ```bash
-# Get changed files in vLLM source code
-git diff <old_commit> <new_commit> --name-only | grep -E "^vllm/" | head -200
-
-# Count total changes
-git diff <old_commit> <new_commit> --name-only | wc -l
+python3 <skill_dir>/scripts/check_and_commit.py \
+  --ascend-path <ascend_path> --step-id <step-id> \
+  --message "<commit message>"
+git -C <vllm_path> checkout <step_end_commit>
 ```
 
-#### 4.2 Categorize Changes by Priority
+6. **If CI result does not allow commit, diagnose and fix.**
+Read `reference/diagnosis-guide.md` and follow its Steps 1-4. The guide
+contains error type → fix pattern mappings and references
+`reference/error-pattern-examples.md` for concrete fix examples — use these
+lookups each round rather than reasoning from the error message alone. Re-run
+CI after each fix round. Stop conditions are listed in the diagnosis guide.
 
-When analyzing changes, categorize them into the following priority levels:
+**If the fix loop is exhausted** (a stop condition from `reference/diagnosis-guide.md` is triggered):
+- Save current changes: `git diff > /tmp/main2main/steps/<step-id>/failed.patch`
+- Write failure details to `/tmp/main2main/steps/<step-id>/failed-summary.json`
+- Rollback to `last_verified_head`: `git checkout -- .`
+- Stop the pipeline. Don't skip the failed step and continue to the next one.
 
-| Priority | Category | Description |
-|----------|----------|-------------|
-| **P0** | Breaking Changes | API changes that will cause runtime errors if not adapted |
-| **P1** | Important Changes | Changes that affect functionality or performance |
-| **P2** | Moderate Changes | Changes that may need review for compatibility |
-| **P3** | Model Changes | New models or model updates |
-| **P4** | Minor Changes | Configuration, documentation, or minor refactoring |
+**If CI hangs (no output for 120+ minutes):** terminate and treat as CI failure.
+Normal long-running CI with regular output is not a hang and must keep running.
 
-#### 4.3 Key Areas to Focus On
+7. **Write step summary.** After committing, write a brief summary for this step: what upstream changes were absorbed, what vllm-ascend files were modified, and any version guards added. Save to `/tmp/main2main/steps/<step-id>/summary.md`. This is important because later steps and the final report depend on it.
 
-When analyzing vLLM changes, pay special attention to these areas that typically require vLLM Ascend adaptation:
+### Phase 3: Refresh adapt-guide tables (after all steps are committed)
 
-1. **Platform Interface** (`vllm/platforms/`)
-   - New abstract methods that must be implemented
-   - Method signature changes
-   - New platform features
+The lookup tables in `reference/adapt-guide.md` drift as vllm-ascend evolves —
+new modules appear, old paths get renamed or deleted. Refresh them once per run
+*after every step is committed* (not per step), so the next main2main run reads
+an up-to-date guide. Only run this when the run is on track to reach `completed`
+or a clean partial stop; skip it if the pipeline rolled back.
 
-2. **MoE (Mixture of Experts)** (`vllm/model_executor/layers/fused_moe/`)
-   - FusedMoE layer changes
-   - Activation function changes
-   - Router changes
-
-3. **Attention** (`vllm/model_executor/layers/attention/`)
-   - Attention backend changes
-   - New parameters or interfaces
-   - MLA (Multi-Head Latent Attention) updates
-
-4. **Speculative Decoding** (`vllm/v1/worker/gpu/spec_decode/`, `vllm/config/speculative.py`)
-   - Import path changes
-   - Config field changes
-   - New speculative methods
-
-5. **Distributed** (`vllm/distributed/`)
-   - Parallel state changes
-   - KV transfer changes
-   - Device communicator updates
-
-6. **Models** (`vllm/model_executor/models/`)
-   - New model architectures
-   - Model interface changes
-
-7. **Worker/Model Runner** (`vllm/v1/worker/gpu/model_runner.py`)
-   - New worker methods
-   - Model runner changes
-
-8. **Quantization** (`vllm/model_executor/layers/quantization/`)
-   - Quantization config changes
-   - compress-tensor method changes
-
-#### 4.4 vllm_changes.md Template
-
-Use the following template structure for `vllm_changes.md`:
-
-```markdown
-# vLLM Changes Relevant to vLLM Ascend
-# Generated: <DATE>
-# Old commit: <OLD_COMMIT_HASH> (<OLD_VERSION>)
-# New commit: <NEW_COMMIT_HASH>
-# Total commits: <COUNT>
-
-================================================================================
-## P0 - Breaking Changes (Must Adapt)
-================================================================================
-
-### <INDEX>. <CHANGE_TITLE>
-FILE: <VLLM_FILE_PATH>
-CHANGE: <DESCRIPTION_OF_CHANGE>
-IMPACT: <WHAT_BREAKS_IF_NOT_ADAPTED>
-VLLM_ASCEND_FILES:
-  - <PATH_TO_ASCEND_FILE_1>
-  - <PATH_TO_ASCEND_FILE_2>
-
-================================================================================
-## P1 - Important Changes (Should Adapt)
-================================================================================
-...
-
-================================================================================
-## P2 - Moderate Changes (Review Needed)
-================================================================================
-...
-
-================================================================================
-## P3 - Model Changes
-================================================================================
-...
-
-================================================================================
-## P4 - Configuration/Minor Changes
-================================================================================
-...
-
-================================================================================
-## Files/Directories Renamed
-================================================================================
-<LIST_OF_RENAMED_FILES>
-
-================================================================================
-## END OF CHANGES
-================================================================================
-```
-
-#### 4.5 Commands to Analyze Specific Changes
-
+1. Run the linter to surface drift:
 ```bash
-# Check for breaking changes in commit messages
-git log --oneline <old_commit>..<new_commit> | grep -iE "(refactor|breaking|api|rename|remove|deprecate)"
-
-# View specific file changes
-git diff <old_commit> <new_commit> -- <FILE_PATH>
-
-# Check for renamed/moved files
-git diff <old_commit> <new_commit> --name-status | grep -E "^R"
-
-# Check platform interface changes
-git diff <old_commit> <new_commit> -- vllm/platforms/
-
-# Check MoE changes
-git diff <old_commit> <new_commit> -- vllm/model_executor/layers/fused_moe/
-
-# Check attention changes
-git diff <old_commit> <new_commit> -- vllm/model_executor/layers/attention/
-
-# Check speculative decoding changes
-git diff <old_commit> <new_commit> -- vllm/v1/worker/gpu/spec_decode/ vllm/config/speculative.py
+python3 <skill_dir>/scripts/lint_adapt_guide.py \
+  --ascend-path <ascend_path>
 ```
+This writes `/tmp/main2main/adapt-guide-refresh/check_report.md` with three
+sections: invalidated paths, uncovered vllm_ascend/ directories, and upstream
+paths touched this run that the file-mapping table doesn't cover.
 
-### 5. Adapt vLLM Ascend Project
+2. Update **only the three AUTO-MAINTAINED regions** in
+`reference/adapt-guide.md` — `key-areas`, `file-locations`, `file-mapping`.
+Use the report plus this run's `changed-files.txt` to decide what to add,
+rename, or remove. Do not touch the surrounding prose, headings, or any other
+section of the file.
 
-For each related change in vLLM from the file `vllm_changes.md`, evaluate whether adaptation in vLLM Ascend is needed:
+3. Commit the refresh as a separate commit, only if the guide actually changed:
+```bash
+git -C <ascend_path> diff --quiet \
+  .agents/skills/main2main/reference/adapt-guide.md \
+  || git -C <ascend_path> commit -s \
+       -m "docs(main2main): refresh adapt-guide tables" \
+       -- .agents/skills/main2main/reference/adapt-guide.md
+```
+Use `git add <file>`, never `git add .`. Keep this commit separate from any
+step's functional commit so reviewers can audit the table changes alone.
 
-#### 5.1 Internal Architecture Changes
+### Phase 4: Final summary
 
-- Check internal interfaces of vLLM core modules (scheduler, executor, model runner, etc.)
-- Update vLLM Ascend's Ascend-specific implementations (e.g., NPU worker/model runner, custom attention、custom ops)
-- Preserve vLLM Ascend specific modifications (e.g., code under `vllm_ascend/`)
+Output a reviewer-facing Markdown summary only when one of these is true:
+1. Every planned step has been completed, verified, committed, and the target
+   vLLM commit has been reached.
+2. A listed partial-stop condition was triggered and the required failed patch
+   plus failure summary were saved.
 
-#### 5.2 Dependency Changes
+Do not write a final summary after a successful intermediate step just to report
+remaining work. Build the final summary from the per-step summaries and CI
+results. Use the exact structure in `reference/final-summary.md`.
 
-- Check for dependency version changes in `pyproject.toml` or `setup.py`
-- Update dependency declarations in vLLM Ascend
+---
 
-### 5. Test and Verify
+## Pre-Completion Checklist
 
-- Run vLLM Ascend's CI/CD pipeline
-- Verify core functionality (text generation, batching, NPU memory management)
-- Ensure backward compatibility: test compatibility with older vLLM versions
+These are the things most commonly missed, based on past experience:
 
-## Key File Locations
-
-| Project | Path |
-|---------|------|
-| vLLM Ascend version compatibility | `docs/source/community/versioning_policy.md` |
-| vLLM Ascend source code | `vllm_ascend/` |
-| **Core Modules** | |
-| Ascend-specific attention | `vllm_ascend/attention/` |
-| Ascend-specific executor | `vllm_ascend/worker/` |
-| Ascend-specific ops | `vllm_ascend/ops/` |
-| **Specialized Implementations** | |
-| Ascend 310P specific | `vllm_ascend/_310p/` |
-| EPLB load balancing | `vllm_ascend/eplb/` |
-| XLite compiler | `vllm_ascend/xlite/` |
-| **Compilation & Fusion** | |
-| Graph fusion pass manager | `vllm_ascend/compilation/` |
-| Compilation passes | `vllm_ascend/compilation/passes/` |
-| **Quantization** | |
-| Quantization methods | `vllm_ascend/quantization/` |
-| ModelSlim integration | `vllm_ascend/quantization/methods/modelslim/` |
-| **Distributed & KV Cache** | |
-| KV transfer | `vllm_ascend/distributed/kv_transfer/` |
-| Device communicators | `vllm_ascend/distributed/device_communicators/` |
-| **Speculative Decoding** | |
-| MTP proposer | `vllm_ascend/spec_decode/mtp_proposer.py` |
-| Eagle proposer | `vllm_ascend/spec_decode/eagle_proposer.py` |
-| **Utility Modules** | |
-| Common utilities | `vllm_ascend/utils.py` |
-| Ascend config | `vllm_ascend/ascend_config.py` |
-| Platform detection | `vllm_ascend/platform.py` |
-| Environment variables | `vllm_ascend/envs.py` |
-
-## Important Notes
-
-1. **Version Checking**: vLLM Ascend uses version checking to maintain compatibility with multiple vLLM versions. Preserve or update related logic when adapting.
-
-2. **Test Verification**: After adaptation, tests must verify:
-    - Compatibility with the latest vLLM version
-    - Backward compatibility with older vLLM versions
-    - Ascend NPU functionality works correctly
-
-3. **Documentation Sync**: If vLLM documentation has significant changes, update vLLM Ascend's documentation accordingly.
-
-4. **Backward Compatibility**:
-    - Maintain compatibility from the version currently adapted by vLLM Ascend to the latest version
-    - Use version checking to handle code branches for different versions:
-    ```python
-    from vllm_ascend.utils import vllm_version_is
-
-    if vllm_version_is("0.15.0"):
-        # Use API for v0.15.0
-    else:
-        # Use API for other versions
-    ```
-
-5. Do not forget to update the vLLM version is `.github` for CI files.
-
-6. **Change Logging**: After adaptation, clearly document in the commit message:
-   - The range of adapted vLLM commits
-   - Main changes made
-   - Test results
-
-7. the vLLM python code is under `vllm/vllm` folder.
-
-## Reference
-
-- [Versioning Policy](../../../docs/source/community/versioning_policy.md) - vLLM Ascend versioning strategy
+- [ ] No temp files in the repo (vllm_changes.md, .log, .patch, .jsonl)
+- [ ] All commits signed (`git commit -s`)
+- [ ] All intermediate files in /tmp/main2main/, not in the repo
+- [ ] conf.py `main_vllm_commit` updated at each step (not just at the end)
+- [ ] conf.py `main_vllm_tag` updated if the tag changed
+- [ ] Every step ran CI after the commit reference update, including no-op adapt steps
+- [ ] New `vllm_version_is()` calls use the correct version
+- [ ] Each commit message includes the upstream commit range
+- [ ] Each step has a summary in `/tmp/main2main/steps/<step-id>/summary.md`
+- [ ] If partial stop: patch + failure details saved
+- [ ] `lint_adapt_guide.py` ran and any updates to the three AUTO-MAINTAINED regions in `reference/adapt-guide.md` were committed as a separate commit
+- [ ] Final summary output to user

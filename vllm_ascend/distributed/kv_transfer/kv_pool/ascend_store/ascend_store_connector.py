@@ -9,7 +9,12 @@ from vllm.distributed.kv_events import (
     KVConnectorKVEvents,
     KVEventAggregator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+    SupportsHMA,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
@@ -61,7 +66,15 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
         return f"<AscendStoreKVEvents events={self.get_all_events()}>"
 
 
-class AscendStoreConnector(KVConnectorBase_V1):
+class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """
+        AscendStore requires PIECEWISE CUDA graph mode when layerwise
+        operations are enabled.
+        """
+        return extra_config.get("use_layerwise", False)
+
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
@@ -99,11 +112,12 @@ class AscendStoreConnector(KVConnectorBase_V1):
 
         if role == KVConnectorRole.SCHEDULER:
             page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, page_size_bytes=page_size_bytes)
+            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config, page_size_bytes=page_size_bytes)
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
                 self.use_layerwise,
+                kv_cache_config,
             )
             # self.connector_worker.layer_transfer_finished_events = vllm_config.layer_transfer_finished_events
             assert self.connector_worker is not None
@@ -134,6 +148,14 @@ class AscendStoreConnector(KVConnectorBase_V1):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished_all_groups(request, block_ids)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
@@ -191,7 +213,21 @@ class AscendStoreConnector(KVConnectorBase_V1):
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        self.connector_worker.start_load_kv(self._get_connector_metadata())
+        metadata = self._get_connector_metadata()
+        logger.debug(
+            "KV pool connector start_load_kv metadata_requests=%d specs=%s",
+            len(metadata.requests),
+            [
+                (
+                    request.req_id,
+                    None if request.load_spec is None else request.load_spec.can_load,
+                    None if request.load_spec is None else request.load_spec.vllm_cached_tokens,
+                    None if request.load_spec is None else request.load_spec.kvpool_cached_tokens,
+                )
+                for request in metadata.requests
+            ],
+        )
+        self.connector_worker.start_load_kv(metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
@@ -226,6 +262,11 @@ class AscendStoreConnector(KVConnectorBase_V1):
             finished_req_ids, self._get_connector_metadata()
         )
         return done_sending, done_recving
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return KV block IDs that failed to load on the worker."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
         """
