@@ -168,6 +168,7 @@ from vllm_ascend.sample.rejection_sampler import (
     AscendRejectionSampler,
     SamplingRandomTensors,
     apply_sampling_constraints,
+    rejection_sample,
 )
 
 if TYPE_CHECKING:
@@ -2795,14 +2796,14 @@ class NPUModelRunner(GPUModelRunner):
                 max_topk,
             )
         with self._configure_spec_rejection_sampler(max_topk, random_tensors):
-            sampler_output = self.rejection_sampler.forward_with_prepared_inputs(
+            sampler_output = self._build_spec_sampler_output(
                 spec_decode_metadata,
-                None,  # draft_probs
                 logits,
                 sampling_metadata,
                 bonus_sampler_output,
                 target_logits,
                 raw_target_logits,
+                random_tensors,
             )
         return sampler_output
 
@@ -2823,6 +2824,44 @@ class NPUModelRunner(GPUModelRunner):
             ),
             predict_bonus_token=True,
             logprobs_mode_override="processed_logits" if self.rejection_sampler.is_processed_logprobs_mode else "raw_logits",
+        )
+
+    def _build_spec_sampler_output(
+        self,
+        spec_decode_metadata: SpecDecodeMetadata,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        bonus_sampler_output: SamplerOutput,
+        target_logits: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None],
+        raw_target_logits: torch.Tensor,
+        random_tensors: SamplingRandomTensors | None,
+    ) -> SamplerOutput:
+        output_token_ids = rejection_sample(
+            spec_decode_metadata.draft_token_ids,
+            spec_decode_metadata.num_draft_tokens,
+            spec_decode_metadata.max_spec_len,
+            spec_decode_metadata.cu_num_draft_tokens,
+            None,  # draft_probs
+            target_logits,
+            bonus_sampler_output.sampled_token_ids,
+            sampling_metadata,
+            random_tensors=random_tensors,
+        )
+
+        logprobs_tensors = None
+        if sampling_metadata.max_num_logprobs is not None:
+            logprobs_tensors = self.rejection_sampler._get_logprobs_tensors(
+                sampling_metadata.max_num_logprobs,
+                spec_decode_metadata,
+                logits,
+                target_logits if self.rejection_sampler.is_processed_logprobs_mode else raw_target_logits,
+                bonus_sampler_output.logprobs_tensors.logprobs,
+                output_token_ids,
+            )
+
+        return SamplerOutput(
+            sampled_token_ids=output_token_ids,
+            logprobs_tensors=logprobs_tensors,
         )
 
     def _sample(
