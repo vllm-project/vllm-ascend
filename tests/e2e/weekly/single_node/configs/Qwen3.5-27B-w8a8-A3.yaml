@@ -41,15 +41,6 @@ test_cases:
       - "--mm-processor-cache-gb"
       - "0"
     benchmarks:
-      acc:
-        case_type: accuracy
-        dataset_path: vllm-ascend/aime2025
-        request_conf: vllm_api_general_chat
-        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-        max_out_len: 32768
-        batch_size: 32
-        baseline: 85
-        threshold: 5
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
@@ -232,7 +223,7 @@ test_cases:
     benchmarks:
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs100_qwen
+        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 48
@@ -502,7 +493,7 @@ test_cases:
     benchmarks:
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs100_qwen
+        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 8

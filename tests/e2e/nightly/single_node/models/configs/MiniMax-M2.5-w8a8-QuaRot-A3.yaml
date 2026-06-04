@@ -11,7 +11,7 @@ test_cases:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM-ASCEND_ENABLE_NZ: "3"
+      VLLM-ASCEND_ENABLE_NZ: "1"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_USE_MODELSCOPE: "true"
@@ -48,10 +48,18 @@ test_cases:
         dataset_path: vllm-ascend/aime2025
         request_conf: vllm_api_general_chat
         dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-        max_out_len: 32768
+        max_out_len: 131072
         batch_size: 32
         baseline: 90
         threshold: 5
+        bos_token_id: 200019
+        do_sample: true
+        eos_token_id: 200020
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 40
+        transformers_version: 4.46.1
+        ignore_eos: false
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs2800
