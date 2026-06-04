@@ -284,8 +284,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 target_embed_tokens = target_language_model.model.word_embeddings
             else:
                 raise AttributeError(
-                    "Target model does not have 'embed_tokens', 'embedding', "
-                    "or 'word_embeddings' attribute"
+                    "Target model does not have 'embed_tokens', 'embedding', or 'word_embeddings' attribute"
                 )
             # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
             # check if mtp model use main model's embedding and LMhead
@@ -324,10 +323,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # MTP model
                 share_embeddings = not self.use_compress
                 if share_embeddings:
-                    logger.info(
-                        "Detected MTP model. Sharing target model embedding "
-                        "weights with the draft model."
-                    )
+                    logger.info("Detected MTP model. Sharing target model embedding weights with the draft model.")
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
@@ -362,11 +358,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 inner = getattr(self.model, "model", None)
                 layers = getattr(inner, "layers", None) if inner else None
                 if layers is not None:
-                    items = (
-                        layers.values()
-                        if isinstance(layers, nn.ModuleDict)
-                        else layers
-                    )
+                    items = layers.values() if isinstance(layers, nn.ModuleDict) else layers
                     for layer_module in items:
                         shared_head = getattr(layer_module, "shared_head", None)
                         if shared_head is not None and hasattr(shared_head, "head"):

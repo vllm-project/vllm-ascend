@@ -103,21 +103,9 @@ class TestNPUModelRunnerSpecDecodeMetadata(unittest.TestCase):
     def test_calculate_reorder_batch_threshold_uses_min_non_none(self):
         runner = self._build_runner()
         groups = [
-            SimpleNamespace(
-                get_metadata_builder=lambda: SimpleNamespace(
-                    reorder_batch_threshold=2
-                )
-            ),
-            SimpleNamespace(
-                get_metadata_builder=lambda: SimpleNamespace(
-                    reorder_batch_threshold=None
-                )
-            ),
-            SimpleNamespace(
-                get_metadata_builder=lambda: SimpleNamespace(
-                    reorder_batch_threshold=1
-                )
-            ),
+            SimpleNamespace(get_metadata_builder=lambda: SimpleNamespace(reorder_batch_threshold=2)),
+            SimpleNamespace(get_metadata_builder=lambda: SimpleNamespace(reorder_batch_threshold=None)),
+            SimpleNamespace(get_metadata_builder=lambda: SimpleNamespace(reorder_batch_threshold=1)),
         ]
         runner._attn_group_iterator = lambda: groups
 

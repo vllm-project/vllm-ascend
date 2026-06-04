@@ -214,9 +214,7 @@ class TestAscendModelSlimConfig(TestBase):
     def test_bailing_mtp_shared_head_falls_back_to_lm_head(self):
         config = AscendModelSlimConfig({"lm_head.weight": "FLOAT"})
 
-        prefix = config.quant_prefix_mapper(
-            "bailing_hybrid_mtp", "model.layers.80.shared_head.head"
-        )
+        prefix = config.quant_prefix_mapper("bailing_hybrid_mtp", "model.layers.80.shared_head.head")
 
         self.assertEqual(prefix, "lm_head")
 
@@ -228,9 +226,7 @@ class TestAscendModelSlimConfig(TestBase):
             }
         )
 
-        prefix = config.quant_prefix_mapper(
-            "bailing_hybrid_mtp", "model.layers.80.shared_head.head"
-        )
+        prefix = config.quant_prefix_mapper("bailing_hybrid_mtp", "model.layers.80.shared_head.head")
 
         self.assertEqual(prefix, "model.layers.80.shared_head.head")
 
