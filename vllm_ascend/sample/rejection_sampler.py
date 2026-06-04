@@ -94,6 +94,48 @@ class AscendRejectionSampler(RejectionSampler):
     def set_random_tensors(self, random_tensors: SamplingRandomTensors | None):
         self.random_tensors = random_tensors
 
+    def forward_with_prepared_inputs(
+        self,
+        metadata: SpecDecodeMetadata,
+        draft_probs: torch.Tensor | None,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        bonus_sampler_output: SamplerOutput,
+        target_logits_or_tuple: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None],
+        raw_target_logits: torch.Tensor,
+    ) -> SamplerOutput:
+        random_tensors = self.random_tensors
+        self.random_tensors = None
+
+        bonus_token_ids = bonus_sampler_output.sampled_token_ids
+        output_token_ids = rejection_sample(
+            metadata.draft_token_ids,
+            metadata.num_draft_tokens,
+            metadata.max_spec_len,
+            metadata.cu_num_draft_tokens,
+            draft_probs,
+            target_logits_or_tuple,
+            bonus_token_ids,
+            sampling_metadata,
+            random_tensors=random_tensors,
+        )
+
+        logprobs_tensors = None
+        if sampling_metadata.max_num_logprobs is not None:
+            logprobs_tensors = self._get_logprobs_tensors(
+                sampling_metadata.max_num_logprobs,
+                metadata,
+                logits,
+                target_logits_or_tuple if self.is_processed_logprobs_mode else raw_target_logits,
+                bonus_sampler_output.logprobs_tensors.logprobs,
+                output_token_ids,
+            )
+
+        return SamplerOutput(
+            sampled_token_ids=output_token_ids,
+            logprobs_tensors=logprobs_tensors,
+        )
+
     def forward(
         self,
         metadata: SpecDecodeMetadata,
@@ -131,7 +173,6 @@ class AscendRejectionSampler(RejectionSampler):
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         bonus_logits_indices = metadata.bonus_logits_indices
         random_tensors = self.random_tensors
-        self.random_tensors = None
 
         # When indexing with a tensor (bonus_logits_indices), PyTorch
         # creates a new tensor with separate storage from the original
@@ -178,33 +219,14 @@ class AscendRejectionSampler(RejectionSampler):
         else:
             target_logits = target_logits_or_tuple
             assert raw_target_logits is not None
-
-        output_token_ids = rejection_sample(
-            metadata.draft_token_ids,
-            metadata.num_draft_tokens,
-            metadata.max_spec_len,
-            metadata.cu_num_draft_tokens,
+        return self.forward_with_prepared_inputs(
+            metadata,
             draft_probs,
-            target_logits,
-            bonus_token_ids,
+            logits,
             sampling_metadata,
-            random_tensors=random_tensors,
-        )
-
-        logprobs_tensors = None
-        if sampling_metadata.max_num_logprobs is not None:
-            logprobs_tensors = self._get_logprobs_tensors(
-                sampling_metadata.max_num_logprobs,
-                metadata,
-                logits,
-                target_logits if self.is_processed_logprobs_mode else raw_target_logits,
-                bonus_sampler_output.logprobs_tensors.logprobs,
-                output_token_ids,
-            )
-
-        return SamplerOutput(
-            sampled_token_ids=output_token_ids,
-            logprobs_tensors=logprobs_tensors,
+            bonus_sampler_output,
+            target_logits,
+            raw_target_logits,
         )
 
 

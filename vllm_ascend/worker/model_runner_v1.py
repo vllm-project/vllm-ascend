@@ -2787,14 +2787,14 @@ class NPUModelRunner(GPUModelRunner):
                 max_topk,
             )
         with self._configure_spec_rejection_sampler(max_topk, random_tensors):
-            sampler_output = self.rejection_sampler(
+            sampler_output = self.rejection_sampler.forward_with_prepared_inputs(
                 spec_decode_metadata,
                 None,  # draft_probs
                 logits,
                 sampling_metadata,
-                bonus_sampler_output=bonus_sampler_output,
-                target_logits_or_tuple=target_logits,
-                raw_target_logits=raw_target_logits,
+                bonus_sampler_output,
+                target_logits,
+                raw_target_logits,
             )
         return sampler_output
 
