@@ -250,6 +250,7 @@ class SamplingExecutionState:
     sampling_metadata: SamplingMetadata
     non_spec_max_topk: int | None
     spec_sampling_state: "SpecSamplingExecutionState | None"
+    output_token_ids_enabled: bool
 
 
 @dataclass
@@ -1680,13 +1681,16 @@ class NPUModelRunner(GPUModelRunner):
         return draft_token_ids
 
     def _copy_draft_token_ids_to_cpu(
-        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
+        self,
+        scheduler_output: "SchedulerOutput",
+        output_token_ids_enabled: bool,
+        zeros_only: bool = False,
     ) -> None:
         if not self.num_spec_tokens:
             return
         if self.use_async_scheduling and not (
             scheduler_output.has_structured_output_requests
-            or self.input_batch.sampling_metadata.output_token_ids
+            or output_token_ids_enabled
         ):
             return
         self._draft_token_req_ids = self.input_batch.req_ids.copy()
@@ -2610,6 +2614,7 @@ class NPUModelRunner(GPUModelRunner):
             sampling_metadata=sampling_metadata,
             non_spec_max_topk=self._prepare_non_spec_max_topk(logits, sampling_metadata),
             spec_sampling_state=self._prepare_spec_sampling_state(logits, spec_decode_metadata, sampling_metadata),
+            output_token_ids_enabled=bool(sampling_metadata.output_token_ids),
         )
 
     def _build_execute_model_state(
@@ -2782,7 +2787,10 @@ class NPUModelRunner(GPUModelRunner):
                 sample_hidden_states,
                 batch_desc,
             )
-            self._copy_draft_token_ids_to_cpu(scheduler_output)
+            self._copy_draft_token_ids_to_cpu(
+                scheduler_output,
+                sampling_state.output_token_ids_enabled,
+            )
 
         if use_padded_batch:
             # EAGLE speculative decoding can use the GPU sampled tokens
@@ -2804,7 +2812,11 @@ class NPUModelRunner(GPUModelRunner):
                     self._draft_token_ids = torch.zeros(
                         1, device=self.device, dtype=torch.int32
                     ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
-                    self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
+                    self._copy_draft_token_ids_to_cpu(
+                        scheduler_output,
+                        sampling_state.output_token_ids_enabled,
+                        zeros_only=True,
+                    )
         elif input_fits_in_drafter:
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
