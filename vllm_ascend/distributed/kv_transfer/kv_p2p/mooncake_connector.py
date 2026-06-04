@@ -1297,10 +1297,11 @@ class MooncakeConnectorWorker:
         self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
         logger.info(
             "MOONCAKE_DIAG config: prefill_tp=%d prefill_pp=%d prefill_dp=%d "
-            "decode_tp=%d decode_dp=%d my_tp=%d my_pp=%d dp_rank=%s",
+            "decode_tp=%d decode_dp=%d pp_size=%s tp_size=%s dp_rank=%s",
             self._prefill_tp_size, self._prefill_pp_size, self._prefill_dp_size,
             self._decode_tp_size, self._decode_dp_size,
-            self.tp_size, self.pp_size,
+            getattr(vllm_config.parallel_config, 'pipeline_parallel_size', '?'),
+            getattr(vllm_config.parallel_config, 'tensor_parallel_size', '?'),
             getattr(vllm_config.parallel_config, 'data_parallel_rank', '?'),
         )
 
