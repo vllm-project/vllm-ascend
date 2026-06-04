@@ -414,6 +414,8 @@ class KVCacheRecvingThread(threading.Thread):
         tp_num_need_pulls: int,
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         all_task_done: bool = False,
+        first_layer_idx: int | None = None,
+        end_layer_idx: int | None = None,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -432,6 +434,8 @@ class KVCacheRecvingThread(threading.Thread):
                 "tp_num_need_pulls": tp_num_need_pulls,
                 "remote_port_send_num": remote_port_send_num,
                 "all_task_done": all_task_done,
+                "first_layer_idx": first_layer_idx,
+                "end_layer_idx": end_layer_idx,
             }
         )
 
@@ -514,7 +518,12 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if all_task_done:
-                if len(req_meta["local_block_ids"]) > 0 or transfer_failed:
+                # Signal completion even when local_block_ids is empty
+                # (full prefix cache hit — no RDMA transfer needed).
+                # Without this, the request is never marked finished on D
+                # and the P-side blocks are never acknowledged for release.
+                has_remote_blocks = len(req_meta.get("remote_block_ids", [])) > 0
+                if len(req_meta["local_block_ids"]) > 0 or has_remote_blocks or transfer_failed:
                     self.task_tracker.update_done_task_count(request_id)
                 if request_id in self.proc_not_transfer_request:
                     del self.proc_not_transfer_request[request_id]
@@ -557,8 +566,11 @@ class KVCacheRecvingThread(threading.Thread):
             return
 
         num_remote_blocks = len(remote_block_ids)
-        assert num_local_blocks <= num_remote_blocks
+        assert num_local_blocks <= num_remote_blocks, (
+            f"local blocks ({num_local_blocks}) > remote blocks ({num_remote_blocks})"
+        )
         if num_local_blocks < num_remote_blocks:
+            # Tail-aligned: D has a prefix cache hit, only the last N blocks are needed
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
         # Check if we have the remote metadata cached.
@@ -577,15 +589,27 @@ class KVCacheRecvingThread(threading.Thread):
             local_block_ids = list(map(lambda x: [x], local_block_ids))
             grouped_remote_block_ids, grouped_local_block_ids = remote_block_ids, local_block_ids
         num_transfer_groups = len(grouped_remote_block_ids)
-        # tp_num_need_pulls: number of KV caches each Decode node needs to pull from each PP stage
-        # Due to GQA, different KV heads are distributed across different ranks, so there are offsets
-        # indicating which KV head to pull
+        # tp_num_need_pulls: number of KV caches each Decode node needs to pull
+        # from each PP stage. Due to GQA, different KV heads are distributed
+        # across different ranks, so there are offsets indicating which KV head
+        # to pull.
+        #
+        # IMPORTANT: the same remote/local_block_ids are reused across ALL PP
+        # stage transfers because the P-side scheduler assigns the same logical
+        # block IDs to all PP stages for a given request.  Each PP stage stores
+        # its KV cache for its layer subset at (layer_base + block_id * block_len),
+        # so the same block_id in different PP stages refers to a different
+        # physical cache entry.  This is correct.
         global_offset = offset  # Global offset of request across all ranks
         prefill_pp_rank = offset // tp_num_need_pulls  # PP rank where current request resides
         inner_offset = offset % tp_num_need_pulls  # Offset within each PP stage
 
         remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
-        first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
+        # Use explicit layer range from meta when available, else derive from offset
+        first_layer_index = req_meta.get("first_layer_idx")
+        end_layer_index = req_meta.get("end_layer_idx")
+        if first_layer_index is None or end_layer_index is None:
+            first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
         # support MTP layer and draft model kv transfer
         if self.vllm_config.speculative_config is not None:
             if prefill_pp_rank == self._prefill_pp_size - 1:
@@ -595,6 +619,18 @@ class KVCacheRecvingThread(threading.Thread):
             first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
         ]
         logger.debug("transfer kv cache first_layer_index:%s , end_layer_index:%s", first_layer_index, end_layer_index)
+        # Validate layer alignment: the number of base addresses should match
+        # the expected layer range for this PP stage transfer.
+        expected_local_layers = (end_layer_index - first_layer_index) * num_cache_per_layer
+        assert len(local_kv_caches_base_addrs) == expected_local_layers, (
+            f"Layer mismatch: expected {expected_local_layers} local base addrs "
+            f"(layers {first_layer_index}-{end_layer_index}, {num_cache_per_layer}/layer), "
+            f"got {len(local_kv_caches_base_addrs)}"
+        )
+        assert len(remote_kv_caches_base_addrs) >= expected_local_layers, (
+            f"Remote worker has {len(remote_kv_caches_base_addrs)} layers, "
+            f"but we need {expected_local_layers} for this transfer"
+        )
         remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         num_blocks = len(local_block_ids)
         session_id = f"{remote_host}:{remote_transfer_port}"
@@ -1775,6 +1811,8 @@ class MooncakeConnectorWorker:
                 chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
                 remote_handshake_port_list = [[x + meta.remote_port] for x in chosen_rank_list]
                 for i in range(tp_num_need_pulls * self._prefill_pp_size):
+                    pp_rank_idx = i // tp_num_need_pulls
+                    first_ly, end_ly = self.kv_recv_thread.pp_layer_indices[pp_rank_idx]
                     assert self.kv_recv_thread is not None
                     remote_host, remote_engine_id = self._get_remote_host_info_by_port(
                         meta.remote_port,
@@ -1794,6 +1832,8 @@ class MooncakeConnectorWorker:
                         offset=i,
                         tp_num_need_pulls=tp_num_need_pulls,
                         all_task_done=(i == tp_num_need_pulls * self._prefill_pp_size - 1),
+                        first_layer_idx=first_ly,
+                        end_layer_idx=end_ly,
                     )
 
         for req_id in metadata.reqs_in_batch:
