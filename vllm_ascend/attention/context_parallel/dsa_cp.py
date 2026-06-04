@@ -181,6 +181,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.block_table: torch.Tensor = None
         self.slot_mapping: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
+        self.seq_lens_cpu: torch.Tensor = None
 
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
         hf_config = self.model_config.hf_config
@@ -289,6 +290,16 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.common_ratio_to_sas_metadata["sin"] = sin
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
+            # Prefer _seq_lens_cpu (always available, updated during draft
+            # iterations) over seq_lens_cpu (None in async spec decode mode).
+            if common_attn_metadata._seq_lens_cpu is not None:
+                _seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+            elif common_attn_metadata.seq_lens_cpu is not None:
+                _seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            else:
+                _seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            self.seq_lens_cpu = _seq_lens_cpu
+            self.common_ratio_to_sas_metadata["seq_lens_cpu"] = self.seq_lens_cpu
         else:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
                 self.common_ratio_to_sas_metadata["num_decodes"],
@@ -300,6 +311,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions_cpu = self.common_ratio_to_sas_metadata["input_positions_cpu"]
             cos, sin = self.common_ratio_to_sas_metadata["cos"], self.common_ratio_to_sas_metadata["sin"]
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
+            self.seq_lens_cpu = self.common_ratio_to_sas_metadata["seq_lens_cpu"]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.slot_mapping[:num_input_tokens] = torch.stack(
@@ -399,6 +411,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         """Build DSA-CP metadata for one draft step."""
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
         has_prefill = _has_prefill(common_attn_metadata.attn_state)
 
@@ -425,9 +438,17 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         local_query_start_loc = local_query_start_loc.clone()
         local_seq_lens = local_seq_lens.clone()
 
-        local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
-        max_local_query_len = max(1, int(local_seq_lens_q.max().item()))
-        max_local_seq_lens = max(1, int(local_seq_lens.max().item()))
+        _, _, _, _, local_query_start_loc_cpu, local_seq_lens_cpu, _, _ = self._build_local_token_metadata(
+            num_reqs=num_reqs,
+            num_input_tokens=num_input_tokens,
+            input_positions=None,
+            query_start_loc=query_start_loc_cpu,
+            seq_lens=self.seq_lens_cpu[:num_reqs],
+            use_cache=False,
+        )
+        local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
+        max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
+        max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
 
         start_pos = self.seq_lens[:num_reqs] - seq_lens_q
 
@@ -499,6 +520,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         has_prefill = _has_prefill(attn_state)
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
 
@@ -525,9 +547,18 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_seq_lens=self.local_seq_lens,
         )
         local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
-        # TODO(qcs): remove this .item() to avoid D2H synchronization.
-        max_local_query_len = max(1, int(local_seq_lens_q.max().item()))
-        max_local_seq_lens = max(1, int(local_seq_lens.max().item()))
+
+        _, _, _, _, local_query_start_loc_cpu, local_seq_lens_cpu, _, _ = self._build_local_token_metadata(
+            num_reqs=num_reqs,
+            num_input_tokens=num_input_tokens,
+            input_positions=None,
+            query_start_loc=query_start_loc_cpu,
+            seq_lens=self.seq_lens_cpu[:num_reqs],
+            use_cache=False,
+        )
+        local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
+        max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
+        max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
 
         # start_pos: context length before current query
         start_pos = self.seq_lens[:num_reqs] - seq_lens_q
@@ -617,8 +648,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         query_start_loc,
         seq_lens,
         use_cache,
-        local_query_start_loc,
-        local_seq_lens,
+        local_query_start_loc=None,
+        local_seq_lens=None,
     ):
         """
         For example:
@@ -645,29 +676,46 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         local_start = tp_rank * tokens_per_rank
         local_end = local_start + tokens_per_rank
 
-        local_query_start_loc.fill_(0)
-        local_seq_lens.fill_(0)
+        if local_query_start_loc is not None:
+            local_query_start_loc.fill_(0)
+            local_seq_lens.fill_(0)
 
         # Intersect each request's global token interval with this rank's local
         # token interval, then build the per-rank query_start_loc from lengths.
         local_query_start = torch.clamp(query_start_loc[:-1], min=local_start, max=local_end)
         local_query_end = torch.clamp(query_start_loc[1:], min=local_start, max=local_end)
         local_query_lens = local_query_end - local_query_start
-        local_query_start_loc[1 : num_reqs + 1] = torch.cumsum(local_query_lens, dim=0)
+        if local_query_start_loc is not None:
+            local_query_start_loc[1 : num_reqs + 1] = torch.cumsum(local_query_lens, dim=0)
+        else:
+            local_query_start_loc = torch.cat(
+                [
+                    torch.tensor([0], dtype=local_query_lens.dtype, device=local_query_lens.device),
+                    torch.cumsum(local_query_lens, dim=0),
+                ],
+                0,
+            )
 
         # For requests that cross the local slice boundary, offset removes the
         # tokens that live on later ranks so local_seq_lens matches local queries.
         offset = query_start_loc[1:] - local_query_end
-        local_seq_lens[:num_reqs] = (local_query_lens > 0) * (seq_lens - offset)
+        if local_seq_lens is not None:
+            local_seq_lens[:num_reqs] = (local_query_lens > 0) * (seq_lens - offset)
+        else:
+            local_seq_lens = (local_query_lens > 0) * (seq_lens - offset)
 
         # RoPE tables are generated on the padded global positions first, then
         # sliced to this rank so local tokens keep their original positions.
-        pad_tokens = num_tokens_pad - input_positions.shape[0]
-        if pad_tokens > 0:
-            input_positions = F.pad(input_positions, (0, pad_tokens), value=0)
-        local_cos, local_sin = get_cos_and_sin_dsa(input_positions, use_cache=use_cache)
-        local_cos = local_cos[local_start:local_end]
-        local_sin = local_sin[local_start:local_end]
+        if input_positions is not None:
+            pad_tokens = num_tokens_pad - input_positions.shape[0]
+            if pad_tokens > 0:
+                input_positions = F.pad(input_positions, (0, pad_tokens), value=0)
+            local_cos, local_sin = get_cos_and_sin_dsa(input_positions, use_cache=use_cache)
+            local_cos = local_cos[local_start:local_end]
+            local_sin = local_sin[local_start:local_end]
+        else:
+            local_cos = None
+            local_sin = None
         return (
             local_start,
             local_end,
@@ -1009,14 +1057,41 @@ class AscendDSACPImpl(DSAAttentionImpl):
             qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 q_a, self.q_norm.weight, epsilon=self.eps
             )
-            q = torch_npu.npu_quant_matmul(
-                qr_local,
-                self.wq_b.weight,
-                self.wq_b.weight_scale,
-                pertoken_scale=qr_pertoken_scale_local,
-                bias=self.wq_b.bias,
-                output_dtype=hidden_states_local.dtype,
-            )
+            if getattr(self.wq_b, "_chunk_size", 0):
+                bias = self.wq_b.bias
+                chunk_size = self.wq_b._chunk_size
+                bias_1 = bias[:chunk_size] if bias is not None else None
+                bias_2 = bias[chunk_size:] if bias is not None else None
+                q = torch.cat(
+                    [
+                        torch_npu.npu_quant_matmul(
+                            qr_local,
+                            self.wq_b.weight_1,
+                            self.wq_b.weight_1_scale,
+                            pertoken_scale=qr_pertoken_scale_local,
+                            bias=bias_1,
+                            output_dtype=hidden_states_local.dtype,
+                        ),
+                        torch_npu.npu_quant_matmul(
+                            qr_local,
+                            self.wq_b.weight_2,
+                            self.wq_b.weight_2_scale,
+                            pertoken_scale=qr_pertoken_scale_local,
+                            bias=bias_2,
+                            output_dtype=hidden_states_local.dtype,
+                        ),
+                    ],
+                    dim=-1,
+                )
+            else:
+                q = torch_npu.npu_quant_matmul(
+                    qr_local,
+                    self.wq_b.weight,
+                    self.wq_b.weight_scale,
+                    pertoken_scale=qr_pertoken_scale_local,
+                    bias=self.wq_b.bias,
+                    output_dtype=hidden_states_local.dtype,
+                )
         else:
             qr_local = self.q_norm(self.wq_a(hidden_states_local))
             q = self.wq_b(qr_local)

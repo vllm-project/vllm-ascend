@@ -162,6 +162,44 @@
 #       Remove this patch once the runtime vLLM version contains the upstream
 #       MiniMax usage-accounting fix.
 #
+# ** 7a. File: platform/patch_glm_tool_call_streaming.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#    Why:
+#       GLM tool-call streaming can emit final remaining-argument chunks with
+#       repeated tool-call metadata, and can combine terminal argument bytes with
+#       `finish_reason="tool_calls"` in the same SSE chunk.
+#    How：
+#       Monkey-patch remaining-argument delta construction to emit only argument
+#       fragments by default, and split terminal argument chunks into an argument
+#       chunk followed by an empty finish chunk.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/44098
+#       https://github.com/vllm-project/vllm/pull/44099
+#       https://github.com/vllm-project/vllm-ascend/issues/8327
+#       https://github.com/vllm-project/vllm-ascend/pull/8178
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       GLM tool-call final chunk fixes.
+#
+# ** 7b. File: platform/patch_glm47_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers.glm47_moe_tool_parser.Glm47MoeModelToolParser`
+#    Why:
+#       vLLM's GLM47 streaming parser can drop complete inline zero-argument
+#       tool calls such as `<tool_call>get_current_time</tool_call>`, while
+#       non-streaming parses the same output correctly.
+#    How：
+#       Monkey-patch GLM47 tool-call region extraction so complete inline
+#       zero-argument regions are normalized for the existing streaming name
+#       extractor without emitting partial names for incomplete regions.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/44326
+#       https://github.com/vllm-project/vllm/pull/44327
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       GLM47 inline zero-argument streaming parser fix.
+#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
@@ -286,6 +324,24 @@
 #    Future Plan:
 #       Remove this patch once vllm-ascend upgrades to a vLLM version with the
 #       same DeepSeek V4 thinking behavior.
+#
+# ** 12b. File: platform/patch_minimax_m2_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers.minimax_m2_tool_parser.MinimaxM2ToolParser`
+#    Why:
+#       vLLM 0.20.2 only emits MiniMax-M2 tool-call arguments after a complete
+#       `<invoke>...</invoke>` block, so long arguments are buffered instead of
+#       streamed incrementally.
+#    How:
+#       Monkey-patch the MiniMax-M2 parser to emit the tool name once the
+#       `<invoke name=...>` header is available and then stream partial
+#       `<parameter>` values as JSON argument fragments.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/40253
+#       https://github.com/vllm-project/vllm/pull/40298
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       MiniMax-M2 incremental tool-call streaming fix.
 #
 # ** 13. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
