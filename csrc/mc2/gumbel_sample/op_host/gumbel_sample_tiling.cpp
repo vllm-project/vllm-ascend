@@ -152,7 +152,7 @@ static ge::graphStatus GumbelSampleTilingFunc(gert::TilingContext* context) {
     if (ws == nullptr) {
         return ge::GRAPH_FAILED;
     }
-    ws[0] = 0;
+    ws[0] = 32;
 
     return ge::GRAPH_SUCCESS;
 }
