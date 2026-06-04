@@ -259,12 +259,17 @@ class SamplingExecutionState:
 
 
 @dataclass
-class SpecSamplingExecutionState:
-    max_topk: int | None
+class PreparedSpecSamplingInputs:
     random_tensors: SamplingRandomTensors | None
     bonus_sampler_output: SamplerOutput | None
     target_logits_or_tuple: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None] | None
     raw_target_logits: torch.Tensor | None
+
+
+@dataclass
+class SpecSamplingExecutionState:
+    max_topk: int | None
+    prepared_inputs: PreparedSpecSamplingInputs
 
 
 @dataclass
@@ -2612,10 +2617,12 @@ class NPUModelRunner(GPUModelRunner):
 
         return SpecSamplingExecutionState(
             max_topk=max_topk,
-            random_tensors=random_tensors,
-            bonus_sampler_output=bonus_sampler_output,
-            target_logits_or_tuple=target_logits_or_tuple,
-            raw_target_logits=raw_target_logits,
+            prepared_inputs=PreparedSpecSamplingInputs(
+                random_tensors=random_tensors,
+                bonus_sampler_output=bonus_sampler_output,
+                target_logits_or_tuple=target_logits_or_tuple,
+                raw_target_logits=raw_target_logits,
+            ),
         )
 
     def _prepare_spec_target_logits(
@@ -2752,7 +2759,8 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits[: len(spec_decode_metadata.logits_indices)]
         if spec_sampling_state is not None:
             max_topk = spec_sampling_state.max_topk
-        random_tensors = spec_sampling_state.random_tensors if spec_sampling_state is not None else None
+        prepared_inputs = spec_sampling_state.prepared_inputs if spec_sampling_state is not None else None
+        random_tensors = prepared_inputs.random_tensors if prepared_inputs is not None else None
         if random_tensors is None:
             random_tensors = self._prepare_spec_sampling_random_tensors(
                 logits,
@@ -2761,8 +2769,8 @@ class NPUModelRunner(GPUModelRunner):
                 max_topk,
             )
         bonus_sampler_output = (
-            spec_sampling_state.bonus_sampler_output
-            if spec_sampling_state is not None else None
+            prepared_inputs.bonus_sampler_output
+            if prepared_inputs is not None else None
         )
         if bonus_sampler_output is None:
             bonus_sampler_output = self._sample_spec_decode_bonus_tokens(
@@ -2772,12 +2780,12 @@ class NPUModelRunner(GPUModelRunner):
                 random_tensors,
             )
         target_logits = (
-            spec_sampling_state.target_logits_or_tuple
-            if spec_sampling_state is not None else None
+            prepared_inputs.target_logits_or_tuple
+            if prepared_inputs is not None else None
         )
         raw_target_logits = (
-            spec_sampling_state.raw_target_logits
-            if spec_sampling_state is not None else None
+            prepared_inputs.raw_target_logits
+            if prepared_inputs is not None else None
         )
         if target_logits is None or raw_target_logits is None:
             target_logits, raw_target_logits = self._prepare_spec_target_logits(
