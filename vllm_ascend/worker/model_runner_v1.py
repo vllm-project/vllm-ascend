@@ -251,6 +251,16 @@ class SpecSamplingExecutionState:
     random_tensors: SamplingRandomTensors | None
 
 
+@dataclass
+class SamplingBookkeepingState:
+    logprobs_lists: LogprobsLists | None
+    valid_sampled_token_ids: list[list[int]]
+    prompt_logprobs_dict: dict[str, LogprobsTensors | None]
+    req_ids_output_copy: list[str]
+    req_id_to_index_output_copy: dict[str, int]
+    invalid_req_indices: list[int]
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -2138,6 +2148,14 @@ class NPUModelRunner(GPUModelRunner):
             output.kv_connector_output = kv_connector_output
             return output
 
+        output = self._sample_tokens_from_execute_state(grammar_output, kv_connector_output)
+        return output
+
+    def _sample_tokens_from_execute_state(
+        self,
+        grammar_output: "GrammarOutput | None",
+        kv_connector_output,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         # Unpack ephemeral state.
         (
             scheduler_output,
@@ -2178,41 +2196,19 @@ class NPUModelRunner(GPUModelRunner):
 
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
 
-        (
-            logprobs_lists,
-            valid_sampled_token_ids,
-            prompt_logprobs_dict,
-            req_ids_output_copy,
-            req_id_to_index_output_copy,
-            invalid_req_indices,
-        ) = self._bookkeeping_sync(
+        bookkeeping_state = self._process_sampled_tokens_after_sampling(
             scheduler_output,
             sampler_output,
             logits,
-            hidden_states,
-            scheduler_output.total_num_scheduled_tokens,
             spec_decode_metadata,
+            spec_decode_common_attn_metadata,
+            positions,
+            hidden_states,
+            aux_hidden_states,
+            sample_hidden_states,
+            batch_desc,
+            scheduler_output.total_num_scheduled_tokens,
         )
-
-        with record_function_or_nullcontext("draft_token"):
-            self._handle_speculative_post_sampling(
-                sampler_output,
-                scheduler_output,
-                spec_decode_metadata,
-                spec_decode_common_attn_metadata,
-                positions,
-                hidden_states,
-                aux_hidden_states,
-                sample_hidden_states,
-                batch_desc,
-                valid_sampled_token_ids,
-            )
-
-            # vLLM v0.18 defers KV connector finalization during target-model
-            # forward when speculative decoding is enabled. Finalize here after
-            # draft model runs so KV pool save/put can complete.
-            if self.speculative_config is not None:
-                self.finalize_kv_connector()
 
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
@@ -2234,7 +2230,124 @@ class NPUModelRunner(GPUModelRunner):
                     slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
                 )
 
-        model_runner_output = ModelRunnerOutput(
+        model_runner_output = self._build_model_runner_output(
+            bookkeeping_state.req_ids_output_copy,
+            bookkeeping_state.req_id_to_index_output_copy,
+            bookkeeping_state.valid_sampled_token_ids,
+            bookkeeping_state.logprobs_lists,
+            bookkeeping_state.prompt_logprobs_dict,
+            kv_connector_output,
+            ec_connector_output,
+            cudagraph_stats,
+            routed_experts_lists,
+        )
+        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
+            self._sync_device()
+            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
+
+        if self.dynamic_eplb:
+            self.eplb_updator.forward_end()
+
+        self._finalize_dump_data()
+
+        self._handle_post_sampling_state_updates(
+            sampler_output.sampled_token_ids,
+            scheduler_output,
+        )
+
+        if not self.use_async_scheduling:
+            return model_runner_output
+        async_output = self._build_async_model_runner_output(
+            model_runner_output,
+            sampler_output,
+            bookkeeping_state.invalid_req_indices,
+        )
+        self.input_batch.set_async_sampled_token_ids(
+            async_output.sampled_token_ids_cpu,
+            async_output.async_copy_ready_event,
+        )
+        return async_output
+
+    def _process_sampled_tokens_after_sampling(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampler_output: SamplerOutput,
+        logits: torch.Tensor | None,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        sample_hidden_states: torch.Tensor,
+        batch_desc: BatchDescriptor,
+        num_scheduled_tokens: int,
+    ) -> SamplingBookkeepingState:
+        bookkeeping_state = self._run_sampling_bookkeeping(
+            scheduler_output,
+            sampler_output,
+            logits,
+            hidden_states,
+            num_scheduled_tokens,
+            spec_decode_metadata,
+        )
+
+        with record_function_or_nullcontext("draft_token"):
+            self._handle_speculative_post_sampling(
+                sampler_output,
+                scheduler_output,
+                spec_decode_metadata,
+                spec_decode_common_attn_metadata,
+                positions,
+                hidden_states,
+                aux_hidden_states,
+                sample_hidden_states,
+                batch_desc,
+                bookkeeping_state.valid_sampled_token_ids,
+            )
+
+            # vLLM v0.18 defers KV connector finalization during target-model
+            # forward when speculative decoding is enabled. Finalize here after
+            # draft model runs so KV pool save/put can complete.
+            if self.speculative_config is not None:
+                self.finalize_kv_connector()
+
+        return bookkeeping_state
+
+    def _handle_post_sampling_state_updates(
+        self,
+        sampled_token_ids: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        if self.need_accepted_tokens:
+            assert self.sampling_done_event is not None
+            with (
+                record_function_or_nullcontext("async_state_update"),
+                torch.npu.stream(global_stream()),
+            ):
+                global_stream().wait_event(self.sampling_done_event)
+                self._update_states_after_model_execute(sampled_token_ids, scheduler_output)
+
+        # In async scheduling + PP, broadcast sampled token ids from the
+        # last PP rank so other PP ranks can receive them without going
+        # through the scheduler/engine IPC path.
+        if self.use_async_scheduling:
+            pp = get_pp_group()
+            if pp.world_size > 1 and pp.is_last_rank:
+                self._pp_broadcast_prev_sampled_token_ids(sampled_token_ids)
+
+    def _build_model_runner_output(
+        self,
+        req_ids_output_copy: list[str],
+        req_id_to_index_output_copy: dict[str, int],
+        valid_sampled_token_ids: list[list[int]],
+        logprobs_lists: LogprobsLists | None,
+        prompt_logprobs_dict: dict[str, LogprobsTensors | None],
+        kv_connector_output,
+        ec_connector_output,
+        cudagraph_stats,
+        routed_experts_lists,
+    ) -> ModelRunnerOutput:
+        return ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
@@ -2248,35 +2361,14 @@ class NPUModelRunner(GPUModelRunner):
                 {} if vllm_version_is("0.20.2") else {"routed_experts": routed_experts_lists}
             ),
         )
-        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
-            self._sync_device()
-            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
-        if self.dynamic_eplb:
-            self.eplb_updator.forward_end()
-
-        self._finalize_dump_data()
-
-        if self.need_accepted_tokens:
-            assert self.sampling_done_event is not None
-            with (
-                record_function_or_nullcontext("async_state_update"),
-                torch.npu.stream(global_stream()),
-            ):
-                global_stream().wait_event(self.sampling_done_event)
-                self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
-
-        # In async scheduling + PP, broadcast sampled token ids from the
-        # last PP rank so other PP ranks can receive them without going
-        # through the scheduler/engine IPC path.
-        if self.use_async_scheduling:
-            pp = get_pp_group()
-            if pp.world_size > 1 and pp.is_last_rank:
-                self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
-
-        if not self.use_async_scheduling:
-            return model_runner_output
-        async_output = AsyncGPUModelRunnerOutput(
+    def _build_async_model_runner_output(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        sampler_output: SamplerOutput,
+        invalid_req_indices: list[int],
+    ) -> AsyncGPUModelRunnerOutput:
+        return AsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,
             logprobs_tensors=sampler_output.logprobs_tensors,
@@ -2284,11 +2376,39 @@ class NPUModelRunner(GPUModelRunner):
             async_output_copy_stream=self.async_output_copy_stream,
             vocab_size=self.input_batch.vocab_size,
         )
-        self.input_batch.set_async_sampled_token_ids(
-            async_output.sampled_token_ids_cpu,
-            async_output.async_copy_ready_event,
+
+    def _run_sampling_bookkeeping(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampler_output: SamplerOutput,
+        logits: torch.Tensor | None,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> SamplingBookkeepingState:
+        (
+            logprobs_lists,
+            valid_sampled_token_ids,
+            prompt_logprobs_dict,
+            req_ids_output_copy,
+            req_id_to_index_output_copy,
+            invalid_req_indices,
+        ) = self._bookkeeping_sync(
+            scheduler_output,
+            sampler_output,
+            logits,
+            hidden_states,
+            num_scheduled_tokens,
+            spec_decode_metadata,
         )
-        return async_output
+        return SamplingBookkeepingState(
+            logprobs_lists=logprobs_lists,
+            valid_sampled_token_ids=valid_sampled_token_ids,
+            prompt_logprobs_dict=prompt_logprobs_dict,
+            req_ids_output_copy=req_ids_output_copy,
+            req_id_to_index_output_copy=req_id_to_index_output_copy,
+            invalid_req_indices=invalid_req_indices,
+        )
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _make_sampling_q(
