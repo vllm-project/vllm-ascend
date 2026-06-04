@@ -94,6 +94,28 @@ class AscendRejectionSampler(RejectionSampler):
     def set_random_tensors(self, random_tensors: SamplingRandomTensors | None):
         self.random_tensors = random_tensors
 
+    def build_logprobs_tensors_from_prepared_inputs(
+        self,
+        metadata: SpecDecodeMetadata,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        target_logits_or_tuple: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None],
+        raw_target_logits: torch.Tensor,
+        bonus_sampler_output: SamplerOutput,
+        output_token_ids: torch.Tensor,
+    ):
+        if sampling_metadata.max_num_logprobs is None:
+            return None
+
+        return self._get_logprobs_tensors(
+            sampling_metadata.max_num_logprobs,
+            metadata,
+            logits,
+            target_logits_or_tuple if self.is_processed_logprobs_mode else raw_target_logits,
+            bonus_sampler_output.logprobs_tensors.logprobs,
+            output_token_ids,
+        )
+
     def forward_with_prepared_inputs(
         self,
         metadata: SpecDecodeMetadata,
@@ -120,16 +142,15 @@ class AscendRejectionSampler(RejectionSampler):
             random_tensors=random_tensors,
         )
 
-        logprobs_tensors = None
-        if sampling_metadata.max_num_logprobs is not None:
-            logprobs_tensors = self._get_logprobs_tensors(
-                sampling_metadata.max_num_logprobs,
-                metadata,
-                logits,
-                target_logits_or_tuple if self.is_processed_logprobs_mode else raw_target_logits,
-                bonus_sampler_output.logprobs_tensors.logprobs,
-                output_token_ids,
-            )
+        logprobs_tensors = self.build_logprobs_tensors_from_prepared_inputs(
+            metadata,
+            logits,
+            sampling_metadata,
+            target_logits_or_tuple,
+            raw_target_logits,
+            bonus_sampler_output,
+            output_token_ids,
+        )
 
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
