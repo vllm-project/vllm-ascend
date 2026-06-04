@@ -159,6 +159,9 @@ jobs:
           else
             uv pip install -e .
           fi
+          if [[ "${{ matrix.group.npu_type }}" == "310p" ]]; then
+            pip uninstall -y triton-ascend triton
+          fi
 
       - name: Install vllm-project/vllm-ascend no device
         if: ${{ steps.check_npu.outputs.has_npu == 'false' }}

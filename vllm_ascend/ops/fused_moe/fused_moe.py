@@ -27,7 +27,6 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -50,7 +49,7 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-if vllm_version_is("0.20.2"):
+if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map
 else:
 
@@ -180,9 +179,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             input_ids=input_ids,
         )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.20.2"):
-                # In 0.20.2, capturer is a process-wide singleton.
-                capturer = RoutedExpertsCapturer.get_instance()
+            if vllm_version_is("0.21.0"):
+                # In 0.21.0, capturer is a process-wide singleton.
+                from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_global_experts_capturer
+
+                capturer = get_global_experts_capturer()
             else:
                 capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
             if capturer is not None:
@@ -414,7 +415,7 @@ class AscendFusedMoE(FusedMoE):
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
         self.local_num_experts = self.global_num_experts // self.ep_size
-        if not vllm_version_is("0.20.2"):
+        if not vllm_version_is("0.21.0"):
             self.expert_map_manager._local_num_experts = self.local_num_experts
             self.expert_map_manager._expert_map = self._expert_map
         if self._expert_map is not None:

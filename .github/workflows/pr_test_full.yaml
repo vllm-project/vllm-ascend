@@ -83,7 +83,7 @@ jobs:
     if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     strategy:
       matrix:
-        vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.20.2]
+        vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.21.0]
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
