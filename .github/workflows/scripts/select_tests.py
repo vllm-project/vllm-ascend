@@ -19,10 +19,10 @@
 Pipeline:
   1. Diff       -- get changed files from git.
   2. Match      -- identify affected modules via test_config.yaml.
-  3. Collect    -- gather test directories for matched modules.
-  4. Route      -- determine runner for each test directory by convention:
-                     UT:  directory path pattern (a2/, a3_2/, 310p/, etc.)
-                     E2E: directory path pattern (one_card, two_card, four_card, 310p)
+  3. Collect    -- gather test paths (always resolved to individual files).
+  4. Route      -- determine runner for each test file by convention:
+                      UT:  directory path pattern (a2/, a3_2/, 310p/, etc.)
+                      E2E: directory path pattern (one_card, two_card, four_card, 310p)
   5. Output     -- write test_groups / has_tests / matched_modules.
 
 Directory conventions for UT runner routing:
@@ -34,14 +34,11 @@ Directory conventions for UT runner routing:
   tests/ut/<module>/310p/       -> 310P NPU x1
 
 Directory conventions for E2E runner routing:
-  tests/e2e/pull_request/light/one_card/   -> A2 NPU x1
-  tests/e2e/pull_request/light/two_card/   -> A3 NPU x2
-  tests/e2e/pull_request/light/four_card/   -> A3 NPU x4
-  tests/e2e/pull_request/full/one_card/    -> A2 NPU x1
-  tests/e2e/pull_request/full/two_cards/   -> A3 NPU x2
-  tests/e2e/pull_request/full/four_cards/   -> A3 NPU x4
-  tests/e2e/310p/singlecard/             -> 310P NPU x1
-  tests/e2e/310p/multicard/              -> 310P NPU x4
+  tests/e2e/pull_request/one_card/    -> A2 NPU x1
+  tests/e2e/pull_request/two_card/    -> A3 NPU x2
+  tests/e2e/pull_request/four_card/   -> A3 NPU x4
+  *_310p.py under one/two-card paths  -> 310P NPU x1
+  *_310p.py under four-card paths     -> 310P NPU x4
 
 Usage:
     python select_tests.py --diff-base origin/main
@@ -105,16 +102,14 @@ _UT_DIR_PATTERNS: list[tuple[re.Pattern, NpuType, int]] = [
 
 _E2E_DIR_PATTERNS: list[tuple[re.Pattern, NpuType, int]] = [
     (re.compile(r"/four_card/"), NpuType.A3, 4),
-    (re.compile(r"/four_cards/"), NpuType.A3, 4),
     (re.compile(r"/two_card/"), NpuType.A3, 2),
-    (re.compile(r"/two_cards/"), NpuType.A3, 2),
     (re.compile(r"/one_card/"), NpuType.A2, 1),
 ]
 
 
 def _route_e2e_file(file_path: str) -> RunnerKey | None:
     if "_310p" in Path(file_path).name:
-        if "/four_cards/" in file_path or "/four_card/" in file_path:
+        if "/four_card/" in file_path:
             return (4, NpuType._310P)
         return (1, NpuType._310P)
     return _route_e2e_dir(file_path)
@@ -266,21 +261,6 @@ def _is_ut_path(path: str) -> bool:
 
 def _is_e2e_path(path: str) -> bool:
     return path.startswith("tests/e2e/")
-
-
-def _matches_e2e_type(path: str, e2e_type: str) -> bool:
-    """Filter E2E test paths by type (light/full).
-
-    - ``light``: only paths under ``tests/e2e/pull_request/light/``
-      or non-pull_request paths (310p, nightly, etc.).
-    - ``full``: only paths under ``tests/e2e/pull_request/full/``
-      or non-pull_request paths (310p, nightly, etc.).
-    """
-    if "pull_request/light/" in path:
-        return e2e_type == "light"
-    if "pull_request/full/" in path:
-        return e2e_type == "full"
-    return True
 
 
 def _scan_ut_test_dir(
@@ -507,14 +487,6 @@ def main():
         action="store_true",
         help="Run all CPU UT tests regardless of module filtering",
     )
-    parser.add_argument(
-        "--e2e-type",
-        type=str,
-        default=None,
-        choices=["light", "full"],
-        help="Only include E2E tests from the specified pull_request subdirectory"
-        " (light or full). When omitted, all matched E2E tests are included.",
-    )
 
     args = parser.parse_args()
     config = _resolve_config_inheritance(yaml.safe_load(args.config.read_text()))
@@ -536,12 +508,6 @@ def main():
 
     ut_dirs = [d for d in test_dirs if _is_ut_path(d)]
     e2e_dirs = [d for d in test_dirs if _is_e2e_path(d)]
-
-    if args.e2e_type is not None:
-        e2e_dirs = [d for d in e2e_dirs if _matches_e2e_type(d, args.e2e_type)]
-        changed_test_files = [
-            f for f in changed_test_files if not _is_e2e_path(f) or _matches_e2e_type(f, args.e2e_type)
-        ]
 
     all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
 
