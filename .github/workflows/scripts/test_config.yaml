@@ -153,7 +153,6 @@
     - vllm_ascend/distributed
   tests:
     - tests/ut/distributed
-    - tests/ut/kv_connector
     - tests/e2e/pull_request/full/two_cards/test_data_parallel.py
     - tests/e2e/pull_request/full/two_cards/test_external_launcher.py
     - tests/e2e/pull_request/full/four_cards/test_data_parallel_tp2.py
