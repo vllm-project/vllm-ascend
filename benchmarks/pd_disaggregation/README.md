@@ -67,27 +67,6 @@ bash mix_pd_benchmark.sh
 You can generate HSTU prompt JSONL files from the Fuxi Alpha example with
 `examples/fuxi_alpha/prompts2json.py`.
 
-## Qwen2.5 Flow
-
-Start the serving process:
-
-```bash
-cd benchmarks/pd_disaggregation/Qwen2.5
-ASCEND_RT_VISIBLE_DEVICES=0,1 \
-MODEL_PATH=/path/to/Qwen2.5-VL-7B-Instruct \
-bash mix_pd_serve.sh
-```
-
-Run the benchmark client:
-
-```bash
-cd benchmarks/pd_disaggregation/Qwen2.5
-MODEL_PATH=/path/to/Qwen2.5-VL-7B-Instruct \
-DATASET_PATH=/path/to/ShareGPT_V3_unfiltered_cleaned_split.json \
-PORT=8105 \
-bash mix_pd_benchmark.sh
-```
-
 ## Useful Environment Variables
 
 - `ASCEND_TOOLKIT_PATH`: Ascend toolkit root. Defaults to
