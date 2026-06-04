@@ -15,10 +15,15 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: E2E-Light
+name: E2E
 
 on:
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
     branches:
       - 'main'
       - '*-dev'
@@ -31,14 +36,13 @@ defaults:
   run:
     shell: bash -el {0}
 
-# only cancel in-progress runs of the same workflow
-# and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.action != 'labeled' || github.event.label.name == 'ready' && 'run' || 'noop' }}
   cancel-in-progress: true
 
 jobs:
   lint-and-select-tests:
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -147,16 +151,16 @@ jobs:
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }} \
-            --run-all-cpu \
-            --e2e-type light
+            --run-all-cpu
 
   run-selected-tests:
     needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       matrix:
         vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.20.2]
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}

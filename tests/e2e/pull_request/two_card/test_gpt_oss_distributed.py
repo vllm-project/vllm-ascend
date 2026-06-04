@@ -18,7 +18,7 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/e2e/pull_request/full/two_cards/test_gpt_oss_distributed.py`.
+Run `pytest tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py`.
 """
 
 import os

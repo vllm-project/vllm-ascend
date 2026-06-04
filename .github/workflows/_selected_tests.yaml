@@ -105,6 +105,12 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Rebase on latest main
+        run: |
+          git fetch origin main
+          git rebase origin/main
 
       - name: Get csrc hash
         id: get_csrc_hash

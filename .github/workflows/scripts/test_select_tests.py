@@ -110,30 +110,25 @@ def test_collect_paths_and_basic_path_helpers():
     assert select_tests._is_e2e_path("tests/e2e/a.py")
 
 
-def test_route_helpers_and_e2e_type_filters():
+def test_route_helpers():
     assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py") == (2, select_tests.NpuType.A2)
     assert select_tests._route_ut_dir("tests/ut/mod/a2/test_x.py") == (1, select_tests.NpuType.A2)
     assert select_tests._route_ut_dir("tests/ut/mod/a3_4/test_x.py") == (4, select_tests.NpuType.A3)
     assert select_tests._route_ut_dir("tests/ut/mod/a3_2/test_x.py") == (2, select_tests.NpuType.A3)
     assert select_tests._route_ut_dir("tests/ut/mod/310p/test_x.py") == (1, select_tests.NpuType._310P)
     assert select_tests._route_ut_dir("tests/ut/_310p/test_x.py") == select_tests._DEFAULT_KEY
-    assert select_tests._route_e2e_dir("tests/e2e/pull_request/full/four_cards/") == (4, select_tests.NpuType.A3)
-    assert select_tests._route_e2e_dir("tests/e2e/pull_request/full/four_card/") == (4, select_tests.NpuType.A3)
-    assert select_tests._route_e2e_dir("tests/e2e/pull_request/full/two_cards/") == (2, select_tests.NpuType.A3)
-    assert select_tests._route_e2e_dir("tests/e2e/pull_request/full/two_card/") == (2, select_tests.NpuType.A3)
-    assert select_tests._route_e2e_dir("tests/e2e/pull_request/full/one_card/") == (1, select_tests.NpuType.A2)
+    assert select_tests._route_e2e_dir("tests/e2e/pull_request/four_card/") == (4, select_tests.NpuType.A3)
+    assert select_tests._route_e2e_dir("tests/e2e/pull_request/two_card/") == (2, select_tests.NpuType.A3)
+    assert select_tests._route_e2e_dir("tests/e2e/pull_request/one_card/") == (1, select_tests.NpuType.A2)
     assert select_tests._route_e2e_dir("tests/e2e/other/") is None
-    assert select_tests._route_e2e_file("tests/e2e/pull_request/full/four_cards/test_x_310p.py") == (
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/four_card/test_x_310p.py") == (
         4,
         select_tests.NpuType._310P,
     )
-    assert select_tests._route_e2e_file("tests/e2e/pull_request/full/one_card/test_x_310p.py") == (
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/one_card/test_x_310p.py") == (
         1,
         select_tests.NpuType._310P,
     )
-    assert select_tests._matches_e2e_type("tests/e2e/pull_request/light/one_card/test_x.py", "light")
-    assert not select_tests._matches_e2e_type("tests/e2e/pull_request/light/one_card/test_x.py", "full")
-    assert select_tests._matches_e2e_type("tests/e2e/310p/singlecard/test_x.py", "full")
 
 
 def test_scan_ut_test_dir(tmp_path):
@@ -182,7 +177,7 @@ def test_scan_e2e_test_dir(tmp_path, capsys):
     select_tests._scan_e2e_test_dir(str(unrouted), groups)
     assert "does not match any runner pattern" in capsys.readouterr().err
 
-    one_card = tmp_path / "tests" / "e2e" / "pull_request" / "full" / "one_card"
+    one_card = tmp_path / "tests" / "e2e" / "pull_request" / "one_card"
     one_card.mkdir(parents=True)
     test_one = one_card / "test_one.py"
     test_310p = one_card / "test_one_310p.py"
@@ -195,7 +190,7 @@ def test_scan_e2e_test_dir(tmp_path, capsys):
     assert str(test_310p) in groups[(1, select_tests.NpuType._310P)]
     assert str(helper) not in groups[(1, select_tests.NpuType.A2)]
 
-    parent = tmp_path / "tests" / "e2e" / "pull_request" / "light"
+    parent = tmp_path / "tests" / "e2e" / "pull_request"
     two_card = parent / "two_card"
     two_card.mkdir(parents=True)
     test_two = two_card / "test_two.py"
@@ -264,17 +259,17 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
     test_root = tmp_path / "tests"
     cpu_dir = test_root / "ut" / "cpu"
     a2_dir = test_root / "ut" / "npu" / "a2"
-    e2e_light = test_root / "e2e" / "pull_request" / "light" / "one_card"
-    e2e_full = test_root / "e2e" / "pull_request" / "full" / "two_cards"
-    for path in (cpu_dir, a2_dir, e2e_light, e2e_full):
+    e2e_one_card = test_root / "e2e" / "pull_request" / "one_card"
+    e2e_two_card = test_root / "e2e" / "pull_request" / "two_card"
+    for path in (cpu_dir, a2_dir, e2e_one_card, e2e_two_card):
         path.mkdir(parents=True)
     cpu_keep = cpu_dir / "test_keep.py"
     cpu_skip = cpu_dir / "test_skip.py"
     changed_test = cpu_dir / "test_changed.py"
     a2_test = a2_dir / "test_a2.py"
-    light_test = e2e_light / "test_light.py"
-    full_test = e2e_full / "test_full.py"
-    for path in (cpu_keep, cpu_skip, changed_test, a2_test, light_test, full_test):
+    one_card_test = e2e_one_card / "test_one_card.py"
+    two_card_test = e2e_two_card / "test_two_card.py"
+    for path in (cpu_keep, cpu_skip, changed_test, a2_test, one_card_test, two_card_test):
         path.write_text("")
 
     config = [
@@ -294,8 +289,8 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
             "name": "e2e",
             "source_file_dependencies": ["src/e2e.py"],
             "tests": [
-                "tests/e2e/pull_request/light/one_card",
-                "tests/e2e/pull_request/full/two_cards",
+                "tests/e2e/pull_request/one_card",
+                "tests/e2e/pull_request/two_card",
             ],
         },
     ]
@@ -325,8 +320,6 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
             "src/npu.py",
             "src/e2e.py",
             "tests/ut/cpu/test_changed.py",
-            "--e2e-type",
-            "light",
         ],
     )
 
@@ -337,8 +330,8 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
     assert "tests/ut/cpu/test_skip.py" not in out
     assert "tests/ut/missing/test_missing.py" in out
     assert "tests/ut/npu/a2/test_a2.py" in out
-    assert "tests/e2e/pull_request/light/one_card/test_light.py" in out
-    assert "tests/e2e/pull_request/full/two_cards/test_full.py" not in out
+    assert "tests/e2e/pull_request/one_card/test_one_card.py" in out
+    assert "tests/e2e/pull_request/two_card/test_two_card.py" in out
     assert "tests/ut/cpu/test_changed.py" in out
 
     monkeypatch.setattr(

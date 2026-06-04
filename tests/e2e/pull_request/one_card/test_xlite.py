@@ -18,7 +18,7 @@
 Compare the outputs of vLLM with and without xlite via logprob-based accuracy
 check (3 tokens: 1 prefill + 2 decode).
 
-Run `pytest tests/e2e/pull_request/full/one_card/test_xlite.py`.
+Run `pytest tests/e2e/pull_request/one_card/test_xlite.py`.
 """
 
 # ruff: noqa: E501
