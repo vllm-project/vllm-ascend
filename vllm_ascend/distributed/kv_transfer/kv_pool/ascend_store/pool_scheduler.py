@@ -8,6 +8,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_socket
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -18,11 +19,13 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
     ReqMeta,
     RequestTracker,
@@ -82,6 +85,7 @@ class KVPoolScheduler:
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
+        self.mamba_group_ids = self._infer_mamba_groups()
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
@@ -105,6 +109,13 @@ class KVPoolScheduler:
         )
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
         self._unfinished_request_ids: set[str] = set()
+        self._block_pool: BlockPool | None = None
+        self.sending_event_id = 0
+        # {event_id, flattened block_ids}
+        self.sending_blocks: dict[int, list[int]] = {}
+        # {event_id, completed_woke_count}
+        self.sending_events: dict[int, int] = {}
+        self._expected_worker_count = vllm_config.parallel_config.world_size
 
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
@@ -159,6 +170,18 @@ class KVPoolScheduler:
         return len(kv_cache_config.kv_cache_groups) > 1 and any(
             not isinstance(group.kv_cache_spec, FullAttentionSpec) for group in kv_cache_config.kv_cache_groups
         )
+
+    def _infer_mamba_groups(self):
+        if self.kv_cache_config is None or not self.use_hybrid:
+            return []
+        mamba_group_ids: list[int] = []
+        for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+            if isinstance(kv_cache_spec, MambaSpec):
+                mamba_group_ids.append(group_id)
+        return mamba_group_ids
 
     def _infer_swa_blocks(self) -> list[int]:
         if self.kv_cache_config is None:
@@ -391,6 +414,7 @@ class KVPoolScheduler:
                 kv_cache_group_families=self.kv_cache_group_families,
             )
             if req_meta is not None:
+                self.touch_sending_mamba_blocks(req_meta)
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -469,6 +493,7 @@ class KVPoolScheduler:
                         kv_cache_group_families=self.kv_cache_group_families,
                     )
                 if req_meta is not None:
+                    self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
 
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
@@ -500,8 +525,62 @@ class KVPoolScheduler:
                     kv_cache_group_families=self.kv_cache_group_families,
                 )
                 if req_meta is not None:
+                    self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
         return meta
+
+    def get_sending_event_id(self):
+        """
+        get a unique event id for a kv store request
+        """
+        using_id = self.sending_event_id
+        # todo: reset sending_event_id, in case infinitely increasing
+        self.sending_event_id += 1
+        return using_id
+
+    def touch_sending_mamba_blocks(self, req_meta: ReqMeta):
+        """
+        keep the reference of all non-null mamba blocks that will send to external kv store
+        """
+        if not self.use_hybrid or len(self.mamba_group_ids) == 0 or not req_meta.can_save:
+            return
+        using_event_id = self.get_sending_event_id()
+        req_meta.event_id = using_event_id
+        current_step_sending: list[int] = []
+        for group_id in self.mamba_group_ids:
+            group_block_ids = req_meta.block_ids_by_group[group_id]
+            current_step_sending.extend([block_id for block_id in group_block_ids if block_id > 0])
+        logger.debug("event: %s touch blocks: %s", using_event_id, current_step_sending)
+        assert self._block_pool is not None
+        self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in current_step_sending])
+        self.sending_events[using_event_id] = 0
+        self.sending_blocks[using_event_id] = current_step_sending
+
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        """
+        hand the connector_output, free non-null mamba blocks and so on.
+        """
+        meta = connector_output.kv_connector_worker_meta
+        if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
+            return
+        to_free_block_ids: list[int] = []
+        for event_id, count in meta.completed_events.items():
+            logger.debug("event %s update with %s", event_id, count)
+            total = self.sending_events.get(event_id, -1)
+            if total == -1:
+                logger.warning("worker reports an invalid event: %s, count %s", event_id, count)
+                continue
+            total = total + count
+            if total >= self._expected_worker_count:
+                to_free_block_ids.extend(self.sending_blocks.pop(event_id, []))
+                self.sending_events.pop(event_id, None)
+            else:
+                self.sending_events[event_id] = total
+
+        if to_free_block_ids:
+            logger.debug("free blocks: %s", to_free_block_ids)
+            assert self._block_pool is not None
+            self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in to_free_block_ids])
 
     def request_finished(
         self,
@@ -544,6 +623,9 @@ class KVPoolScheduler:
                 request.request_id,
             )
         return delay_free_blocks, None
+
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        self._block_pool = gpu_block_pool
 
 
 class LookupKeyClient:

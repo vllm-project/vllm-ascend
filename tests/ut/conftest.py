@@ -15,11 +15,25 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import functools
-import inspect
+"""Shared UT setup.
+
+NPU vs CPU routing is determined by directory convention, not decorators.
+See ``.github/workflows/scripts/select_tests.py`` and
+``.github/workflows/scripts/test_config.yaml`` for the routing rules.
+
+Conventions for UT directories:
+    tests/ut/<module>/            -> CPU runner (default)
+    tests/ut/<module>/a2/         -> A2 NPU x1
+    tests/ut/<module>/a2_2/       -> A2 NPU x2
+    tests/ut/<module>/a3_2/       -> A3 NPU x2
+    tests/ut/<module>/a3_4/       -> A3 NPU x4
+    tests/ut/<module>/310p/       -> 310P NPU x1
+"""
+
+import importlib.util
 import subprocess
 import sys
-from enum import Enum
+import types
 from unittest.mock import MagicMock
 
 try:
@@ -36,14 +50,66 @@ if not _npu_available:
         "num_vectorcore": 8,
     }
     sys.modules["triton.runtime"] = triton_runtime
+    torch_npu = types.ModuleType("torch_npu")
+    torch_npu.__spec__ = importlib.util.spec_from_loader("torch_npu", loader=None)
+    torch_npu.__path__ = []
+    torch_npu.npu = MagicMock()  # type: ignore[attr-defined]
+    torch_npu.profiler = MagicMock()  # type: ignore[attr-defined]
+    torch_npu.npu_fusion_attention = MagicMock()  # type: ignore[attr-defined]
+    torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt: weight)  # type: ignore[attr-defined]
+    torch_npu._C = MagicMock()  # type: ignore[attr-defined]
+    torch_npu._C._NPUTaskGroupHandle = MagicMock
+    sys.modules["torch_npu"] = torch_npu
+    sys.modules["torch_npu._C"] = torch_npu._C
+    sys.modules["torch_npu._C._distributed_c10d"] = torch_npu._C._distributed_c10d
+    acl_rt = types.ModuleType("acl.rt")
+    acl_rt.__spec__ = importlib.util.spec_from_loader("acl.rt", loader=None)
+    acl_rt.memcpy = MagicMock()  # type: ignore[attr-defined]
+    acl_mod = types.ModuleType("acl")
+    acl_mod.__spec__ = importlib.util.spec_from_loader("acl", loader=None)
+    acl_mod.rt = acl_rt  # type: ignore[attr-defined]
+    sys.modules["acl"] = acl_mod
+    sys.modules["acl.rt"] = acl_rt
+    mooncake_engine = types.ModuleType("mooncake.engine")
+    mooncake_engine.__spec__ = importlib.util.spec_from_loader("mooncake.engine", loader=None)
+    mooncake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["mooncake.engine"] = mooncake_engine
+    import torch
 
-from vllm_ascend.utils import adapt_patch  # noqa E402
-from vllm_ascend.utils import register_ascend_customop  # noqa E402
+    try:  # noqa: SIM105
+        torch.utils.rename_privateuse1_backend("npu")
+    except RuntimeError:
+        pass
+    torch.npu = MagicMock()
+    torch.npu.Stream = MagicMock
+    torch.version.cann = None
+    torch.distributed.is_hccl_available = MagicMock(return_value=True)
+
+import pytest
+
+mooncake_engine = types.ModuleType("mooncake.engine")
+mooncake_engine.__spec__ = importlib.util.spec_from_loader("mooncake.engine", loader=None)
+mooncake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
+sys.modules.setdefault("mooncake.engine", mooncake_engine)
+
+from vllm_ascend.utils import (  # noqa: E402
+    adapt_patch,
+    clear_enable_sp,
+    register_ascend_customop,
+)
 
 # Mock torch_npu AFTER vllm_ascend import to avoid circular import in accelerate
 if not _npu_available:
     sys.modules["torch_npu"].npu.current_device = MagicMock(return_value=0)
     sys.modules["torch_npu._inductor"] = MagicMock()
+    sys.modules["torch_npu"]._npu_flash_attention = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"]._npu_paged_attention_splitfuse = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"]._npu_reshape_and_cache = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_moe_gating_top_k_softmax = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_quant_matmul = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_rms_norm = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_swiglu = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_convert_weight_to_int4pack = MagicMock()  # type: ignore[attr-defined]
 
 adapt_patch()
 adapt_patch(True)
@@ -51,80 +117,19 @@ adapt_patch(True)
 # register Ascend CustomOp here because uts will use this
 register_ascend_customop()
 
-
-class RunnerDeviceType(str, Enum):
-    """Chip types — values match runner_label.json "chip" field exactly.
-
-    Shared by:
-      - tests/ut/conftest.py (npu_test decorator)
-      - .github/workflows/scripts/determine_smart_e2e_scope.py (AST parser)
-    """
-
-    A2 = "a2"
-    A3 = "a3"
-    _310P = "310p"
-    CPU = "cpu"
+# Clean up any stale mock modules that may have been installed by
+# other test files (e.g., ascend_store/_mock_deps.py) which replace
+# real subpackages with MagicMock, breaking later imports.
+_stale_modules = [
+    k
+    for k in sys.modules
+    if k.startswith("vllm_ascend.distributed.kv_transfer.") and not isinstance(sys.modules[k], types.ModuleType)
+]
+for _m in _stale_modules:
+    del sys.modules[_m]
 
 
-def npu_test(num_npus: int = 1, npu_type: str | RunnerDeviceType = RunnerDeviceType.A2):
-    """Decorator that marks a test with NPU resource requirements.
-
-    Can be applied to either a single test function/method or a test class.
-
-    Serves two purposes, depending on the target:
-
-      - **Function/method**: declarative metadata for the AST parser AND
-        runtime gating. If the runner does not satisfy the declared
-        requirements, the wrapper raises ``RuntimeError`` (fails loudly,
-        not ``pytest.skip``) — a mismatch means routing or the runner
-        environment is broken.
-      - **Class**: declarative metadata only. The class is returned
-        unchanged so pytest's standard class-based collection still works.
-        CI routing (driven by the AST parser) is the single source of
-        truth — runtime gating per method would be redundant.
-
-    The AST parser in ``determine_smart_e2e_scope.py`` reads the decorator
-    keyword arguments (num_npus, npu_type) to group tests by runner type.
-    The parameter names and decorator name must stay in sync with the parser.
-
-    Args:
-        num_npus: Number of NPU devices required (default 1).
-        npu_type: The NPU chip type required (default A2).
-    """
-    if not isinstance(npu_type, RunnerDeviceType):
-        npu_type = RunnerDeviceType(npu_type)
-
-    def _wrap_callable(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            if npu_type == RunnerDeviceType.CPU:
-                return func(*args, **kwargs)
-            # CI routes this test to a runner matching (npu_type, num_npus).
-            # If the requirements are not met at runtime, the routing or the
-            # runner environment is broken — fail loudly instead of skipping.
-            if not _npu_available:
-                raise RuntimeError(
-                    f"NPU required but not available on this runner "
-                    f"(test needs {npu_type.value} x{num_npus}). "
-                    "Check runner_label.json and the runner's NPU setup."
-                )
-            import torch  # noqa
-
-            device_count = torch.npu.device_count()
-            if device_count < num_npus:
-                raise RuntimeError(
-                    f"Insufficient NPUs on this runner: need {num_npus}, have {device_count}. Check runner_label.json."
-                )
-            return func(*args, **kwargs)
-
-        return wrapper
-
-    def decorator(obj):
-        # Class decoration is purely declarative — the AST parser handles
-        # routing, and CI routing is the single source of truth. Returning
-        # the class unchanged keeps pytest's class-based collection working.
-        if inspect.isclass(obj):
-            return obj
-        return _wrap_callable(obj)
-
-    return decorator
+@pytest.fixture(autouse=True)
+def _clear_enable_sp_before_test():
+    clear_enable_sp()
+    yield
