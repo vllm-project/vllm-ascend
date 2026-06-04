@@ -200,14 +200,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.max_window_blocks = self.window_blocks + 1
             self._sliding_window_full_block_table: torch.Tensor | None = None
             self._sliding_window_start_block_indices: torch.Tensor | None = None
-            logger.info(
-                "[SlidingWindow] Enabled for draft model: draft_window_size=%s, "
-                "block_size=%s, window_blocks=%s, max_window_blocks=%s",
-                self.draft_window_size,
-                self.block_size,
-                self.window_blocks,
-                self.max_window_blocks,
-            )
         else:
             self.draft_window_size = None
 
@@ -358,7 +350,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
         if self.method in ("eagle", "dflash"):
-            logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
             if hasattr(model, "lm_head"):
                 self.model.lm_head = model.lm_head
             elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
@@ -386,10 +377,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if hasattr(self.model.model, "topk_indices_buffer"):
                 del self.model.model.topk_indices_buffer
             self.model.model.topk_indices_buffer = target_language_model.model.topk_indices_buffer
-            logger.info(
-                "Detecting MTP model with topk_indices_buffer."
-                "Sharing target model topk_indices_buffer with the draft model."
-            )
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -582,13 +569,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         W = self.draft_window_size
         B = self.block_size
 
-        logger.info(
-            "[SlidingWindow] _apply_sliding_window called: num_reqs=%s, "
-            "full_seq_lens=%s, block_table.shape=%s",
-            num_reqs,
-            full_seq_lens.tolist(),
-            list(common_attn_metadata.block_table_tensor.shape),
-        )
 
         # Final length L+K
         final_seq_lens = full_seq_lens + K
@@ -605,17 +585,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         needed_blocks_per_req = ((tokens_to_cover + B - 1) // B).to(torch.int64)
         max_needed_blocks = int(needed_blocks_per_req.max().item())
 
-        logger.info(
-            "[SlidingWindow] final_seq_lens: %s, start_tokens: %s, "
-            "start_blocks: %s, start_block_indices: %s, needed_blocks_per_req: %s, "
-            "max_window_blocks: %s",
-            final_seq_lens.tolist(),
-            start_tokens.tolist(),
-            start_blocks.tolist(),
-            start_block_indices.tolist(),
-            needed_blocks_per_req.tolist(),
-            max_needed_blocks,
-        )
 
         # Use fixed max_window_blocks so tensor shape is constant across
         # dummy_run (graph capture) and runtime, avoiding ACL graph mismatch.
@@ -645,10 +614,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             torch.full_like(full_seq_lens, W)
         )
         common_attn_metadata.seq_lens = windowed_seq_lens
-        logger.info(
-            "[SlidingWindow] Applied: windowed_seq_lens=%s",
-            windowed_seq_lens.tolist(),
-        )
         # Sync CPU-side mirrors so attention backends on host see the same lengths
         if getattr(common_attn_metadata, "seq_lens_cpu", None) is not None:
             common_attn_metadata.seq_lens_cpu = windowed_seq_lens.cpu()
@@ -1550,12 +1515,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             new_lens = common_attn_metadata.seq_lens[:batch_size] + 1
             new_lens.clamp_(max=self.draft_window_size)
             common_attn_metadata.seq_lens[:batch_size] = new_lens
-            logger.info(
-                "[SlidingWindow] attn_update: draft_step=%s, old_lens=%s, new_lens=%s",
-                draft_step,
-                old_lens.tolist(),
-                new_lens.tolist(),
-            )
         else:
             common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
