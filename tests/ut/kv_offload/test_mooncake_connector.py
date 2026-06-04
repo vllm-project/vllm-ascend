@@ -315,6 +315,39 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             prefill_pp_layer_partition=None,
         )
 
+    def test_head_dim_falls_back_when_config_lacks_head_dim(self):
+        # Regression for vllm-project/vllm-ascend#7352: some configs (e.g.
+        # Qwen2Config on older transformers) do not expose `head_dim`. The
+        # connector must resolve it via ModelConfig.get_head_size() (which falls
+        # back to hidden_size // num_attention_heads) instead of reading
+        # hf_text_config.head_dim directly, which raised AttributeError.
+        vllm_config = MockVllmConfig()
+        vllm_config.model_config.hf_text_config = types.SimpleNamespace(
+            num_key_value_heads=8,
+            num_hidden_layers=32,
+            model_type="qwen2",
+        )  # note: no `head_dim` attribute
+        vllm_config.model_config.get_head_size = MagicMock(return_value=64)
+
+        thread = KVCacheRecvingThread(
+            tp_rank=0,
+            tp_size=4,
+            _prefill_pp_size=1,
+            engine=MagicMock(),
+            local_engine_id="local_engine",
+            local_handshake_port=5555,
+            side_channel_port=30001,
+            local_kv_caches_base_addr=[[0x1000], [0x2000]],
+            block_len_per_addr=[[1024], [2048]],
+            ready_event=threading.Event(),
+            vllm_config=vllm_config,
+            kv_caches={},
+            prefill_pp_layer_partition=None,
+        )
+
+        self.assertEqual(thread.k_head_dim, 64)
+        self.assertEqual(thread.v_head_dim, 64)
+
     def test_add_request(self):
         test_req: dict[str, Any] = {
             "request_id": "req1",
@@ -673,6 +706,9 @@ class MockVllmConfig:
             qk_rope_head_dim=8,
             model_type="qwen2",
         )
+        # The connector resolves head size via ModelConfig.get_head_size(), which
+        # falls back to hidden_size // num_attention_heads when head_dim is absent.
+        self.model_config.get_head_size = MagicMock(return_value=16)
         self.model_config.get_num_layers = MagicMock(return_value=32)
         self.parallel_config.tensor_parallel_size = 2
         self.parallel_config.data_parallel_rank = 0
