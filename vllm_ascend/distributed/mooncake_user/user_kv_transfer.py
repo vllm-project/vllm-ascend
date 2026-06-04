@@ -293,7 +293,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.get_event = get_event
 
     def add_request(  # type: ignore[override]
-            self, req_meta: LasyerMultiBlockReqMeta) -> torch.Tensor:
+            self, req_meta: LasyerMultiBlockReqMeta) -> None:
         self.request_queue.put(req_meta)
 
     def _handle_request(  # type: ignore[override]
