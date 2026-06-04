@@ -121,10 +121,16 @@ class FFN_npu_swiglu(torch.nn.Module):
         self.w3 = torch.nn.Linear(dim, hidden_dim,
                                   bias=False).to(torch.float16)
         self.dropout = torch.nn.Dropout(dropout).to(dtype)
-        self.W_1 = torch.cat([self.w3.weight, self.w1.weight],
-                             dim=0).transpose(0, 1)
-        self.W_2 = self.w2.weight.transpose(0, 1)
         self.dtype = dtype
+
+    @property
+    def W_1(self):
+        return torch.cat([self.w3.weight, self.w1.weight],
+                         dim=0).transpose(0, 1)
+
+    @property
+    def W_2(self):
+        return self.w2.weight.transpose(0, 1)
 
     def forward(self, x):
         return self.dropout(
