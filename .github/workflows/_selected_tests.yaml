@@ -171,6 +171,11 @@ jobs:
           pip install . --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi
           pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi
 
+      - name: Uninstall Triton for 310P tests
+        if: ${{ steps.check_npu.outputs.has_npu == 'true' && matrix.group.npu_type == '310p' }}
+        run: |
+          pip uninstall -y triton-ascend triton
+
       - name: Run selected tests with device
         if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         env:
@@ -188,12 +193,25 @@ jobs:
           done
           echo -e "\033[1;34m====================\033[0m"
           failed=0
+          aclgraph_capture_replay="tests/e2e/pull_request/full/two_cards/test_aclgraph_capture_replay.py"
+          run_aclgraph_capture_replay=0
           for target in ${{ matrix.group.tests }}; do
+            if [ "${target}" = "${aclgraph_capture_replay}" ]; then
+              run_aclgraph_capture_replay=1
+              continue
+            fi
             echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
             if ! pytest -sv --color=yes "${target}"; then
               failed=1
             fi
           done
+          if [ "${run_aclgraph_capture_replay}" = "1" ]; then
+            pip uninstall -y triton-ascend triton
+            echo -e "\033[1;34m=== Running target: ${aclgraph_capture_replay} ===\033[0m"
+            if ! pytest -sv --color=yes "${aclgraph_capture_replay}"; then
+              failed=1
+            fi
+          fi
           exit "${failed}"
 
       - name: Run selected tests without device
