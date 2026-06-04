@@ -2381,11 +2381,19 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits[: self.input_batch.num_reqs]
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+        with self._configure_non_spec_sampler(max_topk):
+            return self.sampler(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
+
+    @contextmanager
+    def _configure_non_spec_sampler(self, max_topk: int | None):
         self.sampler.prepare_sampling(max_topk)
-        return self.sampler(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+        try:
+            yield
+        finally:
+            self.sampler.prepare_sampling(None)
 
     @contextmanager
     def _configure_spec_rejection_sampler(
