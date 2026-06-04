@@ -466,6 +466,32 @@ class NPUModelRunner(GPUModelRunner):
             self.input_batch.req_id_to_cp_size.get(req_id, 1),
         )
 
+    def _sync_dycp_sampled_token_ids(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: torch.Tensor,
+    ) -> None:
+        if self.dycp_size <= 1 or sampled_token_ids is None:
+            return
+
+        num_cp_request = int(getattr(scheduler_output, "num_cp_request", 0) or 0)
+        if num_cp_request <= 0 or sampled_token_ids.numel() == 0:
+            return
+
+        # DyCP decodes one logical request on multiple DP ranks. Keep the
+        # sampled token authoritative on rank 0 before bookkeeping writes it.
+        num_rows = min(num_cp_request, sampled_token_ids.shape[0])
+        if num_rows <= 0:
+            return
+
+        dycp_group = get_dycp_group()
+        if getattr(dycp_group, "world_size", 1) <= 1:
+            return
+
+        sync_token_ids = sampled_token_ids[:num_rows].contiguous()
+        dycp_group.broadcast(sync_token_ids, src=0)
+        sampled_token_ids[:num_rows].copy_(sync_token_ids)
+
     def _update_batch_req_cp_sizes(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1794,6 +1820,10 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+        self._sync_dycp_sampled_token_ids(
+            scheduler_output,
+            sampler_output.sampled_token_ids,
+        )
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
