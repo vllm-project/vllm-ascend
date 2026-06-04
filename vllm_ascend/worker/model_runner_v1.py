@@ -239,9 +239,16 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     attn_metadata: "PerLayerAttnMetadata"
     positions: torch.Tensor
+    spec_sampling_state: "SpecSamplingExecutionState | None"
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+@dataclass
+class SpecSamplingExecutionState:
+    max_topk: int | None
+    random_tensors: SamplingRandomTensors | None
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -2085,6 +2092,25 @@ class NPUModelRunner(GPUModelRunner):
                 logits = broadcasted["logits"]
 
             # Apply structured output bitmasks if present
+            spec_sampling_state = None
+            if spec_decode_metadata is not None:
+                max_topk = None
+                if (
+                    self.input_batch.sampling_metadata.top_k is not None
+                    and get_ascend_config().enable_reduce_sample
+                    and logits is not None
+                ):
+                    max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+                spec_sampling_state = SpecSamplingExecutionState(
+                    max_topk=max_topk,
+                    random_tensors=self._prepare_spec_sampling_random_tensors(
+                        logits,
+                        spec_decode_metadata,
+                        self.input_batch.sampling_metadata,
+                        max_topk,
+                    ),
+                )
+
             self.execute_model_state = ExecuteModelState(
                 scheduler_output,
                 logits,
@@ -2095,6 +2121,7 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states,
                 attn_metadata,
                 positions,
+                spec_sampling_state,
                 ec_connector_output,
                 cudagraph_stats,
                 batch_desc,
@@ -2143,6 +2170,7 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states,
             attn_metadata,
             positions,
+            spec_sampling_state,
             ec_connector_output,
             cudagraph_stats,
             batch_desc,
@@ -2160,7 +2188,7 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits.to(self.device).to(logits_dtype)
 
         with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampler_output = self._sample(logits, spec_decode_metadata, spec_sampling_state)
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -2381,7 +2409,12 @@ class NPUModelRunner(GPUModelRunner):
             recovered_q=self._make_sampling_q(batch_size, selected_vocab_size, generators),
         )
 
-    def _sample(self, logits, spec_decode_metadata):
+    def _sample(
+        self,
+        logits,
+        spec_decode_metadata,
+        spec_sampling_state: SpecSamplingExecutionState | None = None,
+    ):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         self.input_batch.update_async_output_token_ids()
@@ -2400,15 +2433,20 @@ class NPUModelRunner(GPUModelRunner):
         max_topk = None
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
-        if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+        if spec_sampling_state is not None:
+            max_topk = spec_sampling_state.max_topk
+        elif self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+        if max_topk is not None:
             self.rejection_sampler.prepare_sampling(max_topk)
-        random_tensors = self._prepare_spec_sampling_random_tensors(
-            logits,
-            spec_decode_metadata,
-            sampling_metadata,
-            max_topk,
-        )
+        random_tensors = spec_sampling_state.random_tensors if spec_sampling_state is not None else None
+        if random_tensors is None:
+            random_tensors = self._prepare_spec_sampling_random_tensors(
+                logits,
+                spec_decode_metadata,
+                sampling_metadata,
+                max_topk,
+            )
         self.rejection_sampler.set_random_tensors(random_tensors)
         try:
             sampler_output = self.rejection_sampler(
