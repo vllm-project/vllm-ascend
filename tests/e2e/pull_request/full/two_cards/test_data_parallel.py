@@ -23,7 +23,6 @@ Run `pytest tests/multicard/test_data_parallel.py`.
 import os
 import subprocess
 import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -31,8 +30,6 @@ import pytest
 from tests.e2e.conftest import wait_until_npu_memory_free
 
 MODELS = ["Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"]
-REPO_ROOT = Path(__file__).resolve().parents[5]
-DATA_PARALLEL_SCRIPT = REPO_ROOT / "examples" / "offline_data_parallel.py"
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -43,11 +40,13 @@ DATA_PARALLEL_SCRIPT = REPO_ROOT / "examples" / "offline_data_parallel.py"
 def test_qwen3_inference_dp2(model, max_tokens):
     moe_models = ["Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8"]
     quantization_models = ["vllm-ascend/Qwen3-30B-A3B-W8A8"]
+    script = "examples/offline_data_parallel.py"
+
     env = os.environ.copy()
 
     cmd = [
         sys.executable,
-        str(DATA_PARALLEL_SCRIPT),
+        script,
         "--model",
         model,
         "--dp-size",

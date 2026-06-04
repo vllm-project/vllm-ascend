@@ -145,7 +145,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             scale_dim=specs[0].scale_dim,
-            scale_dtype=specs[0].scale_dtype,
             sparse_head_dim=specs[0].sparse_head_dim,
             dtype=specs[0].dtype,
             cache_dtype_str=cache_dtype_str_set.pop(),

@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * This program is free software, you can redistribute it and/or modify it.
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This file is a part of the CANN Open Software.
+ * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file sparse_flash_attention_tiling.h
@@ -21,10 +21,8 @@
 #include <tiling/platform/platform_ascendc.h>
 #include "register/tilingdata_base.h"
 #include "exe_graph/runtime/tiling_context.h"
-#include "platform/soc_spec.h"
 
 namespace optiling {
-// ------------------算子原型索引常量定义----------------
 // Inputs Index
 constexpr uint32_t QUERY_INPUT_INDEX = 0;
 constexpr uint32_t KEY_INPUT_INDEX = 1;
@@ -37,39 +35,29 @@ constexpr uint32_t QUERY_ROPE_INPUT_INDEX = 7;
 constexpr uint32_t KEY_ROPE_INPUT_INDEX = 8;
 // Outputs Index
 constexpr uint32_t OUTPUT_INDEX = 0;
-constexpr uint32_t SOFTMAXMAX_INDEX = 1;
-constexpr uint32_t SOFTMAXSUM_INDEX = 2;
-
 // Attributes Index
 constexpr uint32_t SCALE_VALUE_ATTR_INDEX = 0;
 constexpr uint32_t SPARSE_BLOCK_SIZE_ATTR_INDEX = 1;
 constexpr uint32_t LAYOUT_QUERY_ATTR_INDEX = 2;
 constexpr uint32_t LAYOUT_KV_ATTR_INDEX = 3;
 constexpr uint32_t SPARSE_MODE_ATTR_INDEX = 4;
-constexpr uint32_t PRE_TOKENS_ATTR_INDEX = 5;
-constexpr uint32_t NEXT_TOKENS_ATTR_INDEX = 6;
-constexpr uint32_t ATTENTION_MODE_ATTR_INDEX = 7;
-constexpr uint32_t RETURN_SOFTMAX_LSE_ATTR_INDEX = 8;
 // Dim Num
 constexpr size_t DIM_NUM_TWO = 2;
 constexpr size_t DIM_NUM_THREE = 3;
 constexpr size_t DIM_NUM_FOUR = 4;
-// 常量
+// Constant
 constexpr uint32_t MAX_BLOCK_SIZE = 1024;
 constexpr uint32_t COPYND2NZ_SRC_STRIDE_LIMITATION = 65535;
 constexpr uint32_t NUM_BYTES_FLOAT = 4;
 constexpr uint32_t NUM_BYTES_FLOAT16 = 2;
 constexpr uint32_t NUM_BYTES_BF16 = 2;
 constexpr uint32_t BYTE_BLOCK = 32;
-const uint32_t SFA_MAX_AIC_CORE_NUM = 26; // 25 + 1 保证数组8字节对齐
+const uint32_t SFA_MAX_AIC_CORE_NUM = 26;
 
-// ------------------公共定义--------------------------
 enum class SFALayout : uint32_t {
     BSND = 0,
     TND = 1,
-    PA_BSND = 2,
-    BNSG = 3,
-    NTG = 4
+    PA_BSND = 2
 };
 
 struct SFATilingShapeCompareParam {
@@ -78,7 +66,6 @@ struct SFATilingShapeCompareParam {
     int64_t N = 1;
     int64_t D = 1;
     int64_t T = 1;
-    int64_t G = 1;
     // PA
     int64_t Bs = 1;
     int64_t Bn = 1;
@@ -99,11 +86,10 @@ enum class SFAAxis : uint32_t {
     S = 1,
     N = 2,
     D = 3,
-    K = 3,  // sparse_indices的K和key的D枚举值相同，表达相同位置, 最后一维
+    K = 3,
     T = 5,
     Bn = 6, // block number
     Bs = 7, // block size
-    G = 8,
 };
 
 struct SFARequiredParaInfo {
@@ -116,7 +102,6 @@ struct SFAOptionalParaInfo {
     const gert::Tensor *tensor;
 };
 
-// -----------算子Tiling入参结构体定义---------------
 struct SFAParaInfo {
     SFARequiredParaInfo query = {nullptr, nullptr};
     SFARequiredParaInfo key = {nullptr, nullptr};
@@ -128,18 +113,12 @@ struct SFAParaInfo {
     SFAOptionalParaInfo queryRope = {nullptr, nullptr};
     SFAOptionalParaInfo keyRope = {nullptr, nullptr};
     SFARequiredParaInfo attenOut = {nullptr, nullptr};
-    SFARequiredParaInfo softmaxMax = {nullptr, nullptr};
-    SFARequiredParaInfo softmaxSum = {nullptr, nullptr};
 
     const char *layoutQuery = nullptr;
     const char *layoutKV = nullptr;
     const int64_t *sparseBlockSize = nullptr;
     const float *scaleValue = nullptr;
     const int64_t *sparseMode = nullptr;
-    const int64_t *preTokens = nullptr;
-    const int64_t *nextTokens = nullptr;
-    const int64_t *attentionMode = nullptr;
-    const bool *returnSoftmaxLse = nullptr;
 };
 
 struct InnerSplitParams {
@@ -147,7 +126,6 @@ struct InnerSplitParams {
     uint32_t s2BaseSize = 1;
 };
 
-// -----------算子TilingData定义---------------
 BEGIN_TILING_DATA_DEF(SparseFlashAttentionBaseParamsMla)
 TILING_DATA_FIELD_DEF(uint32_t, batchSize)
 TILING_DATA_FIELD_DEF(uint32_t, seqSize)
@@ -160,14 +138,8 @@ TILING_DATA_FIELD_DEF(uint32_t, actualLenDimsQ)
 TILING_DATA_FIELD_DEF(uint32_t, actualLenDimsKV)
 TILING_DATA_FIELD_DEF(uint32_t, outputLayout)
 TILING_DATA_FIELD_DEF(uint32_t, sparseMode)
-TILING_DATA_FIELD_DEF(int64_t, preTokens)
-TILING_DATA_FIELD_DEF(int64_t, nextTokens)
-TILING_DATA_FIELD_DEF(uint32_t, attentionMode)
-TILING_DATA_FIELD_DEF(uint32_t, returnSoftmaxLse)
 TILING_DATA_FIELD_DEF(int64_t, sparseBlockSize)
 TILING_DATA_FIELD_DEF(uint32_t, sparseBlockCount)
-TILING_DATA_FIELD_DEF(uint32_t, isActualLenDimsNull)
-TILING_DATA_FIELD_DEF(uint32_t, isActualLenDimsKVNull)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(SparseFlashAttentionBaseParamsMlaOp, SparseFlashAttentionBaseParamsMla)
 
@@ -183,13 +155,12 @@ END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(SparseFlashAttentionSingleCoreTensorSizeMlaOp, SparseFlashAttentionSingleCoreTensorSizeMla)
 
 BEGIN_TILING_DATA_DEF(SparseFlashAttentionSplitKVParamsMla)
-TILING_DATA_FIELD_DEF(uint32_t, s2)             // S2切分份数
+TILING_DATA_FIELD_DEF(uint32_t, s2)
 TILING_DATA_FIELD_DEF(uint32_t, accumOutSize)   // FD workspace
 TILING_DATA_FIELD_DEF(uint32_t, logSumExpSize)  // FD workspace
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(SparseFlashAttentionSplitKVParamsMlaOp, SparseFlashAttentionSplitKVParamsMla)
 
-// 内切基本块参数
 BEGIN_TILING_DATA_DEF(SparseFlashAttentionInnerSplitParams)
 TILING_DATA_FIELD_DEF(uint32_t, mBaseSize)
 TILING_DATA_FIELD_DEF(uint32_t, s2BaseSize)
@@ -231,15 +202,13 @@ std::string SFATensorDesc2String(const gert::StorageShape *shape, const gert::Co
 std::string SFADebugTilingContext(const gert::TilingContext *context);
 std::string SFALayoutToSerialString(SFALayout layout);
 
-// -----------算子Tiling入参信息类---------------
 struct SFATilingInfo {
     const char *opName = nullptr;
     fe::PlatFormInfos *platformInfo = nullptr;
     SFAParaInfo opParamInfo;
 
     // Base Param
-    NpuArch npuArch = NpuArch::DAV_2201;
-    bool isA5 = false;
+    platform_ascendc::SocVersion socVersion = platform_ascendc::SocVersion::ASCEND910B;
     uint32_t bSize = 0;
     uint32_t n1Size = 0;
     uint32_t n2Size = 0;
@@ -249,8 +218,8 @@ struct SFATilingInfo {
     uint32_t vHeadDim = 0;
     uint32_t gSize = 0;
     uint32_t ropeHeadDim = 0;
-    uint32_t qTSize = 0; // 仅TND时生效
-    uint32_t kvTSize = 0; // 仅TND时生效
+    uint32_t qTSize = 0;
+    uint32_t kvTSize = 0;
     float scaleValue = 0;
     uint32_t innerPrecise = 0;
     uint32_t l2CacheOffFlag = 0;
@@ -266,7 +235,6 @@ struct SFATilingInfo {
     uint32_t actualLenDimsQ = 0;
     uint32_t maxActualseq = 0;
 
-    bool actualQSeqLenFlag = false;
     bool actualSeqLenFlag = false;
     bool isSameSeqAllKVTensor = true;
     bool isSameActualseq = true;
@@ -274,10 +242,6 @@ struct SFATilingInfo {
     std::vector<int64_t> kvListSeqLens {};
 
     uint32_t sparseMode = 0;
-    int64_t preTokens = INT64_MAX;
-    int64_t nextTokens = INT64_MAX;
-    uint32_t attentionMode = 2;
-    bool returnSoftmaxLse = false;
 
     ge::DataType inputQType = ge::DT_FLOAT16;
     ge::DataType inputKvType = ge::DT_FLOAT16;
@@ -289,8 +253,6 @@ struct SFATilingInfo {
     SFALayout topkLayout = SFALayout::BSND;
     SFALayout outLayout = SFALayout::BSND;
     SFALayout kvLayout = SFALayout::BSND;
-    SFALayout softmaxMaxLayout = SFALayout::BNSG;
-    SFALayout softmaxSumLayout = SFALayout::BNSG;
 
     ge::DataType inputQRopeType = ge::DT_FLOAT16;
     ge::DataType inputKRopeType = ge::DT_FLOAT16;
@@ -298,23 +260,22 @@ struct SFATilingInfo {
     uint64_t l2CacheSize = 0;
 };
 
-// ---------------算子Tiling类---------------
 class SFAMlaTiling {
 public:
     explicit SFAMlaTiling(gert::TilingContext *context) : context_(context) {}
     ge::graphStatus DoOpTiling(SFATilingInfo *sfaInfo);
 
 private:
-    ge::graphStatus SetBlockDim(uint32_t blockDim) const;
-    ge::graphStatus SetTilingKey(uint64_t tilingKey) const;
-    ge::graphStatus SetWorkspaceSize(uint64_t workspaceSize) const;
-    ge::graphStatus SetTilingData(TilingDef &tilingData) const;
+    ge::graphStatus SetBlockDim(uint32_t blockDim);
+    ge::graphStatus SetTilingKey(uint64_t tilingKey);
+    ge::graphStatus SetWorkspaceSize(uint64_t workspaceSize);
+    ge::graphStatus SetTilingData(TilingDef &tilingData);
     gert::TilingContext *context_ = nullptr;
     ge::graphStatus GetPlatformInfo();
     void GenTilingKey();
     bool DealSameSeqEachBatch();
 
-    void ZeroTensorProcess() const;
+    void ZeroTensorProcess();
     void InitParams();
 
     void Split();
@@ -338,11 +299,9 @@ private:
     void CalcFDWorkSpace(const uint32_t actCoreNum);
     void GetWorkspaceSize();
 
-    uint32_t CalcBalanceFDParamNums(const uint32_t actCoreNum) const;
+    uint32_t CalcBalanceFDParamNums(const uint32_t actCoreNum);
 
     void CalcBlockDim();
-
-    uint32_t GetTypeSize(ge::DataType dtype) const;
 
     bool balanceModeFlag_ = false;
     bool splitKVFlag_ = false;
@@ -379,7 +338,6 @@ private:
     SFATilingInfo *sfaInfo_ = nullptr;
 };
 
-// -----------算子Tiling入参信息解析及Check类---------------
 class SFATilingCheck {
 public:
     explicit SFATilingCheck(const SFATilingInfo &sfaInfo) : sfaInfo_(sfaInfo) {};
@@ -434,11 +392,12 @@ private:
     ge::graphStatus CheckParaExistenceMla() const;
     ge::graphStatus CheckParaExistence();
     ge::graphStatus GetActualSeqLenSize(uint32_t &size, const gert::Tensor *tensor,
-        const SFALayout &layout, const std::string &name) const;
+        const SFALayout &layout, const std::string &name);
     void SetSFAShapeCompare();
     ge::graphStatus CheckQRope();
     ge::graphStatus CheckQRopeShape();
     ge::graphStatus CheckVAndKRopeShapeForBatchContinuous();
+    uint32_t GetTypeSize(ge::DataType dtype) const;
     ge::graphStatus CheckVAndKRopeShapeForPageAttention();
     ge::graphStatus CheckVAndKRopeShape();
     ge::graphStatus CheckVAndKRope();
@@ -450,10 +409,6 @@ private:
 
     ge::graphStatus CheckAttenOut();
     ge::graphStatus CheckAttenOutShape();
-    ge::graphStatus CheckSoftmaxMax();
-    ge::graphStatus CheckSoftmaxMaxShape();
-    ge::graphStatus CheckSoftmaxSum();
-    ge::graphStatus CheckSoftmaxSumShape();
     ge::graphStatus CheckActualSeqLensQ();
     ge::graphStatus CheckActualSeqLensQShape();
     ge::graphStatus CheckActualSeqLensQDType();
@@ -470,9 +425,6 @@ private:
     ge::graphStatus CheckFeatureMla() const;
     ge::graphStatus CheckFeature() const;
 
-    ge::graphStatus CheckSingleParaPreTokens() const;
-    ge::graphStatus CheckSingleParaNextTokens() const;
-
 private:
     const char *opName_;
     fe::PlatFormInfos *platformInfo_;
@@ -488,8 +440,8 @@ private:
     uint32_t qkHeadDim_ = 0;
     uint32_t vHeadDim_ = 0;
     uint32_t ropeHeadDim_ = 0;
-    uint32_t qTSize_ = 0; // 仅TND时生效
-    uint32_t kvTSize_ = 0; // 仅TND时生效
+    uint32_t qTSize_ = 0;
+    uint32_t kvTSize_ = 0;
     KvStorageMode kvStorageMode_ = KvStorageMode::BATCH_CONTINUOUS;
     uint32_t sparseBlockCount_ = 0;
     int64_t sparseBlockSize_ = 0;
@@ -498,16 +450,13 @@ private:
     SFALayout topkLayout_ = SFALayout::BSND;
     SFALayout outLayout_ = SFALayout::BSND;
     SFALayout kvLayout_ = SFALayout::BSND;
-    SFALayout softmaxMaxLayout_ = SFALayout::BNSG;
-    SFALayout softmaxSumLayout_ = SFALayout::BNSG;
 
     uint32_t maxBlockNumPerBatch_ = 0;
     int64_t blockSize_ = 0;
 
     uint32_t aicNum_ = 0;
     uint32_t aivNum_ = 0;
-    NpuArch npuArch_ = NpuArch::DAV_2201;
-    bool isA5_ = false;
+    platform_ascendc::SocVersion socVersion_ = platform_ascendc::SocVersion::ASCEND910B;
     uint64_t l2CacheSize_ = 0;
 
     ge::DataType inputQType_ = ge::DT_FLOAT16;
@@ -523,8 +472,6 @@ private:
     gert::Shape queryRopeShapeCmp_{};
     gert::Shape keyRopeShapeCmp_{};
     gert::Shape attenOutShapeCmp_{};
-    gert::Shape softmaxMaxShapeCmp_{};
-    gert::Shape softmaxSumShapeCmp_{};
 };
 
 class SFAInfoParser {
@@ -537,7 +484,7 @@ public:
     ge::graphStatus CheckRequiredParaExistence() const;
 
     ge::graphStatus GetActualSeqLenSize(uint32_t &size, const gert::Tensor *tensor,
-        SFALayout &layout, const std::string &name) const;
+        SFALayout &layout, const std::string &name);
     ge::graphStatus GetActualSeqLenQSize(uint32_t &size);
     ge::graphStatus GetOpName();
     ge::graphStatus GetNpuInfo();
@@ -566,7 +513,6 @@ public:
     ge::graphStatus GetRopeHeadDim();
     ge::graphStatus GetQueryAndOutLayout();
     ge::graphStatus GetTopkLayout();
-    ge::graphStatus GetSoftmaxMaxAndSumLayout();
     ge::graphStatus GetN1Size();
     ge::graphStatus GetN2Size();
     ge::graphStatus GetGSize();
@@ -596,8 +542,8 @@ public:
     uint32_t qkHeadDim_ = 0;
     uint32_t vHeadDim_ = 0;
     uint32_t ropeHeadDim_ = 0;
-    uint32_t qTSize_ = 0; // 仅TND时生效
-    uint32_t kvTSize_ = 0; // 仅TND时生效
+    uint32_t qTSize_ = 0;
+    uint32_t kvTSize_ = 0;
     KvStorageMode kvStorageMode_ = KvStorageMode::BATCH_CONTINUOUS;
     uint32_t sparseBlockCount_ = 0;
 
@@ -605,13 +551,11 @@ public:
     SFALayout topkLayout_ = SFALayout::BSND;
     SFALayout outLayout_ = SFALayout::BSND;
     SFALayout kvLayout_ = SFALayout::BSND;
-    SFALayout softmaxMaxLayout_ = SFALayout::BNSG;
-    SFALayout softmaxSumLayout_ = SFALayout::BNSG;
+
     uint32_t maxBlockNumPerBatch_ = 0;
     uint32_t blockSize_ = 0;
 
-    NpuArch npuArch_ = NpuArch::DAV_2201;
-    bool isA5_ = false;
+    platform_ascendc::SocVersion socVersion_ = platform_ascendc::SocVersion::ASCEND910B;
 
     ge::DataType inputQType_ = ge::DT_FLOAT16;
     ge::DataType inputKvType_ = ge::DT_FLOAT16;
