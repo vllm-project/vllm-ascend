@@ -536,6 +536,39 @@ class TestNPUPlatform(TestBase):
         ):
             self.platform.check_and_update_config(vllm_config)
 
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_recompute_scheduler_rejects_invalid_kv_role(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        """Test that recompute_scheduler_enable rejects kv_transfer_config with None or invalid kv_role."""
+        mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_ascend_config.recompute_scheduler_enable = True
+        mock_init_ascend.return_value = mock_ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = MagicMock(spec=["engine_id"])
+        vllm_config.kv_transfer_config.engine_id = "engine0"
+        # kv_role is not set, so getattr returns None
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.scheduler_config = MagicMock()
+        mock_init_recompute.return_value = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with (
+            pytest.raises(ValueError, match=r"recompute_scheduler_enable.*PD-disaggregated.*PD-mixed"),
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
+
     def test_validate_kv_load_failure_policy_rejects_hybrid_recompute(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.is_hybrid = True
