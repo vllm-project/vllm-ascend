@@ -343,5 +343,5 @@ class InputPreprocessModule(torch.nn.Module):
         rerank_embs = rerank_embs * (self._embedding_dim**0.5) + position_embs
         rerank_embs = torch.nn.functional.pad(rerank_embs, (0, 0, 0, 1, 0, 0),
                                               'constant', 0.0)
-        rerank_embs.squeeze(0)
+        rerank_embs = rerank_embs.squeeze(0)
         return rerank_embs
