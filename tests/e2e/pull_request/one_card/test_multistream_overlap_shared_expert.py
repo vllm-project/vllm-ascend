@@ -18,7 +18,7 @@
 Compare the outputs of vLLM with multistream_overlap_shared_expert
 enabled and disabled.
 
-Run `pytest tests/e2e/pull_request/full/one_card/test_multistream_overlap_shared_expert.py`.
+Run `pytest tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py`.
 """
 
 import pytest
