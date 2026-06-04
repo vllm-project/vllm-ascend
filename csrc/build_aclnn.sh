@@ -86,7 +86,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "scatter_nd_update_v2"
         "moe_grouped_matmul"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
-        "lightning_indexer_vllm"
+        "lightning_indexer"
         "sparse_flash_attention"
         "matmul_allreduce_add_rmsnorm"
         "moe_init_routing_custom"
@@ -115,6 +115,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
+        "fused_gdn_gating"
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
@@ -141,36 +142,15 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         git checkout "${CATLASS_COMMIT}" || exit 1
         cd - || exit 1
     fi
-    # dependency: cann-toolkit file moe_distribute_base.h
-    HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
-    if [ -z "$HCCL_STRUCT_FILE_PATH" ]; then
-        echo "cannot find moe_distribute_base.h file in CANN env"
-        exit 1
-    fi
-    # for dispatch_gmm_combine_decode
-    yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
-
-    # for dispatch_normal and combine_normal
-    TARGET_DIR="$SCRIPT_DIR/mc2/moe_dispatch_normal/op_kernel/utils/"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-
-    TARGET_DIR="$SCRIPT_DIR/mc2/moe_combine_normal/op_kernel/utils/"
-    echo "$TARGET_DIR"
-    cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-    
     CUSTOM_OPS_ARRAY=(
         "scatter_nd_update_v2"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
-        "lightning_indexer_vllm"
+        "lightning_indexer"
         "sparse_flash_attention"
         "dispatch_ffn_combine"
         "dispatch_ffn_combine_w4_a8"
         "dispatch_ffn_combine_bf16"
         "dispatch_gmm_combine_decode"
-        "moe_combine_normal"
-        "moe_dispatch_normal"
-        "dispatch_layout"
-        "notify_dispatch"
         "moe_init_routing_custom"
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
@@ -198,6 +178,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
+        "fused_gdn_gating"
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
