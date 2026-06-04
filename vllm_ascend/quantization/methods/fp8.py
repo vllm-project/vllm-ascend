@@ -24,10 +24,10 @@ from vllm.config import get_current_vllm_config
 from .base import QuantType
 from .registry import register_scheme
 from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod
-from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod, AscendW8A8MXFP8DynamicFusedMoEMethod
 
 
-@register_scheme("FP8", "ds_linear")
+@register_scheme("fp8", "ds_linear")
 class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.
 
@@ -36,9 +36,9 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
 
     model_dtype = None
 
-    def __init__(self, quant_config):
+    def __init__(self, weight_block_size):
         super().__init__()
-        self.block_size = quant_config.get("weight_block_size", [128, 128])[0]
+        self.block_size = weight_block_size[0]
         vllm_config = get_current_vllm_config()
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         hf_config = vllm_config.model_config.hf_config
@@ -78,16 +78,12 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
             )
 
 
-@register_scheme("FP8", "w4a8_moe")
+@register_scheme("fp8", "ds_w4a8_moe")
 class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod):
     """FusedMoe method for DS original w4a8 mxfp quantization."""
 
     model_dtype = None
     quant_type: QuantType = QuantType.W4A8MXFP
-
-    def __init__(self, quant_config, tid2eid=None):
-        super().__init__()
-        self.tid2eid = tid2eid
 
     def get_dynamic_quant_param(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
@@ -128,3 +124,42 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
         layer.w2_weight_scale.data = (
             layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
         )
+
+
+@register_scheme("fp8", "ds_w8a8_moe")
+class AscendW8A8MXFP8DSDynamicFusedMoEMethod(AscendW8A8MXFP8DynamicFusedMoEMethod):
+    """FusedMoe method for DS original w8a8 mxfp quantization."""
+
+    model_dtype = None
+    quant_type: QuantType = QuantType.W4A8MXFP
+
+    def __init__(self, tid2eid=None):
+        super().__init__()
+        self.tid2eid = tid2eid
+
+    def get_dynamic_quant_param(
+        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
+    ) -> dict[str, Any]:
+        param_dict = {}
+        param_dict["w13_weight_scale"] = torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_sizes // self.group_size,
+            dtype=torch.float8_e8m0fnu,
+        )
+
+        param_dict["w2_weight_scale"] = torch.empty(
+            num_experts, hidden_sizes, intermediate_size_per_partition // self.group_size, dtype=torch.float8_e8m0fnu
+        )
+        return param_dict
+
+    def process_weights_after_loading(self, layer):
+        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data.view(torch.uint8), 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2)
+        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data.view(torch.uint8), 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2)
+
+        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+        g, n, k = layer.w13_weight_scale.shape
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
+        g, n, k = layer.w2_weight_scale.shape
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
