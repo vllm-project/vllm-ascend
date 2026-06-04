@@ -27,6 +27,11 @@ on:
         type: string
         required: true
         description: 'JSON array of test groups from select_tests.py'
+      ref:
+        type: string
+        required: false
+        default: ''
+        description: 'The vllm-ascend ref to test.'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -43,7 +48,7 @@ permissions:
 
 jobs:
   selected-tests:
-    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card
+    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
     strategy:
       fail-fast: false
       matrix:
@@ -98,6 +103,8 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -133,7 +140,7 @@ jobs:
             libcurl4
           ldconfig
 
-          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.8.post1-cp311-cp311-manylinux_2_17_aarch64.manylinux_2_35_aarch64.whl"
+          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.8.post1-cp312-cp312-manylinux_2_17_aarch64.manylinux_2_35_aarch64.whl"
           pip install --no-cache-dir --no-deps \
             "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
 
@@ -164,23 +171,22 @@ jobs:
           pip install . --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi
           pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi
 
+      - name: Uninstall Triton for 310P tests
+        if: ${{ steps.check_npu.outputs.has_npu == 'true' && matrix.group.npu_type == '310p' }}
+        run: |
+          pip uninstall -y triton-ascend triton
+
       - name: Run selected tests with device
         if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         run: |
-          echo -e "\033[1;34m=== TEST INFO ===\033[0m"
-          echo -e "  \033[33mDevice:\033[0m ${{ matrix.group.npu_type }}"
-          if [ "${{ matrix.group.npu_type }}" != "cpu" ]; then
-            echo -e "  \033[33mNPU count:\033[0m ${{ matrix.group.num_npus }}"
-          fi
-          echo -e "  \033[33mTargets:\033[0m"
-          for target in ${{ matrix.group.tests }}; do
-            echo -e "    \033[32m-\033[0m ${target}"
-          done
-          echo -e "\033[1;34m====================\033[0m"
-          pytest -sv --color=yes ${{ matrix.group.tests }}
+          .github/workflows/scripts/run_selected_tests.sh \
+            "${{ matrix.group.npu_type }}" \
+            "${{ matrix.group.num_npus }}" \
+            "with-device" \
+            ${{ matrix.group.tests }}
 
       - name: Run selected tests without device
         if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
@@ -189,15 +195,19 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          .github/workflows/scripts/run_selected_tests.sh \
+            "${{ matrix.group.npu_type }}" \
+            "${{ matrix.group.num_npus }}" \
+            "without-device" \
+            ${{ matrix.group.tests }}
 
-          echo -e "\033[1;34m=== TEST INFO ===\033[0m"
-          echo -e "  \033[33mDevice:\033[0m ${{ matrix.group.npu_type }}"
-          if [ "${{ matrix.group.npu_type }}" != "cpu" ]; then
-            echo -e "  \033[33mNPU count:\033[0m ${{ matrix.group.num_npus }}"
-          fi
-          echo -e "  \033[33mTargets:\033[0m"
-          for target in ${{ matrix.group.tests }}; do
-            echo -e "    \033[32m-\033[0m ${target}"
-          done
-          echo -e "\033[1;34m====================\033[0m"
-          pytest -sv --color=yes ${{ matrix.group.tests }}
+      - name: Upload selected test logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: selected-test-logs-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
+          path: ${{ runner.temp }}/selected-tests-*
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0

@@ -1,10 +1,10 @@
-# Documentation writing guide
+# Doc writing guide
 
-## Guide to Writing Model Tutorial Documentation
+## Guide to Writing Model Tutorial Doc
 
 `docs/source/_templates/Model-Deployment-Tutorial-Template.md` is a template for writing model deployment tutorials. You can copy and modify it to create new docs.
 
-## Testable documentation code block generation (``model-code``)
+## Testable doc code block generation (``model-code``)
 
 - For **documentation authors**: how to insert testable command blocks into docs
 - For **developers**: how to add a new converter
@@ -13,9 +13,9 @@ Built-in supported `converter_tag` values:
 
 | converter_tag | Renders | YAML source |
 | --- | --- | --- |
-| `single_node` | One `vllm serve` script for a single node | `test_cases[case_index]` |
-| `multi_node` | One host's `vllm serve` script | `deployment[host_index]` |
-| `external_dp_template` | One external-DP node's env exports + `vllm serve` command | `templates[host_index]` (+ top-level `model`) |
+| `single_node` | A single node's env exports + `vllm serve` script | `test_cases[case_index]` |
+| `multi_node` | One host's env exports + `vllm serve` script | `deployment[host_index]` |
+| `external_dp_template` | One external-DP node's env exports + `vllm serve` command | `templates[host_index]` |
 | `external_dp_launch` | One `launch_online_dp.py` line per node | `config[]` |
 | `external_dp_proxy` | The load-balance proxy launch command | `config[]` + `routing` |
 
@@ -26,137 +26,176 @@ By default, the generator scans only `.md` files under `docs/source/tutorials/mo
 If you put ``model-code`` blocks in other directories, Sphinx builds will not automatically generate the corresponding scripts.
 :::
 
-#### Single node (`single_node`)
+All ``model-code`` blocks need:
 
-##### Template 1: minimal (metadata only)
+| Option | Required | Description |
+| --- | --- | --- |
+| `block_name` | Yes | Block name; must be unique within the current document |
+| `converter_tag` | Yes | Selects one of the built-in converters |
+| `test_case_path` | Yes | Repository-relative YAML path that stays within the repo; the file must exist |
 
-````md
-```{model-code}
-:block_name: your_unique_block_name
-:converter_tag: single_node
-:test_case_path: tests/e2e/nightly/single_node/models/configs/your_model.yaml
+Use the body of the block to add shell wrapper lines such as `set -eux`. Always
+place the `{{ generated }}` placeholder where the converter output should be
+inserted.
+
+#### converter_tag: `single_node`
+
+`single_node` reads one item from `test_cases`. The optional `case_index`
+metadata selects the item; when omitted, it defaults to `0`.
+
+Only the fields read by this converter are expanded below. Other test metadata
+can be left in the YAML and is ignored by this converter.
+
+```yaml
+test_cases:
+  - name: qwen3-8b-single
+    model: Qwen/Qwen3-8B
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      SERVER_PORT: DEFAULT_PORT
+    server_cmd:
+      - --tensor-parallel-size
+      - "1"
+      - --port
+      - $SERVER_PORT
+      - --trust-remote-code
+    server_cmd_extra:
+      - --enable-expert-parallel
+    benchmarks: ...
 ```
-````
 
-##### Template 2: with text (use `{{ generated }}` placeholder)
+`envs` is rendered as `export` lines. `SERVER_PORT: DEFAULT_PORT` is resolved
+to the default single-node port `8000`. `model` becomes `vllm serve <model>`,
+and `server_cmd` plus optional `server_cmd_extra` become command arguments.
+Both command fields can be either a shell string or a flat token list.
+
+Write the doc block like this:
 
 ````md
 ```{model-code}
-:block_name: your_unique_block_name
+:block_name: qwen3_8b_single_node
 :converter_tag: single_node
 :test_case_path: tests/e2e/nightly/single_node/models/configs/your_model.yaml
 :case_index: 0
 
-# You can add any extra content here, e.g. code, explanations, or comments.
+set -eux
 {{ generated }}
 ```
 ````
 
-##### Options
+Generated shell script:
 
-| Option | Required | Default | Description |
-| --- | --- | --- | --- |
-| `block_name` | Yes | None | Block name; must be unique within the current document |
-| `converter_tag` | Yes | None | Must be `single_node` |
-| `test_case_path` | Yes | None | Repository-relative path that stays within the repo (no `..` escape); file must exist |
-| `case_index` | No | `0` | Use `test_cases[case_index]` from the YAML as the rendering source |
+```bash
+set -eux
+export HCCL_BUFFSIZE=1024
+export SERVER_PORT=8000
 
-##### YAML reference
-
-See existing files under `tests/e2e/nightly/single_node/models/configs/`.
-
-`single_node` reads `test_cases[case_index]`. Common fields include:
-
-- `model`: model name (ultimately renders `vllm serve <model> ...`)
-- `envs`: rendered as `export ...` (scalar values)
-- `server_cmd`: arguments appended to `vllm serve <model>` (shell string or token list)
-- `server_cmd_extra` (optional): extra appended arguments
-
-#### Multi node (`multi_node`)
-
-##### Template 1: minimal (metadata only)
-
-````md
-```{model-code}
-:block_name: your_unique_block_name_0
-:converter_tag: multi_node
-:test_case_path: tests/e2e/nightly/multi_node/config/your_model.yaml
-:host_index: 0
+vllm serve Qwen/Qwen3-8B \
+  --tensor-parallel-size 1 \
+  --port $SERVER_PORT \
+  --trust-remote-code \
+  --enable-expert-parallel
 ```
-````
 
-````md
-```{model-code}
-:block_name: your_unique_block_name_1
-:converter_tag: multi_node
-:test_case_path: tests/e2e/nightly/multi_node/config/your_model.yaml
-:host_index: 1
+#### converter_tag: `multi_node`
+
+`multi_node` reads one item from `deployment`. The required `host_index`
+metadata selects which host to render.
+
+```yaml
+deployment:
+  - envs:
+      SERVER_PORT: "8000"
+    server_cmd: >
+      vllm serve Qwen/Qwen3-235B-A22B
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --data-parallel-size 2
+      --tensor-parallel-size 8
+      --data-parallel-address $LOCAL_IP
+  - envs:
+      SERVER_PORT: "8000"
+    server_cmd: >
+      vllm serve Qwen/Qwen3-235B-A22B
+      --headless
+      --port $SERVER_PORT
+      --data-parallel-size 2
+      --tensor-parallel-size 8
+      --data-parallel-start-rank 1
+      --data-parallel-address $MASTER_IP
+benchmarks: ...
 ```
-````
 
-##### Template 2: with text (use `{{ generated }}` placeholder)
+`server_cmd` must be a complete command starting with `vllm serve <model>`.
+It can be written as a shell string or a flat token list.
 
-````md
-```{model-code}
-:block_name: your_unique_block_name_0
-:converter_tag: multi_node
-:test_case_path: tests/e2e/nightly/multi_node/config/your_model.yaml
-:host_index: 0
-
-# You can add any extra content here, e.g. code, explanations, or comments.
-{{ generated }}
-```
-````
+Write the doc block like this:
 
 ````md
 ```{model-code}
-:block_name: your_unique_block_name_1
+:block_name: qwen3_235b_worker_1
 :converter_tag: multi_node
-:test_case_path: tests/e2e/nightly/multi_node/config/your_model.yaml
+:test_case_path: tests/e2e/nightly/multi_node/internal_dp/config/your_model.yaml
 :host_index: 1
 
-# You can add any extra content here, e.g. code, explanations, or comments.
+set -eux
 {{ generated }}
 ```
 ````
 
-##### Options
+Generated shell script for `host_index: 1`:
 
-| Option | Required | Default | Description |
-| --- | --- | --- | --- |
-| `block_name` | Yes | None | Block name; must be unique within the current document |
-| `converter_tag` | Yes | None | Must be `multi_node` |
-| `test_case_path` | Yes | None | Repository-relative path that stays within the repo (no `..` escape); file must exist |
-| `host_index` | Yes | None | Use `deployment[host_index]` from the YAML as the rendering source |
+```bash
+set -eux
+export MASTER_IP=192.168.1.10
+export SERVER_PORT=8000
 
-##### YAML reference
+vllm serve Qwen/Qwen3-235B-A22B \
+  --headless \
+  --port $SERVER_PORT \
+  --data-parallel-size 2 \
+  --tensor-parallel-size 8 \
+  --data-parallel-start-rank 1 \
+  --data-parallel-address $MASTER_IP
+```
 
-See existing files under `tests/e2e/nightly/multi_node/config/`.
+#### converter_tag: `external_dp_template`
 
-`multi_node` reads `deployment[host_index]`. Common fields include:
+`external_dp_template` reads one item from `templates`. The required
+`host_index` metadata selects which template to render. The top-level `model`
+field is also required because the converter builds `vllm serve <model>`.
 
-- `envs`: rendered as `export ...` (scalar values)
-- `server_cmd`: a complete command (must start with `vllm serve <model>`; shell multi-line string or token list)
+```yaml
+model: Eco-Tech/GLM-Test
+templates:
+  - node_index: 0
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+    server_cmd_template:
+      - --host
+      - 0.0.0.0
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --trust-remote-code
+config: ...
+routing: ...
+```
 
-#### External data parallel (`external_dp_template` / `external_dp_launch` / `external_dp_proxy`)
+Known braced template variables are rewritten to the positional shell arguments
+that `run_dp_template.sh` receives from `launch_online_dp.py`:
 
-These three converters read one **shared** external-DP YAML (see
-`tests/e2e/nightly/multi_node/external_dp/config/`) and each render a different
-part of the deployment. They are tightly coupled to that schema by design.
-
-The shared YAML provides:
-
-- `model`: model name (top level)
-- `config`: a list of per-node settings (`port_start`, `dp_rpc_port`, `dp_size`,
-  `dp_size_local`, `dp_rank_start`, `tp_size`, `dp_address`, ...)
-- `routing`: `type` plus `groups` (e.g. `prefiller` / `decoder` lists of `config` indices)
-- `templates`: a list of per-node `envs` and `server_cmd_template` entries
-
-`server_cmd_template` uses braced `${VAR}` placeholders that
-`external_dp_template` rewrites to the positional shell parameters consumed by
-`run_dp_template.sh`:
-
-| `${VAR}` | Positional |
+| Template variable | Rendered positional |
 | --- | --- |
 | `${VISIBLE_DEVICES}` | `$1` |
 | `${PORT}` | `$2` |
@@ -166,54 +205,173 @@ The shared YAML provides:
 | `${DP_RPC_PORT}` | `$6` |
 | `${TP_SIZE}` | `$7` |
 
-Unbraced references such as `$SERVER_PORT` and unknown braced variables are left
-untouched so they remain live shell expansions.
+Unknown braced variables and unbraced shell references such as `$SERVER_PORT`
+are left unchanged.
 
-##### Templates
+Write the doc block like this:
 
 ````md
 ```{model-code}
-:block_name: your_unique_block_name_prefill_node0
+:block_name: glm_external_dp_template_node0
 :converter_tag: external_dp_template
 :test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
 :host_index: 0
+
+set -eux
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+
+{{ generated }}
 ```
 ````
 
-`external_dp_launch` (one `python launch_online_dp.py ...` line per `config` node)
-and `external_dp_proxy` (the load-balance proxy command, e.g.
-`python load_balance_proxy_server_example.py ...`) read the whole cluster, so they
-take **no** index option:
+Generated shell script for `host_index: 0`:
+
+```bash
+set -eux
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+
+export HCCL_BUFFSIZE=1024
+export ASCEND_RT_VISIBLE_DEVICES=$1
+
+vllm serve Eco-Tech/GLM-Test \
+  --host 0.0.0.0 \
+  --port $2 \
+  --data-parallel-size $3 \
+  --data-parallel-rank $4 \
+  --data-parallel-address $5 \
+  --data-parallel-rpc-port $6 \
+  --tensor-parallel-size $7 \
+  --trust-remote-code
+```
+
+#### converter_tag: `external_dp_launch`
+
+`external_dp_launch` reads the full `config` list and renders one
+`launch_online_dp.py` command per node. It does not take an index option.
+
+```yaml
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+  - node_index: 1
+    port_start: 7200
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_1_IP}"
+templates: ...
+routing: ...
+```
+
+Write the doc block like this:
 
 ````md
 ```{model-code}
-:block_name: your_unique_block_name_launch
+:block_name: glm_external_dp_launch
 :converter_tag: external_dp_launch
 :test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
+
+set -eux
+{{ generated }}
 ```
 ````
+
+Generated shell script:
+
+```bash
+set -eux
+python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address ${NODE_0_IP} --dp-rpc-port 12321 --vllm-start-port 7100
+
+python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address ${NODE_1_IP} --dp-rpc-port 12321 --vllm-start-port 7200
+```
+
+#### converter_tag: `external_dp_proxy`
+
+`external_dp_proxy` reads `config` and `routing`. It renders the
+`load_balance_proxy_server_example.py` command for `routing.type:
+disaggregated_prefill`. It does not take an index option.
+
+```yaml
+routing:
+  type: disaggregated_prefill
+  groups:
+    prefiller: [0]
+    decoder: [1]
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_size_local: 2
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+  - node_index: 1
+    port_start: 7200
+    dp_size_local: 4
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_1_IP}"
+templates: ...
+```
+
+`routing.groups.prefiller` and `routing.groups.decoder` contain indices into
+`config`. Each referenced node expands to `dp_size_local` host and port entries.
+The proxy itself is rendered on `${NODE_0_IP}:1999`.
+
+Write the doc block like this:
 
 ````md
 ```{model-code}
-:block_name: your_unique_block_name_proxy
+:block_name: glm_external_dp_proxy
 :converter_tag: external_dp_proxy
 :test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
+
+set -eux
+{{ generated }}
 ```
 ````
 
-##### Options
+Generated shell script:
 
-| Option | Required | Default | Description |
-| --- | --- | --- | --- |
-| `block_name` | Yes | None | Block name; must be unique within the current document |
-| `converter_tag` | Yes | None | One of `external_dp_template`, `external_dp_launch`, `external_dp_proxy` |
-| `test_case_path` | Yes | None | Repository-relative path that stays within the repo (no `..` escape); file must exist |
-| `host_index` | `external_dp_template` only | None | Use `templates[host_index]` from the YAML as the rendering source |
-
-:::{note}
-`external_dp_proxy` currently supports only `routing.type: disaggregated_prefill`
-and reads its `routing.groups.prefiller` / `routing.groups.decoder` node lists.
-:::
+```bash
+set -eux
+python load_balance_proxy_server_example.py \
+  --host ${NODE_0_IP} \
+  --port 1999 \
+  --prefiller-hosts \
+    ${NODE_0_IP} \
+    ${NODE_0_IP} \
+  --prefiller-ports \
+    7100 \
+    7101 \
+  --decoder-hosts \
+    ${NODE_1_IP} \
+    ${NODE_1_IP} \
+    ${NODE_1_IP} \
+    ${NODE_1_IP} \
+  --decoder-ports \
+    7200 \
+    7201 \
+    7202 \
+    7203
+```
 
 ### Local debugging and generation
 
@@ -237,87 +395,6 @@ By default, artifacts are written to: `docs/_build/doc_codegen/<doc_stem>/<block
 :::{note}
 After the script is generated, please make sure to check whether the generated content is runnable, especially key parts such as environment variables and command-line parameters.
 :::
-
-#### Concrete YAML-to-shell example
-
-The following `model-code` block reads the first test case from
-`tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml`:
-
-````md
-```{model-code}
-:block_name: kimi_k2_thinking_single_node
-:converter_tag: single_node
-:test_case_path: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
-```
-````
-
-The YAML fields read by the converter look like this:
-
-```yaml
-test_cases:
-  - name: "Kimi-K2-Thinking-TP16-Case"
-    model: "moonshotai/Kimi-K2-Thinking"
-    envs:
-      HCCL_BUFFSIZE: "1024"
-      TASK_QUEUE_ENABLE: "1"
-      OMP_PROC_BIND: "false"
-      HCCL_OP_EXPANSION_MODE: "AIV"
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      SERVER_PORT: "DEFAULT_PORT"
-    server_cmd:
-      - "--tensor-parallel-size"
-      - "16"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--max-model-len"
-      - "8192"
-      - "--max-num-batched-tokens"
-      - "8192"
-      - "--max-num-seqs"
-      - "12"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--trust-remote-code"
-      - "--enable-expert-parallel"
-      - "--no-enable-prefix-caching"
-```
-
-Run the block in dry-run mode to see the generated shell without writing files:
-
-```bash
-python3 tools/docs_codegen/cli.py \
-  --block docs/source/tutorials/models/Kimi-K2-Thinking.md::kimi_k2_thinking_single_node \
-  --dry-run --stdout
-```
-
-The first line is the artifact path. The remaining lines are the generated shell
-content:
-
-```bash
-# docs/_build/doc_codegen/Kimi-K2-Thinking/kimi_k2_thinking_single_node.sh
-export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
-export OMP_PROC_BIND=false
-export HCCL_OP_EXPANSION_MODE=AIV
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export SERVER_PORT=8000
-
-vllm serve moonshotai/Kimi-K2-Thinking \
-  --tensor-parallel-size 16 \
-  --port $SERVER_PORT \
-  --max-model-len 8192 \
-  --max-num-batched-tokens 8192 \
-  --max-num-seqs 12 \
-  --gpu-memory-utilization 0.9 \
-  --trust-remote-code \
-  --enable-expert-parallel \
-  --no-enable-prefix-caching
-```
-
-In this example, `envs` is rendered as `export` lines, `model` becomes
-`vllm serve <model>`, and `server_cmd` is appended as formatted command-line
-arguments. `SERVER_PORT: "DEFAULT_PORT"` is resolved to the default single-node
-port `8000`.
 
 #### Build the site & preview locally
 
@@ -343,27 +420,50 @@ python3 -m http.server -d docs/_build/html 8000
 
 ### For developers: add a new converter
 
-The goal of adding a converter is to make `converter_tag: <name>` render a given YAML structure into a script (`GeneratedScript`).
+A converter turns one loaded YAML file plus one parsed `ModelCodeBlock` into a
+`GeneratedScript`. The current pipeline is:
 
-#### What to change
+1. `BlockScanner` parses ``model-code`` fences and accepts only options listed
+   in `MODEL_CODE_OPTION_NAMES`.
+2. `YamlLoader` loads `test_case_path`.
+3. `get_converter()` looks up `block.converter_tag` from
+   `build_default_converters()`.
+4. The selected converter returns `GeneratedScript(content=..., language="shell")`.
+5. `GeneratorService` replaces `{{ generated }}` in the block body, validates
+   that the final script is non-empty, and writes
+   `docs/_build/doc_codegen/<doc_stem>/<block_name>.sh`.
 
-1. In `tools/docs_codegen/converters.py`:
+To add a converter:
 
-   - Add a `BaseConverter` subclass that implements `convert(loaded_yaml, *, block) -> GeneratedScript`
-   - Give the converter a unique `name` (the value used by `converter_tag` in docs)
-   - Register it in `build_default_converters()`
-   - Reuse the shared validation/rendering helpers in `tools/docs_codegen/utils.py`
-     (`require_yaml_mapping`, `require_mapping`, `require_scalar_mapping`,
-     `require_indexed_mapping`, `parse_command_tokens`, `render_cli_command`, ...)
-     rather than re-validating the YAML shape inline
+1. In `tools/docs_codegen/converters.py`, add a `BaseConverter` subclass with a
+   unique `name`. That name is the value authors put in `:converter_tag:`.
+2. Implement `convert(self, loaded_yaml, *, block) -> GeneratedScript`. Use
+   `make_docs_codegen_error(..., block=block)` for user-facing validation
+   errors so the CLI and Sphinx output include document context.
+3. Reuse helpers from `tools/docs_codegen/utils.py`, such as
+   `require_mapping`, `require_mapping_list`, `require_scalar_mapping`,
+   `require_indexed_mapping`, `require_node_field`, `parse_command_tokens`,
+   `substitute_template_positionals`, and `render_cli_command`.
+4. Register the converter in `build_default_converters()`. If it is not
+   registered, `get_converter()` will reject the new `converter_tag`.
+5. If the converter needs new directive metadata, add the option name to
+   `MODEL_CODE_OPTION_NAMES` in `tools/docs_codegen/scanner.py` and to
+   `ModelCodeDirective.option_spec` in
+   `tools/docs_codegen/sphinx_extension.py`. Read the option with
+   `block.get_option("<option_name>")`.
+6. Add or update tests in `tests/ut/tools/test_docs_codegen.py`. Cover the
+   successful render path, required option validation, YAML shape validation,
+   and any CLI/Sphinx scanner behavior affected by new metadata.
+7. Add a real ``model-code`` example in a model tutorial, preferably under
+   `docs/source/tutorials/models/`, and point it to an existing YAML file under
+   `tests/`.
+8. Validate with the CLI:
 
-2. If your converter needs new directive options (e.g. `:foo_index:`):
+   ```bash
+   python3 tools/docs_codegen/cli.py --doc <your_doc> --dry-run
+   python3 tools/docs_codegen/cli.py --block <your_doc>::<block_name> --dry-run --stdout
+   ```
 
-   - Add the option name to `MODEL_CODE_OPTION_NAMES` in `tools/docs_codegen/scanner.py`
-   - Add the option name to `ModelCodeDirective.option_spec` in `tools/docs_codegen/sphinx_extension.py`
-
-3. Add a real example snippet in any model doc (recommended under `docs/source/tutorials/models/`) and point it to a YAML file that exists (recommended under `tests/`).
-
-4. Minimal validation via CLI:
-
-   - `python3 tools/docs_codegen/cli.py --doc <your_doc>` or `--block <doc>::<block_name>`
+If a converter should render something other than shell, set
+`GeneratedScript.language` accordingly so Sphinx can highlight the generated
+literal block correctly.
