@@ -83,7 +83,7 @@ run_pytest_target() {
 print_test_info
 
 if [ "${mode}" = "with-device" ]; then
-  aclgraph_capture_replay="tests/e2e/pull_request/full/two_cards/test_aclgraph_capture_replay.py"
+  aclgraph_capture_replay="tests/e2e/pull_request/light/two_card/aclgraph/test_aclgraph_capture_replay.py"
   run_aclgraph_capture_replay=0
   for target in "${targets[@]}"; do
     if [ "${target}" = "${aclgraph_capture_replay}" ]; then
