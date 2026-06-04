@@ -17,7 +17,7 @@
 """
 Compare the outputs of vLLM with and without context parallel.
 
-Run `pytest tests/e2e/multicard/long_sequence/test_accuracy.py`.
+Run `pytest tests/e2e/pull_request/four_card/long_sequence/test_accuracy.py`.
 """
 
 import pytest

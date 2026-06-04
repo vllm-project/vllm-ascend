@@ -18,7 +18,7 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/e2e/multicard/spec_decode/test_mtp_qwen3_next.py`.
+Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py`.
 """
 
 import os
