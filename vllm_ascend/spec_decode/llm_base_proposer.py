@@ -23,6 +23,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
@@ -31,6 +32,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -194,10 +196,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         """
         from vllm.compilation.backends import set_model_tag
 
+        draft_vllm_config = self._create_draft_vllm_config()
+        draft_load_config = self.speculative_config.draft_load_config
+        logger.info(
+            "AscendSpecDecodeBaseProposer._get_model(): loading draft model with load_format=%s, model=%s",
+            getattr(draft_load_config, "load_format", None),
+            getattr(self.speculative_config.draft_model_config, "model", None),
+        )
         with set_model_tag("eagle_head"):
             model = get_model(
-                vllm_config=self.vllm_config,
-                model_config=self.vllm_config.speculative_config.draft_model_config,
+                vllm_config=draft_vllm_config,
+                model_config=self.speculative_config.draft_model_config,
+                load_config=self.speculative_config.draft_load_config,
             )
         return model
 
@@ -334,13 +344,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
         if self.method in ("eagle", "dflash"):
-            logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
-            if hasattr(model, "lm_head"):
-                self.model.lm_head = model.lm_head
-            elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
-                self.model.lm_head = model.get_language_model().lm_head
+            # For DFlash drafters trained with a reduced draft vocabulary, the
+            # draft model ships its own lm_head of shape [draft_vocab_size,
+            # hidden] whose rows map to a trained subset of the target vocab via
+            # the draft_id_to_target_id (d2t) buffer. Overwriting it with the
+            # target lm_head ([target_vocab_size, hidden]) makes the draft emit
+            # logits over the wrong vocabulary, so the verifier rejects almost
+            # every speculative token. Keep the draft's own lm_head in that case.
+            draft_has_own_lm_head = (
+                self.method == "dflash" and getattr(self.model, "draft_id_to_target_id", None) is not None
+            )
+            if draft_has_own_lm_head:
+                logger.info(
+                    "DFlash draft uses d2t vocab remapping; keeping the draft's "
+                    "own lm_head instead of sharing the target lm_head."
+                )
             else:
-                logger.warning("Target model has no accessible lm_head for sharing.")
+                logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
+                if hasattr(model, "lm_head"):
+                    self.model.lm_head = model.lm_head
+                elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
+                    self.model.lm_head = model.get_language_model().lm_head
+                else:
+                    logger.warning("Target model has no accessible lm_head for sharing.")
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
@@ -567,7 +593,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method in ("eagle3", "dflash"):
-            assert isinstance(self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM))
+            assert isinstance(
+                self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM, Eagle3DeepseekV2ForCausalLM)
+            )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
@@ -672,7 +700,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs_padded = common_attn_metadata.num_reqs
             # In the below scenario, padding has been applied by _pad_query_start_loc_for_fia in the model runner.
             # We need to unpad here for eager mode to maintain compatibility.
-            if (enable_sp() and not self.vllm_config.model_config.use_mla) and self.pcp_size * self.dcp_size == 1:
+            if not self.vllm_config.model_config.use_mla and self.pcp_size * self.dcp_size == 1:
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
@@ -838,6 +866,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
+        self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
@@ -1509,9 +1538,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         if self.pcp_size * self.dcp_size > 1:
-            if self.vllm_config.model_config.use_mla:
-                if getattr(attn_metadata, "decode", None):
-                    attn_metadata.decode.cp_seq_len = cp_seq_len
+            kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
+            if isinstance(kv_cache_spec, MLAAttentionSpec):
+                attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
 
