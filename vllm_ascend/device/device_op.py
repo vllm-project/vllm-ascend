@@ -501,8 +501,8 @@ class BaseDeviceAdaptor:
         return [8, 32, 128]
 
     @staticmethod
-    def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
-        chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
+    def chunk_scaled_dot_kkt_fwd(num_core, bh_step, task_num, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
+        chunk_scaled_dot_kkt_fwd_kernel[(num_core,)](
             k=k,
             beta=beta,
             g_cumsum=g_cumsum,
@@ -516,6 +516,9 @@ class BaseDeviceAdaptor:
             K=K,
             BT=BT,
             BK=BK,
+            bh_step=bh_step,
+            task_num=task_num,
+            num_core=num_core,
             num_warps=8,
             num_stages=3,
             multibuffer=True,
@@ -1120,8 +1123,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return context_layer
 
     @staticmethod
-    def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
-        chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
+    def chunk_scaled_dot_kkt_fwd(num_core, bh_step, task_num, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
+        chunk_scaled_dot_kkt_fwd_kernel[(num_core,)](
             k=k,
             beta=beta,
             g_cumsum=g_cumsum,
@@ -1135,6 +1138,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             K=K,
             BT=BT,
             BK=BK,
+            bh_step=bh_step,
+            task_num=task_num,
+            num_core=num_core,
             num_warps=8,
             num_stages=3,
             multibuffer=True,
