@@ -268,7 +268,7 @@ class AscendQwen2VisionTransformer(Qwen2VisionTransformer):
             dim=2)
         qkv_weight_final = qkv_weight_padded.reshape(-1, self.hidden_size)
 
-        if is_enable_nz():
+        if is_enable_nz(qkv_weight_final.dtype):
             qkv_weight_final_copy = torch.empty_like(qkv_weight_final).copy_(
                 qkv_weight_final)
             qkv_weight_final_copy = torch_npu.npu_format_cast(
@@ -284,7 +284,7 @@ class AscendQwen2VisionTransformer(Qwen2VisionTransformer):
             (0, self.half_pad_hidden_size_per_attention_head, 0, 0)).reshape(
                 self.hidden_size, -1)
 
-        if is_enable_nz():
+        if is_enable_nz(out_weight.dtype):
             out_weight_copy = torch.empty_like(out_weight).copy_(out_weight)
             out_weight_copy = torch_npu.npu_format_cast(
                 out_weight_copy, ACL_FORMAT_FRACTAL_ND)
