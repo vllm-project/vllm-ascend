@@ -207,6 +207,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
 
+        # Sliding window attention for draft model
+        draft_window_size = getattr(self.speculative_config, 'draft_window_size', None)
+        if draft_window_size is None and self.vllm_config.additional_config:
+            draft_window_size = self.vllm_config.additional_config.get('draft_window_size')
+        if isinstance(draft_window_size, int):
+            self.draft_window_size = int(draft_window_size)
+            self.block_size = self.runner.block_size
+            self.window_blocks = (self.draft_window_size + self.block_size - 1) // self.block_size
+            # max needed blocks is window_blocks + 1 because tokens_to_cover can be
+            # up to W + B (when start_tokens is just inside a new block boundary)
+            self.max_window_blocks = self.window_blocks + 1
+            self._sliding_window_full_block_table: torch.Tensor | None = None
+            self._sliding_window_start_block_indices: torch.Tensor | None = None
+        else:
+            self.draft_window_size = None
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -406,10 +422,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if hasattr(self.model.model, "topk_indices_buffer"):
                 del self.model.model.topk_indices_buffer
             self.model.model.topk_indices_buffer = target_language_model.model.topk_indices_buffer
-            logger.info(
-                "Detecting MTP model with topk_indices_buffer."
-                "Sharing target model topk_indices_buffer with the draft model."
-            )
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -503,6 +515,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     : num_reqs * self.decode_threshold
                 ]
 
+            # Apply sliding window for graph capture so shapes match runtime
+            if self.draft_window_size is not None:
+                self._apply_sliding_window(common_attn_metadata, self.runner.seq_lens[:num_reqs].clone())
+
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
             # update the tensor's address for each step.
@@ -512,7 +528,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
                 common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][:num_reqs]
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
-                if self.pcp_size * self.dcp_size > 1 and draft_step > 0:
+                if self.draft_window_size is None and self.pcp_size * self.dcp_size > 1 and draft_step > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                     slicing_length = num_reqs * self.decode_threshold
                     common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:slicing_length]
@@ -582,6 +598,82 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _apply_sliding_window(self, common_attn_metadata, full_seq_lens):
+        """Apply sliding window to draft model attention metadata.
+
+        Limits the draft model's attention to the most recent W tokens by
+        cropping block_table_tensor and clamping seq_lens. The original full
+        block table is saved so that slot-mapping (KV-cache write indices)
+        can still use the full KV cache.
+        """
+        if self.draft_window_size is None:
+            return
+        full_block_table = common_attn_metadata.block_table_tensor
+        num_reqs = full_seq_lens.shape[0]
+        K = self.num_speculative_tokens
+        W = self.draft_window_size
+        B = self.block_size
+
+
+        # Final length L+K
+        final_seq_lens = full_seq_lens + K
+        # Window start token
+        start_tokens = (final_seq_lens - W).clamp(min=0)
+        # Align to block boundary
+        start_blocks = (start_tokens // B) * B
+        start_block_indices = (start_blocks // B).to(torch.int64)
+
+        # Dynamically calculate needed blocks per request to handle boundary
+        # misalignment. e.g., W=512, B=128, final_seq_lens=515, start_blocks=0
+        # needs ceil(515/128)=5 blocks, not fixed window_blocks=4.
+        tokens_to_cover = final_seq_lens - start_blocks
+        needed_blocks_per_req = ((tokens_to_cover + B - 1) // B).to(torch.int64)
+        max_needed_blocks = int(needed_blocks_per_req.max().item())
+
+
+        # Use fixed max_window_blocks so tensor shape is constant across
+        # dummy_run (graph capture) and runtime, avoiding ACL graph mismatch.
+        max_blocks = self.max_window_blocks
+        window_block_table = torch.zeros(
+            num_reqs, max_blocks,
+            dtype=full_block_table.dtype, device=full_block_table.device
+        )
+        for i in range(num_reqs):
+            start_idx = start_block_indices[i].item()
+            needed = min(needed_blocks_per_req[i].item(), max_blocks)
+            end_idx = start_idx + needed
+            if end_idx <= full_block_table.shape[1]:
+                window_block_table[i, :needed] = full_block_table[i, start_idx:end_idx]
+            else:
+                valid = full_block_table.shape[1] - start_idx
+                window_block_table[i, :valid] = full_block_table[i, start_idx:]
+
+        # Save original block table and start indices for slot-mapping
+        self._sliding_window_full_block_table = full_block_table
+        self._sliding_window_start_block_indices = start_block_indices
+
+        # Replace common_attn_metadata fields
+        common_attn_metadata.block_table_tensor = window_block_table
+        windowed_seq_lens = torch.min(
+            full_seq_lens,
+            torch.full_like(full_seq_lens, W)
+        )
+        common_attn_metadata.seq_lens = windowed_seq_lens
+        # Sync CPU-side mirrors so attention backends on host see the same lengths
+        if getattr(common_attn_metadata, "seq_lens_cpu", None) is not None:
+            common_attn_metadata.seq_lens_cpu = windowed_seq_lens.cpu()
+        if getattr(common_attn_metadata, "_seq_lens_cpu", None) is not None:
+            common_attn_metadata._seq_lens_cpu = windowed_seq_lens.cpu().clone()
+        if getattr(common_attn_metadata, "seq_lens_cpu_upper_bound", None) is not None:
+            common_attn_metadata.seq_lens_cpu_upper_bound = windowed_seq_lens.cpu().clone()
+
+        # Pre-fill seq_lens_group for multi-step loop
+        for step in range(K):
+            current_len = full_seq_lens + step
+            windowed_len = torch.min(current_len, torch.full_like(current_len, W))
+            self.seq_lens_group[step][:num_reqs].copy_(windowed_len)
+            self.seq_lens_group[step][num_reqs:].fill_(0)
+
     def _propose(
         self,
         # [num_tokens]
@@ -630,6 +722,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
         )
+
+        # Save original seq_lens and apply sliding window before any CP adjustments
+        full_seq_lens = common_attn_metadata.seq_lens.clone()
+        self._apply_sliding_window(common_attn_metadata, full_seq_lens)
+
         if self.pcp_size * self.dcp_size > 1:
             assert long_seq_args is not None
             query_lens_d, ori_token_indices_to_sample = long_seq_args
@@ -784,7 +881,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Clone the data so that when calculating the data at position 2 and position 3
         # in the merged graph, it does not affect position 1
         # FIXME(lilinsiman)
-        if self.pcp_size * self.dcp_size > 1 and self.use_cuda_graph:
+        if self.draft_window_size is None and self.pcp_size * self.dcp_size > 1 and self.use_cuda_graph:
             assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
             self.block_table_tensor_clone[: common_attn_metadata.block_table_tensor.shape[0]] = (
                 common_attn_metadata.block_table_tensor
@@ -1504,7 +1601,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # operations in case they are modified in next step's `prepare_input`
         # of main model.
         # Increment the sequence lengths.
-        common_attn_metadata.seq_lens[:batch_size] += 1
+        if self.draft_window_size is not None:
+            old_lens = common_attn_metadata.seq_lens[:batch_size].clone()
+            new_lens = common_attn_metadata.seq_lens[:batch_size] + 1
+            new_lens.clamp_(max=self.draft_window_size)
+            common_attn_metadata.seq_lens[:batch_size] = new_lens
+        else:
+            common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
         common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_max_model_len, 1)
@@ -1545,11 +1648,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 block_size = 128
 
             # Compute the slot mapping.
+            # When sliding window is enabled, block_table_tensor may be cropped
+            # for attention, but slot mapping needs the full block table to
+            # address the absolute KV cache positions.
+            if self.draft_window_size is not None and self._sliding_window_full_block_table is not None:
+                block_table_for_slot = self._sliding_window_full_block_table
+            else:
+                block_table_for_slot = old_common_metadata.block_table_tensor
+
             if self.uses_mrope:
                 block_numbers = clamped_positions[0] // block_size
             else:
                 block_numbers = clamped_positions // block_size
-            block_ids = old_common_metadata.block_table_tensor.gather(dim=1, index=block_numbers.view(-1, 1))
+            block_ids = block_table_for_slot.gather(dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             if self.uses_mrope:
                 slot_mapping = block_ids * block_size + clamped_positions[0] % block_size
