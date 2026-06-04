@@ -1,0 +1,9 @@
+{
+  "local_hostname": "127.0.0.1",
+  "metadata_server": "P2PHANDSHAKE",
+  "protocol": "ascend",
+  "device_name": "",
+  "use_ascend_direct": true,
+  "master_server_address": "127.0.0.1:50088",
+  "global_segment_size": 274877906944
+}

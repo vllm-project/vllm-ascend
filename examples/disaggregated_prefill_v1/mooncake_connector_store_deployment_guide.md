@@ -17,20 +17,26 @@
     **load_async**:Whether to Enable Asynchronous Loading. The default value is false.
     **register_buffer**:Whether to Register Video Memory with the Backend. Registration is Not Required When Used with MooncakeConnectorV1; It is Required in All Other Cases. The Default Value is false.
 
-## run mooncake master
+## Run Mooncake Master
 
-### 1.Configure mooncake.json
+Start the Mooncake master service before running any online serving script or
+offline script that uses the Mooncake-backed KV cache backend.
 
-The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path where mooncake.json is located.
+### 1. Configure mooncake.example.json
+
+The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
+where the Mooncake JSON config is located. A single-node example is provided in
+`examples/disaggregated_prefill_v1/mooncake.example.json`.
 
 ```
 {
-    "local_hostname": "xx.xx.xx.xx",
+    "local_hostname": "127.0.0.1",
     "metadata_server": "P2PHANDSHAKE",
     "protocol": "ascend",
     "device_name": "",
-    "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": 30000000000
+    "use_ascend_direct": true,
+    "master_server_address": "127.0.0.1:50088",
+    "global_segment_size": 274877906944
 }
 ```
 
@@ -43,11 +49,17 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 
 ### 2. Start mooncake_master
 
-Under the mooncake folder:
+Use the provided startup template:
 
 ```
-mooncake_master --port 50088
+cd examples/disaggregated_prefill_v1
+export MOONCAKE_CONFIG_PATH="${PWD}/mooncake.example.json"
+bash start_mooncake_master.sh
 ```
+
+For multi-node deployments, copy `mooncake.example.json` and set
+`local_hostname` and `master_server_address` to the reachable IP address and
+port of the Mooncake master node.
 
 ## Pooling and Prefill Decode Disaggregate Scenario
 
@@ -66,7 +78,7 @@ The content of the multi_producer.sh script:
 ```
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
-export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
+export MOONCAKE_CONFIG_PATH="/path/to/mooncake.example.json"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ASCEND_TRANSPORT_PRINT=1
@@ -129,7 +141,7 @@ The content of multi_consumer.sh:
 ```
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
-export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
+export MOONCAKE_CONFIG_PATH="/path/to/mooncake.example.json"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
 export ACL_OP_INIT_MODE=1
@@ -230,7 +242,7 @@ Content of mixed_department.sh:
 ```
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
-export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
+export MOONCAKE_CONFIG_PATH="/path/to/mooncake.example.json"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ACL_OP_INIT_MODE=1

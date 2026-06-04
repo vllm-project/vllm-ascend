@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
-export MOONCAKE_CONFIG_PATH="${MOONCAKE_CONFIG_PATH:-${SCRIPT_DIR}/../../../mooncake.json}"
+export MOONCAKE_CONFIG_PATH="${MOONCAKE_CONFIG_PATH:-${SCRIPT_DIR}/../disaggregated_prefill_v1/mooncake.example.json}"
 export PYTHONPATH="${PYTHONPATH:-}:${SCRIPT_DIR}/../../../vllm-ascend/"
 export PYTHONPATH="${PYTHONPATH}:${SCRIPT_DIR}/../../../vllm/"
 export MODEL_PATH="${MODEL_PATH:-${SCRIPT_DIR}}"

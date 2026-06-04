@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
 export LD_LIBRARY_PATH="${ASCEND_TOOLKIT_PATH:-/usr/local/Ascend/ascend-toolkit/latest}/python/site-packages:${LD_LIBRARY_PATH:-}"
+export MOONCAKE_CONFIG_PATH="${MOONCAKE_CONFIG_PATH:-${SCRIPT_DIR}/../../../examples/disaggregated_prefill_v1/mooncake.example.json}"
 export PYTHONPATH="${PYTHONPATH:-}:${SCRIPT_DIR}/../../../../vllm-ascend/"
 export PYTHONPATH="${PYTHONPATH}:${SCRIPT_DIR}/../../../../vllm/"
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1}"

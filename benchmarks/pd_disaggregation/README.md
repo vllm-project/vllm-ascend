@@ -11,7 +11,7 @@ processes such as `bash`, `python3`, or `vllm`:
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1
-export MOONCAKE_CONFIG_PATH=/path/to/mooncake.json
+export MOONCAKE_CONFIG_PATH=/path/to/mooncake.example.json
 export MODEL_PATH=/path/to/model
 export DATASET_PATH=/path/to/dataset.json
 ```
@@ -26,6 +26,22 @@ ASCEND_RT_VISIBLE_DEVICES=0 MODEL_PATH=/path/to/model bash mix_pd_serve.sh
 To make the settings persistent, add the `export ...` lines to `~/.bashrc` or
 your shell profile, then reload it with `source ~/.bashrc`.
 
+## Start Mooncake Master
+
+The online serving scripts use Mooncake-backed KV transfer. Start the Mooncake
+master service before running any serving or benchmark flow:
+
+```bash
+cd examples/disaggregated_prefill_v1
+export MOONCAKE_CONFIG_PATH="${PWD}/mooncake.example.json"
+bash start_mooncake_master.sh
+```
+
+For multi-node runs, copy `mooncake.example.json` and set
+`local_hostname` and `master_server_address` to the reachable IP address and
+port of the Mooncake master node. The default `127.0.0.1:50088` is for
+single-node local testing.
+
 ## Fuxi Alpha / HSTU Flow
 
 Start the serving process:
@@ -33,7 +49,7 @@ Start the serving process:
 ```bash
 cd benchmarks/pd_disaggregation/gr
 ASCEND_RT_VISIBLE_DEVICES=0 \
-MOONCAKE_CONFIG_PATH=/path/to/mooncake.json \
+MOONCAKE_CONFIG_PATH=/path/to/mooncake.example.json \
 MODEL_PATH=/path/to/vllm-ascend/examples/fuxi_alpha \
 bash mix_pd_serve.sh
 ```
@@ -80,6 +96,9 @@ bash mix_pd_benchmark.sh
 - `MODEL_PATH`: local model path.
 - `DATASET_PATH`: benchmark dataset path.
 - `MOONCAKE_CONFIG_PATH`: Mooncake configuration path.
+- `MOONCAKE_PORT`: Mooncake master port used by
+  `examples/disaggregated_prefill_v1/start_mooncake_master.sh`. Defaults to
+  `50088`.
 - `VLLM_TORCH_PROFILER_DIR`: optional profiler output directory.
 - `RESULT_DIR`: benchmark result directory.
 - `PORT`: serving port.

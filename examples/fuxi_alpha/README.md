@@ -13,7 +13,7 @@ processes such as `bash`, `python3`, or `vllm`:
 export ASCEND_RT_VISIBLE_DEVICES=0
 export MODEL_PATH=/path/to/fuxi_alpha_model_or_this_directory
 export DATASET_PATH=/path/to/kuairand/dataset
-export MOONCAKE_CONFIG_PATH=/path/to/mooncake.json
+export MOONCAKE_CONFIG_PATH=/path/to/mooncake.example.json
 export LIB_FBGEMM_NPU_API_SO_PATH=/path/to/libfbgemm_npu_api.so
 ```
 
@@ -27,6 +27,22 @@ ASCEND_RT_VISIBLE_DEVICES=0 MODEL_PATH=/path/to/model bash run_model.sh
 To make the settings persistent, add the `export ...` lines to `~/.bashrc` or
 your shell profile, then reload it with `source ~/.bashrc`.
 
+## Start Mooncake Master
+
+This offline demo uses the Mooncake KV cache backend. Start the Mooncake
+master service before running `run_model.sh` or `run.sh`:
+
+```bash
+cd ../disaggregated_prefill_v1
+export MOONCAKE_CONFIG_PATH="${PWD}/mooncake.example.json"
+bash start_mooncake_master.sh
+```
+
+For multi-node runs, copy `mooncake.example.json` and set
+`local_hostname` and `master_server_address` to the reachable IP address and
+port of the Mooncake master node. The default `127.0.0.1:50088` is for
+single-node local testing.
+
 ## Run The Demo
 
 ```bash
@@ -34,7 +50,7 @@ cd examples/fuxi_alpha
 ASCEND_RT_VISIBLE_DEVICES=0 \
 MODEL_PATH=/path/to/fuxi_alpha_model_or_this_directory \
 DATASET_PATH=/path/to/kuairand/dataset \
-MOONCAKE_CONFIG_PATH=/path/to/mooncake.json \
+MOONCAKE_CONFIG_PATH=/path/to/mooncake.example.json \
 bash run_model.sh
 ```
 
@@ -108,6 +124,9 @@ The generated decode prompt file can be passed to
 
 - `ASCEND_RT_VISIBLE_DEVICES`: NPU device list.
 - `MOONCAKE_CONFIG_PATH`: Mooncake configuration path.
+- `MOONCAKE_PORT`: Mooncake master port used by
+  `examples/disaggregated_prefill_v1/start_mooncake_master.sh`. Defaults to
+  `50088`.
 - `VLLM_TORCH_PROFILER_DIR`: profiler output directory.
 - `HSTU_PROMPT_OUTPUT_DIR`: output directory for generated prompt JSONL files.
 - `HSTU_PROMPT_USER_NUM`: number of users used for generated prompts.

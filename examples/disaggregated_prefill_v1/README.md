@@ -8,6 +8,23 @@ This demo document provides instructions for running a disaggregated vLLM-ascend
 - Network interfaces configured for distributed communication (eg: eth0)
 - Model weights located at `/models/deepseek_r1_w8a8`
 
+## Start Mooncake Master
+The Mooncake-backed online and offline examples require a running Mooncake
+master service before starting vLLM serving processes or offline scripts.
+
+Use the provided local template for single-node testing:
+
+```shell
+cd /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/
+export MOONCAKE_CONFIG_PATH="${PWD}/mooncake.example.json"
+bash start_mooncake_master.sh
+```
+
+For multi-node deployments, copy `mooncake.example.json` and update
+`local_hostname` and `master_server_address` to the reachable IP address and
+port of the Mooncake master node. The default port is `50088` and can be
+overridden with `MOONCAKE_PORT`.
+
 ## Rank table generation
 The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to nodes. The following command generates a rank table for all nodes with 16 cards prefill and 16 cards decode:
 
