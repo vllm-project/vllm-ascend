@@ -21,14 +21,17 @@ test_cases:
       - "--port"
       - "$SERVER_PORT"
       - "--max-num-seqs"
-      - "128"
+      - "32"
       - "--quantization"
       - "ascend"
       - "--max-model-len"
-      - "128000"
+      - "196608"
       - "--max-num-batched-tokens"
       - "16384"
       - "--trust-remote-code"
+      - "--async-scheduling"
+      - "--allowed-local-media-path"
+      - "/"
       - "--gpu-memory-utilization"
       - "0.9"
       - "--additional-config"
@@ -45,10 +48,18 @@ test_cases:
         dataset_path: vllm-ascend/aime2025
         request_conf: vllm_api_general_chat
         dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-        max_out_len: 32768
+        max_out_len: 65536
         batch_size: 32
         baseline: 90
         threshold: 5
+        ignore_eos: false
+        thinking: true
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
