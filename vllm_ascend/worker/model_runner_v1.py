@@ -43,6 +43,7 @@ from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_moe import routed_experts_capturer
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
@@ -51,6 +52,7 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1 import outputs as vllm_outputs
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -80,9 +82,6 @@ from vllm.v1.outputs import (
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
-
-if not vllm_version_is("0.21.0"):
-    from vllm.v1.outputs import RoutedExpertsLists
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
@@ -1684,7 +1683,10 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        if self.vllm_config.model_config.enable_return_routed_experts:
+        if (
+            self.vllm_config.model_config.enable_return_routed_experts
+            and not vllm_version_is("0.21.0")
+        ):
             if self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
 
@@ -2199,6 +2201,18 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
         )
 
+        if vllm_version_is("0.21.0") and self.routed_experts_initialized:
+            issue_routing_d2h_copy = getattr(
+                routed_experts_capturer,
+                "issue_routing_d2h_copy",
+            )
+            issue_routing_d2h_copy(
+                input_batch_req_ids=self.input_batch.req_ids,
+                num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                positions=self.positions,
+                positions_cpu=self._positions_cpu,
+            )
+
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
                 input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
@@ -2249,9 +2263,29 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
+        routed_experts_dict = None
         routed_experts_lists = None
-        if self.model_config.enable_return_routed_experts:
-            if self.routed_experts_initialized:
+        if (
+            self.model_config.enable_return_routed_experts
+            and self.routed_experts_initialized
+        ):
+            if vllm_version_is("0.21.0"):
+                extract_routed_experts = getattr(
+                    routed_experts_capturer,
+                    "extract_routed_experts_for_current_batch",
+                )
+                routed_experts_dict = extract_routed_experts(
+                    req_ids=req_ids_output_copy,
+                    requests=self.requests,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    num_tokens_no_spec=self.input_batch.num_tokens_no_spec,
+                    max_model_len=self.max_model_len,
+                )
+            else:
+                routed_experts_lists_cls = getattr(
+                    vllm_outputs,
+                    "RoutedExpertsLists",
+                )
                 buf = self.routed_experts_capturer.get_device_buffer()
                 total = scheduler_output.total_num_scheduled_tokens
                 self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
@@ -2260,7 +2294,7 @@ class NPUModelRunner(GPUModelRunner):
                     non_blocking=True,
                 )
                 torch.npu.current_stream().synchronize()
-                routed_experts_lists = RoutedExpertsLists(
+                routed_experts_lists = routed_experts_lists_cls(
                     routing_data=self.routed_experts_cpu[:total].numpy(),
                     slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
                 )
@@ -2276,7 +2310,9 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
             **(
-                {"routed_experts": routed_experts_lists} if not vllm_version_is("0.21.0") else {}
+                {"routed_experts_dict": routed_experts_dict}
+                if vllm_version_is("0.21.0")
+                else {"routed_experts": routed_experts_lists}
             ),
         )
         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
@@ -2824,7 +2860,11 @@ class NPUModelRunner(GPUModelRunner):
                     slot_mapping,
                     kv_cache_gid,
                 )
-            if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
+            if (
+                self.model_config.enable_return_routed_experts
+                and not vllm_version_is("0.21.0")
+                and kv_cache_gid == 0
+            ):
                 if self.routed_experts_initialized:
                     # snapshot slot_mapping into a private device
                     # buffer so the next ``_prepare_inputs`` does not

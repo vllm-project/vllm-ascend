@@ -23,13 +23,47 @@ import logging
 
 import torch
 import torch.distributed as dist
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.fused_moe import routed_experts_capturer
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 
 logger = logging.getLogger(__name__)
+
+
+def _get_dp_rank(capturer: RoutedExpertsCapturer) -> int:
+    dp_rank = getattr(capturer, "dp_rank", None)
+    if dp_rank is not None:
+        return dp_rank
+    try:
+        return get_dp_group().rank_in_group
+    except Exception:
+        return 0
+
+
+def _get_tp_size(capturer: RoutedExpertsCapturer) -> int:
+    tp_size = getattr(capturer, "tp_size", None)
+    if tp_size is not None:
+        return tp_size
+    try:
+        return get_tp_group().world_size
+    except Exception:
+        return 1
+
+
+def _get_device_buffer(
+    capturer: RoutedExpertsCapturer,
+) -> tuple[torch.Tensor | None, bool]:
+    device_buffer = getattr(capturer, "device_buffer", None)
+    if device_buffer is not None:
+        return device_buffer, False
+
+    device_cache = getattr(capturer, "device_cache", None)
+    if device_cache is None:
+        return None, False
+    return getattr(device_cache, "buffer", None), True
 
 
 def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
@@ -67,13 +101,15 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
     """
 
     ctx = get_forward_context()
+    dp_rank = _get_dp_rank(self)
+    tp_size = _get_tp_size(self)
     if ctx.dp_metadata is None:  # single dp
         start_loc = 0
         end_loc = topk_ids.shape[0]
         token_num_per_dp = topk_ids.shape[0]
     else:  # multi dp
         num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
-        token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
+        token_num_per_dp = int(num_tokens_dp[dp_rank].item())
         total = int(num_tokens_dp.sum().item())
         n = topk_ids.shape[0]
 
@@ -91,7 +127,7 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
             # before routing. This rank owns tokens
             # [end_loc - token_num_per_dp, end_loc).
             cumsum = torch.cumsum(num_tokens_dp, dim=0)
-            end_loc = int(cumsum[self.dp_rank].item())
+            end_loc = int(cumsum[dp_rank].item())
             start_loc = end_loc - token_num_per_dp
         elif n == token_num_per_dp:
             # Modular-kernel path: DP combine happens inside
@@ -113,18 +149,18 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
             # start_loc = 0 * 7 = 0
             # end_loc = 0 + 5 = 5 (only first 5 tokens are valid)
 
-            start_loc = self.dp_rank * max_tokens
+            start_loc = dp_rank * max_tokens
             end_loc = start_loc + token_num_per_dp
         elif (
-            self.tp_size > 1
+            tp_size > 1
             and n != token_num_per_dp
             and (
                 # all2all scenario use tensor split, different tp rank have different
                 # size of tokens.
-                n == (token_num_per_dp + self.tp_size - 1) // self.tp_size
-                or n == token_num_per_dp // self.tp_size
+                n == (token_num_per_dp + tp_size - 1) // tp_size
+                or n == token_num_per_dp // tp_size
                 # mc2 scenario will pad dp tokens to max_tokens and then ceil-div.
-                or n == (max_tokens + self.tp_size - 1) // self.tp_size
+                or n == (max_tokens + tp_size - 1) // tp_size
             )
         ):
             # SP + modular-kernel path. All-gather across the TP
@@ -151,38 +187,60 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
             if _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL:
                 gather_topk_ids_shape = (
                     (token_num_per_dp, topk_ids.shape[1])
-                    if token_num_per_dp >= self.tp_size
-                    else (self.tp_size, topk_ids.shape[1])
+                    if token_num_per_dp >= tp_size
+                    else (tp_size, topk_ids.shape[1])
                 )
             # mc2 scenario in vllm-ascend
             else:
-                gather_topk_ids_shape = (n * self.tp_size, topk_ids.shape[1])
+                gather_topk_ids_shape = (n * tp_size, topk_ids.shape[1])
 
             gather_topk_ids = torch.empty(
                 gather_topk_ids_shape,
                 dtype=topk_ids.dtype,
                 device=topk_ids.device,
             )
-            split_topk_ids = torch.tensor_split(gather_topk_ids, self.tp_size, dim=0)
+            split_topk_ids = torch.tensor_split(gather_topk_ids, tp_size, dim=0)
             dist.all_gather(list(split_topk_ids), topk_ids, get_tp_group().device_group)
             topk_ids = gather_topk_ids
             start_loc = 0
             end_loc = token_num_per_dp
         else:
-            sp_expected = (token_num_per_dp + self.tp_size - 1) // self.tp_size if self.tp_size > 0 else -1
+            sp_expected = (token_num_per_dp + tp_size - 1) // tp_size if tp_size > 0 else -1
             raise AssertionError(
                 "RoutedExpertsCapturer: unexpected topk_ids batch "
                 f"dim {n} (expected {total}, {token_num_per_dp}, "
                 f"{total_with_padding}, or {sp_expected} for "
-                f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
+                f"dp_rank={dp_rank}, tp_size={tp_size})"
             )
+
+    device_buffer, layers_first = _get_device_buffer(self)
+    if device_buffer is None:
+        return
 
     # Defensive: model may expose more layers than the capture buffer
     # was sized for (unusual, but guards against miss-config).
-    if layer_id >= self.device_buffer.shape[1]:
-        return
+    if layers_first:
+        if layer_id >= device_buffer.shape[0]:
+            return
+        device_buffer[layer_id, :token_num_per_dp, :].copy_(
+            topk_ids[start_loc:end_loc, :],
+            non_blocking=True,
+        )
+    else:
+        if layer_id >= device_buffer.shape[1]:
+            return
 
-    self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[start_loc:end_loc, :]
+        device_buffer[:token_num_per_dp, layer_id, :].copy_(
+            topk_ids[start_loc:end_loc, :],
+            non_blocking=True,
+        )
 
 
 RoutedExpertsCapturer.capture = capture
+_RealRoutedExpertsCapturer = getattr(
+    routed_experts_capturer,
+    "_RoutedExpertsCapturerReal",
+    None,
+)
+if _RealRoutedExpertsCapturer is not None:
+    _RealRoutedExpertsCapturer.capture = capture
