@@ -238,7 +238,13 @@ class KVCacheSendingThread(threading.Thread):
             device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
             handshake_port = self.side_channel_port + device_index
             path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
-            logger.info("Starting listening on path: %s", path)
+            logger.info(
+                "MOONCAKE_DIAG sender_listen: path=%s device_index=%d "
+                "pp=%d tp=%d pcp=%d prefill_tp=%d side_port=%d",
+                path, device_index,
+                self.pp_rank, self.tp_rank, self.pcp_rank,
+                self.prefill_tp_size, self.side_channel_port,
+            )
             with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
                 self.ready_event.set()
                 self.run_busy_loop(sock)
@@ -596,10 +602,17 @@ class KVCacheRecvingThread(threading.Thread):
         block_length = len(self.block_len)
         logger.info(
             "MOONCAKE_DIAG transfer: first_layer=%d end_layer=%d num_cache_per_layer=%d "
-            "block_len=%s inner_block_len=%d num_transfer_groups=%d",
+            "block_len=%s inner_block_len=%d num_transfer_groups=%d "
+            "offset=%d pp_rank=%d inner_off=%d tp_need=%d",
             first_layer_index, end_layer_index, num_cache_per_layer,
             self.block_len, self.block_len[0] // tp_num_need_pulls if self.block_len else 0,
             num_transfer_groups,
+            offset, prefill_pp_rank, inner_offset, tp_num_need_pulls,
+        )
+        logger.info(
+            "MOONCAKE_DIAG transfer_blocks: remote_blocks=%s local_blocks=%s",
+            str(grouped_remote_block_ids[:8]) + ("..." if len(grouped_remote_block_ids) > 8 else ""),
+            str(grouped_local_block_ids[:8]) + ("..." if len(grouped_local_block_ids) > 8 else ""),
         )
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
             zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
@@ -614,22 +627,31 @@ class KVCacheRecvingThread(threading.Thread):
                 dst_list.append(dst)
                 length_list.append(length)
 
+        # Log first few src/dst addresses to verify direction
+        n = min(len(src_list), 3)
+        log_src = ", ".join(f"0x{x:x}" for x in src_list[:n])
+        log_dst = ", ".join(f"0x{x:x}" for x in dst_list[:n])
+        log_len = ", ".join(str(l) for l in length_list[:n])
+        logger.info(
+            "MOONCAKE_DIAG transfer_addrs: session=%s "
+            "src=[%s] dst=[%s] len=[%s] total_desc=%d total_bytes=%d",
+            session_id, log_src, log_dst, log_len,
+            len(src_list), sum(length_list),
+        )
+
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
-            logger.error("Mooncake transfer failed for request %s", req_meta["remote_request_id"])
+            logger.error("MOONCAKE_DIAG transfer FAILED: req=%s ret=%d", req_meta["remote_request_id"], ret)
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
         logger.info(
-            "KV cache transfer for request %s took %.2f ms (%d groups,"
-            " %d blocks). local_ip %s local_device_id %s remote_session_id %s",
+            "MOONCAKE_DIAG transfer_ok: req=%s took=%.2fms groups=%d blocks=%d session=%s",
             remote_request_id,
             req_transfer_elapsed,
             num_transfer_groups,
             num_blocks,
-            get_ip(),
-            self.tp_rank,
             session_id,
         )
 
@@ -827,6 +849,7 @@ class KVCacheRecvingThread(threading.Thread):
     def _get_remote_socket(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore
         """Get a socket to the remote host."""
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
+        logger.info("MOONCAKE_DIAG get_remote_socket: connecting to %s", remote_path)
         with self.remote_sockets_lock:
             if self.remote_sockets[remote_path]:
                 return self.remote_sockets[remote_path].popleft()
@@ -1166,11 +1189,20 @@ class MooncakeConnectorScheduler:
         Args:
             metadata (dict): the handshake metadata to set.
         """
+        logger.info("MOONCAKE_DIAG set_xfer: receiving %d entries", len(metadata) if metadata else 0)
         for local_rank, rank_metadata in metadata.items():
+            logger.info(
+                "MOONCAKE_DIAG set_xfer: key=%s -> host=%s engine=%s",
+                local_rank, rank_metadata.local_ip, rank_metadata.engine_id,
+            )
             self.multi_nodes_meta_mapping[str(local_rank)] = {
                 "host": rank_metadata.local_ip,
                 "engine_id": rank_metadata.engine_id,
             }
+        logger.info(
+            "MOONCAKE_DIAG set_xfer_done: mapped %d entries",
+            len(self.multi_nodes_meta_mapping),
+        )
 
 
 class MooncakeConnectorWorker:
@@ -1263,6 +1295,14 @@ class MooncakeConnectorWorker:
         self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
         assert self._decode_pp_size == 1, "decode pp size must be 1"
         self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+        logger.info(
+            "MOONCAKE_DIAG config: prefill_tp=%d prefill_pp=%d prefill_dp=%d "
+            "decode_tp=%d decode_dp=%d my_tp=%d my_pp=%d dp_rank=%s",
+            self._prefill_tp_size, self._prefill_pp_size, self._prefill_dp_size,
+            self._decode_tp_size, self._decode_dp_size,
+            self.tp_size, self.pp_size,
+            getattr(vllm_config.parallel_config, 'data_parallel_rank', '?'),
+        )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
@@ -1331,6 +1371,14 @@ class MooncakeConnectorWorker:
             local_ip=get_ip(),
         )
         self.xfer_handshake_metadata = metadata
+        logger.info(
+            "MOONCAKE_DIAG register_done: role=%s engine=%s host=%s port=%d "
+            "tp_rank=%d/%d pp_rank=%d num_blocks=%d block_len=%s",
+            self.kv_role, self.engine_id,
+            self.side_channel_host, self.side_channel_port,
+            self.tp_rank, self.tp_size, self.pp_rank,
+            self.num_blocks, str(self.block_len),
+        )
 
         ready_event = threading.Event()
         if self.kv_role == "kv_producer":
@@ -1735,9 +1783,22 @@ class MooncakeConnectorWorker:
     ):
         rank = str(remote_handshake_port - base_port)
         if remote_multi_nodes_meta_mapping is None or remote_multi_nodes_meta_mapping.get(rank) is None:
+            logger.info(
+                "MOONCAKE_DIAG host_lookup: base=%d handshake=%d rank=%s -> "
+                "NO_MAPPING, fallback host=%s",
+                base_port, remote_handshake_port, rank, remote_host,
+            )
             return remote_host, remote_engine_id
         info = remote_multi_nodes_meta_mapping[rank]
-        return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
+        dest_host = info.get("host", remote_host)
+        logger.info(
+            "MOONCAKE_DIAG host_lookup: base=%d handshake=%d rank=%s -> "
+            "mapped=%s dest_host=%s",
+            base_port, remote_handshake_port, rank,
+            "YES" if dest_host != remote_host else "SAME",
+            dest_host,
+        )
+        return dest_host, info.get("engine_id", remote_engine_id)
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
         return sum(self._get_remote_ranks_for_req(req_id), [])
@@ -1811,11 +1872,18 @@ class MooncakeConnectorWorker:
             sampled_nums.append(group)
         logger.info(
             "MOONCAKE_DIAG remote_ranks: req=%s prefill_tp=%d decode_tp=%d "
-            "pp_size=%d tp_num_need_pulls=%d result=%s",
+            "pp_size=%d tp_num_need_pulls=%d result_len=%d",
             req_id, prefill_tp_size, self._decode_tp_size,
             self._prefill_pp_size, self._get_tp_num_need_pulls(prefill_tp_size),
-            sampled_nums,
+            len(sampled_nums),
         )
+        if sampled_nums and self.tp_rank < len(sampled_nums):
+            my_chosen = sampled_nums[self.tp_rank]
+            logger.info(
+                "MOONCAKE_DIAG remote_ranks_me: tp_rank=%d chosen=%s",
+                self.tp_rank,
+                str(my_chosen[:16]) + ("..." if len(my_chosen) > 16 else ""),
+            )
         return sampled_nums
 
 
