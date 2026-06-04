@@ -182,37 +182,11 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         run: |
-          echo -e "\033[1;34m=== TEST INFO ===\033[0m"
-          echo -e "  \033[33mDevice:\033[0m ${{ matrix.group.npu_type }}"
-          if [ "${{ matrix.group.npu_type }}" != "cpu" ]; then
-            echo -e "  \033[33mNPU count:\033[0m ${{ matrix.group.num_npus }}"
-          fi
-          echo -e "  \033[33mTargets:\033[0m"
-          for target in ${{ matrix.group.tests }}; do
-            echo -e "    \033[32m-\033[0m ${target}"
-          done
-          echo -e "\033[1;34m====================\033[0m"
-          failed=0
-          aclgraph_capture_replay="tests/e2e/pull_request/full/two_cards/test_aclgraph_capture_replay.py"
-          run_aclgraph_capture_replay=0
-          for target in ${{ matrix.group.tests }}; do
-            if [ "${target}" = "${aclgraph_capture_replay}" ]; then
-              run_aclgraph_capture_replay=1
-              continue
-            fi
-            echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
-            if ! pytest -sv --color=yes "${target}"; then
-              failed=1
-            fi
-          done
-          if [ "${run_aclgraph_capture_replay}" = "1" ]; then
-            pip uninstall -y triton-ascend triton
-            echo -e "\033[1;34m=== Running target: ${aclgraph_capture_replay} ===\033[0m"
-            if ! pytest -sv --color=yes "${aclgraph_capture_replay}"; then
-              failed=1
-            fi
-          fi
-          exit "${failed}"
+          .github/workflows/scripts/run_selected_tests.sh \
+            "${{ matrix.group.npu_type }}" \
+            "${{ matrix.group.num_npus }}" \
+            "with-device" \
+            ${{ matrix.group.tests }}
 
       - name: Run selected tests without device
         if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
@@ -221,22 +195,19 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          .github/workflows/scripts/run_selected_tests.sh \
+            "${{ matrix.group.npu_type }}" \
+            "${{ matrix.group.num_npus }}" \
+            "without-device" \
+            ${{ matrix.group.tests }}
 
-          echo -e "\033[1;34m=== TEST INFO ===\033[0m"
-          echo -e "  \033[33mDevice:\033[0m ${{ matrix.group.npu_type }}"
-          if [ "${{ matrix.group.npu_type }}" != "cpu" ]; then
-            echo -e "  \033[33mNPU count:\033[0m ${{ matrix.group.num_npus }}"
-          fi
-          echo -e "  \033[33mTargets:\033[0m"
-          for target in ${{ matrix.group.tests }}; do
-            echo -e "    \033[32m-\033[0m ${target}"
-          done
-          echo -e "\033[1;34m====================\033[0m"
-          failed=0
-          for target in ${{ matrix.group.tests }}; do
-            echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
-            if ! pytest -sv --color=yes "${target}"; then
-              failed=1
-            fi
-          done
-          exit "${failed}"
+      - name: Upload selected test logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: selected-test-logs-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
+          path: ${{ runner.temp }}/selected-tests-*
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
