@@ -107,12 +107,22 @@ _E2E_DIR_PATTERNS: list[tuple[re.Pattern, NpuType, int]] = [
 ]
 
 
+def _as_posix_path(path: str) -> str:
+    return path.replace("\\", "/")
+
+
+def _pytest_node_file_path(path: str) -> str:
+    """Return the real file path for a pytest nodeid target."""
+    return path.split("::", 1)[0]
+
+
 def _route_e2e_file(file_path: str) -> RunnerKey | None:
-    if "_310p" in Path(file_path).name:
-        if "/four_card/" in file_path:
+    route_path = _as_posix_path(_pytest_node_file_path(file_path))
+    if "_310p" in Path(route_path).name:
+        if "/four_card/" in route_path:
             return (4, NpuType._310P)
         return (1, NpuType._310P)
-    return _route_e2e_dir(file_path)
+    return _route_e2e_dir(route_path)
 
 
 def _load_runners() -> list[RunnerInfo]:
@@ -240,8 +250,31 @@ def _collect_test_dirs(
     return result
 
 
+def _configured_nodeid_targets_for_file(file_path: str, config: list[dict]) -> list[str]:
+    file_path = _as_posix_path(_pytest_node_file_path(file_path))
+    targets: list[str] = []
+    seen: set[str] = set()
+    for module in config:
+        for test_target in module.get("tests", []):
+            test_target = test_target.rstrip("/")
+            if "::" not in test_target:
+                continue
+            target_file = _as_posix_path(_pytest_node_file_path(test_target))
+            if target_file == file_path and test_target not in seen:
+                targets.append(test_target)
+                seen.add(test_target)
+    return targets
+
+
+def _is_skipped_test_target(target: str, skip_tests: set[str]) -> bool:
+    target = target.rstrip("/")
+    return target in skip_tests or _pytest_node_file_path(target) in skip_tests
+
+
 def _route_ut_dir(dir_path: str) -> RunnerKey:
+    dir_path = _pytest_node_file_path(dir_path)
     normalized = dir_path if dir_path.endswith("/") else dir_path + "/"
+    normalized = _as_posix_path(normalized)
     for pattern, npu_type, num_npus in _UT_DIR_PATTERNS:
         if pattern.search(normalized):
             return (num_npus, npu_type)
@@ -249,6 +282,7 @@ def _route_ut_dir(dir_path: str) -> RunnerKey:
 
 
 def _route_e2e_dir(dir_path: str) -> RunnerKey | None:
+    dir_path = _as_posix_path(dir_path)
     for pattern, npu_type, num_npus in _E2E_DIR_PATTERNS:
         if pattern.search(dir_path):
             return (num_npus, npu_type)
@@ -256,11 +290,11 @@ def _route_e2e_dir(dir_path: str) -> RunnerKey | None:
 
 
 def _is_ut_path(path: str) -> bool:
-    return path.startswith("tests/ut/")
+    return path == "tests/ut" or path.startswith("tests/ut/")
 
 
 def _is_e2e_path(path: str) -> bool:
-    return path.startswith("tests/e2e/")
+    return path == "tests/e2e" or path.startswith("tests/e2e/")
 
 
 def _scan_ut_test_dir(
@@ -276,13 +310,14 @@ def _scan_ut_test_dir(
     Always emits individual file paths to avoid test pollution when pytest
     runs a whole directory.
     """
-    path = Path(dir_path)
+    path = Path(_pytest_node_file_path(dir_path))
     if not path.exists():
         groups[_DEFAULT_KEY].append(dir_path)
         return
 
     if path.is_file():
-        groups[_DEFAULT_KEY].append(dir_path)
+        key = _route_ut_dir(dir_path)
+        groups[key].append(dir_path)
         return
 
     for f in sorted(path.rglob("test_*.py")):
@@ -301,7 +336,7 @@ def _scan_e2e_test_dir(
     *dir_path* may be either a directory (all ``test_*.py`` under it are
     collected) or a single test file.
     """
-    path = Path(dir_path)
+    path = Path(_pytest_node_file_path(dir_path))
     if not path.exists():
         return
 
@@ -487,12 +522,19 @@ def main():
         action="store_true",
         help="Run all CPU UT tests regardless of module filtering",
     )
+    parser.add_argument(
+        "--run-all-modules",
+        action="store_true",
+        help="Run tests for all configured modules regardless of changed files",
+    )
 
     args = parser.parse_args()
     config = _resolve_config_inheritance(yaml.safe_load(args.config.read_text()))
 
     changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
-    matched_modules = _match_modules(changed_files, config)
+    matched_modules = (
+        [module["name"] for module in config] if args.run_all_modules else _match_modules(changed_files, config)
+    )
     test_dirs = _collect_test_dirs(matched_modules, config)
 
     skip_tests: set[str] = set()
@@ -503,7 +545,9 @@ def main():
     changed_test_files = [
         f
         for f in changed_files
-        if (_is_ut_path(f) or _is_e2e_path(f)) and Path(f).name.startswith("test_") and Path(f).exists()
+        if (_is_ut_path(f) or _is_e2e_path(f))
+        and Path(_pytest_node_file_path(f)).name.startswith("test_")
+        and Path(_pytest_node_file_path(f)).exists()
     ]
 
     ut_dirs = [d for d in test_dirs if _is_ut_path(d)]
@@ -512,7 +556,7 @@ def main():
     all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
 
     for dir_path in ut_dirs:
-        p = Path(dir_path)
+        p = Path(_pytest_node_file_path(dir_path))
         if p.is_file():
             key = _route_ut_dir(dir_path)
             all_groups[key].append(dir_path)
@@ -524,7 +568,7 @@ def main():
         all_ut_dirs = [d for d in _collect_test_dirs(all_module_names, config) if _is_ut_path(d)]
         cpu_groups: dict[RunnerKey, list[str]] = defaultdict(list)
         for dir_path in all_ut_dirs:
-            p = Path(dir_path)
+            p = Path(_pytest_node_file_path(dir_path))
             if p.is_file():
                 cpu_groups[_DEFAULT_KEY].append(dir_path)
             else:
@@ -534,16 +578,21 @@ def main():
     for dir_path in e2e_dirs:
         _scan_e2e_test_dir(dir_path, all_groups)
 
-    for f in changed_test_files:
-        if f in skip_tests:
-            continue
-        if _is_ut_path(f):
-            key = _route_ut_dir(f)
-            all_groups[key].append(f)
-        elif _is_e2e_path(f):
-            key = _route_e2e_file(f)
-            if key is not None:
+    for changed_test_file in changed_test_files:
+        if "::" in changed_test_file:
+            changed_targets = [changed_test_file]
+        else:
+            changed_targets = _configured_nodeid_targets_for_file(changed_test_file, config) or [changed_test_file]
+        for f in changed_targets:
+            if _is_skipped_test_target(f, skip_tests):
+                continue
+            if _is_ut_path(f):
+                key = _route_ut_dir(f)
                 all_groups[key].append(f)
+            elif _is_e2e_path(f):
+                key = _route_e2e_file(f)
+                if key is not None:
+                    all_groups[key].append(f)
 
     _dedup_groups(all_groups)
 
@@ -551,11 +600,13 @@ def main():
         for key in list(all_groups.keys()):
             filtered: list[str] = []
             for t in all_groups[key]:
-                if t in skip_tests:
+                if _is_skipped_test_target(t, skip_tests):
                     continue
-                p = Path(t)
+                p = Path(_pytest_node_file_path(t))
                 if p.is_dir():
-                    sub = [str(f) for f in sorted(p.rglob("test_*.py")) if str(f) not in skip_tests]
+                    sub = [
+                        str(f) for f in sorted(p.rglob("test_*.py")) if not _is_skipped_test_target(str(f), skip_tests)
+                    ]
                     if sub:
                         filtered.extend(sub)
                 else:

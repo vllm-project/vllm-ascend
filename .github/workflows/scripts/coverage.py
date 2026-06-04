@@ -8,6 +8,11 @@ import yaml
 with open(".github/workflows/scripts/test_config.yaml") as f:
     config = yaml.safe_load(f)
 
+
+def pytest_node_file_path(path: str) -> str:
+    return path.split("::", 1)[0]
+
+
 all_yaml_paths = set()
 all_yaml_e2e_paths = set()
 all_yaml_ut_paths = set()
@@ -22,17 +27,17 @@ for module in config:
             all_yaml_ut_paths.add(t)
 
 # ============================================================
-# 1. BROKEN PATHS — yaml 中引用了不存在的路径
+# 1. BROKEN PATHS — A non-existent path is referenced in yaml
 # ============================================================
-broken = sorted(p for p in all_yaml_paths if not Path(p).exists())
+broken = sorted(p for p in all_yaml_paths if not Path(pytest_node_file_path(p)).exists())
 
 # ============================================================
-# 2. E2E pull_request 覆盖
+# 2. E2E pull_request coverage
 # ============================================================
 yaml_e2e_pr = {p for p in all_yaml_e2e_paths if "tests/e2e/pull_request/" in p}
 resolved_e2e = set()
 for p in yaml_e2e_pr:
-    path = Path(p)
+    path = Path(pytest_node_file_path(p))
     if path.is_file():
         resolved_e2e.add(str(path))
     elif path.is_dir():
@@ -42,11 +47,11 @@ actual_e2e = {str(f) for f in Path("tests/e2e/pull_request").rglob("test_*.py")}
 uncovered_e2e = sorted(actual_e2e - resolved_e2e)
 
 # ============================================================
-# 3. UT 覆盖
+# 3. UT coverage
 # ============================================================
 resolved_ut = set()
 for p in all_yaml_ut_paths:
-    path = Path(p)
+    path = Path(pytest_node_file_path(p))
     if path.is_file():
         resolved_ut.add(str(path))
     elif path.is_dir():

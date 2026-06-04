@@ -30,7 +30,7 @@ from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "768"
 
-E2E_ROOT = Path(__file__).resolve().parents[4]
+E2E_ROOT = Path(__file__).resolve().parents[3]
 QWEN_IMAGE_PATH = E2E_ROOT / "prompts" / "qwen.png"
 
 

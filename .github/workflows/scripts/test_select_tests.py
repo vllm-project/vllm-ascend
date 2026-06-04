@@ -97,6 +97,16 @@ def test_collect_paths_and_basic_path_helpers():
         {"name": "a", "tests": ["tests/ut/a/", "tests/ut/a/test_x.py", "tests/e2e/x"]},
         {"name": "b", "tests": ["tests/ut/b/test_y.py", "tests/ut/b/test_y.py"]},
     ]
+    nodeid_config = [
+        {
+            "name": "nodeid",
+            "tests": [
+                "tests/e2e/pull_request/two_card/test_split.py::test_a",
+                "tests/e2e/pull_request/two_card/test_split.py::test_b",
+                "tests/e2e/pull_request/two_card/test_split.py::test_a",
+            ],
+        },
+    ]
 
     assert select_tests._matches_path_dependency("pkg/a.py", "pkg")
     assert select_tests._matches_path_dependency("pkg/a.py", "pkg/")
@@ -106,12 +116,31 @@ def test_collect_paths_and_basic_path_helpers():
         "tests/ut/a",
         "tests/ut/b/test_y.py",
     ]
+    assert select_tests._is_ut_path("tests/ut")
     assert select_tests._is_ut_path("tests/ut/a.py")
+    assert select_tests._is_e2e_path("tests/e2e")
     assert select_tests._is_e2e_path("tests/e2e/a.py")
+    assert select_tests._configured_nodeid_targets_for_file(
+        "tests/e2e/pull_request/two_card/test_split.py",
+        nodeid_config,
+    ) == [
+        "tests/e2e/pull_request/two_card/test_split.py::test_a",
+        "tests/e2e/pull_request/two_card/test_split.py::test_b",
+    ]
+    assert select_tests._is_skipped_test_target(
+        "tests/e2e/pull_request/two_card/test_split.py::test_a",
+        {"tests/e2e/pull_request/two_card/test_split.py"},
+    )
+    assert select_tests._is_skipped_test_target(
+        "tests/e2e/pull_request/two_card/test_split.py::test_a",
+        {"tests/e2e/pull_request/two_card/test_split.py::test_a"},
+    )
 
 
 def test_route_helpers():
+    assert select_tests._pytest_node_file_path("tests/e2e/test_x.py::TestCase::test_a") == "tests/e2e/test_x.py"
     assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py") == (2, select_tests.NpuType.A2)
+    assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py::test_case") == (2, select_tests.NpuType.A2)
     assert select_tests._route_ut_dir("tests/ut/mod/a2/test_x.py") == (1, select_tests.NpuType.A2)
     assert select_tests._route_ut_dir("tests/ut/mod/a3_4/test_x.py") == (4, select_tests.NpuType.A3)
     assert select_tests._route_ut_dir("tests/ut/mod/a3_2/test_x.py") == (2, select_tests.NpuType.A3)
@@ -128,6 +157,10 @@ def test_route_helpers():
     assert select_tests._route_e2e_file("tests/e2e/pull_request/one_card/test_x_310p.py") == (
         1,
         select_tests.NpuType._310P,
+    )
+    assert select_tests._route_e2e_file("tests/e2e/pull_request/two_card/test_x.py::test_case") == (
+        2,
+        select_tests.NpuType.A3,
     )
 
 
@@ -189,6 +222,10 @@ def test_scan_e2e_test_dir(tmp_path, capsys):
     assert str(test_one) in groups[(1, select_tests.NpuType.A2)]
     assert str(test_310p) in groups[(1, select_tests.NpuType._310P)]
     assert str(helper) not in groups[(1, select_tests.NpuType.A2)]
+
+    nodeid = f"{test_one}::test_specific_case"
+    select_tests._scan_e2e_test_dir(nodeid, groups)
+    assert nodeid in groups[(1, select_tests.NpuType.A2)]
 
     parent = tmp_path / "tests" / "e2e" / "pull_request"
     two_card = parent / "two_card"
@@ -293,6 +330,15 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
                 "tests/e2e/pull_request/two_card",
             ],
         },
+        {
+            "name": "nodeid",
+            "source_file_dependencies": ["src/nodeid.py"],
+            "tests": [
+                "tests/e2e/pull_request/two_card/test_two_card.py::test_specific_case",
+                "tests/e2e/pull_request/two_card/test_two_card.py::test_other_case",
+            ],
+            "skip_tests": ["tests/e2e/pull_request/two_card/test_two_card.py::test_other_case"],
+        },
     ]
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(config))
@@ -341,3 +387,59 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
     )
     select_tests.main()
     assert "tests/ut/cpu/test_keep.py" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "select_tests.py",
+            "--config",
+            str(config_path),
+            "--changed-files",
+            "src/cpu.py",
+            "--run-all-modules",
+        ],
+    )
+    select_tests.main()
+    out = capsys.readouterr().out
+    assert "matched_modules=cpu,npu,e2e" in out
+    assert "tests/ut/cpu/test_keep.py" in out
+    assert "tests/ut/cpu/test_skip.py" not in out
+    assert "tests/ut/npu/a2" in out
+    assert "tests/e2e/pull_request/one_card/test_one_card.py" in out
+    assert "tests/e2e/pull_request/two_card/test_two_card.py" in out
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "select_tests.py",
+            "--config",
+            str(config_path),
+            "--changed-files",
+            "src/nodeid.py",
+        ],
+    )
+    select_tests.main()
+    out = capsys.readouterr().out
+    assert "matched_modules=nodeid" in out
+    assert "tests/e2e/pull_request/two_card/test_two_card.py::test_specific_case" in out
+    assert "tests/e2e/pull_request/two_card/test_two_card.py::test_other_case" not in out
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "select_tests.py",
+            "--config",
+            str(config_path),
+            "--changed-files",
+            "tests/e2e/pull_request/two_card/test_two_card.py",
+        ],
+    )
+    select_tests.main()
+    out = capsys.readouterr().out
+    groups_line = next(line for line in out.splitlines() if line.startswith("test_groups="))
+    test_groups = json.loads(groups_line.removeprefix("test_groups="))
+    selected_tests = set(test_groups[0]["tests"].split())
+    assert selected_tests == {"tests/e2e/pull_request/two_card/test_two_card.py::test_specific_case"}
