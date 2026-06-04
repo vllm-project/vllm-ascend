@@ -4,6 +4,7 @@ import gc
 import json
 import os
 import random
+from typing import Any
 
 import numpy as np
 import torch
@@ -42,12 +43,12 @@ FIXED_SEED = 42
 set_seed(FIXED_SEED)
 
 MODEL_PATH = os.getenv("MODEL_PATH")
-USER_2_PREFILL_PROMPT_DICT = {}
-USER_2_PREFILL_SAMPLING_PARAMS_DICT = {}
-USER_2_DECODE_PROMPT_DICT = {}
-USER_2_DECODE_SAMPLING_PARAMS_DICT = {}
-USER_2_PD_MERGE_PROMPT_DICT = {}
-USER_2_PD_MERGE_SAMPLING_PARAMS_DICT = {}
+USER_2_PREFILL_PROMPT_DICT: dict[int, Any] = {}
+USER_2_PREFILL_SAMPLING_PARAMS_DICT: dict[int, Any] = {}
+USER_2_DECODE_PROMPT_DICT: dict[int, Any] = {}
+USER_2_DECODE_SAMPLING_PARAMS_DICT: dict[int, Any] = {}
+USER_2_PD_MERGE_PROMPT_DICT: dict[int, Any] = {}
+USER_2_PD_MERGE_SAMPLING_PARAMS_DICT: dict[int, Any] = {}
 
 torch._dynamo.config.cache_size_limit = 64
 
@@ -100,7 +101,7 @@ def parse_params_and_deal_json() -> dict:
     block_size = int(args.block_size)
 
     def generate_seq_stages(max_seq, step=512):
-        stages = []
+        stages: list[int] = []
         power = 5
         while len(stages) < 2 or stages[-1] - stages[-2] < step:
             val = 2**power
@@ -123,6 +124,7 @@ def parse_params_and_deal_json() -> dict:
                                            graph_step)
 
     # 1. 读取 JSON 文件
+    assert MODEL_PATH is not None
     file_path = MODEL_PATH + '/config.json'
 
     with open(file_path, 'r', encoding='utf-8') as file:
@@ -191,6 +193,8 @@ def parse_params_and_deal_json() -> dict:
 def initialize_llm_and_dataset(params):
     MODEL_PATH = os.getenv("MODEL_PATH")
     dataset_base_path = os.getenv("DATASET_PATH")
+    assert MODEL_PATH is not None
+    assert dataset_base_path is not None
     seq_logs_file = os.path.join(dataset_base_path, "processed_seqs.csv")
     batch_logs_file = os.path.join(dataset_base_path, "processed_batches.csv")
 
@@ -332,7 +336,7 @@ def get_profiler():
 
 def get_user_data(max_seq_len, dataloader_iter, user_id=None):
     selected_dates = []
-    selected_dates_endptrs = []
+    selected_dates_endptrs: list[int] = []
     selected_uids = []
     uids = None
     sum_cnt = 0
@@ -459,7 +463,7 @@ def generate_request_by_uid(dataloader, dataloader_iter, dataset, user_ids):
     prefill_engine_prompt_list = []
     decode_engine_prompt_list = []
     pd_merged_prompt_list = []
-    used_uids = []
+    used_uids: list[int] = []
     prefill_sampling_params_list = []
     decode_sampling_params_list = []
     pd_merged_sampling_params_list = []

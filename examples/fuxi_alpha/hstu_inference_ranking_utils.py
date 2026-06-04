@@ -4,7 +4,7 @@ import os
 from typing import Iterator, List, Optional
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import IterableDataset

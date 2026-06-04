@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from typing import Any
 
 # ruff: noqa: E402
 root_path = os.path.abspath(__file__)
@@ -12,12 +13,12 @@ import torch
 from fuxi_alpha_kuairand_demo import (get_seq_user_data,
                                       initialize_llm_and_dataset,
                                       parse_params_and_deal_json)
-from tqdm import tqdm
+from tqdm import tqdm  # type: ignore[import-untyped]
 from vllm.inputs import TokensPrompt
 
-USER_2_PREFILL_PROMPT_DICT = {}
-USER_2_DECODE_PROMPT_DICT = {}
-USER_2_PD_MERGE_PROMPT_DICT = {}
+USER_2_PREFILL_PROMPT_DICT: dict[int, Any] = {}
+USER_2_DECODE_PROMPT_DICT: dict[int, Any] = {}
+USER_2_PD_MERGE_PROMPT_DICT: dict[int, Any] = {}
 DELIMITER_CANDIDATE = torch.tensor([-1], dtype=torch.int64, device='cpu')
 
 
@@ -31,7 +32,7 @@ def generate_request_by_uid(dataloader, params, dataset, user_ids):
     prefill_engine_prompt_list = []
     decode_engine_prompt_list = []
     pd_merged_prompt_list = []
-    used_uids = []
+    used_uids: list[int] = []
     # while batches_processed < max_batches_to_process:
     for batches_processed in tqdm(range(len(user_ids))):
         try:
