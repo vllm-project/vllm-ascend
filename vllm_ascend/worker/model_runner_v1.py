@@ -85,7 +85,7 @@ if not vllm_version_is("0.20.2"):
     from vllm.v1.outputs import RoutedExpertsLists
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.sample.rejection_sampler import RejectionSampler, generate_uniform_probs
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
@@ -164,7 +164,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
-from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler, SamplingRandomTensors
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -2331,11 +2331,62 @@ class NPUModelRunner(GPUModelRunner):
         return async_output
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
+    def _make_sampling_q(
+        self,
+        num_rows: int,
+        num_cols: int,
+        generators: dict[int, torch.Generator] | None,
+    ) -> torch.Tensor | None:
+        if num_rows <= 0 or num_cols <= 0:
+            return None
+
+        generators = generators or {}
+        q = torch.empty((num_rows, num_cols), device=self.device, dtype=torch.float32)
+        if len(generators) != num_rows:
+            q.exponential_()
+        if generators:
+            for i, generator in generators.items():
+                if 0 <= i < num_rows:
+                    q[i].exponential_(generator=generator)
+        return q
+
+    def _get_sampling_width(self, logits: torch.Tensor, max_topk: int | None) -> int:
+        if max_topk is not None and get_ascend_config().enable_reduce_sample:
+            return int(max_topk) * get_tp_group().world_size
+        return logits.shape[1]
+
+    def _prepare_spec_sampling_random_tensors(
+        self,
+        logits: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+        max_topk: int | None,
+    ) -> SamplingRandomTensors | None:
+        if sampling_metadata.all_greedy:
+            return None
+
+        selected_vocab_size = self._get_sampling_width(logits, max_topk)
+        batch_size = len(spec_decode_metadata.num_draft_tokens)
+        num_tokens = spec_decode_metadata.draft_token_ids.shape[0]
+        generators = sampling_metadata.generators or {}
+
+        return SamplingRandomTensors(
+            bonus_q=self._make_sampling_q(batch_size, selected_vocab_size, generators),
+            uniform_probs=generate_uniform_probs(
+                num_tokens,
+                spec_decode_metadata.num_draft_tokens,
+                generators,
+                self.device,
+            ),
+            recovered_q=self._make_sampling_q(batch_size, selected_vocab_size, generators),
+        )
+
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
+            max_topk = None
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
             if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
@@ -2346,17 +2397,28 @@ class NPUModelRunner(GPUModelRunner):
                 sampling_metadata=sampling_metadata,
             )
 
+        max_topk = None
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
-        sampler_output = self.rejection_sampler(
-            spec_decode_metadata,
-            None,  # draft_probs
+        random_tensors = self._prepare_spec_sampling_random_tensors(
             logits,
+            spec_decode_metadata,
             sampling_metadata,
+            max_topk,
         )
+        self.rejection_sampler.set_random_tensors(random_tensors)
+        try:
+            sampler_output = self.rejection_sampler(
+                spec_decode_metadata,
+                None,  # draft_probs
+                logits,
+                sampling_metadata,
+            )
+        finally:
+            self.rejection_sampler.set_random_tensors(None)
         return sampler_output
 
     # TODO: remove this func after eagle_proposer is refactored and

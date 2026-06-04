@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import torch
 from vllm.distributed.parallel_state import get_tp_group
@@ -28,6 +28,15 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+
+
+@dataclass
+class SamplingRandomTensors:
+    # External random tensors are the bridge for moving sampling into graph
+    # replay later. They let the caller prepare all randomness up front.
+    bonus_q: torch.Tensor | None = None
+    uniform_probs: torch.Tensor | None = None
+    recovered_q: torch.Tensor | None = None
 
 
 class AscendRejectionSampler(RejectionSampler):
@@ -80,6 +89,10 @@ class AscendRejectionSampler(RejectionSampler):
         # Store Ascend-specific optimizations
         self._ascend_optimizations_enabled = True
         self.top_k = None
+        self.random_tensors: SamplingRandomTensors | None = None
+
+    def set_random_tensors(self, random_tensors: SamplingRandomTensors | None):
+        self.random_tensors = random_tensors
 
     def forward(
         self,
@@ -115,6 +128,8 @@ class AscendRejectionSampler(RejectionSampler):
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
+        random_tensors = self.random_tensors
+        self.random_tensors = None
 
         # When indexing with a tensor (bonus_logits_indices), PyTorch
         # creates a new tensor with separate storage from the original
@@ -122,6 +137,7 @@ class AscendRejectionSampler(RejectionSampler):
         # won't affect the original logits tensor.
         assert logits is not None
         bonus_logits = logits[bonus_logits_indices]
+        self.sampler.set_external_q(None if random_tensors is None else random_tensors.bonus_q)
         bonus_sampler_output = self.sampler(
             logits=bonus_logits,
             sampling_metadata=replace(
@@ -164,6 +180,7 @@ class AscendRejectionSampler(RejectionSampler):
             target_logits,
             bonus_token_ids,
             sampling_metadata,
+            random_tensors=random_tensors,
         )
 
         logprobs_tensors = None
@@ -284,6 +301,7 @@ def rejection_sample(
     # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    random_tensors: SamplingRandomTensors | None = None,
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -402,11 +420,15 @@ def rejection_sample(
         assert target_probs.is_contiguous()
 
         # Generate uniform probabilities for rejection sampling
-        uniform_probs = generate_uniform_probs(
-            num_tokens,
-            num_draft_tokens,
-            sampling_metadata.generators,
-            device,
+        uniform_probs = (
+            random_tensors.uniform_probs
+            if random_tensors is not None and random_tensors.uniform_probs is not None
+            else generate_uniform_probs(
+                num_tokens,
+                num_draft_tokens,
+                sampling_metadata.generators,
+                device,
+            )
         )
 
         # Sample recovered tokens for each position
@@ -423,6 +445,7 @@ def rejection_sample(
             target_indices=target_indices,
             global_vocab_size=global_vocab_size,
             enable_reduce_sampling=True,
+            q=random_tensors.recovered_q if random_tensors is not None else None,
         )
 
         if not using_block_verify:
@@ -513,11 +536,15 @@ def rejection_sample(
         assert target_probs.is_contiguous()
 
         # Generate uniform probabilities for rejection sampling
-        uniform_probs = generate_uniform_probs(
-            num_tokens,
-            num_draft_tokens,
-            sampling_metadata.generators,
-            device,
+        uniform_probs = (
+            random_tensors.uniform_probs
+            if random_tensors is not None and random_tensors.uniform_probs is not None
+            else generate_uniform_probs(
+                num_tokens,
+                num_draft_tokens,
+                sampling_metadata.generators,
+                device,
+            )
         )
 
         # Sample recovered tokens for each position
@@ -534,6 +561,7 @@ def rejection_sample(
             target_indices=None,
             global_vocab_size=vocab_size,
             enable_reduce_sampling=False,
+            q=random_tensors.recovered_q if random_tensors is not None else None,
         )
 
         if not using_block_verify:
@@ -672,24 +700,26 @@ def sample_recovered_tokens(
     target_indices: torch.Tensor | None = None,
     global_vocab_size: int | None = None,
     enable_reduce_sampling: bool = False,
+    q: torch.Tensor | None = None,
 ) -> torch.Tensor:
     batch_size = len(num_draft_tokens)
     vocab_size = target_probs.shape[-1]
 
-    q = torch.empty(
-        (batch_size, vocab_size),
-        dtype=torch.float32,
-        device=device,
-    )
-    q.exponential_()
+    if q is None:
+        q = torch.empty(
+            (batch_size, vocab_size),
+            dtype=torch.float32,
+            device=device,
+        )
+        q.exponential_()
 
-    num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(device, non_blocking=True)
-    has_draft_mask = num_draft_tensor > 0
+        num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(device, non_blocking=True)
+        has_draft_mask = num_draft_tensor > 0
 
-    for i, generator in sampling_metadata.generators.items():
-        temp_q = torch.empty_like(q[i])
-        temp_q.exponential_(generator=generator)
-        q[i] = torch.where(has_draft_mask[i], temp_q, q[i])
+        for i, generator in sampling_metadata.generators.items():
+            temp_q = torch.empty_like(q[i])
+            temp_q.exponential_(generator=generator)
+            q[i] = torch.where(has_draft_mask[i], temp_q, q[i])
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
     if HAS_TRITON:

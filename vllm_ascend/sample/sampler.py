@@ -73,6 +73,9 @@ class AscendSampler(Sampler):
     def set_q_event(self, q, event):
         self.topk_topp_sampler.set_q_event(q, event)
 
+    def set_external_q(self, q: torch.Tensor | None):
+        self.topk_topp_sampler.set_external_q(q)
+
     def prepare_sampling(self, top_k):
         self.topk_topp_sampler.prepare_sampling(top_k)
 
@@ -115,12 +118,16 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         super().__init__(**kwargs)
         self.apply_top_k_top_p = apply_top_k_top_p
         self.top_k = None
+        self.external_q: torch.Tensor | None = None
 
     def set_q_event(self, q, event):
         # Pass in async exponential results.
         # Also pass in event to prevent synchronize errors.
         self.q = q
         self.async_event = event
+
+    def set_external_q(self, q: torch.Tensor | None):
+        self.external_q = q
 
     def prepare_sampling(self, top_k):
         if top_k is not None:
@@ -130,6 +137,9 @@ class AscendTopKTopPSampler(TopKTopPSampler):
 
     def forward_native(self, logits, generators, k, p):
         """Override pytorch native implementation to torch_npu"""
+        external_q = self.external_q
+        self.external_q = None
+
         # when batch_invariant mode is enabled, we should use vllm's implementation.
         # or it will make batch_invariant mode not working.
         if envs.VLLM_BATCH_INVARIANT:
@@ -144,7 +154,10 @@ class AscendTopKTopPSampler(TopKTopPSampler):
                 logits_to_return = cand_logits.log_softmax(dim=-1, dtype=torch.float32)
 
             probs = torch.softmax(cand_logits, dim=-1)
-            pos = random_sample(probs, generators)  # [B]
+            if external_q is not None:
+                pos = probs.div_(external_q).argmax(dim=-1).view(-1)
+            else:
+                pos = random_sample(probs, generators)  # [B]
 
             next_token = cand_idx.gather(dim=1, index=pos.unsqueeze(1)).squeeze(1)  # [B]
             return next_token, logits_to_return
@@ -157,6 +170,8 @@ class AscendTopKTopPSampler(TopKTopPSampler):
                 logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
             probs = logits.softmax(dim=-1, dtype=torch.float32)
+            if external_q is not None:
+                return probs.div_(external_q).argmax(dim=-1).view(-1), logits_to_return
             if get_ascend_config().enable_async_exponential:
                 # Add synchronize to prevent synchronize error.
                 self.async_event.synchronize()

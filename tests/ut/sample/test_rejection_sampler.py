@@ -11,6 +11,7 @@ from vllm_ascend.sample.rejection_sampler import (
     rejection_random_sample_pytorch,
     sample_recovered_tokens_blockwise_pytorch,
     sample_recovered_tokens_pytorch,
+    sample_recovered_tokens,
 )
 
 # Global constants
@@ -210,6 +211,41 @@ class TestAscendRejectionSampler(TestBase):
 
         assert output_token_ids[0].item() == 0
         assert output_token_ids[1].item() == 1
+
+    @patch.object(torch.Tensor, "exponential_", side_effect=AssertionError("unexpected exponential_"))
+    def test_sample_recovered_tokens_uses_external_q(self, _mock_exponential):
+        cu_num_draft_tokens = torch.tensor([1, 2])
+        draft_token_ids = torch.tensor([1, 2], dtype=torch.int32)
+        draft_probs = None
+        target_probs = torch.tensor(
+            [
+                [0.1, 0.2, 0.7],
+                [0.3, 0.3, 0.4],
+            ],
+            dtype=torch.float32,
+        )
+        external_q = torch.tensor(
+            [
+                [0.1, 0.2, 0.7],
+                [0.5, 0.4, 0.1],
+            ],
+            dtype=torch.float32,
+        )
+
+        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):
+            recovered_token_ids = sample_recovered_tokens(
+                max_spec_len=1,
+                num_draft_tokens=[1, 1],
+                cu_num_draft_tokens=cu_num_draft_tokens,
+                draft_token_ids=draft_token_ids,
+                draft_probs=draft_probs,
+                target_probs=target_probs,
+                sampling_metadata=type("SamplingMetadata", (), {"generators": {}})(),
+                device=target_probs.device,
+                q=external_q,
+            )
+
+        assert recovered_token_ids.dtype == torch.int32
 
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
