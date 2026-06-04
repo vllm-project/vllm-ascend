@@ -232,7 +232,6 @@ class ExecuteModelState(NamedTuple):
 
     scheduler_output: "SchedulerOutput"
     logits: torch.Tensor
-    sampling_metadata: SamplingMetadata
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None
     hidden_states: torch.Tensor
@@ -240,10 +239,17 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     attn_metadata: "PerLayerAttnMetadata"
     positions: torch.Tensor
-    spec_sampling_state: "SpecSamplingExecutionState | None"
+    sampling_state: "SamplingExecutionState"
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+@dataclass
+class SamplingExecutionState:
+    sampling_metadata: SamplingMetadata
+    non_spec_max_topk: int | None
+    spec_sampling_state: "SpecSamplingExecutionState | None"
 
 
 @dataclass
@@ -260,6 +266,12 @@ class SamplingBookkeepingState:
     req_ids_output_copy: list[str]
     req_id_to_index_output_copy: dict[str, int]
     invalid_req_indices: list[int]
+
+
+@dataclass
+class SamplingPhaseResult:
+    sampler_output: SamplerOutput
+    bookkeeping_state: SamplingBookkeepingState
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -2162,7 +2174,6 @@ class NPUModelRunner(GPUModelRunner):
         (
             scheduler_output,
             logits,
-            sampling_metadata,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
             hidden_states,
@@ -2170,7 +2181,7 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states,
             attn_metadata,
             positions,
-            spec_sampling_state,
+            sampling_state,
             ec_connector_output,
             cudagraph_stats,
             batch_desc,
@@ -2187,22 +2198,10 @@ class NPUModelRunner(GPUModelRunner):
             apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
             logits = logits.to(self.device).to(logits_dtype)
 
-        with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, sampling_metadata, spec_decode_metadata, spec_sampling_state)
-
-        if self.need_accepted_tokens:
-            if self.sampling_done_event is None:
-                self.sampling_done_event = torch.npu.Event()
-
-            assert self.sampling_done_event is not None
-            self.sampling_done_event.record()
-
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
-
-        bookkeeping_state = self._process_sampled_tokens_after_sampling(
+        sampling_phase_result = self._run_sampling_phase(
             scheduler_output,
-            sampler_output,
             logits,
+            sampling_state,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
             positions,
@@ -2210,8 +2209,9 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states,
             sample_hidden_states,
             batch_desc,
-            scheduler_output.total_num_scheduled_tokens,
         )
+        sampler_output = sampling_phase_result.sampler_output
+        bookkeeping_state = sampling_phase_result.bookkeeping_state
 
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
@@ -2270,6 +2270,56 @@ class NPUModelRunner(GPUModelRunner):
             async_output.async_copy_ready_event,
         )
         return async_output
+
+    def _run_sampling_phase(
+        self,
+        scheduler_output: "SchedulerOutput",
+        logits: torch.Tensor,
+        sampling_state: SamplingExecutionState,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        sample_hidden_states: torch.Tensor,
+        batch_desc: BatchDescriptor,
+    ) -> SamplingPhaseResult:
+        with record_function_or_nullcontext("sample_token"):
+            sampler_output = self._sample(
+                logits,
+                sampling_state.sampling_metadata,
+                spec_decode_metadata,
+                sampling_state.spec_sampling_state,
+                sampling_state.non_spec_max_topk,
+            )
+
+        if self.need_accepted_tokens:
+            if self.sampling_done_event is None:
+                self.sampling_done_event = torch.npu.Event()
+
+            assert self.sampling_done_event is not None
+            self.sampling_done_event.record()
+
+        self.valid_sampled_token_count_gpu: torch.Tensor | None = None  # type: ignore[no-redef]
+
+        bookkeeping_state = self._process_sampled_tokens_after_sampling(
+            scheduler_output,
+            sampler_output,
+            logits,
+            spec_decode_metadata,
+            spec_decode_common_attn_metadata,
+            positions,
+            hidden_states,
+            aux_hidden_states,
+            sample_hidden_states,
+            batch_desc,
+            scheduler_output.total_num_scheduled_tokens,
+        )
+
+        return SamplingPhaseResult(
+            sampler_output=sampler_output,
+            bookkeeping_state=bookkeeping_state,
+        )
 
     def _process_sampled_tokens_after_sampling(
         self,
@@ -2491,6 +2541,31 @@ class NPUModelRunner(GPUModelRunner):
             ),
         )
 
+    def _prepare_non_spec_max_topk(
+        self,
+        logits: torch.Tensor | None,
+        sampling_metadata: SamplingMetadata,
+    ) -> int | None:
+        if (
+            sampling_metadata.top_k is not None
+            and get_ascend_config().enable_reduce_sample
+            and logits is not None
+        ):
+            return self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+        return None
+
+    def _prepare_sampling_execution_state(
+        self,
+        logits: torch.Tensor | None,
+        sampling_metadata: SamplingMetadata,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> SamplingExecutionState:
+        return SamplingExecutionState(
+            sampling_metadata=sampling_metadata,
+            non_spec_max_topk=self._prepare_non_spec_max_topk(logits, sampling_metadata),
+            spec_sampling_state=self._prepare_spec_sampling_state(logits, spec_decode_metadata, sampling_metadata),
+        )
+
     def _build_execute_model_state(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2510,7 +2585,6 @@ class NPUModelRunner(GPUModelRunner):
         return ExecuteModelState(
             scheduler_output,
             logits,
-            sampling_metadata,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
             hidden_states,
@@ -2518,7 +2592,7 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states,
             attn_metadata,
             positions,
-            self._prepare_spec_sampling_state(logits, spec_decode_metadata, sampling_metadata),
+            self._prepare_sampling_execution_state(logits, sampling_metadata, spec_decode_metadata),
             ec_connector_output,
             cudagraph_stats,
             batch_desc,
@@ -2528,11 +2602,12 @@ class NPUModelRunner(GPUModelRunner):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        non_spec_max_topk: int | None = None,
     ) -> SamplerOutput:
-        max_topk = None
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: self.input_batch.num_reqs]
-        if sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+        max_topk = non_spec_max_topk
+        if max_topk is None and sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
         with self._configure_non_spec_sampler(max_topk):
             return self.sampler(
@@ -2599,11 +2674,12 @@ class NPUModelRunner(GPUModelRunner):
         sampling_metadata: SamplingMetadata,
         spec_decode_metadata,
         spec_sampling_state: SpecSamplingExecutionState | None = None,
+        non_spec_max_topk: int | None = None,
     ):
         # Sample the next token and get logprobs if needed.
         self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
-            return self._sample_non_spec_decode(logits, sampling_metadata)
+            return self._sample_non_spec_decode(logits, sampling_metadata, non_spec_max_topk)
 
         return self._sample_spec_decode(
             logits,
