@@ -164,11 +164,11 @@ def test_scan_ut_test_dir(tmp_path):
     assert sorted(groups[select_tests._DEFAULT_KEY]) == sorted(
         [str(mixed / "test_root.py"), str(nested / "test_nested.py")]
     )
-    assert groups[(2, select_tests.NpuType.A3)] == [str(a3)]
+    assert groups[(2, select_tests.NpuType.A3)] == [str(a3 / "test_a3.py")]
 
     groups = defaultdict(list)
     select_tests._scan_ut_test_dir(str(a3), groups)
-    assert groups[(2, select_tests.NpuType.A3)] == [str(a3)]
+    assert groups[(2, select_tests.NpuType.A3)] == [str(a3 / "test_a3.py")]
 
 
 def test_scan_e2e_test_dir(tmp_path, capsys):
@@ -336,7 +336,7 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
     assert "tests/ut/cpu/test_keep.py" in out
     assert "tests/ut/cpu/test_skip.py" not in out
     assert "tests/ut/missing/test_missing.py" in out
-    assert "tests/ut/npu/a2" in out
+    assert "tests/ut/npu/a2/test_a2.py" in out
     assert "tests/e2e/pull_request/light/one_card/test_light.py" in out
     assert "tests/e2e/pull_request/full/two_cards/test_full.py" not in out
     assert "tests/ut/cpu/test_changed.py" in out
