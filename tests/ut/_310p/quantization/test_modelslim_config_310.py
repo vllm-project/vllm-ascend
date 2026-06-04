@@ -79,9 +79,7 @@ class TestAscendModelSlimConfig310(TestBase):
                 "vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer",
                 return_value=mock_scheme,
             ) as mock_create_scheme,
-            patch(
-                "vllm_ascend._310p.quantization.modelslim_config.AscendLinearMethod", return_value=MagicMock()
-            ),
+            patch("vllm_ascend._310p.quantization.modelslim_config.AscendLinearMethod", return_value=MagicMock()),
         ):
             config.get_quant_method(linear_layer, "lm_head")
 
