@@ -38,25 +38,101 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    uses: ./.github/workflows/_pre_commit.yml
-    with:
-      vllm: 9090368b650896bf5fc990c921df7eb4c20355a5
-
-  select-tests:
-    needs: lint
-    if: ${{ needs.lint.result == 'success' }}
+  lint-and-select-tests:
     runs-on: linux-amd64-cpu-8-hk
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+      image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
       has_tests: ${{ steps.scope.outputs.has_tests }}
       test_groups: ${{ steps.scope.outputs.test_groups }}
       matched_modules: ${{ steps.scope.outputs.matched_modules }}
     steps:
-      - uses: actions/checkout@v6
+      - name: Validate PR title prefix
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [ -z "$PR_TITLE" ]; then
+            echo "::error::PR title cannot be empty"
+            exit 1
+          fi
+
+          echo "Checking PR title: $PR_TITLE"
+
+          VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor)\]'
+
+          if ! echo "$PR_TITLE" | grep -iqE "$VALID_PREFIXES"; then
+            echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor]"
+            echo "::error::Example: '[Feature] Add new optimization pass' or 'Add new feature [Feature]'"
+            exit 1
+          fi
+
+          echo "✓ PR title prefix is valid"
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: cp problem matchers
+        run: |
+          cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
+          cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
+          cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
+
+      - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
+      - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
+      - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+          ref: 9090368b650896bf5fc990c921df7eb4c20355a5
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            lint_tracker:
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'requirements-lint.txt'
+
+      - name: Install vllm-ascend dev (conditional)
+        if: steps.filter.outputs.lint_tracker == 'true'
+        env:
+          UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_NO_CACHE: 1
+          UV_SYSTEM_PYTHON: 1
+        run: |
+          pip install uv
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run pre-commit
+        env:
+          PRE_COMMIT_COLOR: always
+          FORCE_COLOR: "1"
+          TERM: xterm-256color
+          SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+
+      - name: Run mypy
+        run: |
+          PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+          export PYTHONPATH
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          for python_version in "3.10" "3.11" "3.12"; do
+            echo "============================"
+            tools/mypy.sh 1 "$python_version"
+            echo "============================"
+          done
 
       - name: Validate test coverage config
         run: |
@@ -75,12 +151,12 @@ jobs:
             --e2e-type light
 
   run-selected-tests:
-    needs: select-tests
-    if: ${{ needs.select-tests.outputs.has_tests == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
+    needs: lint-and-select-tests
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       matrix:
         vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.20.2]
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
