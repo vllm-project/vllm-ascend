@@ -114,6 +114,7 @@
     - tests/ut/attention
     - tests/ut/spec_decode
     - tests/e2e/pull_request/light/one_card/aclgraph
+    - tests/e2e/pull_request/light/two_card/aclgraph
 
 - name: compilation - pass base
   optional: true
@@ -169,6 +170,7 @@
   tests:
     - tests/ut/core
 
+# Device
 - name: device
   optional: true
   source_file_dependencies:
@@ -176,6 +178,7 @@
   tests:
     - tests/ut/device
 
+# Device Allocator
 - name: device_allocator
   optional: true
   source_file_dependencies:
@@ -184,20 +187,20 @@
     - tests/ut/device_allocator
     - tests/e2e/pull_request/light/one_card/test_camem.py
 
+# Distributed
 - name: distributed
   optional: true
   source_file_dependencies:
     - vllm_ascend/distributed
   tests:
     - tests/ut/distributed
-    - tests/e2e/pull_request/full/two_cards/test_data_parallel.py
-    - tests/e2e/pull_request/full/two_cards/test_external_launcher.py
-    - tests/e2e/pull_request/full/four_cards/test_data_parallel_tp2.py
-    - tests/e2e/pull_request/full/two_cards/test_full_graph_mode.py
-    - tests/e2e/pull_request/full/two_cards/test_shared_expert_dp.py
-    - tests/e2e/pull_request/full/two_cards/test_sequence_parallelism_moe.py
-    - tests/e2e/pull_request/full/two_cards/test_disaggregated_encoder.py
+    - tests/e2e/pull_request/light/two_card/test_data_parallel.py
+    - tests/e2e/pull_request/light/four_card/test_data_parallel_tp2.py
+    - tests/e2e/pull_request/light/two_card/test_shared_expert_dp.py
+    - tests/e2e/pull_request/light/two_card/test_sequence_parallelism_moe.py
+    - tests/e2e/pull_request/light/two_card/test_disaggregated_encoder.py
 
+# EPLB
 - name: eplb
   optional: true
   source_file_dependencies:
@@ -207,6 +210,7 @@
     - tests/e2e/pull_request/light/two_card/test_qwen3_30b_a3b.py
     - tests/e2e/pull_request/light/two_card/test_qwen3_moe_eplb.py
 
+# KV Offload
 - name: kv_offload
   optional: true
   source_file_dependencies:
@@ -214,9 +218,8 @@
   tests:
     - tests/ut/kv_offload
     - tests/e2e/pull_request/light/one_card/test_cpu_offloading.py
-    - tests/e2e/pull_request/full/two_cards/test_prefix_caching.py
-    - tests/e2e/pull_request/light/four_card/long_sequence/test_prefix_caching_cp.py
 
+# Lora
 - name: lora
   optional: true
   source_file_dependencies:
@@ -226,14 +229,15 @@
     - tests/e2e/pull_request/light/one_card/lora
     - tests/e2e/pull_request/light/two_card/lora
 
+# Model Loader
 - name: model_loader
   optional: true
   source_file_dependencies:
     - vllm_ascend/model_loader
   tests:
     - tests/ut/model_loader
-    - tests/e2e/pull_request/full/two_cards/test_offline_weight_load.py
 
+# Models
 - name: models
   optional: true
   source_file_dependencies:
@@ -263,8 +267,8 @@
     - tests/e2e/pull_request/full/one_card/test_multistream_overlap_shared_expert.py
     - tests/e2e/pull_request/full/two_cards/test_qwen3_moe.py
     - tests/e2e/pull_request/full/two_cards/test_moe_routing_replay.py
-    - tests/e2e/pull_request/full/two_cards/test_sequence_parallelism_moe.py
-    - tests/e2e/pull_request/full/two_cards/test_shared_expert_dp.py
+    - tests/e2e/pull_request/light/two_card/test_sequence_parallelism_moe.py
+    - tests/e2e/pull_request/light/two_card/test_shared_expert_dp.py
     - tests/e2e/pull_request/full/four_cards/test_profiling_chunk_performance.py
 
 - name: ops_common
@@ -296,6 +300,7 @@
     - tests/e2e/pull_request/full/four_cards/test_qwen3_5.py
     - tests/e2e/pull_request/full/four_cards/test_qwen3_next.py
 
+# Profiler
 - name: profiler
   optional: true
   source_file_dependencies:
@@ -311,13 +316,14 @@
     - tests/ut/quantization
     - tests/e2e/pull_request/full/two_cards/test_offline_inference_distributed.py
 
+# Sample
 - name: sample
   optional: true
   source_file_dependencies:
     - vllm_ascend/sample
   tests:
     - tests/ut/sample
-    - tests/e2e/pull_request/full/one_card/test_sampler.py
+    - tests/e2e/pull_request/light/one_card/test_sampler.py
 
 - name: spec_decode
   optional: true
@@ -348,8 +354,11 @@
     - tests/e2e/pull_request/full/one_card/model_runner_v2/test_basic.py
     - tests/e2e/pull_request/full/two_cards/test_aclgraph_capture_replay.py
     - tests/e2e/pull_request/full/two_cards/test_qwen3_performance.py
-    - tests/e2e/pull_request/full/two_cards/test_single_request_aclgraph.py
+    - tests/e2e/pull_request/full/two_cards/test_external_launcher.py
+    - tests/e2e/pull_request/full/two_cards/test_prefix_caching.py
+    - tests/e2e/pull_request/full/two_cards/test_offline_weight_load.py
 
+# XLite
 - name: xlite
   optional: true
   source_file_dependencies:
@@ -358,6 +367,7 @@
     - tests/ut/xlite
     - tests/e2e/pull_request/light/one_card/test_xlite.py
 
+# Batch Invariant
 - name: batch_invariant
   optional: true
   source_file_dependencies:
@@ -365,7 +375,7 @@
   tests:
     - tests/ut/test_batch_invariant.py
     - tests/e2e/pull_request/light/one_card/aclgraph/test_aclgraph_batch_invariant.py
-    - tests/e2e/pull_request/full/one_card/test_batch_invariant.py
+    - tests/e2e/pull_request/light/one_card/test_batch_invariant.py
 
 - name: csrc
   optional: true
