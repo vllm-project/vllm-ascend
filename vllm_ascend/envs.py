@@ -110,17 +110,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Number of CPUs to reserve per rank for MemCache client threads.
-    # KV transfer helper threads use the same CPU set.
-    # Default: 8. Valid range: integer >= 0. This variable is not sensitive.
-    "VLLM_ASCEND_CPU_BIND_MEMCACHE_CPU_COUNT": lambda: int(
-        os.getenv("VLLM_ASCEND_CPU_BIND_MEMCACHE_CPU_COUNT", "8")
-    ),
-    # Number of CPUs to reserve per rank for worker/main threads.
-    # Default: 12. Valid range: integer >= 1. This variable is not sensitive.
-    "VLLM_ASCEND_CPU_BIND_WORKER_CPU_COUNT": lambda: int(
-        os.getenv("VLLM_ASCEND_CPU_BIND_WORKER_CPU_COUNT", "12")
-    ),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
 }

@@ -176,9 +176,8 @@ class KVPoolScheduler:
             * num_layer_keys
         )
         self.keys_per_block_hash = keys_per_block_hash
-        self.prefill_offload = self.layerwise_offload
         self.client: LookupKeyClient | None = None
-        if self.prefill_offload:
+        if self.layerwise_offload:
             self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
                 "discard_partial_chunks", False
             )
@@ -750,7 +749,7 @@ class KVPoolScheduler:
         new_block_ids_by_group = normalize_block_ids_by_group(new_block_ids)
         self._preempted_req_ids.discard(req_id)
         load_spec = self.load_specs.pop(req_id, None)
-        if self.prefill_offload:
+        if self.layerwise_offload:
             load_spec = LoadSpec(
                 vllm_cached_tokens=0,
                 kvpool_cached_tokens=cached_reqs.num_computed_tokens[i],
@@ -804,7 +803,7 @@ class KVPoolScheduler:
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
     ) -> ReqMeta | None:
-        if not self.save_decode_cache and not self.prefill_offload:
+        if not self.save_decode_cache and not self.prfflllffload:
             return None
         request_tracker = self._request_trackers.get(req_id)
         if request_tracker is None:
@@ -850,7 +849,7 @@ class KVPoolScheduler:
         if new_block_ids is not None:
             request_tracker.update(new_block_ids)
         load_spec = None
-        if self.prefill_offload:
+        if self.layerwise_offload:
             load_spec = LoadSpec(
                 vllm_cached_tokens=cached_reqs.num_computed_tokens[i],
                 kvpool_cached_tokens=cached_reqs.num_computed_tokens[i],
@@ -948,7 +947,7 @@ class KVPoolScheduler:
         if not force_skip_save:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids and not self.prefill_offload:
+                if not new_block_ids and not self.layerwise_offload:
                     continue
                 if req_id in self._preempted_req_ids:
                     req_meta = self._process_preempted_cached_request(
