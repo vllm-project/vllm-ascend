@@ -339,6 +339,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         mask = attn_metadata.attn_mask
 
         if is_310p():
+            assert mask is not None
             # align q k v output tensors
             query = aligned_16(query)
             key = aligned_16(key)
@@ -564,7 +565,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor],
+        kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
         trace_flag: bool = True,

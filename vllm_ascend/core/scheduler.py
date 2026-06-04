@@ -581,8 +581,7 @@ class AscendScheduler(Scheduler):
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         extra_args = request.sampling_params.extra_args or {}
-        if extra_args.get(
-                "request_stage") != RequestStage.Decode.value:
+        if extra_args.get("request_stage") != RequestStage.Decode.value:
             return False
 
         assert self.connector is not None

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Optional
 
 from vllm.config import ParallelConfig
 
@@ -28,12 +29,12 @@ class Backend(ABC):
 
     @abstractmethod
     def get_batch(self, keys: list[str], addrs: list[list[int]],
-                  sizes: list[list[int]], block_ids: list[int]):
+                  sizes: list[list[int]], block_ids: Optional[list[int]]):
         pass
 
     @abstractmethod
     def put_batch(self, keys: list[str], addrs: list[list[int]],
-                  sizes: list[list[int]], block_ids: list[int]):
+                  sizes: list[list[int]], block_ids: Optional[list[int]]):
         pass
 
     @abstractmethod

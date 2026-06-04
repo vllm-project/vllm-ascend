@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type

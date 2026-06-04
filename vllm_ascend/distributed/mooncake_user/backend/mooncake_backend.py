@@ -1,5 +1,6 @@
 # Standard
 import os
+from typing import Optional
 
 # Third Party
 from mooncake.store import ReplicateConfig  # type: ignore
@@ -78,7 +79,7 @@ class MooncakeBackend(Backend):
         return self.store.register_buffer(ptr, length)
 
     def get_batch(self, keys: list[str], addrs: list[list[int]],
-                  sizes: list[list[int]], block_ids: list[int]):
+                  sizes: list[list[int]], block_ids: Optional[list[int]]):
         try:
             res = self.store.batch_get_into_multi_buffers(
                 keys, addrs, sizes, True)
@@ -89,7 +90,7 @@ class MooncakeBackend(Backend):
             logger.error(f"Failed to get key {keys}. {e}")
 
     def put_batch(self, keys: list[str], addrs: list[list[int]],
-                  sizes: list[list[int]], block_ids: list[int]):
+                  sizes: list[list[int]], block_ids: Optional[list[int]]):
         try:
             config = ReplicateConfig()
             config.preferred_segment = self.local_seg

@@ -1,5 +1,6 @@
 # Standard
 from enum import Enum
+from typing import Optional
 
 import torch
 from vllm.config import ParallelConfig
@@ -73,7 +74,7 @@ class MemcacheBackend(Backend):
             logger.error(f"Failed to get key {key}. {e}")
 
     def get_batch(self, keys: list[str], addrs: list[list[int]],
-                  sizes: list[list[int]], block_ids: list[int]):
+                  sizes: list[list[int]], block_ids: Optional[list[int]]):
         try:
             res = self.store.batch_get_into_layers(keys, addrs, sizes,
                                                    MmcDirect.COPY_G2L.value)
@@ -84,7 +85,7 @@ class MemcacheBackend(Backend):
             logger.error(f"Failed to get key {keys}. {e}")
 
     def put_batch(self, keys: list[str], addrs: list[list[int]],
-                  sizes: list[list[int]], block_ids: list[int]):
+                  sizes: list[list[int]], block_ids: Optional[list[int]]):
         try:
             res = self.store.batch_put_from_layers(keys, addrs, sizes,
                                                    MmcDirect.COPY_L2G.value)

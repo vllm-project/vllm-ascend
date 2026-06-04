@@ -76,7 +76,9 @@ class MooncakeEngine:
             "backend", "mooncake")
         backend_cls = backend_map.get(self.backend.lower())
         if backend_cls is None:
-            raise ValueError(f"Unsupported backend: {self.backend}. Supported backends are: {list(backend_map.keys())}")
+            raise ValueError(
+                f"Unsupported backend: {self.backend}. Supported backends are: {list(backend_map.keys())}"
+            )
         self.m_store = backend_cls(parallel_config)
 
         self.kv_send_thread: Optional[KVTransferThread] = None
@@ -305,6 +307,7 @@ class MooncakeEngine:
                 starts = starts[:min_length]
                 request.block_ids = request.block_ids[:min_length]
                 logger.info(f"block_size:{self.block_size}")
+                assert self.kv_send_thread is not None
                 for start, end in zip(starts, ends):
                     addr, size = self.kv_send_thread.prepare_value_layer(
                         start, end, request.block_ids, layer_id)
@@ -358,6 +361,7 @@ class MooncakeEngine:
                 sizes = []
                 starts, ends = get_start_end(len(request.token_ids),
                                              self.block_size)
+                assert self.kv_recv_thread is not None
                 for start, end in zip(starts, ends):
                     addr, size = self.kv_recv_thread.prepare_value_layer(
                         start, end, request.block_ids, layer_id)

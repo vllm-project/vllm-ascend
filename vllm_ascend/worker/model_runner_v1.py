@@ -1298,6 +1298,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for req_idx, req_id in enumerate(req_ids):
                 n = num_scheduled_tokens[req_idx]
                 req_state = self.requests.get(req_id)
+                assert req_state is not None
                 token_start = max(0, req_state.num_prompt_tokens - n)
                 token_read_positions_np[flat_idx:flat_idx + n] = np.arange(
                     token_start, token_start + n, dtype=np.int32)
