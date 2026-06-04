@@ -110,17 +110,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # The DRAM size allocated for KV pool storage (e.g., "2GB", "512MB", "1073741824").
-    # Used to calculate LRU cache capacity for KV block management.
-    # If not set, defaults to "0" which means LRU capacity falls back to a fixed value.
-    "VLLM_ASCEND_KV_POOL_DRAM_SIZE": lambda: os.getenv("VLLM_ASCEND_KV_POOL_DRAM_SIZE", "0"),
-    # Number of reusable layerwise KV pool transfer buffers.
-    # Default: None, which uses the number of layers and disables layer reuse.
-    # Valid range: integer >= 1. Set smaller than the number of non-independent
-    # layers to enable layer reuse/offload. Not sensitive.
-    "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS": lambda: os.getenv(
-        "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS", None
-    ),
     # Number of CPUs to reserve per rank for MemCache client threads.
     # KV transfer helper threads use the same CPU set.
     # Default: 8. Valid range: integer >= 0. This variable is not sensitive.
@@ -131,20 +120,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Default: 12. Valid range: integer >= 1. This variable is not sensitive.
     "VLLM_ASCEND_CPU_BIND_WORKER_CPU_COUNT": lambda: int(
         os.getenv("VLLM_ASCEND_CPU_BIND_WORKER_CPU_COUNT", "12")
-    ),
-    # Number of layerwise KV pool load layers to prefetch.
-    # Default: 2. Valid range: integer >= 1. Not sensitive.
-    "VLLM_ASCEND_KV_POOL_LAYERWISE_PREFETCH_LAYERS": lambda: int(
-        os.getenv("VLLM_ASCEND_KV_POOL_LAYERWISE_PREFETCH_LAYERS", "2")
-    ),
-    # Comma-separated independent layer indices for layerwise KV pool transfer,
-    # or "all" to make every layer independent for layerwise KV pooling.
-    # Negative indices are supported, e.g. "-1" means the last layer.
-    # Default: None, which uses the first and last layers. Set to an empty
-    # string to make every layer use reusable layerwise KV pool transfer.
-    # Valid range for each index: [-num_layers, num_layers - 1]. Not sensitive.
-    "VLLM_ASCEND_KV_POOL_LAYERWISE_INDEPENDENT_LAYERS": lambda: os.getenv(
-        "VLLM_ASCEND_KV_POOL_LAYERWISE_INDEPENDENT_LAYERS", None
     ),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
