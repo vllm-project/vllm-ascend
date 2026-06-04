@@ -2710,14 +2710,40 @@ class NPUModelRunner(GPUModelRunner):
                 sampling_metadata,
                 max_topk,
             )
+        bonus_sampler_output = self._sample_spec_decode_bonus_tokens(
+            logits,
+            spec_decode_metadata,
+            sampling_metadata,
+            random_tensors,
+        )
         with self._configure_spec_rejection_sampler(max_topk, random_tensors):
             sampler_output = self.rejection_sampler(
                 spec_decode_metadata,
                 None,  # draft_probs
                 logits,
                 sampling_metadata,
+                bonus_sampler_output=bonus_sampler_output,
             )
         return sampler_output
+
+    def _sample_spec_decode_bonus_tokens(
+        self,
+        logits: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+        random_tensors: SamplingRandomTensors | None,
+    ) -> SamplerOutput:
+        bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
+        self.sampler.set_external_q(None if random_tensors is None else random_tensors.bonus_q)
+        return self.sampler(
+            logits=bonus_logits,
+            sampling_metadata=replace(
+                sampling_metadata,
+                max_num_logprobs=-1,
+            ),
+            predict_bonus_token=True,
+            logprobs_mode_override="processed_logits" if self.rejection_sampler.is_processed_logprobs_mode else "raw_logits",
+        )
 
     def _sample(
         self,
