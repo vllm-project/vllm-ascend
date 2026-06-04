@@ -2,7 +2,7 @@
 
 Measures Time-To-First-Token (TTFT) on 64k-token prefill requests with
 profiling_chunk_config enabled.  The test runs against
-DeepSeek-V2-Lite-Chat served with PP=2, TP=2 (4 NPU cards total).
+Qwen3-30B-A3B-W8A8 served with PP=2, TP=2 (4 NPU cards total).
 
 Test flow:
   1. Create an LLM engine with profiling_chunk_config enabled.
@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
 
-MODEL = "Qwen/Qwen3-30B-A3B"
+MODEL = "vllm-ascend/Qwen3-30B-A3B-W8A8"
 
 # ~64k tokens
 _WORD = "hello "
@@ -29,7 +29,7 @@ NUM_WARMUP = 5
 NUM_TEST = 5
 
 # NOTE: Any changes to this baseline must be approved by team members.
-# Measured on Qwen3-30B-A3B, PP=2, TP=2, 64k prefill, profiling_chunk enabled.
+# Measured on Qwen3-30B-A3B-W8A8, PP=2, TP=2, 64k prefill, profiling_chunk enabled.
 BASELINE_TTFT_S = 5.2
 
 
@@ -52,6 +52,7 @@ def test_profiling_chunk_ttft_performance() -> None:
         enable_prefix_caching=False,
         gpu_memory_utilization=0.9,
         max_num_batched_tokens=12288,
+        quantization="ascend",
         distributed_executor_backend="mp",
         enforce_eager=True,
         async_scheduling=False,
