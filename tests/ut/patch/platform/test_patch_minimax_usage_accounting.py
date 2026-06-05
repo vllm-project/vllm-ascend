@@ -113,6 +113,20 @@ def test_make_usage_info_injects_reasoning_token_details():
     assert payload["prompt_tokens_details"]["cached_tokens"] == 1
 
 
+def test_make_usage_info_injects_zero_cached_tokens():
+    fake_serving = SimpleNamespace(enable_prompt_tokens_details=True)
+    usage = minimax_usage_patch._make_usage_info(
+        fake_serving,
+        prompt_tokens=3,
+        completion_tokens=4,
+        num_cached_tokens=0,
+    )
+
+    payload = usage.model_dump(exclude_none=True)
+
+    assert payload["prompt_tokens_details"]["cached_tokens"] == 0
+
+
 def test_make_full_response_usage_sums_reasoning_tokens():
     class FakeServing:
         enable_prompt_tokens_details = False
@@ -151,7 +165,9 @@ def test_stream_usage_details_are_injected_without_replacing_source():
     state = minimax_usage_patch._create_usage_tracking_state(
         num_choices=1,
         reasoning_parser=FakeReasoningParser(),
+        enable_prompt_tokens_details=True,
     )
+    state.num_cached_tokens = 0
     state.raw_output_token_ids = [[10, 11, 2, 20]]
 
     chunk = {
@@ -174,5 +190,39 @@ def test_stream_usage_details_are_injected_without_replacing_source():
     assert payload["usage"]["completion_tokens_details"] == {
         "reasoning_tokens": 2,
     }
+    assert payload["usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 0,
+    }
     assert not hasattr(minimax_usage_patch, "_extract_class_method_source")
     assert not hasattr(minimax_usage_patch, "_patch_chat_completion_stream_generator")
+
+
+def test_stream_usage_details_inject_prompt_details_without_reasoning():
+    state = minimax_usage_patch._create_usage_tracking_state(
+        num_choices=1,
+        reasoning_parser=None,
+        enable_prompt_tokens_details=True,
+    )
+    state.num_cached_tokens = 0
+
+    chunk = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion.chunk",
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 3,
+            "completion_tokens": 4,
+            "total_tokens": 7,
+        },
+    }
+
+    data = minimax_usage_patch._inject_stream_usage_details(
+        f"data: {json.dumps(chunk)}\n\n",
+        state,
+    )
+    payload = json.loads(data.removeprefix("data: ").removesuffix("\n\n"))
+
+    assert payload["usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 0,
+    }
+    assert "completion_tokens_details" not in payload["usage"]

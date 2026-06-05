@@ -1009,14 +1009,41 @@ class AscendDSACPImpl(DSAAttentionImpl):
             qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 q_a, self.q_norm.weight, epsilon=self.eps
             )
-            q = torch_npu.npu_quant_matmul(
-                qr_local,
-                self.wq_b.weight,
-                self.wq_b.weight_scale,
-                pertoken_scale=qr_pertoken_scale_local,
-                bias=self.wq_b.bias,
-                output_dtype=hidden_states_local.dtype,
-            )
+            if getattr(self.wq_b, "_chunk_size", 0):
+                bias = self.wq_b.bias
+                chunk_size = self.wq_b._chunk_size
+                bias_1 = bias[:chunk_size] if bias is not None else None
+                bias_2 = bias[chunk_size:] if bias is not None else None
+                q = torch.cat(
+                    [
+                        torch_npu.npu_quant_matmul(
+                            qr_local,
+                            self.wq_b.weight_1,
+                            self.wq_b.weight_1_scale,
+                            pertoken_scale=qr_pertoken_scale_local,
+                            bias=bias_1,
+                            output_dtype=hidden_states_local.dtype,
+                        ),
+                        torch_npu.npu_quant_matmul(
+                            qr_local,
+                            self.wq_b.weight_2,
+                            self.wq_b.weight_2_scale,
+                            pertoken_scale=qr_pertoken_scale_local,
+                            bias=bias_2,
+                            output_dtype=hidden_states_local.dtype,
+                        ),
+                    ],
+                    dim=-1,
+                )
+            else:
+                q = torch_npu.npu_quant_matmul(
+                    qr_local,
+                    self.wq_b.weight,
+                    self.wq_b.weight_scale,
+                    pertoken_scale=qr_pertoken_scale_local,
+                    bias=self.wq_b.bias,
+                    output_dtype=hidden_states_local.dtype,
+                )
         else:
             qr_local = self.q_norm(self.wq_a(hidden_states_local))
             q = self.wq_b(qr_local)

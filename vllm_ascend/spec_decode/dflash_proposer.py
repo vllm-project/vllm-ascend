@@ -167,6 +167,8 @@ class AscendDflashProposer(AscendEagleProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
 
+        if not self.use_cuda_graph:
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
         num_query_per_req = 1 + self.num_speculative_tokens
         num_query_total = num_reqs * num_query_per_req
 

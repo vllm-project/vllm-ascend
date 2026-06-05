@@ -51,7 +51,7 @@ jobs:
             part: [0, 1, 2, 3]
             vllm: [v0.20.2]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
+          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
@@ -134,7 +134,7 @@ jobs:
             part: [0]
             vllm: [v0.20.2]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
+          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
@@ -208,7 +208,7 @@ jobs:
             part: [0]
             vllm: [v0.20.2]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11
+          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
