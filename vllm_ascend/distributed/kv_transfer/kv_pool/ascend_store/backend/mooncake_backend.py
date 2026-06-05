@@ -31,7 +31,8 @@ class MooncakeBackend(Backend):
         self.store: Any | None = None
         self.local_seg: str | None = None
         self._use_fabric_mem = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
-        self._lazy_init = lazy_init and self._use_fabric_mem
+        self._use_dummy_client = self.config.use_dummy_client
+        self._lazy_init = lazy_init and self._use_fabric_mem and not self._use_dummy_client
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
 
@@ -63,10 +64,18 @@ class MooncakeBackend(Backend):
 
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
+
+        if self._use_dummy_client:
+            self.local_seg = local_hostname
+            ret = store.setup_dummy(
+                mem_pool_size=0,
+                local_buffer_size=0,
+                server_address=self.config.dummy_server_address,
+            )
         # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
         # and only can be used for 800 I/T A3 series.
         # Required supporting hardware versions are as follows:
-        if not self._use_fabric_mem:
+        elif not self._use_fabric_mem:
             transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
             self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
             ret = store.setup(
@@ -103,6 +112,11 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
+        if self._use_dummy_client:
+            assert self.store is not None
+            for ptr, length in zip(ptrs, lengths):
+                self.store.register_buffer(ptr, length)
+            return
         if not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)
@@ -177,6 +191,8 @@ class MooncakeStoreConfig:
     master_server_address: str
     preferred_segment: bool
     prefer_alloc_in_same_node: bool
+    use_dummy_client: bool
+    dummy_server_address: str
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
@@ -184,6 +200,13 @@ class MooncakeStoreConfig:
             config = json.load(file)
         master_server_address = os.getenv("MOONCAKE_MASTER", None)
         global_segment_size_env = os.getenv("MOONCAKE_GLOBAL_SEGMENT_SIZE", None)
+        use_dummy_client = os.getenv("MOONCAKE_USE_DUMMY_CLIENT", config.get("use_dummy_client", False))
+        if isinstance(use_dummy_client, str):
+            use_dummy_client = use_dummy_client.lower() in ("1", "true")
+        dummy_server_address = os.getenv(
+            "MOONCAKE_DUMMY_SERVER_ADDRESS",
+            config.get("dummy_server_address", ""),
+        )
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server"),
             global_segment_size=_parse_global_segment_size(
@@ -199,6 +222,8 @@ class MooncakeStoreConfig:
             else config.get("master_server_address"),
             preferred_segment=config.get("preferred_segment", False),
             prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node", True),
+            use_dummy_client=use_dummy_client,
+            dummy_server_address=dummy_server_address,
         )
 
     @staticmethod
