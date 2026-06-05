@@ -165,6 +165,10 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.sample.spec_sampling_executor import (
+    PreparedSpecSamplingInputs,
+    SpecSamplingNPUExecutor,
+)
 from vllm_ascend.sample.spec_sampling_poc import dump_spec_sampling_case, write_spec_sampling_marker
 
 if TYPE_CHECKING:
@@ -580,6 +584,10 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
                     self.use_aux_hidden_state_outputs = True
                 self.rejection_sampler = AscendRejectionSampler(self.sampler)
+                self.spec_sampling_executor = SpecSamplingNPUExecutor(
+                    self.sampler,
+                    self.rejection_sampler,
+                )
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
@@ -2378,9 +2386,9 @@ class NPUModelRunner(GPUModelRunner):
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
+        prepared_top_k = None
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
-            max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-            self.rejection_sampler.prepare_sampling(max_topk)
+            prepared_top_k = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
         if self.speculative_config and self.speculative_config.method == "mtp":
             write_spec_sampling_marker(
                 "entered_mtp_sample",
@@ -2390,12 +2398,24 @@ class NPUModelRunner(GPUModelRunner):
                     "num_spec_tokens": self.num_spec_tokens,
                 },
             )
-        sampler_output = self.rejection_sampler(
-            spec_decode_metadata,
-            None,  # draft_probs
-            logits,
-            sampling_metadata,
-        )
+        if self.speculative_config and self.speculative_config.method == "mtp":
+            inputs = PreparedSpecSamplingInputs(
+                metadata=spec_decode_metadata,
+                sampling_metadata=sampling_metadata,
+                logits=logits,
+                draft_probs=None,
+                prepared_top_k=int(prepared_top_k) if prepared_top_k is not None else None,
+            )
+            sampler_output = self.spec_sampling_executor.execute(inputs)
+        else:
+            if prepared_top_k is not None:
+                self.rejection_sampler.prepare_sampling(prepared_top_k)
+            sampler_output = self.rejection_sampler(
+                spec_decode_metadata,
+                None,  # draft_probs
+                logits,
+                sampling_metadata,
+            )
         if self.speculative_config and self.speculative_config.method == "mtp":
             write_spec_sampling_marker(
                 "finished_mtp_sample",
