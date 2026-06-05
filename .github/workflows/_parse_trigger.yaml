@@ -243,14 +243,14 @@ jobs:
           P310_MULTICARD_TESTS=""
 
           for TEST in $TESTS; do
-            if echo "$TEST" | grep -q "multicard/two_cards"; then
-              MULTICARD_2_TESTS="$MULTICARD_2_TESTS $TEST"
-            elif echo "$TEST" | grep -q "multicard/four_cards"; then
-              MULTICARD_4_TESTS="$MULTICARD_4_TESTS $TEST"
-            elif echo "$TEST" | grep -q "310p.*multicard"; then
+            if echo "$TEST" | grep -q "four_card/_310p"; then
               P310_MULTICARD_TESTS="$P310_MULTICARD_TESTS $TEST"
-            elif echo "$TEST" | grep -q "310p"; then
+            elif echo "$TEST" | grep -q "_310p"; then
               P310_SINGLECARD_TESTS="$P310_SINGLECARD_TESTS $TEST"
+            elif echo "$TEST" | grep -q "four_card"; then
+              MULTICARD_4_TESTS="$MULTICARD_4_TESTS $TEST"
+            elif echo "$TEST" | grep -q "two_card"; then
+              MULTICARD_2_TESTS="$MULTICARD_2_TESTS $TEST"
             else
               SINGLECARD_TESTS="$SINGLECARD_TESTS $TEST"
             fi
