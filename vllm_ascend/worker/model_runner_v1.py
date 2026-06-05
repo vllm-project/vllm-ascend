@@ -2383,8 +2383,6 @@ class NPUModelRunner(GPUModelRunner):
                 sampling_metadata=sampling_metadata,
             )
 
-        if lmhead_tp_enable() and logits is not None:
-            logits = logits[: len(spec_decode_metadata.logits_indices)]
         if self.speculative_config and self.speculative_config.method == "mtp":
             write_spec_sampling_marker(
                 "entered_mtp_sample",
@@ -2395,7 +2393,7 @@ class NPUModelRunner(GPUModelRunner):
                 },
             )
         if self.speculative_config and self.speculative_config.method == "mtp":
-            inputs = self.spec_sampling_executor.build_inputs_from_runtime(
+            sampler_output = self.spec_sampling_executor.execute_from_runtime(
                 metadata=spec_decode_metadata,
                 sampling_metadata=sampling_metadata,
                 logits=logits,
@@ -2403,9 +2401,9 @@ class NPUModelRunner(GPUModelRunner):
                 if self.input_batch.sampling_metadata.top_k is not None
                 else None,
                 enable_reduce_sample=get_ascend_config().enable_reduce_sample,
+                trim_logits_to_indices=lmhead_tp_enable() and logits is not None,
                 draft_probs=None,
             )
-            sampler_output = self.spec_sampling_executor.execute(inputs)
         else:
             prepared_top_k = None
             if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:

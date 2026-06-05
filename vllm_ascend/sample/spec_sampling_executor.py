@@ -150,3 +150,26 @@ class SpecSamplingNPUExecutor:
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
         )
+
+    def execute_from_runtime(
+        self,
+        *,
+        metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+        logits: torch.Tensor,
+        top_k_cpu: torch.Tensor | None,
+        enable_reduce_sample: bool,
+        trim_logits_to_indices: bool = False,
+        draft_probs: torch.Tensor | None = None,
+    ) -> SamplerOutput:
+        if trim_logits_to_indices:
+            logits = logits[: len(metadata.logits_indices)]
+        inputs = self.build_inputs_from_runtime(
+            metadata=metadata,
+            sampling_metadata=sampling_metadata,
+            logits=logits,
+            top_k_cpu=top_k_cpu,
+            enable_reduce_sample=enable_reduce_sample,
+            draft_probs=draft_probs,
+        )
+        return self.execute(inputs)
