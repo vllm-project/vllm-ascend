@@ -138,12 +138,18 @@ jobs:
           echo "value=buildcache-${{ matrix.tag }}" >> $GITHUB_OUTPUT
         fi
 
-    - name: Get csrc hash
-      id: get_csrc_hash
+    - name: Get csrc build cache base branch
+      id: get_csrc_build_cache_base_branch
       run: |
-        CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-        -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-        echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+        base_branch="${{ inputs.branch_ref }}"
+        base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+        echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+
+    - name: Get current cache hour
+      id: get_cache_time
+      run: |
+        cache_time=$(date -u +'%Y%m%d%H')
+        echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
 
     - name: Get Dockerfile base image tag
       id: get_base_image_tag
@@ -152,17 +158,18 @@ jobs:
         BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
         echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> $GITHUB_OUTPUT
 
-    - name: Cache vllm-ascend csrc
-      id: cache-csrc
-      uses: actions/cache/restore@v5
+    - name: Restore vllm-ascend csrc build cache
+      id: restore-csrc-build-cache
+      uses: runs-on/cache/restore@v5
       with:
         path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-        key: vllm-ascend-build-v1-${{ runner.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          csrc/build
+        key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ runner.arch }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_cache_time.outputs.cache_time }}
+        restore-keys: |
+          vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ runner.arch }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-
 
+    - name: Ensure csrc/build exists (cache miss fallback)
+      run: mkdir -p csrc/build
 
     - name: Build and push
       uses: docker/build-push-action@v7
@@ -177,7 +184,6 @@ jobs:
         outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
-          COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".

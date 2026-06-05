@@ -1,0 +1,3 @@
+# Ninja incremental build cache — excluded from Docker image to avoid
+# invalidating the COPY layer; mounted via --mount=type=bind at build time.
+csrc/build/
