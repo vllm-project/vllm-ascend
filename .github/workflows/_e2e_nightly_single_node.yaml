@@ -49,6 +49,11 @@ on:
         type: string
         default: ''
         description: branch name used as prefix in artifact/benchmark names to distinguish dual-branch test runs
+      tests_override:
+        required: false
+        type: string
+        default: ''
+        description: specific file name to run within the tests directory (e.g. "test_ops.py"), overrides running the full directory
     secrets:
       OBS_ACCESS_KEY:
         required: false
@@ -208,11 +213,16 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
+          TESTS_OVERRIDE: ${{ inputs.tests_override }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-          echo "Running pytest with tests path: ${{ inputs.tests }}"
-          pytest -sv "${{ inputs.tests }}" \
+          TESTS_PATH="${{ inputs.tests }}"
+          if [ -n "$TESTS_OVERRIDE" ]; then
+            TESTS_PATH="${TESTS_PATH%/}/$TESTS_OVERRIDE"
+          fi
+          echo "Running pytest with tests path: $TESTS_PATH"
+          pytest -sv "$TESTS_PATH" \
           --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
 
       - name: Run Pytest (YAML-driven)

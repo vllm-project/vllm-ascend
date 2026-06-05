@@ -34,9 +34,8 @@ on:
           - main
           - releases/v0.18.0
       test_cases:
-        description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
-        required: false
-        default: 'all'
+        description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group")'
+        required: true
         type: string
   pull_request:
     branches:
@@ -173,6 +172,7 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      tests_override: ${{ fromJSON(needs.parse-trigger.outputs.file_overrides || '{}')[matrix.test_config.name] || '' }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
