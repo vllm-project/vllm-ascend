@@ -639,11 +639,21 @@ After about several minutes, you can get the performance evaluation result.
 
 ## Best Practices
 
-In this chapter, we recommend best practices for three scenarios:
+In this chapter, we recommend best practices for these scenarios:
 
-- Long-context: For long sequences with low concurrency (≤ 4): set `dp1 tp16`; For long sequences with high concurrency (> 4): set `dp4 tp4`
-- Low-latency: For short sequences with low latency: we recommend setting `dp2 tp8`
-- High-throughput: For short sequences with high throughput: we also recommend setting `dp4 tp4`
+- 1. Single-Node Mixed Deployment
+  16K Long-Context Sequences: Set dp2 tp8 to balance memory capacity and compute efficiency.
+  128K Long-Context (without Prefix-Cache): Set dp1 tp16 to maximize tensor parallelism and accommodate extreme context lengths within a single node.
+  128K Long-Context (with Prefix-Cache): Set dp2 tp8 to optimize memory bandwidth and improve prefix-cache utilization.
+  1080P Multimodal Scenarios: Set dp1 tp16 to handle the high computational and memory demands of high-resolution visual inputs.
+
+- 2. Dual-Node 1P1D Scenario (1 Prefill, 1 Decode Node)
+  General P/D Node Configuration: Set dp2 tp8 for both Prefill and Decode nodes to ensure a balanced trade-off between latency and throughput.
+  1080P Multimodal Scenarios: Configure as dp2 tp8 or dp16 tp1, depending on the specific memory constraints and concurrency requirements of the workload.
+
+- 3. Quad-Node 2P1D Scenario (2 Prefill, 1 Decode Nodes)
+  General P/D Node Configuration: Scale the configuration to range from dp4 tp4 to dp8 tp4 to effectively utilize the increased distributed compute resources.
+  1080P Multimodal Scenarios: Configure with higher data parallelism, ranging from dp8 tp2 to dp32 tp1, to maximize throughput and handle heavy multimodal workloads across multiple decode nodes.
 
 **Notice:**
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
