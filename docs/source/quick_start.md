@@ -17,6 +17,21 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A3 inference series (Atlas 800I A3)
 - [Experimental] Atlas 300I inference series (Atlas 300I Duo)
 
+## Requirements
+
+- OS: Linux
+- Python: >= 3.10, < 3.13
+- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
+- Software:
+
+    | Software      | Supported version                | Note                                      |
+    |---------------|----------------------------------|-------------------------------------------|
+    | Ascend HDK    | Refer to the documentation [CANN 9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
+    | CANN          | == 9.0.0                        | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+    | NNAL          | == 9.0.0                        | Required for libatb.so, enables advanced tensor operations |
+
 ## Setup environment using container
 
 Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-docker/) for installation instructions.
@@ -110,7 +125,7 @@ There are two ways to start vLLM on Ascend NPU:
 
 With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inference).
 
-Try to run below Python script directly or use `python3` shell to generate texts:
+Create and run a simple inference test. The `example.py` can be like:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
@@ -131,6 +146,47 @@ for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
+
+Then run:
+
+```bash
+python example.py
+```
+
+If you encounter a connection error with Hugging Face (e.g., `We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.`), run the following commands to use ModelScope as an alternative:
+
+```bash
+export VLLM_USE_MODELSCOPE=True
+pip install modelscope
+python example.py
+```
+
+This section shows ascend platform is successfully detected in vllm:
+
+```bash
+INFO 05-27 11:40:38 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 05-27 11:40:38 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 05-27 11:40:38 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 05-27 11:40:38 [__init__.py:238] Platform plugin ascend is activated
+```
+
+This section shows the final output:
+
+```bash
+Prompt: 'Hello, my name is', Generated text: ' Lucy and I am an 8 year old who loves to draw and write stories'
+Prompt: 'The president of the United States is', Generated text: " a key leader in the federal government, and the president's role in the executive"
+Prompt: 'The capital of France is', Generated text: ' a city. What is the capital of France? The capital of France is Paris'
+Prompt: 'The future of AI is', Generated text: ' a topic that is being discussed in various contexts. In the business world, AI'
+```
+
+This section shows process exits after offline inference, and is does not affect actual inference:
+
+```bash
+(EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1201] Shutdown initiated (timeout=0)
+(EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1224] Shutdown complete
+ERROR 05-12 11:36:01 [core_client.py:704] Engine core proc EngineCore died unexpectedly, shutting down client.
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
 ```
 
 ::::
