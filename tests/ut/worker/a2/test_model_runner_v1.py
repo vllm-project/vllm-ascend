@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -151,6 +152,71 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         actual_output_token_ids = actual_sampling_metadata.output_token_ids
         self.assertEqual(actual_output_token_ids[0], [1, 2, 3, 6])
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
+
+    @patch("torch.npu.current_stream")
+    @patch("torch.npu.stream")
+    def test_copy_valid_sampled_token_count_syncs_host_accepted_counts(
+        self, mock_npu_stream, mock_current_stream
+    ):
+        mock_current_stream.return_value = MagicMock()
+        mock_npu_stream.side_effect = lambda _stream: nullcontext()
+
+        runner = self._build_runner()
+        runner.valid_sampled_token_count_event = MagicMock()
+        runner.valid_sampled_token_count_copy_stream = MagicMock()
+        runner.use_async_spec_decode = False
+        runner.valid_sampled_token_count_cpu = torch.zeros(4, dtype=torch.int32)
+        runner.input_batch = SimpleNamespace(
+            num_accepted_tokens_cpu_tensor=torch.zeros(4, dtype=torch.int32),
+            prev_sampled_token_ids=None,
+        )
+
+        next_token_ids = torch.tensor([11, 12], dtype=torch.int32)
+        valid_counts = torch.tensor([3, 1], dtype=torch.int32)
+
+        runner._copy_valid_sampled_token_count(next_token_ids, valid_counts)
+
+        self.assertTrue(
+            torch.equal(runner.input_batch.num_accepted_tokens_cpu_tensor[:2], valid_counts)
+        )
+        self.assertTrue(
+            torch.equal(runner.input_batch.prev_sampled_token_ids, next_token_ids.unsqueeze(1))
+        )
+
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
+    def test_sample_mtp_returns_executor_counts_explicitly(
+        self, mock_get_ascend_config, mock_lmhead_tp_enable
+    ):
+        mock_lmhead_tp_enable.return_value = False
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_reduce_sample = False
+        mock_get_ascend_config.return_value = mock_ascend_config
+
+        runner = self._build_runner()
+        runner.input_batch = MagicMock()
+        runner.input_batch.sampling_metadata = MagicMock()
+        runner.input_batch.sampling_metadata.top_k = None
+        runner.input_batch.top_k_cpu = None
+        runner.input_batch.num_reqs = 2
+        runner.input_batch.update_async_output_token_ids = MagicMock()
+        runner.speculative_config = SimpleNamespace(method="mtp")
+        runner.num_spec_tokens = 3
+        expected_output = MagicMock()
+        expected_counts = torch.tensor([4, 2], dtype=torch.int32)
+        runner.spec_sampling_executor = MagicMock()
+        runner.spec_sampling_executor.execute_from_runtime.return_value = SimpleNamespace(
+            sampler_output=expected_output,
+            num_output_tokens_per_req=expected_counts,
+        )
+
+        logits = torch.randn(4, 32)
+        spec_decode_metadata = MagicMock()
+        sampler_output, counts = runner._sample(logits, spec_decode_metadata)
+
+        self.assertIs(sampler_output, expected_output)
+        self.assertTrue(torch.equal(counts, expected_counts))
+        runner.spec_sampling_executor.execute_from_runtime.assert_called_once()
 
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):
