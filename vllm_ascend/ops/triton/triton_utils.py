@@ -81,7 +81,8 @@ def get_aicore_num():
     global _NUM_AICORE
     if _NUM_AICORE <= 0:
         logger.error(
-            "[TritonOps] Device properties not initialized (num_aicore=%s). Call init_device_properties_triton() first.",
+            "[TritonOps] Device properties not initialized (num_aicore=%s). "
+            "Call init_device_properties_triton() first.",
             _NUM_AICORE,
         )
         raise RuntimeError(
