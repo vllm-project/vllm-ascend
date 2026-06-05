@@ -10,6 +10,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm_ascend.sample.rejection_sampler import (
     AscendRejectionSampler,
     MAX_SPEC_LEN,
+    PLACEHOLDER_TOKEN_ID,
     apply_sampling_constraints,
     rejection_sample,
 )
@@ -24,6 +25,12 @@ class PreparedSpecSamplingInputs:
     logits: torch.Tensor
     draft_probs: torch.Tensor | None = None
     prepared_top_k: int | None = None
+
+
+@dataclass
+class SpecSamplingExecutionResult:
+    sampler_output: SamplerOutput
+    num_output_tokens_per_req: torch.Tensor
 
 
 class SpecSamplingNPUExecutor:
@@ -84,6 +91,9 @@ class SpecSamplingNPUExecutor:
         )
 
     def execute(self, inputs: PreparedSpecSamplingInputs) -> SamplerOutput:
+        return self.execute_detailed(inputs).sampler_output
+
+    def execute_detailed(self, inputs: PreparedSpecSamplingInputs) -> SpecSamplingExecutionResult:
         metadata = inputs.metadata
         sampling_metadata = inputs.sampling_metadata
         logits = inputs.logits
@@ -147,9 +157,14 @@ class SpecSamplingNPUExecutor:
                 output_token_ids,
             )
 
-        return SamplerOutput(
+        sampler_output = SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+        )
+        num_output_tokens_per_req = output_token_ids.ne(PLACEHOLDER_TOKEN_ID).sum(dim=-1).to(torch.int32)
+        return SpecSamplingExecutionResult(
+            sampler_output=sampler_output,
+            num_output_tokens_per_req=num_output_tokens_per_req,
         )
 
     def execute_from_runtime(
@@ -165,7 +180,7 @@ class SpecSamplingNPUExecutor:
         write_markers: bool = False,
         num_reqs: int | None = None,
         num_spec_tokens: int | None = None,
-    ) -> SamplerOutput:
+    ) -> SpecSamplingExecutionResult:
         if write_markers:
             write_spec_sampling_marker(
                 "entered_mtp_sample",
@@ -185,12 +200,13 @@ class SpecSamplingNPUExecutor:
             enable_reduce_sample=enable_reduce_sample,
             draft_probs=draft_probs,
         )
-        sampler_output = self.execute(inputs)
+        result = self.execute_detailed(inputs)
         if write_markers:
             write_spec_sampling_marker(
                 "finished_mtp_sample",
                 {
-                    "sampled_token_ids_shape": list(sampler_output.sampled_token_ids.shape),
+                    "sampled_token_ids_shape": list(result.sampler_output.sampled_token_ids.shape),
+                    "num_output_tokens_per_req": result.num_output_tokens_per_req.tolist(),
                 },
             )
-        return sampler_output
+        return result

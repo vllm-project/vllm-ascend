@@ -1460,6 +1460,7 @@ class NPUModelRunner(GPUModelRunner):
         aux_hidden_states: torch.Tensor = None,
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
+        valid_sampled_tokens_count_override: torch.Tensor | None = None,
     ) -> list[list[int]] | None:
         if not self.drafter:
             # Speculative decoding is not enabled.
@@ -1543,6 +1544,8 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_discarded_requests,
                 )
             )
+            if valid_sampled_tokens_count_override is not None:
+                valid_sampled_tokens_count = valid_sampled_tokens_count_override
             self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
         elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
@@ -1575,6 +1578,8 @@ class NPUModelRunner(GPUModelRunner):
                     self.discard_request_indices.gpu,
                     self.num_discarded_requests,
                 )
+                if valid_sampled_tokens_count_override is not None:
+                    valid_sampled_tokens_count = valid_sampled_tokens_count_override
 
             req_scheduled_tokens = scheduler_output.num_scheduled_tokens
             if self.use_cp:
@@ -2222,6 +2227,7 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states,
                 sample_hidden_states,
                 batch_desc,
+                self._last_spec_num_output_tokens_per_req,
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
@@ -2273,6 +2279,12 @@ class NPUModelRunner(GPUModelRunner):
                                     self.discard_request_indices.gpu,
                                     self.num_discarded_requests,
                                 )
+                            if (
+                                self.speculative_config
+                                and self.speculative_config.method == "mtp"
+                                and self._last_spec_num_output_tokens_per_req is not None
+                            ):
+                                valid_sampled_tokens_count = self._last_spec_num_output_tokens_per_req
                             self._copy_valid_sampled_token_count(
                                 next_token_ids, valid_sampled_tokens_count
                             )
@@ -2372,6 +2384,7 @@ class NPUModelRunner(GPUModelRunner):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         self.input_batch.update_async_output_token_ids()
+        self._last_spec_num_output_tokens_per_req = None
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
@@ -2384,7 +2397,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if self.speculative_config and self.speculative_config.method == "mtp":
-            sampler_output = self.spec_sampling_executor.execute_from_runtime(
+            spec_sampling_result = self.spec_sampling_executor.execute_from_runtime(
                 metadata=spec_decode_metadata,
                 sampling_metadata=sampling_metadata,
                 logits=logits,
@@ -2398,6 +2411,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs=self.input_batch.num_reqs,
                 num_spec_tokens=self.num_spec_tokens,
             )
+            self._last_spec_num_output_tokens_per_req = spec_sampling_result.num_output_tokens_per_req
+            sampler_output = spec_sampling_result.sampler_output
         else:
             prepared_top_k = None
             if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
