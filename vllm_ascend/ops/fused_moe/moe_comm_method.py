@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.expert_offload.expert_offload_manager import has_expert_offload_manager
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -137,13 +138,26 @@ class MoECommMethod(ABC):
 
         before_dispatch_evt = torch.npu.current_stream().record_event()
         routed_topk_ids = fused_experts_input.topk_ids
-        if fused_experts_input.routing.log2phy is not None:
+        topk_weights_mask = None
+        if has_expert_offload_manager():
+            log2phy = fused_experts_input.routing.log2phy
+            log2phy_cache_hit = fused_experts_input.routing.log2phy_cache_hit
+            log2phy_cache_miss = fused_experts_input.routing.log2phy_cache_miss
+            assert log2phy is not None
+            if log2phy_cache_hit is not None:
+                routed_topk_ids = log2phy_cache_hit[routed_topk_ids]
+            else:
+                routed_topk_ids = log2phy[routed_topk_ids]
+            topk_weights_mask = routed_topk_ids > -1
+            routed_topk_ids = routed_topk_ids.clamp(min=0)  # safety: unmapped -> 0
+        elif fused_experts_input.routing.log2phy is not None:
             routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
             routed_topk_ids = routed_topk_ids.clamp(min=0)  # safety: unmapped -> 0
 
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,
             topk_ids=routed_topk_ids,
+            topk_weights_mask=topk_weights_mask,
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
@@ -160,6 +174,35 @@ class MoECommMethod(ABC):
             hidden_states=mlp_output,
             combine_metadata=token_dispatch_output.combine_metadata,
         )
+
+        if has_expert_offload_manager() and log2phy_cache_hit is not None:
+            assert log2phy_cache_miss is not None
+            # TODO async onload in update_weights, and wait for load finish here
+            routed_topk_ids = fused_experts_input.topk_ids
+            routed_topk_ids = log2phy_cache_miss[routed_topk_ids]
+            topk_weights_mask = routed_topk_ids > -1
+            routed_topk_ids = routed_topk_ids.clamp(min=0)  # safety: unmapped -> 0
+
+            token_dispatch_input = build_token_dispatch_input(
+                fused_experts_input=fused_experts_input,
+                topk_ids=routed_topk_ids,
+                topk_weights_mask=topk_weights_mask,
+            )
+            token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+            mlp_compute_input = build_mlp_compute_input(
+                fused_experts_input=fused_experts_input,
+                token_dispatch_output=token_dispatch_output,
+                use_fusion_ops=self.use_fusion_ops,
+            )
+
+            mlp_output, _ = self._apply_mlp(mlp_compute_input)
+
+            routed_out_cache_miss = self.token_dispatcher.token_combine(
+                hidden_states=mlp_output,
+                combine_metadata=token_dispatch_output.combine_metadata,
+            )
+            routed_out = routed_out + routed_out_cache_miss
 
         return FusedExpertsResult(
             routed_out=routed_out,
