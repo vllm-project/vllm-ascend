@@ -125,8 +125,10 @@ class AscendRejectionSampler(RejectionSampler):
         bonus_sampler_output: SamplerOutput,
         target_logits_or_tuple: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None],
         raw_target_logits: torch.Tensor,
+        random_tensors: SamplingRandomTensors | None = None,
     ) -> SamplerOutput:
-        random_tensors = self.random_tensors
+        if random_tensors is None:
+            random_tensors = self.random_tensors
         self.random_tensors = None
 
         bonus_token_ids = bonus_sampler_output.sampled_token_ids
@@ -248,6 +250,7 @@ class AscendRejectionSampler(RejectionSampler):
             bonus_sampler_output,
             target_logits,
             raw_target_logits,
+            random_tensors=random_tensors,
         )
 
 

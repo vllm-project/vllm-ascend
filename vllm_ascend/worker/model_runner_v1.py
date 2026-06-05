@@ -168,7 +168,6 @@ from vllm_ascend.sample.rejection_sampler import (
     AscendRejectionSampler,
     SamplingRandomTensors,
     apply_sampling_constraints,
-    rejection_sample,
 )
 
 if TYPE_CHECKING:
@@ -2820,31 +2819,15 @@ class NPUModelRunner(GPUModelRunner):
         raw_target_logits: torch.Tensor,
         random_tensors: SamplingRandomTensors | None,
     ) -> SamplerOutput:
-        output_token_ids = rejection_sample(
-            spec_decode_metadata.draft_token_ids,
-            spec_decode_metadata.num_draft_tokens,
-            spec_decode_metadata.max_spec_len,
-            spec_decode_metadata.cu_num_draft_tokens,
-            None,  # draft_probs
-            target_logits,
-            bonus_sampler_output.sampled_token_ids,
-            sampling_metadata,
-            random_tensors=random_tensors,
-        )
-
-        logprobs_tensors = self.rejection_sampler.build_logprobs_tensors_from_prepared_inputs(
+        return self.rejection_sampler.forward_with_prepared_inputs(
             spec_decode_metadata,
+            None,
             logits,
             sampling_metadata,
+            bonus_sampler_output,
             target_logits,
             raw_target_logits,
-            bonus_sampler_output,
-            output_token_ids,
-        )
-
-        return SamplerOutput(
-            sampled_token_ids=output_token_ids,
-            logprobs_tensors=logprobs_tensors,
+            random_tensors=random_tensors,
         )
 
     def _sample(
