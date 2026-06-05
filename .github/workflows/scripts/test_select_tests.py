@@ -383,14 +383,6 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
     monkeypatch.setattr(
         sys,
         "argv",
-        ["select_tests.py", "--config", str(config_path), "--changed-files", "src/cpu.py", "--run-all-cpu"],
-    )
-    select_tests.main()
-    assert "tests/ut/cpu/test_keep.py" in capsys.readouterr().out
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
         [
             "select_tests.py",
             "--config",

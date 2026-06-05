@@ -67,6 +67,11 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     kv_alltoall_and_rearrange,
     parallel_info,
 )
+from vllm_ascend.distributed.kv_transfer.utils import (
+    RegisterRegions,
+    collect_storage_merged_register_regions,
+    warn_if_register_regions_exceed_limit,
+)
 from vllm_ascend.utils import npu_stream_switch, trans_nd_to_nz
 
 # isort: off
@@ -1236,7 +1241,16 @@ class MooncakeLayerwiseConnectorWorker:
                 ptrs.append(min(set(tensor_addrs)))
                 lengths.append(kv_cache_tensor.size)
 
-        global_te.register_buffer(ptrs, lengths)
+        if self.use_attn_mamba_hybrid:
+            register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
+        else:
+            # For normal attention / sparse-c8 KV cache, register merged memory
+            # ranges while keeping layer metadata at logical tensor addresses.
+            register_regions = collect_storage_merged_register_regions(kv_caches)
+
+        warn_if_register_regions_exceed_limit(register_regions)
+        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+
         if use_kv_buffer:
             self.create_kv_buffer(kv_buffer)
 
