@@ -50,6 +50,23 @@ def _allocate_case_dir() -> Path | None:
     return case_dir
 
 
+def write_spec_sampling_marker(stage: str, extra: dict[str, Any] | None = None) -> Path | None:
+    dump_dir = _get_dump_dir()
+    if dump_dir is None:
+        return None
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": time.time(),
+        "stage": stage,
+    }
+    if extra:
+        payload["extra"] = extra
+    marker_path = dump_dir / f"marker_{stage}.json"
+    with open(marker_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return marker_path
+
+
 def _move_tensors(obj: Any, device: str | torch.device) -> Any:
     if torch.is_tensor(obj):
         return obj.detach().to(device)
@@ -130,5 +147,4 @@ def load_spec_sampling_case(case_path: str | os.PathLike[str]) -> dict[str, Any]
     case_path = Path(case_path)
     if case_path.is_dir():
         case_path = case_path / "case.pt"
-    return torch.load(case_path, map_location="cpu")
-
+    return torch.load(case_path, map_location="cpu", weights_only=False)

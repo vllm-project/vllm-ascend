@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
         default="20",
         help="Comma-separated capture sizes, e.g. 20 or 12,20",
     )
+    parser.add_argument("--enforce-eager", action="store_true")
     return parser.parse_args()
 
 
@@ -54,6 +55,10 @@ def main() -> int:
 
     dump_dir = Path(args.dump_dir)
     dump_dir.mkdir(parents=True, exist_ok=True)
+    (dump_dir / "marker_runner_start.json").write_text(
+        '{"stage":"runner_start"}',
+        encoding="utf-8",
+    )
 
     from vllm import LLM, SamplingParams
     from vllm.config import CompilationConfig
@@ -71,6 +76,7 @@ def main() -> int:
         gpu_memory_utilization=args.gpu_memory_utilization,
         distributed_executor_backend=args.distributed_executor_backend,
         enable_expert_parallel=enable_expert_parallel,
+        enforce_eager=args.enforce_eager,
         speculative_config={
             "method": "mtp",
             "num_speculative_tokens": args.num_speculative_tokens,

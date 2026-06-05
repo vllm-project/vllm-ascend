@@ -165,7 +165,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
-from vllm_ascend.sample.spec_sampling_poc import dump_spec_sampling_case
+from vllm_ascend.sample.spec_sampling_poc import dump_spec_sampling_case, write_spec_sampling_marker
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -2381,12 +2381,28 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
+        if self.speculative_config and self.speculative_config.method == "mtp":
+            write_spec_sampling_marker(
+                "entered_mtp_sample",
+                {
+                    "logits_shape": list(logits.shape) if logits is not None else None,
+                    "num_reqs": self.input_batch.num_reqs,
+                    "num_spec_tokens": self.num_spec_tokens,
+                },
+            )
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
             None,  # draft_probs
             logits,
             sampling_metadata,
         )
+        if self.speculative_config and self.speculative_config.method == "mtp":
+            write_spec_sampling_marker(
+                "finished_mtp_sample",
+                {
+                    "sampled_token_ids_shape": list(sampler_output.sampled_token_ids.shape),
+                },
+            )
         return sampler_output
 
     def _maybe_dump_mtp_spec_sampling_case(

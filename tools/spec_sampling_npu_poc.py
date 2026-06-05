@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
+import vllm_ascend.sample.rejection_sampler as rejection_sampler_module
+import vllm_ascend.sample.sampler as sampler_module
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.sample.spec_sampling_poc import load_spec_sampling_case
@@ -37,6 +41,15 @@ def main() -> int:
 
     payload = load_spec_sampling_case(args.case_path)
     device = torch.device(args.device)
+    if args.device == "npu":
+        init_device_properties_triton()
+
+    dummy_ascend_config = SimpleNamespace(
+        enable_reduce_sample=False,
+        enable_async_exponential=False,
+    )
+    sampler_module.get_ascend_config = lambda: dummy_ascend_config
+    rejection_sampler_module.get_ascend_config = lambda: dummy_ascend_config
 
     logits = payload["logits"].to(device)
     draft_probs = payload["draft_probs"]
@@ -74,4 +87,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
