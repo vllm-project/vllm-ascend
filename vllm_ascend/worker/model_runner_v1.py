@@ -2270,8 +2270,6 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         with record_function_or_nullcontext("draft_token"):
-            self._draft_token_ids = None
-            self._draft_token_req_ids = None
             if self.speculative_config:
                 input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
                     spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
@@ -2321,28 +2319,6 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
-            # Get draft token ids if available
-            output_spec_token_ids = None
-            if self._draft_token_ids is not None:
-                # Use synchronous copy to avoid NPU async stream/event
-                # synchronization issues. _get_draft_token_ids_cpu relies on
-                # event.synchronize() which may not properly wait for the
-                # async copy on NPU, resulting in stale data.
-                if torch.is_tensor(self._draft_token_ids):
-                    num_reqs = self._draft_token_ids.shape[0]
-                    draft_ids_list = self._draft_token_ids[:num_reqs].cpu().tolist()
-                    draft_req_ids = self._draft_token_req_ids
-                else:
-                    draft_ids_list = self._draft_token_ids
-                    draft_req_ids = self.input_batch.req_ids
-                if draft_ids_list and draft_req_ids:
-                    draft_by_req_id = dict(
-                        zip(draft_req_ids, draft_ids_list))
-                    output_spec_token_ids = [
-                        draft_by_req_id.get(req_id, [])
-                        for req_id in req_ids_output_copy
-                    ]
-
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
@@ -2367,7 +2343,6 @@ class NPUModelRunner(GPUModelRunner):
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=output_spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             kv_connector_output=kv_connector_output,
@@ -3583,7 +3558,7 @@ class NPUModelRunner(GPUModelRunner):
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
         # TODO: refactor the logic of attention
         # Initialize drafter attention group initialization
-        if self.speculative_config and get_pp_group().is_last_rank and (
+        if self.speculative_config and (
             self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
         ):
             assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
