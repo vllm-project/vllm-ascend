@@ -136,7 +136,7 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: matrix.os == 'openeuler'
         run: |
-          yum install -y gcc gcc-c++ cmake numactl-devel clang
+          yum install -y gcc gcc-c++ cmake numactl-devel clang patch
           pip install uv
 
       - name: Get image tag
@@ -155,7 +155,7 @@ jobs:
 
       - name: Cache vllm-ascend csrc
         id: cache-csrc
-        uses: actions/cache@v5
+        uses: runs-on/cache@v5
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -174,11 +174,6 @@ jobs:
           source /usr/local/Ascend/nnal/atb/set_env.sh
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
-
-          # os-specific: openeuler needs C++ include path for compilation
-          if [ "${{ matrix.os }}" = "openeuler" ]; then
-            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
-          fi
 
           pip install uc-manager
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
