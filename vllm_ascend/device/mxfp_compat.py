@@ -31,6 +31,12 @@ def _ensure_symbols_available(feature: str, symbols: tuple[str, ...]) -> None:
     )
 
 
+def is_add_rms_norm_dynamic_mx_quant_fusion_available() -> bool:
+    return hasattr(torch, "float8_e4m3fn") and not _get_missing_symbols(
+        ("npu_dynamic_mx_quant", "npu_add_rms_norm_dynamic_mx_quant")
+    )
+
+
 def ensure_mxfp8_scale_dtype_available(feature: str) -> None:
     _ensure_symbols_available(feature, ("float8_e8m0fnu",))
 
