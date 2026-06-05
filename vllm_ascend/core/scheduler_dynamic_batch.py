@@ -138,9 +138,9 @@ class SchedulerDynamicBatch(Scheduler):
             kv_cache_config,
             structured_output_manager,
             block_size,
-            mm_registry,
-            include_finished_set,
-            log_stats,
+            mm_registry=mm_registry,
+            include_finished_set=include_finished_set,
+            log_stats=log_stats,
         )
         self.running: list[Request] = []
         self.budget_refiner = BudgetRefiner(

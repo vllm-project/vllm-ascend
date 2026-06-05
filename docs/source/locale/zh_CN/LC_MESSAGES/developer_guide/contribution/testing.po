@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"POT-Creation-Date: 2026-06-04 05:04+0000\n"
 "PO-Revision-Date: 2026-01-22 10:00+0800\n"
 "Last-Translator: Your Name <email@example.com>\n"
 "Language: zh_CN\n"
@@ -176,33 +176,34 @@ msgstr "E2E 测试示例"
 #: ../../source/developer_guide/contribution/testing.md:318
 msgid ""
 "Offline test example: "
-"[`tests/e2e/singlecard/test_camem.py`](https://github.com/vllm-project"
-"/vllm-ascend/blob/main/tests/e2e/singlecard/test_camem.py)"
+"[`tests/e2e/pull_request/full/one_card/test_camem.py`](https://github.com"
+"/vllm-project/vllm-"
+"ascend/blob/main/tests/e2e/pull_request/full/one_card/test_camem.py)"
 msgstr ""
-"离线测试示例：[`tests/e2e/singlecard/test_camem.py`](https://github.com/vllm-"
-"project/vllm-ascend/blob/main/tests/e2e/singlecard/test_camem.py)"
+"离线测试示例：[`tests/e2e/pull_request/full/one_card/test_camem.py`](https://github.com/vllm-"
+"project/vllm-ascend/blob/main/tests/e2e/pull_request/full/one_card/test_camem.py)"
 
 #: ../../source/developer_guide/contribution/testing.md:319
 msgid ""
 "Online test example: "
-"[`tests/e2e/multicard/2-cards/test_single_request_aclgraph.py`](https://github.com"
+"[`tests/e2e/pull_request/full/two_cards/test_single_request_aclgraph.py`](https://github.com"
 "/vllm-project/vllm-"
-"ascend/blob/main/tests/e2e/multicard/2-cards/test_single_request_aclgraph.py)"
+"ascend/blob/main/tests/e2e/pull_request/full/two_cards/test_single_request_aclgraph.py)"
 msgstr ""
-"在线测试示例：[`tests/e2e/multicard/2-cards/test_single_request_aclgraph.py`](https://github.com"
+"在线测试示例：[`tests/e2e/pull_request/full/two_cards/test_single_request_aclgraph.py`](https://github.com"
 "/vllm-project/vllm-"
-"ascend/blob/main/tests/e2e/multicard/2-cards/test_single_request_aclgraph.py)"
+"ascend/blob/main/tests/e2e/pull_request/full/two_cards/test_single_request_aclgraph.py)"
 
 #: ../../source/developer_guide/contribution/testing.md:320
 msgid ""
 "Correctness test example: "
-"[`tests/e2e/singlecard/test_aclgraph_accuracy.py`](https://github.com"
+"[`tests/e2e/pull_request/full/one_card/test_aclgraph_accuracy.py`](https://github.com"
 "/vllm-project/vllm-"
-"ascend/blob/main/tests/e2e/singlecard/test_aclgraph_accuracy.py)"
+"ascend/blob/main/tests/e2e/pull_request/full/one_card/test_aclgraph_accuracy.py)"
 msgstr ""
-"正确性测试示例：[`tests/e2e/singlecard/test_aclgraph_accuracy.py`](https://github.com"
+"正确性测试示例：[`tests/e2e/pull_request/full/one_card/test_aclgraph_accuracy.py`](https://github.com"
 "/vllm-project/vllm-"
-"ascend/blob/main/tests/e2e/singlecard/test_aclgraph_accuracy.py)"
+"ascend/blob/main/tests/e2e/pull_request/full/one_card/test_aclgraph_accuracy.py)"
 
 #: ../../source/developer_guide/contribution/testing.md:322
 msgid ""
@@ -234,60 +235,10 @@ msgstr ""
 "`MODEL_LOCAL_PATH`、`DIST_DTYPE` 和 `DIST_MODEL_PATH` 参数："
 
 #: ../../source/developer_guide/contribution/testing.md:344
-msgid "View CI log summary in GitHub Actions"
-msgstr "在 GitHub Actions 中查看 CI 日志摘要"
-
-#: ../../source/developer_guide/contribution/testing.md:346
-msgid ""
-"After a CI job finishes, you can open the corresponding GitHub Actions "
-"job page and check the `Summary` tab to view the generated CI log "
-"summary."
-msgstr "CI 作业完成后，您可以打开相应的 GitHub Actions 作业页面，并查看 `Summary` 选项卡以查看生成的 CI 日志摘要。"
-
-#: ../../source/developer_guide/contribution/testing.md:349
-msgid "![GitHub Actions CI log summary](../../assets/ci_log_summary.png)"
-msgstr "![GitHub Actions CI 日志摘要](../../assets/ci_log_summary.png)"
-
-#: ../../source/developer_guide/contribution/testing.md:349
-msgid "GitHub Actions CI log summary"
-msgstr "GitHub Actions CI 日志摘要"
-
-#: ../../source/developer_guide/contribution/testing.md:351
-msgid ""
-"The summary is intended to help developers triage failures more quickly. "
-"It may include:"
-msgstr "该摘要旨在帮助开发者更快地排查故障。它可能包括："
-
-#: ../../source/developer_guide/contribution/testing.md:353
-msgid "failed test files"
-msgstr "失败的测试文件"
-
-#: ../../source/developer_guide/contribution/testing.md:354
-msgid "failed test cases"
-msgstr "失败的测试用例"
-
-#: ../../source/developer_guide/contribution/testing.md:355
-msgid "distinct root-cause errors"
-msgstr "不同的根本原因错误"
-
-#: ../../source/developer_guide/contribution/testing.md:356
-msgid "short error context extracted from the job log"
-msgstr "从作业日志中提取的简短错误上下文"
-
-#: ../../source/developer_guide/contribution/testing.md:358
-msgid ""
-"This summary is generated from the job log by "
-"`/.github/workflows/scripts/ci_log_summary.py` for unit-test and e2e "
-"workflows."
-msgstr ""
-"该摘要由 `/.github/workflows/scripts/ci_log_summary.py` 从作业日志中生成，适用于单元测试和 e2e"
-" 工作流。"
-
-#: ../../source/developer_guide/contribution/testing.md:361
 msgid "Run doctest"
 msgstr "运行文档测试（doctest）"
 
-#: ../../source/developer_guide/contribution/testing.md:363
+#: ../../source/developer_guide/contribution/testing.md:346
 msgid ""
 "vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to"
 " run all doctests in the doc files. The doctest is a good way to make "
@@ -297,7 +248,7 @@ msgstr ""
 "vllm-ascend 提供了 `vllm-ascend/tests/e2e/run_doctests.sh` 命令，用于运行所有文档文件中的 "
 "doctest。Doctest 是确保文档内容及时更新且示例代码保持可执行性的有效方法，您可以通过以下方式在本地运行："
 
-#: ../../source/developer_guide/contribution/testing.md:371
+#: ../../source/developer_guide/contribution/testing.md:354
 msgid ""
 "This will reproduce the same environment as the CI. See "
 "[labeled_doctest.yaml](https://github.com/vllm-project/vllm-"
@@ -306,15 +257,15 @@ msgstr ""
 "这将复现与 CI 相同的测试环境。请参阅 [labeled_doctest.yaml](https://github.com/vllm-"
 "project/vllm-ascend/blob/main/.github/workflows/labeled_doctest.yaml)。"
 
-#: ../../source/developer_guide/contribution/testing.md:373
+#: ../../source/developer_guide/contribution/testing.md:356
 msgid "Run docs link check"
 msgstr "运行文档链接检查"
 
-#: ../../source/developer_guide/contribution/testing.md:375
+#: ../../source/developer_guide/contribution/testing.md:358
 msgid "You can validate external links in the Sphinx docs locally with:"
 msgstr "您可以通过以下方式在本地验证 Sphinx 文档中的外部链接："
 
-#: ../../source/developer_guide/contribution/testing.md:381
+#: ../../source/developer_guide/contribution/testing.md:364
 msgid ""
 "To check links in a specific Markdown file, pass the file to `sphinx-"
 "build`. For example, to check only "
@@ -323,24 +274,14 @@ msgstr ""
 "要检查特定 Markdown 文件中的链接，请将该文件传递给 `sphinx-build`。例如，仅检查 "
 "`docs/source/user_guide/release_notes.md`："
 
-#: ../../source/developer_guide/contribution/testing.md:390
+#: ../../source/developer_guide/contribution/testing.md:373
 msgid "The detailed report will be written to:"
 msgstr "详细报告将写入以下位置："
 
-#: ../../source/developer_guide/contribution/testing.md:392
+#: ../../source/developer_guide/contribution/testing.md:375
 msgid "`docs/_build/linkcheck/output.txt`"
 msgstr "`docs/_build/linkcheck/output.txt`"
 
-#: ../../source/developer_guide/contribution/testing.md:393
+#: ../../source/developer_guide/contribution/testing.md:376
 msgid "`docs/_build/linkcheck/output.json`"
 msgstr "`docs/_build/linkcheck/output.json`"
-
-#~ msgid ""
-#~ "Offline test example: "
-#~ "[`tests/e2e/singlecard/test_offline_inference.py`](https://github.com"
-#~ "/vllm-project/vllm-"
-#~ "ascend/blob/main/tests/e2e/singlecard/test_offline_inference.py)"
-#~ msgstr ""
-#~ "离线测试示例：[`tests/e2e/singlecard/test_offline_inference.py`](https://github.com"
-#~ "/vllm-project/vllm-"
-#~ "ascend/blob/main/tests/e2e/singlecard/test_offline_inference.py)"

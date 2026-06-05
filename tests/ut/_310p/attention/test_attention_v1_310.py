@@ -173,7 +173,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         mock_npu_paged_attention_splitfuse.assert_called_once()
 
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention")
-    @patch("torch_npu._npu_paged_attention")
+    @patch("torch_npu._npu_paged_attention", create=True)
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_paged_attention_310(
