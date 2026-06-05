@@ -168,7 +168,7 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.sample.spec_sampling_executor import (
     SpecSamplingNPUExecutor,
 )
-from vllm_ascend.sample.spec_sampling_poc import dump_spec_sampling_case, write_spec_sampling_marker
+from vllm_ascend.sample.spec_sampling_poc import dump_spec_sampling_case
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -2384,15 +2384,6 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if self.speculative_config and self.speculative_config.method == "mtp":
-            write_spec_sampling_marker(
-                "entered_mtp_sample",
-                {
-                    "logits_shape": list(logits.shape) if logits is not None else None,
-                    "num_reqs": self.input_batch.num_reqs,
-                    "num_spec_tokens": self.num_spec_tokens,
-                },
-            )
-        if self.speculative_config and self.speculative_config.method == "mtp":
             sampler_output = self.spec_sampling_executor.execute_from_runtime(
                 metadata=spec_decode_metadata,
                 sampling_metadata=sampling_metadata,
@@ -2403,6 +2394,9 @@ class NPUModelRunner(GPUModelRunner):
                 enable_reduce_sample=get_ascend_config().enable_reduce_sample,
                 trim_logits_to_indices=lmhead_tp_enable() and logits is not None,
                 draft_probs=None,
+                write_markers=True,
+                num_reqs=self.input_batch.num_reqs,
+                num_spec_tokens=self.num_spec_tokens,
             )
         else:
             prepared_top_k = None
@@ -2415,13 +2409,6 @@ class NPUModelRunner(GPUModelRunner):
                 None,  # draft_probs
                 logits,
                 sampling_metadata,
-            )
-        if self.speculative_config and self.speculative_config.method == "mtp":
-            write_spec_sampling_marker(
-                "finished_mtp_sample",
-                {
-                    "sampled_token_ids_shape": list(sampler_output.sampled_token_ids.shape),
-                },
             )
         return sampler_output
 

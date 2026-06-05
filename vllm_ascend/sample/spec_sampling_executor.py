@@ -14,6 +14,7 @@ from vllm_ascend.sample.rejection_sampler import (
     rejection_sample,
 )
 from vllm_ascend.sample.sampler import AscendSampler
+from vllm_ascend.sample.spec_sampling_poc import write_spec_sampling_marker
 
 
 @dataclass
@@ -161,7 +162,19 @@ class SpecSamplingNPUExecutor:
         enable_reduce_sample: bool,
         trim_logits_to_indices: bool = False,
         draft_probs: torch.Tensor | None = None,
+        write_markers: bool = False,
+        num_reqs: int | None = None,
+        num_spec_tokens: int | None = None,
     ) -> SamplerOutput:
+        if write_markers:
+            write_spec_sampling_marker(
+                "entered_mtp_sample",
+                {
+                    "logits_shape": list(logits.shape),
+                    "num_reqs": num_reqs,
+                    "num_spec_tokens": num_spec_tokens,
+                },
+            )
         if trim_logits_to_indices:
             logits = logits[: len(metadata.logits_indices)]
         inputs = self.build_inputs_from_runtime(
@@ -172,4 +185,12 @@ class SpecSamplingNPUExecutor:
             enable_reduce_sample=enable_reduce_sample,
             draft_probs=draft_probs,
         )
-        return self.execute(inputs)
+        sampler_output = self.execute(inputs)
+        if write_markers:
+            write_spec_sampling_marker(
+                "finished_mtp_sample",
+                {
+                    "sampled_token_ids_shape": list(sampler_output.sampled_token_ids.shape),
+                },
+            )
+        return sampler_output
