@@ -157,6 +157,7 @@ pip install vllm==|pip_vllm_version|
 # Install vllm-project/vllm-ascend.
 pip install \
 --extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple  \
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi  \
 vllm-ascend==|pip_vllm_ascend_version|
 
 ```
@@ -183,6 +184,7 @@ pip install vllm==|pip_vllm_version|
 # Install vllm-project/vllm-ascend from wheelnext index.
 uv pip install --system \
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi   \
 vllm-ascend==|pip_vllm_ascend_version|
 
 ```
