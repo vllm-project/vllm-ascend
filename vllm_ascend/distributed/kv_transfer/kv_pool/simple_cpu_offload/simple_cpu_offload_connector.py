@@ -1,60 +1,275 @@
-"""Ascend NPU adaptation of vLLM's ``SimpleCPUOffloadConnector``.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""SimpleCPUOffloadConnector: minimal CPU KV cache offloading."""
 
-The scheduler-side ``SimpleCPUOffloadScheduler`` is platform-agnostic
-and reused as-is from upstream vLLM. The Ascend variant only swaps the
-worker-side handler with an NPU-native implementation that uses
-``aclrtMemcpyBatchAsync`` and ``torch.npu`` streams/events.
-"""
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any
 
-from typing import TYPE_CHECKING
+import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
-    SimpleCPUOffloadConnector,
+from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+    SupportsHMA,
 )
-from vllm.logger import logger
-
-from vllm_ascend.simple_kv_offload.worker import SimpleCPUOffloadNPUWorker
+from vllm.logger import init_logger
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
+from vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.manager import (
+    SimpleCPUOffloadScheduler,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.metadata import (
+    SimpleCPUOffloadMetadata,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.worker import (
+    SimpleCPUOffloadWorker,
+)
 
 if TYPE_CHECKING:
+    from vllm.forward_context import ForwardContext
+    from vllm.v1.attention.backend import AttentionMetadata
+    from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.request import Request
+
+logger = init_logger(__name__)
+
+# Default CPU capacity: 8 GB
+DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
 
 
-class AscendSimpleCPUOffloadConnector(SimpleCPUOffloadConnector):
-    """NPU-flavored ``SimpleCPUOffloadConnector``.
-
-    Inherits the full scheduler/worker plumbing from upstream and only
-    replaces the CUDA worker handler with the NPU one. All other public
-    APIs (``register_kv_caches``, ``bind_connector_metadata``,
-    ``get_finished``, ``handle_preemptions``, every scheduler-side
-    method, etc.) are inherited verbatim — they all route through
-    ``self.worker_handler`` / ``self.scheduler_manager``.
-
-    Why post-init swap (instead of skipping ``super().__init__``):
-    ``SimpleCPUOffloadWorker.__init__`` and ``DmaCopyBackend.__init__``
-    only assign ``None``/empty-field defaults — no CUDA resource is
-    allocated until ``register_kv_caches`` runs. So letting the parent
-    construct a transient CUDA worker and then replacing it costs
-    nothing and keeps us free of duplicated configuration parsing.
-    """
+class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
+    """CPU KV cache offloading with custom kernel transfers and BlockPool LRU."""
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig | None" = None,
-    ) -> None:
+    ):
         super().__init__(vllm_config, role, kv_cache_config)
 
-        # If prefix caching is disabled, the parent leaves both handlers
-        # as None and the connector is a no-op — nothing to swap.
-        if role == KVConnectorRole.WORKER and self.worker_handler is not None:
-            cpu_capacity = self.worker_handler.cpu_capacity_bytes
-            self.worker_handler: SimpleCPUOffloadNPUWorker = SimpleCPUOffloadNPUWorker(
-                vllm_config, kv_cache_config, cpu_capacity
+        extra_config = self._kv_transfer_config.kv_connector_extra_config or {}
+        enable_prefix_caching = vllm_config.cache_config.enable_prefix_caching
+        enable_prefix_offload = bool(extra_config.get("enable_prefix_offload", True))
+        enable_preempt_offload = bool(
+            extra_config.get(
+                "enable_preempt_offload",
+                extra_config.get("enable_recompute_offload", False),
             )
-            logger.info(
-                "AscendSimpleCPUOffloadConnector: swapped CUDA worker for NPU worker (per_rank=%.2f GB)",
-                cpu_capacity / (1024**3),
+        )
+        if enable_prefix_offload and not enable_prefix_caching:
+            logger.warning(
+                "Detected prefix caching disabled, disabling prefix CPU "
+                "offload. Preemption offload can still run if enabled."
             )
+            enable_prefix_offload = False
+
+        cpu_capacity_bytes = int(
+            extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES)
+        )
+        # cpu_bytes_to_use is server-wide for compatibility;
+        # cpu_bytes_to_use_per_rank overrides for per-rank capacity.
+        world_size = vllm_config.parallel_config.world_size
+        cpu_capacity_per_rank = cpu_capacity_bytes // world_size
+        if "cpu_bytes_to_use_per_rank" in extra_config:
+            explicit = int(extra_config["cpu_bytes_to_use_per_rank"])
+            if explicit != cpu_capacity_per_rank:
+                logger.warning(
+                    "cpu_bytes_to_use_per_rank (%.2f GB) != "
+                    "cpu_bytes_to_use/world_size (%.2f GB). Using per-rank value.",
+                    explicit / (1024**3),
+                    cpu_capacity_per_rank / (1024**3),
+                )
+            cpu_capacity_per_rank = explicit
+
+        lazy_offload = bool(extra_config.get("lazy_offload", False))
+
+        self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
+        self.worker_handler: SimpleCPUOffloadWorker | None = None
+
+        if not enable_prefix_offload and not enable_preempt_offload:
+            logger.warning(
+                "SimpleCPUOffloadConnector disabled because neither prefix "
+                "offload nor preemption offload is enabled."
+            )
+            return
+
+        logger.info(
+            "SimpleCPUOffloadConnector: role=%s, "
+            "per_rank=%.2f GB, world_size=%d, prefix=%s, preempt=%s, mode=%s",
+            role.name,
+            cpu_capacity_per_rank / (1024**3),
+            world_size,
+            enable_prefix_offload,
+            enable_preempt_offload,
+            "lazy" if lazy_offload else "eager",
+        )
+
+        if role == KVConnectorRole.SCHEDULER:
+            self.scheduler_manager = SimpleCPUOffloadScheduler(
+                vllm_config,
+                kv_cache_config,
+                cpu_capacity_per_rank,
+                lazy_offload=lazy_offload,
+                enable_prefix_offload=enable_prefix_offload,
+                enable_preempt_offload=enable_preempt_offload,
+            )
+        elif role == KVConnectorRole.WORKER:
+            self.worker_handler = SimpleCPUOffloadWorker(
+                vllm_config, kv_cache_config, cpu_capacity_per_rank
+            )
+
+    # --- Worker-side methods ---
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        if self.worker_handler is not None:
+            self.worker_handler.register_kv_caches(kv_caches)
+
+    def bind_connector_metadata(
+        self,
+        connector_metadata: KVConnectorMetadata,
+    ) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        if self.worker_handler is not None:
+            assert isinstance(connector_metadata, SimpleCPUOffloadMetadata)
+            self.worker_handler.bind_connector_metadata(connector_metadata)
+
+    def clear_connector_metadata(self) -> None:
+        super().clear_connector_metadata()
+        if self.worker_handler is not None:
+            self.worker_handler.clear_connector_metadata()
+
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        if self.worker_handler is not None:
+            assert isinstance(kv_connector_metadata, SimpleCPUOffloadMetadata)
+            self.worker_handler.handle_preemptions(kv_connector_metadata)
+
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+        if self.worker_handler is not None:
+            self.worker_handler.start_load_kv()
+
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        pass  # Always load asynchronously and deferred to get_finished()
+
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: "AttentionMetadata",
+        **kwargs: Any,
+    ) -> None:
+        pass  # Always save asynchronously and deferred to get_finished()
+
+    def wait_for_save(self) -> None:
+        pass  # All stores are driven by get_finished() and no wait needed
+
+    def get_finished(
+        self,
+        finished_req_ids: set[str],
+    ) -> tuple[set[str] | None, set[str] | None]:
+        if self.worker_handler is not None:
+            return self.worker_handler.get_finished(finished_req_ids)
+        return None, None
+
+    def build_connector_worker_meta(self):
+        if self.worker_handler is not None:
+            return self.worker_handler.build_connector_worker_meta()
+        return None
+
+    # --- Scheduler-side methods ---
+
+    # NOTE: New API only for SimpleCPUOffloadConnector.
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        if self.scheduler_manager is not None:
+            self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)
+
+    def get_num_new_matched_tokens(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> tuple[int | None, bool]:
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.get_num_new_matched_tokens(
+                request, num_computed_tokens
+            )
+        return 0, False
+
+    def update_state_after_alloc(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int,
+    ) -> None:
+        if self.scheduler_manager is not None:
+            self.scheduler_manager.update_state_after_alloc(
+                request, blocks, num_external_tokens
+            )
+
+    def update_state_before_preempt(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        num_computed_tokens: int,
+    ) -> None:
+        if self.scheduler_manager is not None:
+            self.scheduler_manager.update_state_before_preempt(
+                request,
+                block_ids,
+                num_computed_tokens,
+            )
+
+    def build_connector_meta(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> KVConnectorMetadata:
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.build_connector_meta(scheduler_output)
+        return SimpleCPUOffloadMetadata()
+
+    def update_connector_output(
+        self,
+        connector_output: KVConnectorOutput,
+    ) -> None:
+        if self.scheduler_manager is not None:
+            self.scheduler_manager.update_connector_output(connector_output)
+
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.request_finished(request, block_ids)
+        return False, None
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.request_finished_all_groups(
+                request, block_ids
+            )
+        return False, None
+
+    # NOTE: New API only for SimpleCPUOffloadConnector.
+    def has_pending_transfers(self) -> bool:
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.has_pending_transfers()
+        return False
+
+    def take_events(self) -> Iterable[KVCacheEvent]:
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.take_events()
+        return []
+
+    def reset_cache(self) -> bool | None:
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.reset_cache()
+        return None

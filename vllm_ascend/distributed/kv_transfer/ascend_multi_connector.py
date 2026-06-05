@@ -40,6 +40,17 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 # Call with empty blocks for other connectors.
                 c.update_state_after_alloc(request, empty_blocks, 0)
 
+    def update_state_before_preempt(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        num_computed_tokens: int,
+    ) -> None:
+        for c in self._connectors:
+            hook = getattr(c, "update_state_before_preempt", None)
+            if hook is not None:
+                hook(request, block_ids, num_computed_tokens)
+
     def request_finished_all_groups(
         self,
         request: "Request",

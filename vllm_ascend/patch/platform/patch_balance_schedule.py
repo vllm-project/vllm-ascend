@@ -14,7 +14,10 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import (
+    NewRequestData,
+    SchedulerOutput,
+)
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs
@@ -23,6 +26,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
+
+from vllm_ascend.core.recompute_scheduler import PreemptedRequestData
 
 _ORIGINAL_RUN_ENGINE_CORE = EngineCoreProc.run_engine_core
 _ORIGINAL_SCHEDULER = Scheduler
@@ -86,6 +91,7 @@ class BalanceScheduler(Scheduler):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        preempted_req_data: list[PreemptedRequestData] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -215,6 +221,33 @@ class BalanceScheduler(Scheduler):
                     else:
                         preempted_req = self.running.pop()
 
+                    preempted_req_id = preempted_req.request_id
+                    preempted_block_ids = self.kv_cache_manager.get_block_ids(
+                        preempted_req_id
+                    )
+                    preempted_num_computed_tokens = max(
+                        0,
+                        preempted_req.num_computed_tokens
+                        - preempted_req.num_output_placeholders,
+                    )
+                    preempted_req_data.append(
+                        PreemptedRequestData(
+                            req_id=preempted_req_id,
+                            block_ids=preempted_block_ids,
+                            num_computed_tokens=preempted_num_computed_tokens,
+                        )
+                    )
+                    preempt_hook = (
+                        getattr(self.connector, "update_state_before_preempt", None)
+                        if self.connector is not None
+                        else None
+                    )
+                    if preempt_hook is not None:
+                        preempt_hook(
+                            preempted_req,
+                            preempted_block_ids,
+                            preempted_num_computed_tokens,
+                        )
                     self._preempt_request(preempted_req, scheduled_timestamp)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
@@ -473,7 +506,6 @@ class BalanceScheduler(Scheduler):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-                    step_skipped_waiting.prepend_request(request)
                     request.num_computed_tokens = num_computed_tokens
                     continue
 
@@ -578,6 +610,7 @@ class BalanceScheduler(Scheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
         )
+        scheduler_output.preempted_reqs = preempted_req_data  # type: ignore[attr-defined]
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
