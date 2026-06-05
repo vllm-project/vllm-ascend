@@ -305,7 +305,7 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
 }
 ```
 
-#### 2、Start proxy_server
+#### 2.Start proxy_server
 
 ```shell
 python vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
@@ -336,7 +336,7 @@ curl -s http://localhost:8000/v1/completions -H "Content-Type: application/json"
 
 ### PD-Mixed Inference
 
-#### 1.Run Mixed Department Script
+#### 1.Run Mixed Deployment Script
 
 ```shell
 bash pd_mix.sh
