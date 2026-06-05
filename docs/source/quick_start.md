@@ -10,6 +10,21 @@
 - Atlas 800I A3 inference series (Atlas 800I A3)
 - [Experimental] Atlas 300I inference series (Atlas 300I Duo)
 
+## Requirements
+
+- OS: Linux
+- Python: >= 3.10, < 3.13
+- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
+- Software:
+
+    | Software      | Supported version                | Note                                      |
+    |---------------|----------------------------------|-------------------------------------------|
+    | Ascend HDK    | Refer to the documentation [CANN 9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
+    | CANN          | == 9.0.0                        | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
+    | NNAL          | == 9.0.0                        | Required for libatb.so, enables advanced tensor operations |
+
 ## Setup environment using container
 
 Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-docker/) for installation instructions.
