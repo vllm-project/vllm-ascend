@@ -55,9 +55,43 @@ def test_engine_core_post_step_skips_pp_batch_queue_spec_decode_path():
         batch_queue=object(),
         async_scheduling=False,
         use_spec_decode=True,
+        vllm_config=SimpleNamespace(
+            speculative_config=SimpleNamespace(method="mtp"),
+            parallel_config=SimpleNamespace(pipeline_parallel_size=2),
+            kv_transfer_config=SimpleNamespace(
+                is_kv_producer=True,
+                kv_role="kv_producer",
+            ),
+        ),
     )
 
     assert EngineCore.post_step(fake_core, model_executed=True) is None
+
+
+def test_engine_core_post_step_keeps_decode_dp_mtp_path():
+    fake_core = SimpleNamespace(
+        batch_queue=object(),
+        async_scheduling=False,
+        use_spec_decode=True,
+        model_executor=SimpleNamespace(take_draft_token_ids=lambda: [[11, 12]]),
+        scheduler=SimpleNamespace(),
+        vllm_config=SimpleNamespace(
+            speculative_config=SimpleNamespace(method="mtp"),
+            parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+            kv_transfer_config=SimpleNamespace(
+                is_kv_producer=False,
+                kv_role="kv_consumer",
+            ),
+        ),
+    )
+
+    fake_core.scheduler.update_draft_token_ids = lambda draft_token_ids: setattr(
+        fake_core, "observed_draft_token_ids", draft_token_ids
+    )
+
+    EngineCore.post_step(fake_core, model_executed=True)
+
+    assert fake_core.observed_draft_token_ids == [[11, 12]]
 
 
 def test_model_config_validates_local_mtp_drafter_as_single_pp_rank(monkeypatch):

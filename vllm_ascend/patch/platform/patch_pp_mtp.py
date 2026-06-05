@@ -58,6 +58,27 @@ def _patch_model_runner_output() -> None:
         empty_output.spec_token_ids = None
 
 
+def _is_mtp_speculative_config(vllm_config) -> bool:
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    method = getattr(speculative_config, "method", None)
+    return method is not None and "mtp" in str(method).lower()
+
+
+def _is_pd_prefill_pp_mtp(vllm_config) -> bool:
+    if vllm_config is None or not _is_mtp_speculative_config(vllm_config):
+        return False
+
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    if getattr(parallel_config, "pipeline_parallel_size", 1) <= 1:
+        return False
+
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    return (
+        kv_transfer_config is not None
+        and getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
+    )
+
+
 def _patch_engine_core() -> None:
     global _ORIGINAL_ENGINE_POST_STEP
 
@@ -75,6 +96,7 @@ def _patch_engine_core() -> None:
             and not getattr(self, "async_scheduling", False)
             and getattr(self, "use_spec_decode", False)
             and model_executed
+            and _is_pd_prefill_pp_mtp(getattr(self, "vllm_config", None))
         ):
             return
         return _ORIGINAL_ENGINE_POST_STEP(self, model_executed)

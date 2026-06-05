@@ -56,7 +56,6 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -561,7 +560,6 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
-        self._prev_non_last_pp_mtp_scheduler_output: SchedulerOutput | None = None
         self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
         self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
         if self.enable_hamming_sparse is True:
@@ -743,92 +741,6 @@ class NPUModelRunner(GPUModelRunner):
         self.query_start_loc.copy_to_gpu()
 
         return num_reqs_padded
-
-    def _is_non_last_pp_mtp(self) -> bool:
-        return (
-            self.need_accepted_tokens
-            and self.speculative_config is not None
-            and not get_pp_group().is_last_rank
-            and not self.use_async_scheduling
-        )
-
-    def _sync_num_accepted_tokens_to_gpu(
-        self, accepted_counts: dict[str, int]
-    ) -> None:
-        if not accepted_counts:
-            return
-        for req_id, count in accepted_counts.items():
-            req_index = self.input_batch.req_id_to_index.get(req_id)
-            if req_index is not None:
-                self.input_batch.num_accepted_tokens_cpu[req_index] = count
-        num_reqs = self.input_batch.num_reqs
-        self.num_accepted_tokens.np[:num_reqs] = (
-            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-        )
-        self.num_accepted_tokens.copy_to_gpu(num_reqs)
-
-    def _compute_non_last_pp_mtp_accepted_counts(
-        self,
-        scheduler_output: SchedulerOutput,
-        prev_scheduler_output: SchedulerOutput | None,
-    ) -> dict[str, int]:
-        req_data = scheduler_output.scheduled_cached_reqs
-        prev_spec_tokens = (
-            prev_scheduler_output.scheduled_spec_decode_tokens
-            if prev_scheduler_output is not None
-            else {}
-        )
-        accepted_counts: dict[str, int] = {}
-
-        for i, req_id in enumerate(req_data.req_ids):
-            count = 1
-            req_state = self.requests.get(req_id)
-            if req_state is not None and req_id in prev_spec_tokens:
-                prev_num_computed = req_state.num_computed_tokens
-                num_computed = int(req_data.num_computed_tokens[i])
-                delta = num_computed - prev_num_computed
-                max_count = len(prev_spec_tokens[req_id]) + 1
-                if 0 < delta <= max_count:
-                    count = delta
-            accepted_counts[req_id] = max(1, count)
-
-        return accepted_counts
-
-    def _prepare_non_last_pp_mtp_state_update(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> None:
-        if not self._is_non_last_pp_mtp():
-            return
-
-        accepted_counts = (
-            self._compute_non_last_pp_mtp_accepted_counts(
-                scheduler_output,
-                self._prev_non_last_pp_mtp_scheduler_output,
-            )
-        )
-        if not accepted_counts:
-            return
-
-        # Hybrid-attention models with Mamba cache need the accepted draft-token
-        # count before the upstream state update. Non-last PP ranks do not sample
-        # locally, so infer acceptance from the scheduler's computed-token delta.
-        self._sync_num_accepted_tokens_to_gpu(accepted_counts)
-        prev_scheduler_output = self._prev_non_last_pp_mtp_scheduler_output
-        if (
-            prev_scheduler_output is not None
-            and self.cache_config.mamba_cache_mode == "align"
-        ):
-            mamba_utils.postprocess_mamba(
-                prev_scheduler_output,
-                self.kv_cache_config,
-                self.input_batch,
-                self.requests,
-                self.mamba_state_idx,
-                self.compilation_config.static_forward_context,
-                self.model.get_mamba_state_copy_func(),
-                self._get_mamba_copy_bufs(),
-            )
 
     def _prepare_inputs(
         self,
@@ -1991,87 +1903,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.draft_token_ids_cpu[:num_reqs] = 0
             self.draft_token_ids_event.record()
 
-    def _collect_pp_mtp_readded_token(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> dict[str, tuple[list[int], int]]:
-        if get_pp_group().is_last_rank:
-            return {}
-
-        req_data = scheduler_output.scheduled_cached_reqs
-        new_token_ids = getattr(req_data, "new_token_ids", None)
-        if not new_token_ids:
-            return {}
-
-        cached_req_ids = set(self.input_batch.req_id_to_index)
-        finished_req_ids = set(scheduler_output.finished_req_ids)
-        scheduled_req_ids = set(scheduler_output.num_scheduled_tokens)
-        resumed_req_ids = set(req_data.resumed_req_ids)
-        unscheduled_req_ids = cached_req_ids - (scheduled_req_ids - resumed_req_ids)
-        req_ids_after_parent_removals = (
-            cached_req_ids - finished_req_ids - unscheduled_req_ids
-        )
-
-        token_fixes: dict[str, tuple[list[int], int]] = {}
-        for i, req_id in enumerate(req_data.req_ids):
-            if req_id in req_ids_after_parent_removals or i >= len(new_token_ids):
-                continue
-            if new_tokens := new_token_ids[i]:
-                token_fixes[req_id] = (
-                    list(new_tokens),
-                    req_data.num_computed_tokens[i],
-                )
-        return token_fixes
-
-    @contextmanager
-    def _pp_mtp_update_req_spec_token_ids(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ):
-        if scheduler_output.total_num_scheduled_tokens == 0:
-            yield
-            return
-
-        token_fixes = self._collect_pp_mtp_readded_token(scheduler_output)
-        if not token_fixes:
-            yield
-            return
-
-        input_batch = self.input_batch
-        had_instance_update_spec_tokens = (
-            "update_req_spec_token_ids" in input_batch.__dict__
-        )
-        original_update_spec_tokens = input_batch.update_req_spec_token_ids
-        fixed_req_ids: set[str] = set()
-
-        # Parent _update_states places spec tokens immediately through this API.
-        def update_req_spec_token_ids_pp_mtp(
-            request,
-            scheduled_spec_tokens,
-        ) -> None:
-            req_id = request.req_id
-            if req_id not in fixed_req_ids and (fix_data := token_fixes.get(req_id)):
-                req_index = input_batch.req_id_to_index.get(req_id)
-                if req_index is not None:
-                    new_tokens, num_computed_tokens = fix_data
-                    end_token_index = num_computed_tokens + len(new_tokens)
-                    input_batch.token_ids_cpu[
-                        req_index, num_computed_tokens:end_token_index
-                    ] = new_tokens
-                    input_batch.num_tokens_no_spec[req_index] = end_token_index
-                    fixed_req_ids.add(req_id)
-
-            return original_update_spec_tokens(request, scheduled_spec_tokens)
-
-        input_batch.update_req_spec_token_ids = update_req_spec_token_ids_pp_mtp
-        try:
-            yield
-        finally:
-            if had_instance_update_spec_tokens:
-                input_batch.update_req_spec_token_ids = original_update_spec_tokens
-            else:
-                del input_batch.update_req_spec_token_ids
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2154,16 +1985,9 @@ class NPUModelRunner(GPUModelRunner):
                             req_state.prev_num_draft_len = 0
 
                 # Update persistent batch states.
-                self._prepare_non_last_pp_mtp_state_update(scheduler_output)
                 if scheduler_output.total_num_scheduled_tokens != 0:
-                    with self._pp_mtp_update_req_spec_token_ids(scheduler_output):
-                        deferred_state_corrections_fn = self._update_states(
-                            scheduler_output)
-                if (
-                    self._is_non_last_pp_mtp()
-                    and scheduler_output.scheduled_spec_decode_tokens
-                ):
-                    self._prev_non_last_pp_mtp_scheduler_output = scheduler_output
+                    deferred_state_corrections_fn = self._update_states(
+                        scheduler_output)
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(

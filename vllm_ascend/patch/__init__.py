@@ -299,10 +299,9 @@
 #       MTP draft tokens to the wrong prefill/decode phase.
 #    How：
 #       Carry drafter output as `ModelRunnerOutput.spec_token_ids`, skip the
-#       global post-step draft-token update in PP batch_queue mode, and validate
-#       local Eagle/MTP drafters as PP=1. Scheduler-level PP+MTP alignment is
-#       implemented by `core/scheduler_profiling_chunk.py`, which is the only
-#       scheduler supported for this feature in vllm-ascend.
+#       global post-step draft-token update only for PD P-node PP+MTP
+#       batch_queue mode, and validate local Eagle/MTP drafters as PP=1.
+#       D nodes keep the original DP+MTP post-step path.
 #    Related PR (if no, explain why):
 #       Backport of local vLLM PP+MTP branch changes.
 #    Future Plan:
@@ -777,19 +776,19 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `NPUModelRunner._update_states`
 #    Why:
-#       Product vLLM may not contain PP+MTP worker state fixes. Non-last PP
-#       ranks can re-add requests whose `output_token_ids` do not include
-#       accepted draft tokens, causing `token_ids_cpu` and following spec
-#       token placement to drift.
+#       In KV-load-failure recompute, async scheduling can rewind a cached
+#       request's computed-token count. If the request still carries the
+#       previous draft length, the parent state update can index stale
+#       speculative-token state.
 #    How：
-#       Wrap the parent `_update_states` in vllm-ascend and inject only the
-#       upstream PP+MTP fix before `update_req_spec_token_ids` places draft
-#       tokens for re-added non-last PP requests.
+#       Reset `prev_num_draft_len` when the scheduler reports fewer computed
+#       tokens than the runner's local request state before delegating to the
+#       parent `_update_states`.
 #    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
+#       No, vllm-ascend-specific KV recompute guard.
 #    Future Plan:
-#       Remove this wrapper once the minimum supported runtime vLLM contains
-#       the PP+MTP worker state fixes.
+#       Remove this wrapper once the minimum supported runtime vLLM handles
+#       async recompute rewind without stale draft-token state.
 # ** 20. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
