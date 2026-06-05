@@ -139,9 +139,9 @@ def layer_norm_fwd_npu(
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
     if group_size > BLOCK_N:
         raise RuntimeError(
-            f"[TritonOps] Feature dim too large: group_size={group_size} "
-            f"exceeds BLOCK_N={BLOCK_N} "
-            f"(MAX_FUSED_SIZE={MAX_FUSED_SIZE})"
+            "[TritonOps] Feature dim too large: group_size=%s "
+            "exceeds BLOCK_N=%s "
+            "(MAX_FUSED_SIZE=%s)" % (group_size, BLOCK_N, MAX_FUSED_SIZE)
         )
 
     # Choose BLOCK_M: e.g., 16, 32, 64 — depends on NPU vector core capacity

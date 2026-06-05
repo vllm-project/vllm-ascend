@@ -66,8 +66,14 @@ def fused_gdn_gating_patch(
     threshold: float = 20.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     logger.debug(
-        f"[TritonOps] fused_gdn_gating_patch: A_log.shape={A_log.shape}, a.shape={a.shape}, b.shape={b.shape}, dt_bias.shape={dt_bias.shape}, "
-        f"beta={beta}, threshold={threshold}"
+        "[TritonOps] fused_gdn_gating_patch: A_log.shape=%s, a.shape=%s, b.shape=%s, dt_bias.shape=%s, "
+        "beta=%s, threshold=%s",
+        A_log.shape,
+        a.shape,
+        b.shape,
+        dt_bias.shape,
+        beta,
+        threshold,
     )
     batch, num_heads = a.shape
     seq_len = 1

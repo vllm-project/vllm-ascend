@@ -204,11 +204,20 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
     ):
         logger.debug(
-            f"[TritonOps] chunk_gated_delta_rule_fwd: q.shape={q.shape}, k.shape={k.shape}, "
-            f"v.shape={v.shape}, g.shape={g.shape}, beta.shape={beta.shape}, scale={scale}, "
-            f"initial_state.shape={initial_state.shape if initial_state is not None else None}, "
-            f"output_final_state={output_final_state}, cu_seqlens_shape={cu_seqlens.shape if cu_seqlens is not None else None}, "
-            f"use_qk_l2norm_in_kernel={use_qk_l2norm_in_kernel}."
+            "[TritonOps] chunk_gated_delta_rule_fwd: q.shape=%s, k.shape=%s, "
+            "v.shape=%s, g.shape=%s, beta.shape=%s, scale=%s, "
+            "initial_state.shape=%s, output_final_state=%s, cu_seqlens_shape=%s, "
+            "use_qk_l2norm_in_kernel=%s.",
+            q.shape,
+            k.shape,
+            v.shape,
+            g.shape,
+            beta.shape,
+            scale,
+            initial_state.shape if initial_state is not None else None,
+            output_final_state,
+            cu_seqlens.shape if cu_seqlens is not None else None,
+            use_qk_l2norm_in_kernel
         )
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)

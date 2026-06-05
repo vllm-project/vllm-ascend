@@ -22,8 +22,8 @@ if HAS_TRITON:
 
 def _resolve_triton_ascend_op(op_name: str):
     if not HAS_TRITON:
-        logger.error(f"[TritonOps] Failed to resolve Triton op '{op_name}' because HAS_TRITON is False.")
-        raise RuntimeError(f"Triton op '{op_name}' cannot be resolved because HAS_TRITON is False")
+        logger.error("[TritonOps] Failed to resolve Triton op '%s' because HAS_TRITON is False.", op_name)
+        raise RuntimeError("[TritonOps] Failed to resolve Triton op '%s' because HAS_TRITON is False." %op_name)
 
     if _extension_module is not None:
         extension_op = getattr(_extension_module, op_name, None)
@@ -35,12 +35,12 @@ def _resolve_triton_ascend_op(op_name: str):
         return tl_op
 
     logger.error(
-        f"Failed to resolve Triton op '{op_name}': "
+        "[TritonOps] Failed to resolve Triton op '%s': ", op_name,
         "neither triton.language.extra.cann.extension nor triton.language provides it."
     )
     raise RuntimeError(
-        f"Failed to resolve Triton op '{op_name}': "
-        "neither triton.language.extra.cann.extension nor triton.language provides it."
+        "[TritonOps] Failed to resolve Triton op '%s': "
+        "neither triton.language.extra.cann.extension nor triton.language provides it." %op_name
     )
 
 
@@ -65,11 +65,13 @@ def init_device_properties_triton():
         _NUM_VECTORCORE = device_properties.get("num_vectorcore", -1)
         if _NUM_AICORE <= 0 or _NUM_VECTORCORE <= 0:
             logger.error(
-                "[TritonOps] Failed to detect device properties: "
-                f"num_aicore={_NUM_AICORE}, num_vectorcore={_NUM_VECTORCORE}"
+                "[TritonOps] Failed to detect device properties: num_aicore=%s, num_vectorcore=%s",
+                _NUM_AICORE,
+                _NUM_VECTORCORE
             )
             raise RuntimeError(
-                f"Failed to detect device properties: num_aicore={_NUM_AICORE}, num_vectorcore={_NUM_VECTORCORE}"
+                "[TritonOps] Failed to detect device properties: "
+                "num_aicore=%s, num_vectorcore=%s" %(_NUM_AICORE, _NUM_VECTORCORE)
             )
 
 
@@ -77,12 +79,13 @@ def get_aicore_num():
     global _NUM_AICORE
     if _NUM_AICORE <= 0:
         logger.error(
-            "[TritonOps] Device properties not initialized "
-            f"(num_aicore={_NUM_AICORE}). "
-            "Call init_device_properties_triton() first."
+            "[TritonOps] Device properties not initialized (num_aicore=%s). Call init_device_properties_triton() first.",
+            _NUM_AICORE
         )
         raise RuntimeError(
-            f"Device properties not initialized (num_aicore={_NUM_AICORE}). Call init_device_properties_triton() first."
+            "[TritonOps] Device properties not initialized "
+            "(num_aicore=%s). "
+            "Call init_device_properties_triton() first." %(_NUM_AICORE)
         )
     return _NUM_AICORE
 
@@ -92,12 +95,13 @@ def get_vectorcore_num():
     if _NUM_VECTORCORE <= 0:
         logger.error(
             "[TritonOps] Device properties not initialized "
-            f"(num_vectorcore={_NUM_VECTORCORE}). "
-            "Call init_device_properties_triton() first."
+            "num_vectorcore=%s). "
+            "Call init_device_properties_triton() first.",
+            _NUM_VECTORCORE
         )
         raise RuntimeError(
-            "Device properties not initialized "
-            f"(num_vectorcore={_NUM_VECTORCORE}). "
-            "Call init_device_properties_triton() first."
+            "[TritonOps] Device properties not initialized "
+            "(num_vectorcore=%s). "
+            "Call init_device_properties_triton() first." %(_NUM_VECTORCORE)
         )
     return _NUM_VECTORCORE

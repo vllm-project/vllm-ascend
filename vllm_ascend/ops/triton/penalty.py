@@ -106,7 +106,10 @@ def apply_penalties_triton(
     model_executor.layers.utils.apply_penalties.
     """
     logger.debug(
-        f"[TritonOps] apply_penalties_triton: logits.shape={logits.shape}, prompt_tokens_tensor.shape={prompt_tokens_tensor.shape}, output_tokens_tensor.shape={output_tokens_tensor.shape}"
+        "[TritonOps] apply_penalties_triton: logits.shape=%s, prompt_tokens_tensor.shape=%s, output_tokens_tensor.shape=%s",
+        logits.shape,
+        prompt_tokens_tensor.shape,
+        output_tokens_tensor.shape
     )
     num_seqs, vocab_size = logits.shape
     _, prompt_mask = get_token_bin_counts_and_mask_triton(prompt_tokens_tensor, vocab_size, num_seqs)
