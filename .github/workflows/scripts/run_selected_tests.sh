@@ -80,9 +80,35 @@ run_pytest_target() {
   fi
 }
 
+run_pytest_batch() {
+  local target="$1"
+  shift
+  local batch_targets=("$@")
+  test_index=$((test_index + 1))
+  local log_file="${pytest_log_dir}/${test_index}-cpu-ut.log"
+
+  echo "::group::${target}"
+  echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
+  set +e
+  pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+  local status=${PIPESTATUS[0]}
+  set -e
+  echo "::endgroup::"
+  if [ "${status}" -eq 0 ]; then
+    test_results+=("${target}|PASSED|${log_file}")
+  else
+    test_results+=("${target}|FAILED|${log_file}")
+    failed_logs+=("${target}|${log_file}")
+    print_summary
+    exit "${status}"
+  fi
+}
+
 print_test_info
 
-if [ "${mode}" = "with-device" ]; then
+if [ "${npu_type}" = "cpu" ]; then
+  run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
+elif [ "${mode}" = "with-device" ]; then
   aclgraph_capture_replay="tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py"
   run_aclgraph_capture_replay=0
   for target in "${targets[@]}"; do
