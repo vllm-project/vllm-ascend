@@ -41,6 +41,23 @@ class SpecSamplingNPUExecutor:
         self.sampler = sampler
         self.rejection_sampler = rejection_sampler
 
+    @staticmethod
+    def build_inputs(
+        *,
+        metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+        logits: torch.Tensor,
+        draft_probs: torch.Tensor | None = None,
+        prepared_top_k: int | None = None,
+    ) -> PreparedSpecSamplingInputs:
+        return PreparedSpecSamplingInputs(
+            metadata=metadata,
+            sampling_metadata=sampling_metadata,
+            logits=logits,
+            draft_probs=draft_probs,
+            prepared_top_k=prepared_top_k,
+        )
+
     def execute(self, inputs: PreparedSpecSamplingInputs) -> SamplerOutput:
         metadata = inputs.metadata
         sampling_metadata = inputs.sampling_metadata

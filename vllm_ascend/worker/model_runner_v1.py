@@ -166,7 +166,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedE
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.sample.spec_sampling_executor import (
-    PreparedSpecSamplingInputs,
     SpecSamplingNPUExecutor,
 )
 from vllm_ascend.sample.spec_sampling_poc import dump_spec_sampling_case, write_spec_sampling_marker
@@ -2399,7 +2398,7 @@ class NPUModelRunner(GPUModelRunner):
                 },
             )
         if self.speculative_config and self.speculative_config.method == "mtp":
-            inputs = PreparedSpecSamplingInputs(
+            inputs = self.spec_sampling_executor.build_inputs(
                 metadata=spec_decode_metadata,
                 sampling_metadata=sampling_metadata,
                 logits=logits,
