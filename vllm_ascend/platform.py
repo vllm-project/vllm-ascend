@@ -54,6 +54,14 @@ from vllm_ascend.utils import (
     enable_sp,
 )
 
+# Since vllm-project/vllm#43746, DeepSeek V4 model classes no longer
+# carry @support_torch_compile. This makes vLLM auto-enable the breakable
+# cudagraph PIECEWISE path, which is not supported on Ascend yet.
+envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH = False
+logger.info(
+    "Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet."
+)
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
@@ -206,14 +214,6 @@ class NPUPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
-        # Since vllm-project/vllm#43746, DeepSeek V4 model classes no longer
-        # carry @support_torch_compile. This makes vLLM auto-enable the breakable
-        # cudagraph PIECEWISE path, which is not supported on Ascend yet.
-        envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH = False
-        logger.info(
-            "Breakable cudagraph is force disabled on Ascend because "
-            "DeepSeek V4 PIECEWISE cudagraph is not supported yet."
-        )
 
         # Set sp_min_token_num=1 when enable_sp and not set.
         pass_config = vllm_config.compilation_config.pass_config

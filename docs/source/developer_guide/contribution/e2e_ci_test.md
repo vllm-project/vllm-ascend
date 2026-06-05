@@ -5,7 +5,7 @@ comment command, without running the full E2E test suite.
 
 ## Background
 
-The `E2E-Full` workflow (`pr_test_full.yaml`) normally runs the complete E2E test suite
+The `E2E-Full` workflow (`pr_test.yaml`) normally runs the complete E2E test suite
 when a PR has both `ready` and `ready-for-test` labels. This is expensive in CI resources
 and time.
 
@@ -28,10 +28,10 @@ First, post a comment on the PR specifying which test paths to run:
 
 | Comment format | Effect |
 |---|---|
-| `/e2e tests/e2e/pull_request/full/one_card/test_foo.py` | Run one test file on singlecard |
-| `/e2e tests/e2e/pull_request/full/two_cards/test_bar.py` | Run one test file on two_card |
+| `/e2e tests/e2e/pull_request/one_card/test_foo.py` | Run one test file on one_card |
+| `/e2e tests/e2e/pull_request/two_card/test_bar.py` | Run one test file on two_card |
 | `/e2e path1 path2 path3` | Run multiple files, routed by path pattern |
-| `/e2e tests/e2e/pull_request/full/one_card/test_foo.py::test_case` | Run a specific test case |
+| `/e2e tests/e2e/pull_request/one_card/test_foo.py::test_case` | Run a specific test case |
 
 ### 2. Add the label
 
@@ -70,27 +70,32 @@ on path patterns:
 
 | Path pattern | Hardware | Runner |
 |---|---|---|
-| `multicard/two_cards` in path | two_card A3 NPU | `linux-aarch64-a3-2` |
-| `multicard/four_cards` in path | four_card A3 NPU | `linux-aarch64-a3-4` |
-| `310p` in path | Ascend 310P | `linux-aarch64-310p-*` |
-| All other paths | Singlecard A2 NPU | `linux-aarch64-a2b3-1` |
+| `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-2` |
+| `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-4` |
+| `_310p` in filename under one/two_card | Ascend 310P x1 | `linux-aarch64-310p-*` |
+| `_310p` in filename under four_card | Ascend 310P x4 | `linux-aarch64-310p-*` |
+| All other paths | one_card A2 NPU | `linux-aarch64-a2b3-1` |
 
 When paths from multiple categories are listed in a single comment, each category's
 tests run on its respective hardware in parallel.
 
 ## Test Path Reference
 
-The `tests/e2e/` directory is organized by hardware category:
+The `tests/e2e/pull_request/` directory is organized by hardware category:
 
 ```text
-tests/e2e/
-├── singlecard/          # Single A2 card tests → singlecard runner
-├── multicard/
-│   ├── two_cards/         # two_card tests → two_card runner
-│   └── four_cards/         # four_card tests → four_card runner
-└── 310p/                # Ascend 310P tests → 310P runner
-    ├── singlecard/
-    └── multicard/
+tests/e2e/pull_request/
+├── one_card/          # Single card tests → A2 NPU x1 runner
+├── two_card/          # Two card tests → A3 NPU x2 runner
+├── four_card/         # Four card tests → A3 NPU x4 runner
+```
+
+310P tests use `_310p` subdirectories or `_310p.py` filename suffix under the
+corresponding card directory:
+
+```text
+tests/e2e/pull_request/one_card/_310p/   # 310P single card
+tests/e2e/pull_request/four_card/_310p/  # 310P four card
 ```
 
 ## Comparison with Full E2E Suite
@@ -104,22 +109,22 @@ tests/e2e/
 
 ## Examples
 
-Run a single singlecard test:
+Run a single one_card test:
 
 ```text
-/e2e tests/e2e/pull_request/full/one_card/test_offline_inference.py
+/e2e tests/e2e/pull_request/one_card/test_offline_inference.py
 ```
 
 Run a two_card test:
 
 ```text
-/e2e tests/e2e/pull_request/full/two_cards/test_data_parallel.py
+/e2e tests/e2e/pull_request/two_card/test_data_parallel.py
 ```
 
 Run tests across multiple hardware categories in one comment:
 
 ```text
-/e2e tests/e2e/pull_request/full/one_card/test_offline_inference.py tests/e2e/pull_request/full/two_cards/test_data_parallel.py
+/e2e tests/e2e/pull_request/one_card/test_offline_inference.py tests/e2e/pull_request/two_card/test_data_parallel.py
 ```
 
 Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
@@ -139,9 +144,9 @@ to post a new comment.
 
 **Tests ran on the wrong hardware.**
 
-- Check that the path includes the expected directory segment (`two_cards`, `four_cards`,
-  or `310p`). Paths that do not match any of these patterns are routed to the
-  singlecard runner by default.
+- Check that the path includes the expected directory segment (`one_card`, `two_card`,
+  `four_card`, or `_310p`). Paths that do not match any of these patterns are routed to
+  the one_card runner by default.
 
 **The `parse-comment` job skipped with a permission error.**
 
