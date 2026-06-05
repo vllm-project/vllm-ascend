@@ -26,6 +26,7 @@ on:
       - 'CMakeLists.txt'
       - 'cmake/**'
       - .github/workflows/push_build_csrc_cache.yaml
+      - 'pyproject.toml'
   workflow_dispatch:
 
 defaults:
