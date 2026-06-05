@@ -45,9 +45,8 @@ Usage:
     python select_tests.py --changed-files file1.py file2.py
 
 Flags:
-    --run-all-cpu   Run ALL CPU (undecorated) UT tests regardless of module
-                    filtering.  NPU tests and E2E tests are still filtered
-                    by module.
+    --run-all-modules   Run tests for all configured modules regardless of
+                        changed files
 """
 
 from __future__ import annotations
@@ -518,11 +517,6 @@ def main():
         help="Path to test_config.yaml",
     )
     parser.add_argument(
-        "--run-all-cpu",
-        action="store_true",
-        help="Run all CPU UT tests regardless of module filtering",
-    )
-    parser.add_argument(
         "--run-all-modules",
         action="store_true",
         help="Run tests for all configured modules regardless of changed files",
@@ -562,18 +556,6 @@ def main():
             all_groups[key].append(dir_path)
         else:
             _scan_ut_test_dir(dir_path, all_groups)
-
-    if args.run_all_cpu:
-        all_module_names = [m["name"] for m in config]
-        all_ut_dirs = [d for d in _collect_test_dirs(all_module_names, config) if _is_ut_path(d)]
-        cpu_groups: dict[RunnerKey, list[str]] = defaultdict(list)
-        for dir_path in all_ut_dirs:
-            p = Path(_pytest_node_file_path(dir_path))
-            if p.is_file():
-                cpu_groups[_DEFAULT_KEY].append(dir_path)
-            else:
-                _scan_ut_test_dir(dir_path, cpu_groups)
-        all_groups[_DEFAULT_KEY] = cpu_groups[_DEFAULT_KEY]
 
     for dir_path in e2e_dirs:
         _scan_e2e_test_dir(dir_path, all_groups)
