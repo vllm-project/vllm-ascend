@@ -256,7 +256,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             from vllm_ascend.expert_offload import ExpertOffloadManager
             mgr = ExpertOffloadManager.get_instance()
             num_tokens = topk_ids.size(0)
-            mgr.update_weights(layer, topk_ids, log2phy, topk_weights)
+            log2phy_cache_hit, log2phy_cache_miss = mgr.update_weights(layer, topk_ids, log2phy, topk_weights)
             if num_tokens > mgr.offload_threshold and mgr._prefill_initialized and not mgr._skip_prefill:
                 use_prefill_pool = True
                 try:
@@ -264,6 +264,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 except ValueError:
                     layer_idx = 0
                 prefill_slot = layer_idx % len(mgr._prefill_w13)
+
+        else:
+            log2phy_cache_hit, log2phy_cache_miss = None, None
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         fused_scale_flag = (
@@ -324,6 +327,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
+                log2phy_cache_hit=log2phy_cache_hit,
+                log2phy_cache_miss=log2phy_cache_miss,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
