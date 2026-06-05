@@ -9,7 +9,7 @@ In this case, it's more convenient to treat each DP rank like a separate vLLM de
 The functionality of [external DP](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/?h=external#external-load-balancing) is already natively supported by vLLM. In vllm-ascend we provide two enhanced functionalities:
 
 1. A launch script that helps to launch multiple vLLM instances in one command.
-2. A request-length-aware load-balance proxy for external DP.
+2. A request-length-aware load-balancing proxy for external DP.
 
 This tutorial will introduce the usage of them.
 

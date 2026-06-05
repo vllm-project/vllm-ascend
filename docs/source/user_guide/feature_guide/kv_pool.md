@@ -117,7 +117,7 @@ For common troubleshooting and issue localization guidance for HIXL (ascend_dire
 
 ### Run Mooncake Master
 
-#### 1.Configure mooncake.json
+#### 1. Configure mooncake.json
 
 The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path where mooncake.json is located.
 
@@ -141,7 +141,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 **preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.  
 **prefer_alloc_in_same_node**: Whether to prefer allocating KV on the same node. Defaults to **true**.
 
-#### 2.Start mooncake_master
+#### 2. Start mooncake_master
 
 Under the mooncake folder:
 
@@ -154,7 +154,7 @@ mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_rati
 
 ### PD Disaggregation Scenario
 
-#### 1.Run `prefill` Node and `decode` Node
+#### 1. Run `prefill` Node and `decode` Node
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` serves as the prefix-cache node.
 
@@ -323,7 +323,7 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
 }
 ```
 
-#### 2、Start proxy_server
+#### 2. Start proxy_server
 
 ```shell
 python vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
@@ -354,7 +354,7 @@ curl -s http://localhost:8000/v1/completions -H "Content-Type: application/json"
 
 ### PD-Mixed Inference
 
-#### 1.Run Mixed Department Script
+#### 1. Run Mixed Deployment Script
 
 ```shell
 bash pd_mix.sh
@@ -400,7 +400,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 }' > mix.log 2>&1
 ```
 
-#### 2.Run Inference
+#### 2. Run Inference
 
 Configure the localhost, port, and model weight path in the command to your own settings. The requests sent will only go to the port where the mixed deployment script is located, and there is no need to start a separate proxy.
 
@@ -476,7 +476,7 @@ python -c "from memcache_hybrid import MetaService; MetaService.main()"
 
 ### PD Disaggregation Scenario
 
-#### 1.Run `prefill` Node and `decode` Node
+#### 1. Run `prefill` Node and `decode` Node
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` enables KV Cache Pool
 
@@ -598,7 +598,7 @@ echo "vLLM started. Log file: log_${ROLE}.log"
 
 ### PD-Mixed Scenario
 
-#### 1.Run Mixed Department Script
+#### 1. Run Mixed Deployment Script
 
 #### 800I A2/800T A2/800I A3/800T A3 Series
 
@@ -678,7 +678,7 @@ echo "vLLM started. Log file: log_mix.log"
 
 ```
 
-#### [2.Run Inference](#2run-inference)
+#### [2. Run Inference](#2-run-inference)
 
 ## Example of using Yuanrong as a KV Pool backend
 
@@ -872,4 +872,4 @@ and the worker process. Each instance must use a unique port value.
 * No extra buffer pre-registration step is required for Yuanrong. The backend
   uses device pointers directly when building blob lists.
 
-#### [2.Run Inference](#2run-inference)
+#### [2. Run Inference](#2-run-inference)
