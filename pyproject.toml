@@ -33,6 +33,9 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[tool.uv.extra-build-dependencies]
+pandas = ["setuptools"]
+
 [tool.pymarkdown]
 plugins.md004.style = "sublist" # ul-style
 plugins.md007.indent = 4 # ul-indent
