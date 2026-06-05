@@ -25,6 +25,7 @@ on:
       - 'setup.py'
       - 'CMakeLists.txt'
       - 'cmake/**'
+      - .github/workflows/push_build_csrc_cache.yaml
   workflow_dispatch:
 
 defaults:
@@ -37,7 +38,7 @@ concurrency:
 
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_HTTP_TIMEOUT: 120
@@ -179,6 +180,9 @@ jobs:
           fi
 
           pip install uc-manager
-          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+          # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
+          # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
+          # (does not append to) the env var and would drop the ascend repo.
+          uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          uv pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu
+          uv pip install -e .
