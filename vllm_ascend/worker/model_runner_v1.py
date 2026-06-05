@@ -2195,7 +2195,9 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits.to(self.device).to(logits_dtype)
 
         with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampler_output, spec_num_output_tokens_per_req = self._sample(
+                logits, spec_decode_metadata
+            )
             self._maybe_dump_mtp_spec_sampling_case(
                 logits=logits,
                 sampler_output=sampler_output,
@@ -2227,7 +2229,7 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states,
                 sample_hidden_states,
                 batch_desc,
-                self._last_spec_num_output_tokens_per_req,
+                spec_num_output_tokens_per_req,
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
@@ -2282,9 +2284,9 @@ class NPUModelRunner(GPUModelRunner):
                             if (
                                 self.speculative_config
                                 and self.speculative_config.method == "mtp"
-                                and self._last_spec_num_output_tokens_per_req is not None
+                                and spec_num_output_tokens_per_req is not None
                             ):
-                                valid_sampled_tokens_count = self._last_spec_num_output_tokens_per_req
+                                valid_sampled_tokens_count = spec_num_output_tokens_per_req
                             self._copy_valid_sampled_token_count(
                                 next_token_ids, valid_sampled_tokens_count
                             )
@@ -2384,16 +2386,18 @@ class NPUModelRunner(GPUModelRunner):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         self.input_batch.update_async_output_token_ids()
-        self._last_spec_num_output_tokens_per_req = None
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
             if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
                 max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
                 self.sampler.prepare_sampling(max_topk)
-            return self.sampler(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
+            return (
+                self.sampler(
+                    logits=logits,
+                    sampling_metadata=sampling_metadata,
+                ),
+                None,
             )
 
         if self.speculative_config and self.speculative_config.method == "mtp":
@@ -2411,8 +2415,10 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs=self.input_batch.num_reqs,
                 num_spec_tokens=self.num_spec_tokens,
             )
-            self._last_spec_num_output_tokens_per_req = spec_sampling_result.num_output_tokens_per_req
-            sampler_output = spec_sampling_result.sampler_output
+            return (
+                spec_sampling_result.sampler_output,
+                spec_sampling_result.num_output_tokens_per_req,
+            )
         else:
             prepared_top_k = None
             if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
@@ -2425,7 +2431,7 @@ class NPUModelRunner(GPUModelRunner):
                 logits,
                 sampling_metadata,
             )
-        return sampler_output
+        return sampler_output, None
 
     def _maybe_dump_mtp_spec_sampling_case(
         self,
