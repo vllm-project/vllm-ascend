@@ -1,0 +1,164 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Handle /nightly Command
+
+on:
+  repository_dispatch:
+    types: [nightly-command]
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  authorize:
+    name: Check user authorization
+    runs-on: ubuntu-latest
+    outputs:
+      test_cases: ${{ steps.resolve.outputs.test_cases }}
+      branch: ${{ steps.resolve.outputs.branch }}
+      is_authorized: ${{ steps.auth.outputs.is_authorized }}
+    steps:
+      - name: Check user authorization
+        id: auth
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+
+          PERMISSION=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission')
+          case "$PERMISSION" in
+            triage|write|maintain|admin)
+              echo "User $ACTOR has $PERMISSION permission, authorized."
+              echo "is_authorized=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::User $ACTOR does not have triage+ permission and is not authorized to trigger nightly tests."
+              echo "is_authorized=false" >> "$GITHUB_OUTPUT"
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve test cases and branch
+        id: resolve
+        if: steps.auth.outputs.is_authorized == 'true'
+        run: |
+          ALL_ARGS=$(echo '${{ github.event.client_payload.slash_command.args.all }}' | xargs)
+          if [ -z "$ALL_ARGS" ]; then
+            echo "test_cases=all" >> "$GITHUB_OUTPUT"
+            echo "branch=main" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BRANCH="main"
+          TEST_CASES=""
+          NEXT_IS_BRANCH=0
+          for WORD in $ALL_ARGS; do
+            if [ "$NEXT_IS_BRANCH" = "1" ]; then
+              BRANCH="$WORD"
+              NEXT_IS_BRANCH=0
+            elif [ "$WORD" = "--branch" ]; then
+              NEXT_IS_BRANCH=1
+            else
+              if [ -z "$TEST_CASES" ]; then
+                TEST_CASES="$WORD"
+              else
+                TEST_CASES="$TEST_CASES,$WORD"
+              fi
+            fi
+          done
+
+          # If --branch was the last word (no branch name given), ignore it
+          if [ "$NEXT_IS_BRANCH" = "1" ]; then
+            NEXT_IS_BRANCH=0
+          fi
+
+          if [ -z "$TEST_CASES" ]; then
+            TEST_CASES="all"
+          fi
+          echo "test_cases=$TEST_CASES" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+  dispatch-a2:
+    name: Trigger Nightly-A2
+    needs: [authorize]
+    if: needs.authorize.outputs.is_authorized == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch nightly-a2 workflow
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          gh workflow run schedule_nightly_test_a2.yaml \
+            --repo "$REPO" \
+            --ref main \
+            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
+            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}'
+          echo "Dispatched Nightly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+
+  dispatch-a3:
+    name: Trigger Nightly-A3
+    needs: [authorize]
+    if: needs.authorize.outputs.is_authorized == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch nightly-a3 workflow
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          gh workflow run schedule_nightly_test_a3.yaml \
+            --repo "$REPO" \
+            --ref main \
+            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
+            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}'
+          echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+
+  report:
+    name: Report result
+    needs: [authorize, dispatch-a2, dispatch-a3]
+    if: always() && needs.authorize.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add reaction
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          reactions: ${{ needs.authorize.result == 'success' && 'hooray' || 'confused' }}
+
+      - name: Create comment
+        if: needs.authorize.result == 'success'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            /nightly command dispatched.
+
+            - **Test cases**: `${{ needs.authorize.outputs.test_cases }}`
+            - **Branch**: `${{ needs.authorize.outputs.branch }}`
+            - **A2 run**: https://github.com/${{ github.event.client_payload.github.payload.repository.full_name }}/actions/workflows/schedule_nightly_test_a2.yaml
+            - **A3 run**: https://github.com/${{ github.event.client_payload.github.payload.repository.full_name }}/actions/workflows/schedule_nightly_test_a3.yaml
+          reactions: hooray
