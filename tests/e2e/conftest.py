@@ -84,6 +84,8 @@ PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 logger = logging.getLogger(__name__)
 
+_OFFLINE_RUNNER_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+
 _TEST_DIR = os.path.dirname(__file__)
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 
@@ -184,6 +186,27 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     if hasattr(torch, "npu") and torch.npu.is_initialized():
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
+
+
+def _terminate_current_child_processes() -> None:
+    try:
+        parent = psutil.Process(os.getpid())
+    except psutil.NoSuchProcess:
+        return
+
+    children = parent.children(recursive=True)
+    for child in children:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            child.terminate()
+
+    _, still_alive = psutil.wait_procs(children, timeout=10)
+
+    for child in still_alive:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            child.kill()
+
+    if still_alive:
+        psutil.wait_procs(still_alive, timeout=5)
 
 
 class MooncakeLauncher:
@@ -936,24 +959,30 @@ class VllmRunner:
         if data_parallel_size > 1:
             raise ValueError("VllmRunner does not support `data_parallel_size > 1`; use `DPVllmRunner` instead.")
 
-        self.model = LLM(
-            model=model_name,
-            runner=runner,
-            convert=convert,
-            tokenizer=tokenizer_name,
-            tokenizer_mode=tokenizer_mode,
-            trust_remote_code=True,
-            dtype=dtype,
-            swap_space=swap_space,
-            enforce_eager=enforce_eager,
-            disable_log_stats=disable_log_stats,
-            tensor_parallel_size=tensor_parallel_size,
-            max_model_len=max_model_len,
-            block_size=block_size,
-            enable_chunked_prefill=enable_chunked_prefill,
-            quantization=quantization,
-            **kwargs,
-        )
+        try:
+            self.model = LLM(
+                model=model_name,
+                runner=runner,
+                convert=convert,
+                tokenizer=tokenizer_name,
+                tokenizer_mode=tokenizer_mode,
+                trust_remote_code=True,
+                dtype=dtype,
+                swap_space=swap_space,
+                enforce_eager=enforce_eager,
+                disable_log_stats=disable_log_stats,
+                tensor_parallel_size=tensor_parallel_size,
+                max_model_len=max_model_len,
+                block_size=block_size,
+                enable_chunked_prefill=enable_chunked_prefill,
+                quantization=quantization,
+                **kwargs,
+            )
+        except Exception:
+            _terminate_current_child_processes()
+            clear_ascend_config()
+            cleanup_dist_env_and_memory()
+            raise
 
     @staticmethod
     def _finalize_generate_outputs(req_outputs: list[RequestOutput]) -> list[tuple[list[list[int]], list[str]]]:
@@ -1130,9 +1159,23 @@ class VllmRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        del self.model
-        clear_ascend_config()
-        cleanup_dist_env_and_memory()
+        try:
+            model = getattr(self, "model", None)
+            if model is not None:
+                self._shutdown_llm_engine(model)
+                del self.model
+        finally:
+            _terminate_current_child_processes()
+            clear_ascend_config()
+            cleanup_dist_env_and_memory()
+
+    def _shutdown_llm_engine(self, model: LLM) -> None:
+        llm_engine = getattr(model, "llm_engine", None)
+        engine_core = getattr(llm_engine, "engine_core", None)
+        shutdown = getattr(engine_core, "shutdown", None)
+        if callable(shutdown):
+            with contextlib.suppress(Exception):
+                shutdown(timeout=_OFFLINE_RUNNER_SHUTDOWN_TIMEOUT_SECONDS)
 
 
 class DPVllmRunner(VllmRunner):
