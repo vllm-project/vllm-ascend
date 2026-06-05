@@ -552,7 +552,7 @@ def lightning_attention_npu(
         v.shape,
         ed.shape,
         block_size,
-        kv_history.shape if kv_history is not None else None
+        kv_history.shape if kv_history is not None else None,
     )
     d = q.shape[-1]
     e = v.shape[-1]

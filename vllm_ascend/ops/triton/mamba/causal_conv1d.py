@@ -588,12 +588,11 @@ def causal_conv1d_update_npu(
     out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
     """
     logger.debug(
-        "[TritonOps] causal_conv1d_update_npu: x.shape=%s, "
-        "conv_state.shape=%s, weight.shape=%s, activation=%s",
+        "[TritonOps] causal_conv1d_update_npu: x.shape=%s, conv_state.shape=%s, weight.shape=%s, activation=%s",
         x.shape,
         conv_state.shape,
         weight.shape,
-        activation
+        activation,
     )
     if not HAS_TRITON:
         return _pytorch_update(

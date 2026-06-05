@@ -158,7 +158,7 @@ def fused_qkvzba_split_reshape_cat(
         num_heads_qk,
         num_heads_v,
         head_qk,
-        head_v
+        head_v,
     )
     batch, seq_len = mixed_qkvz.shape[0], 1
     total_rows = batch * seq_len

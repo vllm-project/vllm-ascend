@@ -275,7 +275,7 @@ def rope_forward_triton(
         q.shape,
         k.shape,
         rope_dim,
-        is_neox_style
+        is_neox_style,
     )
 
     num_tokens, n_q_head, head_dim = q.shape
@@ -376,7 +376,7 @@ def rope_forward_triton_siso(
         cos.shape if cos is not None else None,
         sin.shape if sin is not None else None,
         rope_dim,
-        is_neox_style
+        is_neox_style,
     )
     num_tokens, n_head, head_dim = qk.shape
     assert rope_dim <= head_dim

@@ -303,7 +303,7 @@ def triton_split_qkv_rmsnorm_mrope(
         num_q_heads,
         num_kv_heads,
         head_size,
-        rope_dim
+        rope_dim,
     )
     core_num = get_vectorcore_num()
 

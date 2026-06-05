@@ -110,7 +110,7 @@ def get_token_bin_counts_and_mask_triton(
         "[TritonOps] get_token_bin_counts_and_mask_triton: tokens.shape=%s, vocab_size=%s, num_seqs=%s",
         tokens.shape,
         vocab_size,
-        num_seqs
+        num_seqs,
     )
     n_rows, n_cols = tokens.shape
     if num_seqs is not None and num_seqs > 0:

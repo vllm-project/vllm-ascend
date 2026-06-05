@@ -217,7 +217,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state.shape if initial_state is not None else None,
             output_final_state,
             cu_seqlens.shape if cu_seqlens is not None else None,
-            use_qk_l2norm_in_kernel
+            use_qk_l2norm_in_kernel,
         )
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)

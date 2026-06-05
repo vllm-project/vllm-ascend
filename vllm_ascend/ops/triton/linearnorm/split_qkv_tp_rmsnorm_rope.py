@@ -245,12 +245,11 @@ def split_qkv_tp_rmsnorm_rope_impl(
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     logger.debug(
-        "[TritonOps] split_qkv_tp_rmsnorm_rope_impl: input.shape=%s, "
-        "q_hidden_size=%s, kv_hidden_size=%s, head_dim=%s",
+        "[TritonOps] split_qkv_tp_rmsnorm_rope_impl: input.shape=%s, q_hidden_size=%s, kv_hidden_size=%s, head_dim=%s",
         input.shape,
         q_hidden_size,
         kv_hidden_size,
-        head_dim
+        head_dim,
     )
     num_tokens = input.shape[0]
     input_2d = input.view(num_tokens, -1)
