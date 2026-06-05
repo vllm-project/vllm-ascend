@@ -51,7 +51,7 @@ UCM currently provides the following capabilities:
 **Supported Platforms:**
 
 - CUDA (NVIDIA H100, H20, L40, L20)
-- CANN (Ascend 910C, 910B)
+- CANN (Atlas A2 inference products, Atlas A3 inference products)
 - MUSA (Mthreads S5000)
 - MACA (MetaX C500)
 
