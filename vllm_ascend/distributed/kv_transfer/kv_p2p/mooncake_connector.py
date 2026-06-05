@@ -571,7 +571,17 @@ class KVCacheRecvingThread(threading.Thread):
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][
             first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
         ]
-        logger.debug("transfer kv cache first_layer_index:%s , end_layer_index:%s", first_layer_index, end_layer_index)
+        logger.warning(
+            "[ADDR] _transfer_kv_cache: remote_host=%s remote_port=%s prefill_pp_rank=%s "
+            "first_layer=%s end_layer=%s num_cache_per_layer=%s "
+            "remote_addrs=%d local_sliced_addrs=%d "
+            "local_total_addrs=%d remote_total_addrs_for_port=%d",
+            remote_host, remote_handshake_port, prefill_pp_rank,
+            first_layer_index, end_layer_index, num_cache_per_layer,
+            len(remote_kv_caches_base_addrs), len(local_kv_caches_base_addrs),
+            len(self.kv_caches_base_addr.get(self.local_engine_id, {}).get(self.local_handshake_port, [])),
+            len(self.kv_caches_base_addr.get(remote_engine_id, {}).get(remote_handshake_port, [])),
+        )
         remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         num_blocks = len(local_block_ids)
         session_id = f"{remote_host}:{remote_transfer_port}"
@@ -973,6 +983,7 @@ class MooncakeConnectorScheduler:
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
+        logger.warning("[ADDR] Scheduler init: local_ip=%s side_channel_host=%s", self.local_ip, self.side_channel_host)
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -1170,6 +1181,8 @@ class MooncakeConnectorWorker:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
+        logger.warning("[ADDR] Worker init: pp_rank=%s tp_rank=%s side_channel_host=%s pp_size=%s",
+                       self.pp_rank, self.tp_rank, self.side_channel_host, self.pp_size)
         self.pcp_size = get_pcp_group().world_size
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
@@ -1287,6 +1300,9 @@ class MooncakeConnectorWorker:
                 ptrs.append(base_addr)
                 lengths.append(region_len)
         global_te.register_buffer(ptrs, lengths)
+        logger.warning("[ADDR] register_kv_caches: role=%s pp_rank=%s tp_rank=%s local_ip=%s num_layers=%d num_addrs=%d num_blocks=%d",
+                       self.kv_role, getattr(self, 'pp_rank', '?'), getattr(self, 'tp_rank', '?'),
+                       get_ip(), len(kv_caches), len(kv_caches_base_addr), self.num_blocks)
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
             engine_id=self.engine_id,
