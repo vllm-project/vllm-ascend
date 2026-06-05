@@ -200,7 +200,13 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        backend_kwargs = {}
+        # Pass the kv-connector extra config through so backends like
+        # MooncakeBackend can pick up overrides such as ``preferred_segment``
+        # (required for Mooncake disk-tier offloading). The ABC accepts
+        # ``**kwargs``, so backends that don't care simply ignore it.
+        backend_kwargs = {
+            "kv_connector_extra_config": (vllm_config.kv_transfer_config.kv_connector_extra_config or {}),
+        }
         if self.backend.lower() in {"mooncake", "memcache"}:
             # DSV4 exposes compress_ratios; only use lazy store init for this
             # compressed-model path.
