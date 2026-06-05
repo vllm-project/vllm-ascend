@@ -32,7 +32,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.speculative_config = None
         mock_vllm_config.additional_config = {}
         mock_vllm_config.compilation_config.pass_config.enable_sp = False
-        mock_vllm_config.compilation_config.cudagraph_mode = None
+        mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         return mock_vllm_config
 
     @staticmethod
