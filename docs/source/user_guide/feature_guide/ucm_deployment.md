@@ -136,7 +136,6 @@ vllm serve /models/QwQ-32B \
     --kv-transfer-config \
     '{
         "kv_connector": "UCMConnector",
-        "kv_connector_module_path": "ucm.integration.vllm.ucm_connector",
         "kv_role": "kv_both",
         "kv_connector_extra_config": {"UCM_CONFIG_FILE": "/path/to/ucm_config_example.yaml"}
     }'
@@ -164,7 +163,6 @@ vllm serve /models/QwQ-32B \
     --kv-transfer-config \
     '{
         "kv_connector": "UCMConnector",
-        "kv_connector_module_path": "ucm.integration.vllm.ucm_connector",
         "kv_role": "kv_both",
         "kv_connector_extra_config": {"UCM_CONFIG_FILE": "/path/to/ucm_config_example.yaml"}
     }'
@@ -289,7 +287,6 @@ vllm serve /models/QwQ-32B \
                 {
                     "kv_connector": "UCMConnector",
                     "kv_role": "kv_both",
-                    "kv_connector_module_path": "ucm.integration.vllm.ucm_connector",
                     "kv_connector_extra_config": {"UCM_CONFIG_FILE": "/vllm-workspace/unified-cache-management/examples/ucm_config_example.yaml"}
                 }
             ]
@@ -414,7 +411,6 @@ vllm serve /models/QwQ-32B \
     --kv-transfer-config \
     '{
         "kv_connector": "UCMConnector",
-        "kv_connector_module_path": "ucm.integration.vllm.ucm_connector",
         "kv_role": "kv_both",
         "kv_connector_extra_config": {"UCM_CONFIG_FILE": "/path/to/ucm_config_example.yaml"}
     }'
@@ -590,7 +586,6 @@ vllm serve /models/GLM-5.1-w4a8 \
                 {
                     "kv_connector": "UCMConnector",
                     "kv_role": "kv_both",
-                    "kv_connector_module_path": "ucm.integration.vllm.ucm_connector",
                     "kv_connector_extra_config": {"UCM_CONFIG_FILE": "/path/to/ucm_config_example.yaml"}
                 }
             ]

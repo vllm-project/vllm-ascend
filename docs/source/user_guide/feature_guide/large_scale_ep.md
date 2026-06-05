@@ -163,7 +163,6 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
       "kv_role": "kv_producer",
       "kv_parallel_size": "1",
       "kv_port": "20001",
-      "engine_id": "0"
     }' \
     --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
 ```
@@ -229,7 +228,6 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
         "kv_role": "kv_consumer",
         "kv_parallel_size": "1",
         "kv_port": "20001",
-        "engine_id": "0"
         }' \
     --additional-config '{"enable_weight_nz_layout":true}'
 ```
@@ -433,7 +431,6 @@ In the PD separation scenario, we provide an optimized configuration.
           "kv_role": "kv_producer",
           "kv_parallel_size": "1",
           "kv_port": "20001",
-          "engine_id": "0"
         }'
     ```
 
@@ -455,7 +452,6 @@ In the PD separation scenario, we provide an optimized configuration.
           "kv_role": "kv_consumer",
           "kv_parallel_size": "1",
           "kv_port": "20001",
-          "engine_id": "0"
         }'
     ```
 

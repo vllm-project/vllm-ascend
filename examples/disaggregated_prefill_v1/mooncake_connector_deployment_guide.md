@@ -44,7 +44,6 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   "kv_role": "kv_producer",
   "kv_parallel_size": 1,
   "kv_port": "20001",
-  "engine_id": "0",
   "kv_rank": 0,
   "kv_connector_extra_config": {
             "prefill": {
@@ -72,7 +71,7 @@ Set `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` to the co
 `--trust-remote-code` can load the local model.<br>
 `--enforce-eager` Turn off the map mode<br>
 `--gpu-memory-utilization`: Percentage of video memory occupied by the card<br>
-`--kv-transfer-config`: follow kv_connector, kv_connector_module_path: mooncakeconnect, kv_buffer_device, and run on the NPU card. For kv_role, set kv_producer to the p node, kv_consumer to the d node, kv_parallel_size to 1, and kv_port to the port used by the node. For the p node, set engine_id and kv_rank to 0 and for the d node to 1. Configure the distributed parallel policy for the p and d nodes in the kv_connector_extra_config file based on --tensor-parallel-size and --data-parallel-size.<br>
+`--kv-transfer-config`: follow kv_connector, kv_buffer_device, and run on the NPU card. For kv_role, set kv_producer to the p node, kv_consumer to the d node, kv_parallel_size to 1, and kv_port to the port used by the node. For the p node, set engine_id and kv_rank to 0 and for the d node to 1. Configure the distributed parallel policy for the p and d nodes in the kv_connector_extra_config file based on --tensor-parallel-size and --data-parallel-size.<br>
 
 ### 2. Run `decode` Node
 
@@ -111,7 +110,6 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   "kv_role": "kv_consumer",
   "kv_parallel_size": 1,
   "kv_port": "20002",
-  "engine_id": "1",
   "kv_rank": 1,
   "kv_connector_extra_config": {
             "prefill": {

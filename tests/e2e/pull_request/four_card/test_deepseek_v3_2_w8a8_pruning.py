@@ -89,7 +89,6 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
                     "kv_connector": "MooncakeConnectorV1",
                     "kv_role": "kv_producer",
                     "kv_port": "30000",
-                    "engine_id": "prefiller-0",
                     "kv_connector_extra_config": {
                         "prefill": {"dp_size": 1, "tp_size": 2},
                         "decode": {"dp_size": 1, "tp_size": 2},
@@ -125,7 +124,6 @@ def test_pd_disaggregation_w8a8_sfa_dsa_full_decode_only():
                     "kv_connector": "MooncakeConnectorV1",
                     "kv_role": "kv_consumer",
                     "kv_port": "30200",
-                    "engine_id": "decoder-0",
                     "kv_connector_extra_config": {
                         "prefill": {"dp_size": 1, "tp_size": 2},
                         "decode": {"dp_size": 1, "tp_size": 2},

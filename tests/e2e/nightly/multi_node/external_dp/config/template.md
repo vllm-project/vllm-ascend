@@ -192,7 +192,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "engine_id": "0",
         "kv_connector_extra_config": {
           "prefill": {
             "dp_size": 2,
@@ -230,7 +229,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "1",
         "kv_connector_extra_config": {
           "prefill": {
             "dp_size": 2,

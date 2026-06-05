@@ -86,7 +86,7 @@ This feature is flexible and supports various configurations, including setups w
 
 ### 1. Config Parameter Validation
 
-Validate KV transfer config by checking whether the kv_connector type is supported and whether kv_connector_module_path exists and is loadable. On transfer failures, emit clear error logs for diagnostics.
+Validate KV transfer config by checking whether the kv_connector type is supported. On transfer failures, emit clear error logs for diagnostics.
 
 ### 2. Port Conflict Detection
 
