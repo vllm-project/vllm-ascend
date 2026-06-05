@@ -312,6 +312,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             moe_comm_type = MoECommType.ALLTOALL
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
+    moe_comm_type = MoECommType.ALLGATHER
     return moe_comm_type
 
 
