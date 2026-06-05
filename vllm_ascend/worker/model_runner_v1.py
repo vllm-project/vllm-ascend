@@ -3424,8 +3424,6 @@ class NPUModelRunner(GPUModelRunner):
                 if "sink" in name:
                     self._has_sinks = True
                     break
-            if self.dynamic_eplb:
-                model_register(self.model)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
