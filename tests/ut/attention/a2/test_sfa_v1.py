@@ -7,6 +7,7 @@ from vllm.distributed.parallel_state import GroupCoordinator
 from tests.ut.attention.utils import patch_distributed_groups
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import enable_cp
 
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
@@ -16,6 +17,20 @@ from vllm_ascend.utils import enable_dsa_cp
 
 
 class TestAscendSFABackend(TestBase):
+    def setUp(self):
+        self.mock_config = MagicMock()
+        self.mock_config.parallel_config = MagicMock()
+        self.mock_config.parallel_config.prefill_context_parallel_size = 1
+        self.mock_config.parallel_config.decode_context_parallel_size = 1
+
+        self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
+        self.utils_patcher.start()
+        enable_cp.cache_clear()
+
+    def tearDown(self):
+        self.utils_patcher.stop()
+        enable_cp.cache_clear()
+
     def test_get_name(self):
         self.assertEqual(AscendSFABackend.get_name(), "ASCEND_SFA")
 

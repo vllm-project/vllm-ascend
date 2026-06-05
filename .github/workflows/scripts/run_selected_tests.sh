@@ -40,16 +40,16 @@ print_test_info() {
 print_summary() {
   echo -e "\033[1;34m=== TEST SUMMARY ===\033[0m"
   for result in "${test_results[@]}"; do
-    IFS='|' read -r target status log_file <<< "${result}"
-    echo -e "  ${status}: ${target}"
-    echo -e "    log: ${log_file}"
+    IFS='|' read -r summary_target result_status summary_log_file <<< "${result}"
+    echo -e "  ${result_status}: ${summary_target}"
+    echo -e "    log: ${summary_log_file}"
   done
   if [ "${#failed_logs[@]}" -gt 0 ]; then
     echo -e "\033[1;31m=== FAILED TEST LOGS ===\033[0m"
     for failed in "${failed_logs[@]}"; do
-      IFS='|' read -r target log_file <<< "${failed}"
-      echo "::group::${target} failure log"
-      cat "${log_file}"
+      IFS='|' read -r failed_target failed_log_file <<< "${failed}"
+      echo "::group::${failed_target} failure log"
+      cat "${failed_log_file}"
       echo "::endgroup::"
     done
   fi
