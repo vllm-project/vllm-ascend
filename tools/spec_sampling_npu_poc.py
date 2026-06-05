@@ -12,6 +12,7 @@ import vllm_ascend.sample.sampler as sampler_module
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.sample.sampler import AscendSampler
+from vllm_ascend.sample.spec_sampling_executor import SpecSamplingNPUExecutor
 from vllm_ascend.sample.spec_sampling_poc import load_spec_sampling_case
 
 
@@ -62,14 +63,15 @@ def main() -> int:
 
     sampler = AscendSampler()
     rejection_sampler = AscendRejectionSampler(sampler)
-    rejection_sampler.prepare_sampling(prepared_top_k)
-
-    replay_output = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs,
-        logits,
-        sampling_metadata,
+    executor = SpecSamplingNPUExecutor(sampler, rejection_sampler)
+    inputs = executor.build_inputs(
+        metadata=spec_decode_metadata,
+        sampling_metadata=sampling_metadata,
+        logits=logits,
+        draft_probs=draft_probs,
+        prepared_top_k=prepared_top_k,
     )
+    replay_output = executor.execute(inputs)
 
     actual = replay_output.sampled_token_ids
     if expected is not None and torch.equal(actual, expected):

@@ -58,6 +58,30 @@ class SpecSamplingNPUExecutor:
             prepared_top_k=prepared_top_k,
         )
 
+    @classmethod
+    def build_inputs_from_runtime(
+        cls,
+        *,
+        metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+        logits: torch.Tensor,
+        top_k_cpu: torch.Tensor | None,
+        enable_reduce_sample: bool,
+        draft_probs: torch.Tensor | None = None,
+    ) -> PreparedSpecSamplingInputs:
+        prepared_top_k = None
+        if top_k_cpu is not None and enable_reduce_sample:
+            valid_top_k = top_k_cpu[top_k_cpu < logits.shape[1]]
+            if len(valid_top_k) > 0:
+                prepared_top_k = int(valid_top_k.max())
+        return cls.build_inputs(
+            metadata=metadata,
+            sampling_metadata=sampling_metadata,
+            logits=logits,
+            draft_probs=draft_probs,
+            prepared_top_k=prepared_top_k,
+        )
+
     def execute(self, inputs: PreparedSpecSamplingInputs) -> SamplerOutput:
         metadata = inputs.metadata
         sampling_metadata = inputs.sampling_metadata
