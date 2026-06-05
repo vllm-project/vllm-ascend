@@ -2,7 +2,7 @@ test_name: "test DeepSeek-R1-W8A8 disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 4
 npu_per_node: 16
-env_common:
+env_common: &env_common
   HCCL_OP_EXPANSION_MODE: AIV
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024
@@ -21,6 +21,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
           --host 0.0.0.0
@@ -59,6 +61,8 @@ deployment:
           '{"recompute_scheduler_enable":true}'
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
           --host 0.0.0.0
@@ -96,6 +100,8 @@ deployment:
           --additional-config
           '{"recompute_scheduler_enable":true}'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
         --host 0.0.0.0
@@ -140,6 +146,8 @@ deployment:
         "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}
         }'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
         --headless

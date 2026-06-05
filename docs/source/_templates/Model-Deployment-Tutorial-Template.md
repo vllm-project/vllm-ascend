@@ -1,4 +1,8 @@
-# Deployment Tutorial Template Based on the XXX Model
+# Technical Documentation Template for Deployment Tutorials Based on the XXX Model
+
+<p align="center">
+  <a href="Model-Deployment-Tutorial-Template.md"><b>English</b></a> | <a href="Model-Deployment-Tutorial-Template.zh.md"><b>中文</b></a>
+</p>
 
 This template is based on deployment tutorials for models such as DeepSeek-V3.2 and Qwen-VL-Dense, and is intended to serve as a reference for technical documentation writing. Users can systematically construct relevant technical documentation by following the guidelines provided in this template.
 
@@ -39,7 +43,7 @@ This section introduces the features supported by the model, including supported
 | DeepSeek V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
 | Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | ✅ | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
 
-**Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
+>**Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
 
 **Example 2: Reference Citation**
 
@@ -187,6 +191,31 @@ Omitted. Requirements are the same as for Accuracy Evaluation.
 **Content Writing Requirements:**
 
 Provide recommended configurations for three scenarios (long sequence, low latency, high throughput) for each model that can achieve optimal performance, but do not provide specific performance data.
+
+**Example:**
+
+### Best Practice Configuration Reference
+
+### Table 1: Scenario Overview
+
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Optimization Rationale |
+|----------|----------------|-------------|----------------|------------------------|
+| High Throughput<br>(32K context → 1K output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For short-sequence high throughput, try adjusting xxx parameters |
+| Long Context | | | | |
+| Low Latency | | | | |
+
+> **Note**: `*Total NPUs` indicates the total number of NPUs used across all nodes.
+
+### Table 2: Node-Level Detailed Configuration
+
+| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|-----------|-----------|--------------|------------------|
+| High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 64 | 30k | 3 | Off | On | On | On |
+| High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 64 | 30k | 12 | Off | On | Off | On |
+| Long Context | Server-P Node / Single Machine | | | | | | | | | | | |
+| Long Context | Server-D Node | | | | | | | | | | | |
+| Low Latency | Server-P Node / Single Machine | | | | | | | | | | | |
+| Low Latency | Server-D Node | | | | | | | | | | | |
 
 ## 10 Performance Tuning (Optional)
 

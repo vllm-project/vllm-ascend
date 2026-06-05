@@ -34,7 +34,7 @@ From the workflow perspective, we can see how the final test script is executed,
     num_nodes: 2
     npu_per_node: 16
     # All env vars you need should add it here
-    env_common:
+    env_common: &env_common
       VLLM_USE_MODELSCOPE: true
       OMP_PROC_BIND: false
       OMP_NUM_THREADS: 100
@@ -53,14 +53,20 @@ From the workflow perspective, we can see how the final test script is executed,
     # Add each node's vllm serve cli command just like you run locally
     # Add each node's individual envs like follow
     deployment:
-      - envs:
-          # fill with envs like: <key>:<value>
-        server_cmd: >
-          vllm serve ...
-      - envs:
-          # fill with envs like: <key>:<value>
-        server_cmd: >
-          vllm serve ...
+    - name: prefiller node # optional: just for description, not used in code
+      envs:
+        <<: *env_common
+        VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+        # Continue to add other envs if needed
+      server_cmd: >
+        vllm serve ...
+    - name: decoder node # optional: just for description, not used in code
+      envs:
+        <<: *env_common
+        VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+        # Continue to add other envs if needed
+      server_cmd: >
+        vllm serve ...
     benchmarks:
       perf:
         # fill with performance test kwargs
@@ -293,7 +299,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
     INFO 12-30 11:00:57 [__init__.py:217] Platform plugin ascend is activated
     INFO 12-30 11:00:57 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
     ================================================================================================== test session starts ===================================================================================================
-    platform linux -- Python 3.11.13, pytest-8.4.2, pluggy-1.6.0 -- /usr/local/python3.11.13/bin/python3
+    platform linux -- Python 3.12.13, pytest-8.4.2, pluggy-1.6.0 -- /usr/local/python3.12.13/bin/python3
     cachedir: .pytest_cache
     rootdir: /vllm-workspace/vllm-ascend
     configfile: pyproject.toml

@@ -39,7 +39,7 @@ _server_cmd: &server_cmd
 _benchmarks: &benchmarks
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs100_glm5
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs100_glm
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 20
@@ -52,7 +52,7 @@ _benchmarks: &benchmarks
 _benchmarks_bs8: &benchmarks_bs8
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs100_glm5
+    dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs100_glm
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 8
@@ -65,7 +65,7 @@ _benchmarks_bs8: &benchmarks_bs8
 _benchmarks_bs32: &benchmarks_bs32
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in32768_bs100_glm5
+    dataset_path: vllm-ascend/GSM8K_prefix90_in32768_bs100_glm
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 32
@@ -78,7 +78,7 @@ _benchmarks_bs32: &benchmarks_bs32
 _benchmarks_bs10: &benchmarks_bs10
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs100_glm5
+    dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs100_glm
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 10
@@ -95,7 +95,6 @@ test_cases:
 #  16384 1024  0%  20
   - name: "GLM-5_1-w8a8-High—Throughput-bs20"
     model: "Eco-Tech/GLM-5.1-w8a8"
-    special_dependencies: *special_dependencies
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -112,7 +111,6 @@ test_cases:
 #32768 512 0%  8
   - name: "GLM-5_1-w8a8-High—Throughput-bs8"
     model: "Eco-Tech/GLM-5.1-w8a8"
-    special_dependencies: *special_dependencies
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -130,7 +128,6 @@ test_cases:
 #32768  512 90% 32
   - name: "GLM-5_1-w8a8-High—Throughput-bs32"
     model: "Eco-Tech/GLM-5.1-w8a8"
-    special_dependencies: *special_dependencies
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -146,7 +143,6 @@ test_cases:
 #65536  1024  90% 10
   - name: "GLM-5_1-w8a8-High—Throughput-bs10"
     model: "Eco-Tech/GLM-5.1-w8a8"
-    special_dependencies: *special_dependencies
     envs:
       <<: *envs
     server_cmd: *server_cmd

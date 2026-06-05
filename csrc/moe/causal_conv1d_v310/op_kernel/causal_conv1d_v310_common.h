@@ -40,6 +40,12 @@ __aicore__ inline int32_t SlotPrefetch(int32_t t)
     return (t + 4) % RING_SLOTS;
 }
 
+__aicore__ inline int32_t RetreatRingSlot(int32_t slot, int32_t delta)
+{
+    int32_t prev = slot - delta;
+    return (prev >= 0) ? prev : (prev + RING_SLOTS);
+}
+
 } // namespace NsCausalConv1dCommon
 
 #endif // CAUSAL_CONV1D_V310_COMMON_H
