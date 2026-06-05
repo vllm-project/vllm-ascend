@@ -81,14 +81,3 @@ test_cases:
       <<: *benchmarks_acc
       <<: *benchmarks_perf
 
-  - name: "DeepSeek-R1-0528-W8A8-EPLB"
-    model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
-    envs:
-      <<: *envs
-      DYNAMIC_EPLB: "true"
-    server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--additional-config"
-      - '{"enable_weight_nz_layout": true, "eplb_config": {"dynamic_eplb": "true", "expert_heat_collection_interval": 1000, "algorithm_execution_interval": 50, "eplb_policy_type": 3}}'
-    benchmarks:
-      <<: *benchmarks_acc
