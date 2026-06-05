@@ -382,6 +382,14 @@
     - tests/ut/sample
     - tests/e2e/pull_request/one_card/test_sampler.py
 
+- name: simple_kv_offload
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/simple_kv_offload
+    - vllm_ascend/distributed/kv_transfer/kv_pool/simple_cpu_offload
+  tests:
+    - tests/e2e/pull_request/one_card/test_simple_cpu_offload.py
+
 # Spec Decode
 - name: spec_decode_base
   optional: true
