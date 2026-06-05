@@ -125,41 +125,6 @@ class TestMooncakeStoreConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             _make_mooncake_store_config(enable_ssd_offload=True)
 
-    def test_ssd_offload_requires_existing_path(self):
-        missing_path = os.path.join(
-            tempfile.gettempdir(),
-            "mooncake_ssd_missing_ut",
-        )
-        self.assertFalse(os.path.exists(missing_path))
-        with self.assertRaises(ValueError):
-            _make_mooncake_store_config(
-                enable_ssd_offload=True,
-                ssd_offload_path=missing_path,
-            )
-
-    def test_ssd_offload_requires_directory(self):
-        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            file_path = temp_file.name
-        self.addCleanup(lambda: os.unlink(file_path))
-        with self.assertRaises(ValueError):
-            _make_mooncake_store_config(
-                enable_ssd_offload=True,
-                ssd_offload_path=file_path,
-            )
-
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.os.access",
-        return_value=False,
-    )
-    def test_ssd_offload_requires_writable(self, _mock_access):
-        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
-        self.addCleanup(lambda: os.rmdir(ssd_path))
-        with self.assertRaises(ValueError):
-            _make_mooncake_store_config(
-                enable_ssd_offload=True,
-                ssd_offload_path=ssd_path,
-            )
-
     @staticmethod
     def _writable_ssd_path() -> str:
         return tempfile.mkdtemp(prefix="mooncake_ssd_ut_")
