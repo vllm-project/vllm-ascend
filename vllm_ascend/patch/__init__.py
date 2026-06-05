@@ -182,24 +182,6 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM tool-call final chunk fixes.
 #
-# ** 7b. File: platform/patch_glm47_tool_call_parser.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.tool_parsers.glm47_moe_tool_parser.Glm47MoeModelToolParser`
-#    Why:
-#       vLLM's GLM47 streaming parser can drop complete inline zero-argument
-#       tool calls such as `<tool_call>get_current_time</tool_call>`, while
-#       non-streaming parses the same output correctly.
-#    How：
-#       Monkey-patch GLM47 tool-call region extraction so complete inline
-#       zero-argument regions are normalized for the existing streaming name
-#       extractor without emitting partial names for incomplete regions.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/issues/44326
-#       https://github.com/vllm-project/vllm/pull/44327
-#    Future Plan:
-#       Remove this patch once the supported vLLM version contains the upstream
-#       GLM47 inline zero-argument streaming parser fix.
-#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
@@ -361,18 +343,6 @@
 #    Future Plan:
 #       Remove this patch if upstream exposes a platform allocator capability hook
 #       for sleep mode validation.
-#
-# ** 14. File: platform/patch_scheduler.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
-#    Why:
-#       Upstream vLLM has an assert logic, cause it fails when external KV connector hit
-#    How:
-#      remove the assert
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/43935
-#    Future Plan:
-#       Remove this patch if upstream streaming behavior is updated to support mamba external KV connector
 #
 # * Worker Patch:
 # ===============
@@ -746,16 +716,7 @@
 #    Future Plan:
 #       Remove this patch when:
 #       design a dispatch mechanism for batch_memcpy_kernel.
-#   3. `mamba_utils.preprocess_mamba = preprocess_mamba`
-#    Why:
-#       1. preprocess_mamba has a assert logic, cause kv transfer call fails
-#       2. preprocess_mamba copy the state of previous step to the last block before kv transfer load
-#    How:
-#       1. patch to remove assert
-#       2. path to only collect copy metadata in preprocess_mamba(and do actual copy after kv transfer load).
-#    Future Plan:
-#       Remove this patch when:
-#       vLLM itself supports kv transfer for mamba
+#
 # ** 21. File: worker/patch_weight_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`

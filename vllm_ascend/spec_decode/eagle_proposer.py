@@ -4,7 +4,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.v1.spec_decode.eagle import EagleProposer
 
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer, _FusedModelWithMTP
 
 
 class AscendEagleProposer(EagleProposer, AscendSpecDecodeBaseProposer):
