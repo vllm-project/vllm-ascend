@@ -23,7 +23,7 @@ import torch
 from vllm_ascend.quantization.quant_type import QuantType
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=False, slots=True)
 class MoERoutingParams:
     """Routing and dispatch side inputs for one MoE invocation.
 
@@ -41,6 +41,8 @@ class MoERoutingParams:
     log2phy: torch.Tensor | None = None
     # Precomputed activation scales from prepare stage for quantized dispatch.
     pertoken_scale: torch.Tensor | None = None
+    log2phy_cache_hit: torch.Tensor | None = None
+    log2phy_cache_miss: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
