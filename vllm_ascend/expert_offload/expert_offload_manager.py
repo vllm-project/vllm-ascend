@@ -82,6 +82,10 @@ class ExpertOffloadManager:
         # Compute stream waits on this before cache-miss MLP to overlap
         # cache-hit compute with weight transfer.
         self._weights_loaded_event = torch_npu.npu.Event()
+        # Set to True by _update_weights when all needed experts are already
+        # on device — lets update_weights skip cache-hit/miss buffers and
+        # return (None, None, None) so fused_experts uses single-pass path.
+        self._all_hits = False
 
         # Prefill pool: ndl layers × all experts on NPU, shared round-robin
         self._prefill_w13: list[torch.Tensor] = []
@@ -621,6 +625,14 @@ class ExpertOffloadManager:
             self._update_weights(args)
 
         log2phy.copy_(log2phy_h, non_blocking=_EXTRA_CTX.capturing)
+
+        # All-hit fast path: every needed expert was already on device.
+        # Skip cache-hit/miss buffers entirely so fused_experts uses the
+        # normal single-pass log2phy path — avoids a full dispatch+MLP+combine
+        # round that would produce zero output anyway.
+        if self._all_hits:
+            return (None, None, None)
+
         self.log2phy_cache_hit.copy_to_gpu()
         self.log2phy_cache_miss.copy_to_gpu()
         # return (None, None)
@@ -654,6 +666,14 @@ class ExpertOffloadManager:
             on_device = set(slot_owner.values())
             already_there = needed & on_device           # no-op
             need_to_load = needed - already_there          # CPU→NPU copy
+
+            # All-hit fast path: nothing to load, skip H2D copies and
+            # cache-miss buffer setup.  The caller checks self._all_hits
+            # to skip copy_to_gpu and return (None, None, None).
+            self._all_hits = len(need_to_load) == 0
+            if self._all_hits:
+                return
+
             if self.cache_policy is not None:
                 self._record_cache_stats(layer_idx, already_there, need_to_load, needed, on_device)
             reusable_slots = [s for s, e in slot_owner.items()
