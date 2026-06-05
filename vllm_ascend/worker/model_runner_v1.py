@@ -165,6 +165,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.sample.spec_sampling_poc import dump_spec_sampling_case
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -2183,6 +2184,13 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+            self._maybe_dump_mtp_spec_sampling_case(
+                logits=logits,
+                sampler_output=sampler_output,
+                spec_decode_metadata=spec_decode_metadata,
+                spec_decode_common_attn_metadata=spec_decode_common_attn_metadata,
+                positions=positions,
+            )
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -2380,6 +2388,49 @@ class NPUModelRunner(GPUModelRunner):
             sampling_metadata,
         )
         return sampler_output
+
+    def _maybe_dump_mtp_spec_sampling_case(
+        self,
+        *,
+        logits: torch.Tensor,
+        sampler_output: SamplerOutput,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
+        positions: torch.Tensor,
+    ) -> None:
+        if not self.speculative_config or self.speculative_config.method != "mtp":
+            return
+        if spec_decode_metadata is None:
+            return
+
+        sampling_metadata = self.input_batch.sampling_metadata
+        prepared_top_k = None
+        if sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+            valid_top_k = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]]
+            if len(valid_top_k) > 0:
+                prepared_top_k = int(valid_top_k.max())
+
+        num_reqs = self.input_batch.num_reqs
+        max_tokens = int(self.input_batch.num_tokens[:num_reqs].max()) if num_reqs > 0 else 0
+        input_token_ids = None
+        if max_tokens > 0:
+            input_token_ids = self.input_batch.token_ids_cpu[:num_reqs, :max_tokens].copy()
+
+        slot_mapping = None
+        if spec_decode_common_attn_metadata is not None:
+            slot_mapping = spec_decode_common_attn_metadata.slot_mapping
+
+        dump_spec_sampling_case(
+            logits=logits,
+            sampling_metadata=sampling_metadata,
+            spec_decode_metadata=spec_decode_metadata,
+            sampler_output=sampler_output,
+            draft_probs=None,
+            prepared_top_k=prepared_top_k,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            input_token_ids=input_token_ids,
+        )
 
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids

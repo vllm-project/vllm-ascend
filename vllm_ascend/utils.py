@@ -899,7 +899,10 @@ _ascend_device_type = None
 
 def _init_ascend_device_type():
     global _ascend_device_type
-    from vllm_ascend import _build_info  # type: ignore
+    try:
+        from vllm_ascend import _build_info  # type: ignore
+    except ImportError:
+        _build_info = None
 
     device_type = getattr(_build_info, "__device_type__", None)
     if device_type is None:
