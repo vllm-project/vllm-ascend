@@ -23,9 +23,7 @@ if HAS_TRITON:
 def _resolve_triton_ascend_op(op_name: str):
     if not HAS_TRITON:
         logger.error(
-            f"[TritonOps] Failed to resolve Triton op '{op_name}': neither "
-            "triton.language.extra.cann.extension nor "
-            "triton.language provides it."
+            f"[TritonOps] Failed to resolve Triton op '{op_name}' because HAS_TRITON is False."
         )
         raise RuntimeError(f"Triton op '{op_name}' cannot be resolved because HAS_TRITON is False")
 
@@ -39,9 +37,9 @@ def _resolve_triton_ascend_op(op_name: str):
         return tl_op
 
     logger.error(
-        f"[TritonOps] Failed to resolve Triton op '{op_name}': neither "
-        "triton.language.extra.cann.extension nor "
-        "triton.language provides it.")
+        f"Failed to resolve Triton op '{op_name}': "
+        "neither triton.language.extra.cann.extension nor triton.language provides it."
+    )
     raise RuntimeError(
         f"Failed to resolve Triton op '{op_name}': "
         "neither triton.language.extra.cann.extension nor triton.language provides it."
