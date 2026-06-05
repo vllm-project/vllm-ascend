@@ -110,6 +110,7 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
+          submodules: recursive
 
       - name: Rebase on latest main
         run: |
