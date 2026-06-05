@@ -109,6 +109,8 @@ jobs:
 
       - name: Rebase on latest main
         run: |
+          git config user.name "vllm-ascend-ci"
+          git config user.email "vllm-ascend-ci@users.noreply.github.com"
           git fetch origin main
           git rebase origin/main
 
