@@ -106,7 +106,8 @@ def apply_penalties_triton(
     model_executor.layers.utils.apply_penalties.
     """
     logger.debug(
-        "[TritonOps] apply_penalties_triton: logits.shape=%s, prompt_tokens_tensor.shape=%s, output_tokens_tensor.shape=%s",
+        "[TritonOps] apply_penalties_triton: logits.shape=%s, prompt_tokens_tensor.shape=%s, "
+        "output_tokens_tensor.shape=%s",
         logits.shape,
         prompt_tokens_tensor.shape,
         output_tokens_tensor.shape,

@@ -546,7 +546,8 @@ def lightning_attention_npu(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """lightning attention forward pass (NPU-friendly)."""
     logger.debug(
-        "[TritonOps] lightning_attention_npu: q.shape=%s, k.shape=%s, v.shape=%s, ed.shape=%s, block_size=%s, kv_history.shape=%s",
+        "[TritonOps] lightning_attention_npu: q.shape=%s, k.shape=%s, v.shape=%s, ed.shape=%s, "
+        "block_size=%s, kv_history.shape=%s",
         q.shape,
         k.shape,
         v.shape,

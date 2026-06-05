@@ -23,7 +23,7 @@ if HAS_TRITON:
 def _resolve_triton_ascend_op(op_name: str):
     if not HAS_TRITON:
         logger.error("[TritonOps] Failed to resolve Triton op '%s' because HAS_TRITON is False.", op_name)
-        raise RuntimeError("[TritonOps] Failed to resolve Triton op '%s' because HAS_TRITON is False." % op_name)
+        raise RuntimeError("[TritonOps] Failed to resolve Triton op '{}' because HAS_TRITON is False.".format(op_name))
 
     if _extension_module is not None:
         extension_op = getattr(_extension_module, op_name, None)
@@ -40,8 +40,8 @@ def _resolve_triton_ascend_op(op_name: str):
         op_name,
     )
     raise RuntimeError(
-        "[TritonOps] Failed to resolve Triton op '%s': "
-        "neither triton.language.extra.cann.extension nor triton.language provides it." % op_name
+        "[TritonOps] Failed to resolve Triton op '{}': "
+        "neither triton.language.extra.cann.extension nor triton.language provides it.".format(op_name)
     )
 
 
@@ -72,7 +72,7 @@ def init_device_properties_triton():
             )
             raise RuntimeError(
                 "[TritonOps] Failed to detect device properties: "
-                "num_aicore=%s, num_vectorcore=%s" % (_NUM_AICORE, _NUM_VECTORCORE)
+                "num_aicore={}, num_vectorcore={}".format(_NUM_AICORE, _NUM_VECTORCORE)
             )
 
 
@@ -85,8 +85,8 @@ def get_aicore_num():
         )
         raise RuntimeError(
             "[TritonOps] Device properties not initialized "
-            "(num_aicore=%s). "
-            "Call init_device_properties_triton() first." % (_NUM_AICORE)
+            "(num_aicore={}). "
+            "Call init_device_properties_triton() first.".format(_NUM_AICORE)
         )
     return _NUM_AICORE
 
@@ -102,7 +102,7 @@ def get_vectorcore_num():
         )
         raise RuntimeError(
             "[TritonOps] Device properties not initialized "
-            "(num_vectorcore=%s). "
-            "Call init_device_properties_triton() first." % (_NUM_VECTORCORE)
+            "(num_vectorcore={}). "
+            "Call init_device_properties_triton() first.".format(_NUM_VECTORCORE)
         )
     return _NUM_VECTORCORE
