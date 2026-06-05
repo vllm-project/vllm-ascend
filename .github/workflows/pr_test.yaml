@@ -1,0 +1,166 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: E2E
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.action != 'labeled' || github.event.label.name == 'ready' && 'run' || 'noop' }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-select-tests:
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      has_tests: ${{ steps.scope.outputs.has_tests }}
+      test_groups: ${{ steps.scope.outputs.test_groups }}
+      matched_modules: ${{ steps.scope.outputs.matched_modules }}
+    steps:
+      - name: Validate PR title prefix
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [ -z "$PR_TITLE" ]; then
+            echo "::error::PR title cannot be empty"
+            exit 1
+          fi
+
+          echo "Checking PR title: $PR_TITLE"
+
+          VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor)\]'
+
+          if ! echo "$PR_TITLE" | grep -iqE "$VALID_PREFIXES"; then
+            echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor]"
+            echo "::error::Example: '[Feature] Add new optimization pass' or 'Add new feature [Feature]'"
+            exit 1
+          fi
+
+          echo "✓ PR title prefix is valid"
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: cp problem matchers
+        run: |
+          cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
+          cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
+          cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
+
+      - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
+      - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
+      - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+          ref: 9090368b650896bf5fc990c921df7eb4c20355a5
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            lint_tracker:
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'requirements-lint.txt'
+
+      - name: Install vllm-ascend dev (conditional)
+        if: steps.filter.outputs.lint_tracker == 'true'
+        env:
+          UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_NO_CACHE: 1
+          UV_SYSTEM_PYTHON: 1
+        run: |
+          pip install uv
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run pre-commit
+        env:
+          PRE_COMMIT_COLOR: always
+          FORCE_COLOR: "1"
+          TERM: xterm-256color
+          SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+
+      - name: Run mypy
+        run: |
+          PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
+          export PYTHONPATH
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          for python_version in "3.10" "3.11" "3.12"; do
+            echo "============================"
+            tools/mypy.sh 1 "$python_version"
+            echo "============================"
+          done
+
+      - name: Validate test coverage config
+        run: |
+          pip install pyyaml
+          python3 .github/workflows/scripts/coverage.py
+
+      - name: Select tests based on changed files
+        id: scope
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          git fetch origin ${{ github.base_ref }}
+          pip install regex
+          python3 .github/workflows/scripts/select_tests.py \
+            --diff-base origin/${{ github.base_ref }} \
+            --run-all-cpu
+
+  run-selected-tests:
+    needs: lint-and-select-tests
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    strategy:
+      matrix:
+        vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.20.2]
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
