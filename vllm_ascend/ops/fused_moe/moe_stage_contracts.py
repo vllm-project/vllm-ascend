@@ -80,6 +80,7 @@ class MoETokenDispatchInput:
     topk_ids: torch.Tensor
     routing: MoERoutingParams
     quant: MoEQuantParams
+    topk_weights_mask: torch.Tensor | None
 
 
 # dispatch carry-over state consumed by combine
