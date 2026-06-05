@@ -71,8 +71,9 @@ def init_device_properties_triton():
                 _NUM_VECTORCORE,
             )
             raise RuntimeError(
-                "[TritonOps] Failed to detect device properties: "
-                "num_aicore={}, num_vectorcore={}".format(_NUM_AICORE, _NUM_VECTORCORE)
+                "[TritonOps] Failed to detect device properties: num_aicore={}, num_vectorcore={}".format(
+                    _NUM_AICORE, _NUM_VECTORCORE
+                )
             )
 
 
