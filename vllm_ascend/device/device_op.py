@@ -26,6 +26,7 @@ from vllm_ascend.device.mxfp_compat import (
 )
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
+from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -557,6 +558,10 @@ class BaseDeviceAdaptor:
     def npu_gemma_rms_norm(x, weight, variance_epsilon):
         x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, weight, variance_epsilon)
         return x
+
+    @staticmethod
+    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
+        return torch.ops._C_ascend.npu_fused_gdn_gating(A_log, a, b, dt_bias.to(torch.float32))
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
@@ -1175,6 +1180,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def npu_gemma_rms_norm(x, weight, variance_epsilon):
         x, _ = torch_npu.npu_rms_norm(x, 1.0 + weight, variance_epsilon)
         return x
+
+    @staticmethod
+    def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
+        return fused_gdn_gating_patch(A_log, a, b, dt_bias)
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
