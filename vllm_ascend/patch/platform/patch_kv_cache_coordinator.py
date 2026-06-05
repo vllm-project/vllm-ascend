@@ -21,9 +21,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    UniformTypeKVCacheSpecs,
     MambaSpec,
-    MLAAttentionSpec,
 )
 
 from vllm_ascend import envs
