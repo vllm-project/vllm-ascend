@@ -68,11 +68,11 @@ jobs:
           import os
 
           specs = [
-              ("SINGLECARD_TESTS", 1, "a2", "linux-aarch64-a2b3-1", "9.0.0-910b-ubuntu22.04-py3.11"),
-              ("MULTICARD_2_TESTS", 2, "a3", "linux-aarch64-a3-2", "9.0.0-a3-ubuntu22.04-py3.11"),
-              ("MULTICARD_4_TESTS", 4, "a3", "linux-aarch64-a3-4", "9.0.0-a3-ubuntu22.04-py3.11"),
-              ("P310_SINGLECARD_TESTS", 1, "310p", "linux-aarch64-310p-1", "9.1.0-beta.1-310p-ubuntu22.04-py3.11"),
-              ("P310_MULTICARD_TESTS", 4, "310p", "linux-aarch64-310p-4", "9.1.0-beta.1-310p-ubuntu22.04-py3.11"),
+              ("SINGLECARD_TESTS", 1, "a2", "linux-aarch64-a2b3-1", "9.0.0-910b-ubuntu22.04-py3.12"),
+              ("MULTICARD_2_TESTS", 2, "a3", "linux-aarch64-a3-2", "9.0.0-a3-ubuntu22.04-py3.12"),
+              ("MULTICARD_4_TESTS", 4, "a3", "linux-aarch64-a3-4", "9.0.0-a3-ubuntu22.04-py3.12"),
+              ("P310_SINGLECARD_TESTS", 1, "310p", "linux-aarch64-310p-1", "9.1.0-beta.1-310p-ubuntu22.04-py3.12"),
+              ("P310_MULTICARD_TESTS", 4, "310p", "linux-aarch64-310p-4", "9.1.0-beta.1-310p-ubuntu22.04-py3.12"),
           ]
           groups = []
           for env_name, num_npus, npu_type, runner, image_tag in specs:
