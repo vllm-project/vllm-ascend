@@ -28,6 +28,7 @@ on:
       - .github/workflows/push_build_csrc_cache.yaml
       - 'pyproject.toml'
   workflow_dispatch:
+  pull_request:
 
 defaults:
   run:
@@ -136,7 +137,7 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: matrix.os == 'openeuler'
         run: |
-          yum install -y gcc gcc-c++ cmake numactl-devel clang
+          yum install -y gcc gcc-c++ cmake numactl-devel clang patch
           pip install uv
 
       - name: Get image tag
@@ -174,11 +175,6 @@ jobs:
           source /usr/local/Ascend/nnal/atb/set_env.sh
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
-
-          # os-specific: openeuler needs C++ include path for compilation
-          if [ "${{ matrix.os }}" = "openeuler" ]; then
-            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
-          fi
 
           pip install uc-manager
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
