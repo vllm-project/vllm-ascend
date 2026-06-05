@@ -187,7 +187,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             from vllm_ascend.expert_offload import ExpertOffloadManager
             mgr = ExpertOffloadManager.get_instance()
             num_tokens = topk_ids.size(0)
-            log2phy_cache_hit, log2phy_cache_miss = mgr.update_weights(layer, topk_ids, log2phy, topk_weights)
+            log2phy_cache_hit, log2phy_cache_miss, weights_loaded_event = mgr.update_weights(layer, topk_ids, log2phy, topk_weights)
             if num_tokens > mgr.offload_threshold and mgr._prefill_initialized and not mgr._skip_prefill:
                 use_prefill_pool = True
                 try:
@@ -197,7 +197,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 prefill_slot = layer_idx % len(mgr._prefill_w13)
 
         else:
-            log2phy_cache_hit, log2phy_cache_miss = None, None
+            log2phy_cache_hit, log2phy_cache_miss, weights_loaded_event = None, None, None
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             if vllm_version_is("0.20.2"):
@@ -299,6 +299,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 swiglu_limit=layer.swiglu_limit,
                 log2phy_cache_hit=log2phy_cache_hit,
                 log2phy_cache_miss=log2phy_cache_miss,
+                weights_loaded_event=weights_loaded_event,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:

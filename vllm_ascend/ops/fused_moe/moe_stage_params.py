@@ -43,6 +43,10 @@ class MoERoutingParams:
     pertoken_scale: torch.Tensor | None = None
     log2phy_cache_hit: torch.Tensor | None = None
     log2phy_cache_miss: torch.Tensor | None = None
+    # Event signaled when H2D weight copies on load_stream complete.
+    # Compute stream waits on this before cache-miss MLP to enable
+    # overlap between cache-hit compute and weight transfer.
+    weights_loaded_event: torch.npu.Event | None = None
 
 
 @dataclass(frozen=True, slots=True)

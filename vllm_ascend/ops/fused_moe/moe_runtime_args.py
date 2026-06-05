@@ -146,6 +146,7 @@ def build_fused_experts_input(
     w2_offset: torch.Tensor | None = None,
     log2phy_cache_hit: torch.Tensor | None = None,
     log2phy_cache_miss: torch.Tensor | None = None,
+    weights_loaded_event: torch.npu.Event | None = None,
     swiglu_limit: int = 0,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
@@ -173,6 +174,7 @@ def build_fused_experts_input(
             pertoken_scale=pertoken_scale,
             log2phy_cache_hit=log2phy_cache_hit,
             log2phy_cache_miss=log2phy_cache_miss,
+            weights_loaded_event=weights_loaded_event,
         ),
         activation=activation,
         need_trans=need_trans,

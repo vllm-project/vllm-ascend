@@ -177,7 +177,12 @@ class MoECommMethod(ABC):
 
         if has_expert_offload_manager() and log2phy_cache_hit is not None:
             assert log2phy_cache_miss is not None
-            # TODO async onload in update_weights, and wait for load finish here
+            # Wait for H2D weight copies on load_stream to complete before
+            # cache-miss MLP compute.  This enables overlap between cache-hit
+            # compute and the tail of the weight transfer.
+            weights_loaded_event = fused_experts_input.routing.weights_loaded_event
+            if weights_loaded_event is not None:
+                torch.npu.current_stream().wait_event(weights_loaded_event)
             routed_topk_ids = fused_experts_input.topk_ids
             routed_topk_ids = log2phy_cache_miss[routed_topk_ids]
             topk_weights_mask = routed_topk_ids > -1
