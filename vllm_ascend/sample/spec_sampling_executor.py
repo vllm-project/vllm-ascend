@@ -96,7 +96,7 @@ class SpecSamplingNPUExecutor:
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
-            logprobs_tensors = self.rejection_sampler._get_logprobs_tensors(
+            logprobs_tensors = self.rejection_sampler.build_logprobs_tensors_from_prepared_inputs(
                 sampling_metadata.max_num_logprobs,
                 metadata,
                 logits,
