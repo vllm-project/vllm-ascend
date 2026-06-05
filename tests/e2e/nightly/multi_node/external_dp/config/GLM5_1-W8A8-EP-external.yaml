@@ -52,7 +52,6 @@ config:
 env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_MODELSCOPE: "true"
-  SERVER_PORT: "${PORT}"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
@@ -80,7 +79,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - $SERVER_PORT
+      - ${PORT}
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -142,7 +141,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - $SERVER_PORT
+      - ${PORT}
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -205,7 +204,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - $SERVER_PORT
+      - ${PORT}
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -270,7 +269,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - $SERVER_PORT
+      - ${PORT}
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank

@@ -2,7 +2,7 @@ test_name: "test Qwen3-235B-A22B-W8A8-longseq disaggregated_prefill"
 model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   HCCL_OP_EXPANSION_MODE: AIV
   VLLM_USE_MODELSCOPE: true
   TASK_QUEUE_ENABLE: 1
@@ -19,6 +19,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
         --host 0.0.0.0
@@ -58,6 +60,8 @@ deployment:
           '{"dynamic_eplb":true}'
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
         --host 0.0.0.0
