@@ -34,7 +34,7 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [tool.uv.extra-build-dependencies]
-pandas = ["setuptools"]
+pandas = ["setuptools<72"]
 
 [tool.pymarkdown]
 plugins.md004.style = "sublist" # ul-style
