@@ -22,6 +22,7 @@ import torch
 from vllm.config import CompilationConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
+from tests.ut.conftest import _npu_available
 from vllm_ascend import utils
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
@@ -275,9 +276,11 @@ class TestUtils(TestBase):
             utils.get_max_hidden_layers(NoLayerConfig())
         self.assertIn("num_hidden_layers", str(context.exception))
 
+    @mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"})
+    @pytest.mark.skipif(not _npu_available, reason="Requires real NPU (ModelConfig inspection)")
     def test_update_aclgraph_sizes(self):
         test_compilation_config = CompilationConfig(cudagraph_capture_sizes=[i for i in range(150)])
-        model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
+        model_path = os.path.join(os.path.dirname(__file__), "_fake_weight")
         test_model_config = ModelConfig(model=model_path, enforce_eager=True)
         test_parallel_config = ParallelConfig()
         test_vllm_config = VllmConfig(
@@ -324,8 +327,10 @@ class TestUtils(TestBase):
             self.assertEqual(kwargs, {})
 
         # Test case 1: non-310P, NZ is disabled
+        mock_config = mock.MagicMock()
+        mock_config.weight_nz_mode = 0
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
@@ -335,8 +340,9 @@ class TestUtils(TestBase):
 
         # Test case 2: 310P always converts non-fp32 weights, even when NZ=0
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 0
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=True),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
@@ -346,8 +352,9 @@ class TestUtils(TestBase):
 
         # Test case 3: fp32 never converts, including on 310P
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 1
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=True),
         ):
             weight = torch.randn(32, 64, dtype=torch.float32)
@@ -357,8 +364,9 @@ class TestUtils(TestBase):
 
         # Test case 4: non-310P fp16 converts only when NZ=2
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 1
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
@@ -368,8 +376,9 @@ class TestUtils(TestBase):
 
         # Test case 5: non-310P fp16 converts when NZ=2
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 2
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
@@ -379,8 +388,9 @@ class TestUtils(TestBase):
 
         # Test case 6: non-310P bf16 converts when NZ=2
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 2
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
             weight = torch.randn(32, 64, dtype=torch.bfloat16)
@@ -390,8 +400,9 @@ class TestUtils(TestBase):
 
         # Test case 7: non-310P quantized weights still convert by default
         mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 1
         with (
-            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
             weight = torch.zeros(32, 64, dtype=torch.int8)

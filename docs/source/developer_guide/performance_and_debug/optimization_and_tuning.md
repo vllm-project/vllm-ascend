@@ -1,6 +1,6 @@
 # Optimization and Tuning
 
-This guide aims to help users improve vLLM-Ascend performance at the system level. It includes OS configuration, library optimization, deployment guide, and so on. Any feedback is welcome.
+This guide aims to help users improve vLLM Ascend performance at the system level. It includes OS configuration, library optimization, deployment guide, and so on. Any feedback is welcome.
 
 ## Preparation
 
@@ -46,7 +46,7 @@ echo "deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ jammy-security 
 apt update && apt install wget gcc g++ libnuma-dev git vim -y
 ```
 
-Install vllm and vllm-ascend:
+Install vLLM and vLLM Ascend:
 
 ```{code-block} bash
    :substitutions:
@@ -58,17 +58,17 @@ pip install modelscope pandas datasets gevent sacrebleu rouge_score pybind11 pyt
 export VLLM_USE_MODELSCOPE=True
 ```
 
-Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vllm-ascend are installed correctly.
+Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vLLM Ascend are installed correctly.
 
 :::{note}
-Make sure your vLLM and vllm-ascend are installed after your Python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vllm-ascend before completing section 1.1, the binary files will not use the optimized python.
+Make sure your vLLM and vLLM Ascend are installed after your Python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vLLM Ascend before completing section 1.1, the binary files will not use the optimized python.
 :::
 
 ## Optimizations
 
 ### 1. Compilation Optimization
 
-#### 1.1. Install optimized `python`
+#### 1.1. Install optimized `python` (OUT OF DATE)
 
 Python supports **LTO** and **PGO** optimization starting from version `3.6` and above, which can be enabled at compile time. And we have offered optimized `python` packages directly to users for the sake of convenience. You can also reproduce the `python` build following this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) according to your specific scenarios.
 
@@ -84,6 +84,7 @@ wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libssl.so.1.1
 wget https://repo.oepkgs.net/ascend/pytorch/vllm/python/py311_bisheng.tar.gz
 
 # Configure python and pip
+
 cp ./*.so* /usr/local/lib
 tar -zxvf ./py311_bisheng.tar.gz -C /usr/local/
 mv  /usr/local/py311_bisheng/  /usr/local/python

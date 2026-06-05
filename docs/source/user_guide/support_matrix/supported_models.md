@@ -17,6 +17,8 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 | Model                         | Support   | Note                                                                 | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
 |-------------------------------|-----------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|
+| DeepSeek V4-Flash               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ |✅|| ✅ |✅| ✅ || ✅ | ✅ | ✅ || ✅ | 1M || [DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Flash.md) |
+| DeepSeek V4-Pro               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ |✅|| ✅ |✅| ✅ || ✅ | ✅ | ✅ || ✅ | 1M || [DeepSeek-V4](../../tutorials/models/DeepSeek-V4-Pro.md) |
 | DeepSeek V3/3.1               | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k || [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
 | DeepSeek V3.2                 | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
 | DeepSeek R1                   | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 128k || [DeepSeek-R1](../../tutorials/models/DeepSeek-R1.md) |
@@ -25,10 +27,11 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Qwen3-Moe                     | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ ||| ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | 256k || [Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md) |
 | Qwen3-Next                    | 🔵        |                                                                      | ✅ | A2/A3 | ✅ |||||| ✅ ||| ✅ || ✅ | ✅ ||| [Qwen3-Next](../../tutorials/models/Qwen3-Next.md) |
 | GLM-4.x                       | 🔵        |                                                                      || A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|198k||[GLM-4.x](../../tutorials/models/GLM4.x.md)|
-| GLM-5                         | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 198k || [GLM-5](../../tutorials/models/GLM5.md) |
+| GLM-5/5.1                         | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k || [GLM-5](../../tutorials/models/GLM5.md) |
 | Kimi-K2-Thinking              | 🔵        |                                                                      || A2/A3 |||||||||||||||| [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
 | DeepseekOCR2                  | ✅        |                                                                      | ✅ | A2/A3 ||✅||||✅|||||||||| [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
 | MiniMax-M2.5                  | ✅        |                                                                      | ✅ | A2/A3 |✅|✅|✅|❌|✅|✅|✅|🟡|✅|✅|✅|✅|✅|192k|🟡| [MiniMax-M2.5](../../tutorials/models/MiniMax-M2.5.md) |
+| Qwen2.5-Math-RM-72B           | ✅        | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | 🟡 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
 #### Extended Compatible Models
 
@@ -53,6 +56,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Gemma-3                       | 🔵        |                                                                      | A2/A3 |
 | Phi-3/4                       | 🔵        |                                                                      | A2/A3 |
 | Mistral/Mistral-Instruct      | 🔵        |                                                                      | A2/A3 |
+| Hy3-preview                   | 🔵        |                                                                      | A3    |
 | DeepSeek V2.5                 | 🟡        | Need test                                                            |       |
 | Mllama                        | 🟡        | Need test                                                            |       |
 | MiniMax-Text                  | 🟡        | Need test                                                            |       |
@@ -68,6 +72,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Molmo                         | 🔵        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |         A2/A3            |      |
 | XLM-RoBERTa-based             | 🔵        |                                                                      |         A2/A3            |      |
 | Bert                          | 🔵        |                                                                      |         A2/A3            |      |
+| Qwen2.5-Math-RM-72B           | ✅        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
 ## Multimodal Language Models
 
@@ -101,7 +106,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Llama3.2                       | 🔵            |                                                                      | A2/A3 |
 | PaddleOCR-VL                   | 🔵            |                                                                      | A2/A3 |
 | Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |       |
-| Keye-VL-8B-Preview             | ❌            | [1963](https://github.com/vllm-project/vllm-ascend/issues/1963)      |       |
+| Keye-VL-8B-Preview             | ❌            | [1961](https://github.com/vllm-project/vllm-ascend/issues/1961)      |       |
 | Florence-2                     | ❌            | [2259](https://github.com/vllm-project/vllm-ascend/issues/2259)      |       |
 | GLM-4V                         | ❌            | [2260](https://github.com/vllm-project/vllm-ascend/issues/2260)      |       |
 | InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL | ❌ | [2064](https://github.com/vllm-project/vllm-ascend/issues/2064) |  |

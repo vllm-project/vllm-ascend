@@ -52,7 +52,7 @@ class _FakeTokenDatabase:
 
     def prepare_value_layer(self, start, end, block_ids, layer_id):
         block_id = start // 16
-        return [2000 + layer_id * 100 + block_id], [end - start]
+        return [2000 + layer_id * 100 + block_id], [end - start], block_id
 
 
 class TestKVTransferMissingKeyPut(unittest.TestCase):
@@ -68,6 +68,7 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
             put_step=1,
             kv_role="kv_producer",
             ready_event=threading.Event(),
+            group_uses_align_state=[False],
             enable_kv_event=False,
         )
 
@@ -114,6 +115,7 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
             current_event=None,
         )
         thread.request_queue.put(req_meta)
+        thread.add_stored_request(req_meta.req_id)
         thread._handle_request(req_meta)
 
         self.assertEqual(len(store.put_calls), 1)

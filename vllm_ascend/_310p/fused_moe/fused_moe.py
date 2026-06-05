@@ -20,14 +20,17 @@ import torch
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
-from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECommMethods
+from vllm_ascend.ops.fused_moe.moe_comm_method import (
+    AllGatherCommImpl,
+    FusedExpertsResult,
+    _MoECommMethods,
+)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import maybe_trans_nz
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
@@ -41,14 +44,21 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
     def is_monolithic(self) -> bool:
         return False
 
+    def maybe_make_prepare_finalize(self, routing_tables=None):
+        # Ascend 310P uses its own MoE communication and forward_impl path.
+        # Do not let upstream modular-kernel initialization replace it.
+        return None
+
     def process_weights_after_loading(self, layer):
         super().process_weights_after_loading(layer)
 
         # Fused gate_up_proj (column parallel)
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
+        w13_data = maybe_trans_nz(w13_data)
         layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
         # down_proj (row parallel)
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
+        w2_data = maybe_trans_nz(w2_data)
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
     def apply(
@@ -120,6 +130,8 @@ class AscendFusedMoE310(FusedMoE):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self._routed_input_transform = kwargs.get("routed_input_transform")
+        self._shared_experts = kwargs.get("shared_experts")
         self.global_num_experts = kwargs["num_experts"]
 
         if self.quant_config is None:
@@ -128,6 +140,10 @@ class AscendFusedMoE310(FusedMoE):
             self.quant_method = self.quant_config.get_quant_method(self, self.layer_name)
 
         assert self.quant_method is not None
+        # Keep base_quant_method aligned with the Ascend-replaced quant_method
+        # so FusedMoE.maybe_init_modular_kernel doesn't dispatch into the
+        # upstream UnquantizedFusedMoEMethod.maybe_make_prepare_finalize.
+        self.base_quant_method = self.quant_method
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -138,12 +154,8 @@ class AscendFusedMoE310(FusedMoE):
         self.global_expert_map = None
         self.local_expert_map = None
         if self.moe_config.ep_size > 1:
-            self.global_expert_map, self.local_expert_map = self.init_experts_map(self.moe_config)
-        self.local_num_experts = (
-            torch.sum(self.local_expert_map != -1).item()
-            if self.local_expert_map is not None
-            else self.global_num_experts
-        )
+            raise RuntimeError("Expert Parallel is not supported on 310P. Please remove --enable-expert-parallel.")
+        self.local_num_experts = self.global_num_experts
 
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
@@ -164,18 +176,21 @@ class AscendFusedMoE310(FusedMoE):
 
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
+            self.layer_name,
             self.moe_config,
             self.router,
             self._routed_input_transform,
-            self.gate if is_legacy else kwargs.pop("gate", None),
-            self.shared_experts if is_legacy else kwargs.pop("shared_experts", None),
+            kwargs.pop("gate", None),
+            kwargs.pop("shared_experts", None),
             self.quant_method,
-            self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
         )
+
+    @property
+    def is_internal_router(self) -> bool:
+        # 310P Ascend path expects router logits from the model forward path.
+        return False
 
     def init_experts_map(self, moe_config):
         """
@@ -256,75 +271,18 @@ class AscendFusedMoE310(FusedMoE):
 
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
-            reduce_results=self.reduce_results,
+            reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
             padded_hidden_states_shape=padded_hidden_states_shape,
         )
 
         return routed_out
-
-
-class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
-    def __init__(
-        self,
-        shared_experts: torch.nn.Module,
-        gate: torch.nn.Module | None = None,
-        use_overlapped: bool = True,
-        routed_input_transform: torch.nn.Module | None = None,
-        **kwargs,
-    ):
-        AscendFusedMoE310.__init__(self, **kwargs)
-        self._routed_input_transform = routed_input_transform
-        self._shared_experts = shared_experts
-        self.use_overlapped = use_overlapped
-        self.shared_expert_stream = None
-        self._gate = gate
-        # Recreate runner after shared_experts/gate are set so custom op dispatch
-        # goes through moe_forward_shared.
-        # NOTE: must use self._shared_experts here, not self.shared_experts —
-        # FusedMoE.shared_experts is a property that reads self.runner.shared_experts,
-        # which at this point is still the stale runner built with shared_experts=None.
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-
-        is_legacy = vllm_version_is("0.19.1")
-        self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
-            self.moe_config,
-            self.router,
-            self._routed_input_transform,
-            self._gate,
-            self._shared_experts,
-            self.quant_method,
-            self.reduce_results,
-            self.vllm_config.parallel_config.enable_dbo,
-        )
-
-    @property
-    def is_internal_router(self) -> bool:
-        # 310P Ascend path expects router logits from the model forward path.
-        return False
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        result = AscendFusedMoE310.forward(
-            self,
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
-        # When shared experts are absent, the parent returns only fused_out;
-        # otherwise it returns a (shared_out, fused_out) tuple.
-        if self._shared_experts is None:
-            return None, result
-        return result
 
     def _forward_shared_experts(self, hidden_states: torch.Tensor):
         if self._shared_experts is None:
             return None
         return self._shared_experts(hidden_states)
 
-    def forward_impl(  # type: ignore[override]
+    def shared_forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
     ):
         routed_out = AscendFusedMoE310.forward_impl(

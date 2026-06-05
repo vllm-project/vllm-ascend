@@ -50,19 +50,19 @@ Build from source:
 # Install vLLM.
 git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install -v -e .
+VLLM_TARGET_DEVICE=empty pip install -e .
 cd ..
 
 # Install vLLM Ascend.
 git clone --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 git submodule update --init --recursive
-pip install -v -e .
+pip install -e .
 cd ..
 ```
 
 ### Software Stack Version Verification
-
+ <!-- TODO: update to Python 3.12 after verification -->
 The environment is based on CANN built into the GiteeAI platform, and successfully runs vLLM |vllm_ascend_version|, and vLLM-Ascend:|vllm_ascend_version| through the Python 3.11.6 Conda environment.
 
 ## Deployment
@@ -83,7 +83,6 @@ vllm serve ${MODEL_PATH} \
     --tensor-parallel-size 4 \
     --max-model-len 32768 \
     --gpu-memory-utilization 0.90 \
-    --async-scheduling
 ```
 
 ### Key Performance Indicators
@@ -206,7 +205,7 @@ output:
 
 Run performance evaluation of `Hunyuan-A13B-Instruct` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 

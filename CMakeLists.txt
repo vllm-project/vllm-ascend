@@ -10,8 +10,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
-# TODO: Add 3.12 back when torch-npu support 3.12
-set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11")
+set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
 find_package(pybind11 REQUIRED)
 
@@ -22,9 +21,9 @@ find_package(Torch REQUIRED)
 
 run_python(TORCH_VERSION
   "import torch; print(torch.__version__)" "Failed to locate torch path")
-# check torch version is 2.9.0
-if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.9.0")
-  message(FATAL_ERROR "Expected PyTorch version 2.9.0, but found ${TORCH_VERSION}")
+# check torch version is 2.10.0
+if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.10.0")
+  message(FATAL_ERROR "Expected PyTorch version 2.10.0, but found ${TORCH_VERSION}")
 endif()
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
@@ -72,8 +71,8 @@ if(SOC_VERSION MATCHES "ascend950")
     list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
 endif()
 
-if(SOC_VERSION MATCHES "ascend310p.*")
-    message(STATUS "310P hardware detected: skip vllm_ascend_kernels compile")
+if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
+    message(STATUS "Hardware ${SOC_VERSION} detected: skip vllm_ascend_kernels compile")
 else()
     ascendc_library(vllm_ascend_kernels SHARED
         ${VLLM_ASCEND_CUSTOM_OP}
@@ -152,15 +151,13 @@ else()
     message(STATUS "aclrtMemcpyBatchAsync: not found in CANN headers, using fallback aclrtMemcpyAsync loop")
   endif()
 endif()
-# Prefer the CANN ACL headers over torch_npu's bundled third_party ACL copy.
-# torch_npu 2.9.0 ships an older acl_rt.h that does not declare
-# aclrtLaunchHostFunc, which breaks host-print compilation.
-target_include_directories(vllm_ascend_C BEFORE PRIVATE
-  ${ASCEND_HOME_PATH}/include
-)
 
 if(SOC_VERSION MATCHES "ascend310p.*")
     target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)
+endif()
+
+if(NOT (SOC_VERSION MATCHES "ascend310p.*|ascend950"))
+    target_compile_definitions(vllm_ascend_C PRIVATE -DVLLM_ENABLE_ATB_AND_DIRECT_KERNELS)
 endif()
 
 target_link_directories(
@@ -183,7 +180,7 @@ set(VLLM_ASCEND_C_COMMON_LIBS
   opapi
 )
 
-if(SOC_VERSION MATCHES "ascend310p.*")
+if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   target_link_libraries(
     vllm_ascend_C
     PUBLIC
@@ -198,9 +195,9 @@ else()
   )
 endif()
 
-target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/vllm-ascend/op_api/lib")
+target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
 
-if(SOC_VERSION MATCHES "ascend310p.*")
+if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})

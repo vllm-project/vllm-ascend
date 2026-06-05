@@ -126,7 +126,12 @@ class TestAscendModelSlimConfig(TestBase):
             self.assertIs(method, mock_ascend_kvcache.return_value)
 
     def test_get_quant_method_for_c8_kv_cache_attention(self):
-        c8_config = AscendModelSlimConfig({"kv_cache_type": "C8"})
+        c8_config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "model.layers.0.k_proj.kv_cache_scale": "C8",
+            }
+        )
         attention_layer = MagicMock(spec=AttentionLayerBase)
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.hf_config.model_type = None

@@ -217,7 +217,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 ```
 
@@ -268,7 +267,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 ```
 
@@ -304,7 +302,6 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export HCCL_CONNECT_TIMEOUT=120
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --host 0.0.0.0 \
@@ -325,7 +322,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
---additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
 ```
@@ -358,7 +354,6 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export HCCL_CONNECT_TIMEOUT=120
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --host 0.0.0.0 \
@@ -381,7 +376,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
---additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
 ```
@@ -546,7 +540,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name dsv3 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 32560 \
             --trust-remote-code \
@@ -555,7 +549,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
-            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_dsa_cp": true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeLayerwiseConnector",
             "kv_role": "kv_producer",
@@ -621,7 +615,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name dsv3 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 32560 \
             --trust-remote-code \
@@ -630,7 +624,7 @@ Before you start, please
             --quantization ascend \
             --enforce-eager \
             --no-enable-prefix-caching \
-            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
+            --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"], "enable_dsa_cp": true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeLayerwiseConnector",
             "kv_role": "kv_producer",
@@ -698,7 +692,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name dsv3 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 12 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
@@ -706,7 +700,6 @@ Before you start, please
             --max-num-seqs 4 \
             --gpu-memory-utilization 0.95 \
             --no-enable-prefix-caching \
-            --async-scheduling \
             --quantization ascend \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeLayerwiseConnector",
@@ -775,12 +768,11 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --seed 1024 \
-            --served-model-name dsv3 \
+            --served-model-name deepseek_v3.2 \
             --max-model-len 68000 \
             --max-num-batched-tokens 12 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[3, 6, 9, 12]}' \
             --trust-remote-code \
-            --async-scheduling \
             --max-num-seqs 4 \
             --gpu-memory-utilization 0.95 \
             --no-enable-prefix-caching \
@@ -869,6 +861,11 @@ python load_balance_proxy_layerwise_server_example.py \
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
+
+**Note**:
+
+- `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost).
+- `<port>`: The port number specified in the server startup command (e.g., 8000).
 
 ```shell
 curl http://<node0_ip>:<port>/v1/completions \
