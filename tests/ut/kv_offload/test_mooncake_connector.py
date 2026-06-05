@@ -14,6 +14,7 @@ import msgspec
 import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.request import RequestStatus
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -1068,6 +1069,28 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         delay_free, params = self.scheduler.request_finished(request, [1, 2, 3])
         self.assertFalse(delay_free)
         self.assertIsNone(params)
+
+    def test_request_finished_requires_length_capped_status(self):
+        request = MockRequest(
+            "req1",
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.RUNNING,
+        )
+        delay_free, params = self.scheduler.request_finished(request, ([1, 2, 3],))
+        self.assertFalse(delay_free)
+        self.assertIsNone(params)
+
+    def test_request_finished_clips_remote_blocks_to_prompt_span(self):
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=[1, 2, 3, 4],
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+        delay_free, params = self.scheduler.request_finished(request, ([1, 2, 3],))
+        self.assertTrue(delay_free)
+        assert params is not None
+        self.assertEqual(params["remote_block_ids"], ([1],))
 
 
 class TestUtils(unittest.TestCase):
