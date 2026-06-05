@@ -93,6 +93,7 @@ Below are the maintained branches:
 | v0.11.0-dev      | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |
 | releases/v0.13.0 | Maintained   | CI commitment for vLLM 0.13.0 version |
 | releases/v0.18.0 | Maintained   | CI commitment for vLLM 0.18.0 version |
+| releases/v0.20.2rc | Maintained | CI commitment for vLLM 0.20.2 version |
 | rfc/feature-name | Maintained   | [Feature branches](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#feature-branches) for collaboration |
   
 Please refer to [Versioning policy](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html) for more details.
