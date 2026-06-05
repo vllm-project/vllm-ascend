@@ -47,7 +47,9 @@ jobs:
       - name: Set model name as output
         id: set_output
         run: |
-          echo "model_name=${{ inputs.model_name }}" >> $GITHUB_OUTPUT
+          model_base_name=$(basename "${{ inputs.model_name }}")
+          echo "model_name=${{ inputs.model_name }}" >> "$GITHUB_OUTPUT"
+          echo "markdown_name=$model_base_name" >> "$GITHUB_OUTPUT"
 
       - name: Config mirrors
         run: |
@@ -152,9 +154,6 @@ jobs:
           TORCH_VERSION: ${{ env.GHA_TORCH_VERSION }}
           TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
         run: |
-          model_base_name=$(basename ${{ inputs.model_name }})
-          markdown_name="${model_base_name}"
-          echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
           mkdir -p ./benchmarks/accuracy
           pytest -sv ./tests/e2e/models/test_lm_eval_correctness.py \
           --config ./tests/e2e/models/configs/${{ inputs.model_name }}.yaml
@@ -162,14 +161,23 @@ jobs:
       - name: Generate step summary
         if: ${{ always() }}
         run: |
-          cat ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md >> $GITHUB_STEP_SUMMARY
+          report_path="./benchmarks/accuracy/${{ steps.set_output.outputs.markdown_name }}.md"
+          if [ -f "$report_path" ]; then
+            cat "$report_path" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Accuracy report was not generated: $report_path" >> "$GITHUB_STEP_SUMMARY"
+            find ./benchmarks/accuracy -maxdepth 1 -type f -name '*.md' -print >> "$GITHUB_STEP_SUMMARY" || true
+            if [ "${{ steps.report.outcome }}" = "success" ]; then
+              exit 1
+            fi
+          fi
 
       - name: Upload Report
         if: ${{ inputs.upload == true }}
         uses: actions/upload-artifact@v4
         with:
-          name: "report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}"
-          path: ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md
+          name: "report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.set_output.outputs.markdown_name }}"
+          path: ./benchmarks/accuracy/${{ steps.set_output.outputs.markdown_name }}.md
           if-no-files-found: warn
           retention-days: 90
           overwrite: true
