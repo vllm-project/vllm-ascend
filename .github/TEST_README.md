@@ -195,9 +195,6 @@ python3 .github/workflows/scripts/select_tests.py --diff-base origin/main
 
 # Route based on explicit changed files
 python3 .github/workflows/scripts/select_tests.py --changed-files vllm_ascend/ops/foo.py
-
-# Run all CPU UT tests regardless of module matching
-python3 .github/workflows/scripts/select_tests.py --diff-base origin/main --run-all-cpu
 ```
 
 ## Testing Changes to `select_tests.py`
