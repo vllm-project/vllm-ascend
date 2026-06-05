@@ -1745,16 +1745,6 @@ class NPUModelRunner(GPUModelRunner):
             if getattr(scheduler_output, "disable_profiling_timing", False):
                 self.ascend_config.profiling_chunk_config.need_timing = False
             else:
-                logger.warning("RoutedExpertsCapturer is not initialized.")
-
-        if self.ascend_config.profiling_chunk_config.need_timing:
-            # Check if the scheduler signaled that calibration is complete.
-            # This flag is set cross-process via scheduler_output because
-            # modifying the config singleton in the scheduler process does
-            # not affect this worker process.
-            if getattr(scheduler_output, "disable_profiling_timing", False):
-                self.ascend_config.profiling_chunk_config.need_timing = False
-            else:
                 self._sync_device()
                 self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
