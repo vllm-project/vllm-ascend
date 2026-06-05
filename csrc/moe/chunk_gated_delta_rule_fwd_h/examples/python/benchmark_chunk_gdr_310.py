@@ -56,7 +56,9 @@ def make_inputs(args: argparse.Namespace):
     v = torch.randn(1, total_tokens, args.h_v, args.v_dim, dtype=torch.float16, device=device)
     g = -torch.rand(1, total_tokens, args.h_v, dtype=torch.float32, device=device) * 0.2
     beta = (0.1 + 0.4 * torch.rand(1, total_tokens, args.h_v, dtype=torch.float32, device=device)).to(torch.float16)
-    initial_state = torch.randn(len(seq_lens), args.h_v, args.v_dim, args.k_dim, dtype=torch.float16, device=device) * 0.01
+    initial_state = (
+        torch.randn(len(seq_lens), args.h_v, args.v_dim, args.k_dim, dtype=torch.float16, device=device) * 0.01
+    )
     return q, k, v, g, beta, initial_state, cu_seqlens
 
 
@@ -97,16 +99,12 @@ def main() -> int:
 
     print(f"commit: {current_commit()}")
     print(f"device: {torch_npu.npu.get_device_name(args.device)}")
-    print(
-        "shape: "
-        f"seq_lens={args.seq_lens} h_qk={args.h_qk} h_v={args.h_v} "
-        f"k_dim={args.k_dim} v_dim={args.v_dim}"
-    )
+    print(f"shape: seq_lens={args.seq_lens} h_qk={args.h_qk} h_v={args.h_v} k_dim={args.k_dim} v_dim={args.v_dim}")
     print(f"warmup={args.warmup} iters={args.iters}")
 
     funcs = {}
     if args.mode in ("pytorch", "both"):
-        funcs["pytorch"] = getattr(cgdr_mod, "chunk_gated_delta_rule_pytorch")
+        funcs["pytorch"] = cgdr_mod.chunk_gated_delta_rule_pytorch
     if args.mode in ("ascend", "both"):
         ascend_fn = getattr(cgdr_mod, "chunk_gated_delta_rule_310", None)
         if ascend_fn is None:

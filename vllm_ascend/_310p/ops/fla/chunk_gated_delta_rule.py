@@ -189,17 +189,10 @@ def _require_ascend_chunk_ops(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor)
     ascend_ops = getattr(torch.ops, "_C_ascend", None)
     if q.device.type != "npu" or ascend_ops is None:
         raise RuntimeError("310P chunk_gated_delta_rule requires NPU AscendC kernels.")
-    if not (
-        hasattr(ascend_ops, "chunk_gated_delta_rule_fwd_h")
-        and hasattr(ascend_ops, "chunk_fwd_o")
-    ):
-        raise RuntimeError(
-            "Missing AscendC chunk-gdr ops: chunk_gated_delta_rule_fwd_h/chunk_fwd_o."
-        )
+    if not (hasattr(ascend_ops, "chunk_gated_delta_rule_fwd_h") and hasattr(ascend_ops, "chunk_fwd_o")):
+        raise RuntimeError("Missing AscendC chunk-gdr ops: chunk_gated_delta_rule_fwd_h/chunk_fwd_o.")
     if q.dtype != torch.float16 or k.dtype != q.dtype or v.dtype != q.dtype:
-        raise TypeError(
-            f"q/k/v must share float16 dtype on 310P, got {q.dtype}, {k.dtype}, {v.dtype}."
-        )
+        raise TypeError(f"q/k/v must share float16 dtype on 310P, got {q.dtype}, {k.dtype}, {v.dtype}.")
     if v.shape[-1] < 128 or v.shape[-1] % 128 != 0:
         raise ValueError(f"v head dim must be >=128 and a multiple of 128, got {v.shape[-1]}.")
 
@@ -249,7 +242,9 @@ def _pad_varlen_to_chunk(
     beta: torch.Tensor,
     cu_seqlens: torch.Tensor,
     chunk_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[int, int, int]], torch.Tensor]:
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[int, int, int]], torch.Tensor
+]:
     q_parts: list[torch.Tensor] = []
     k_parts: list[torch.Tensor] = []
     v_parts: list[torch.Tensor] = []
@@ -509,9 +504,7 @@ def chunk_gated_delta_rule_310(
 
     original_tokens = v.shape[1]
     if cu_seqlens is None:
-        q_pad, k_pad, v_pad, g_pad, beta_pad, seq_ranges, cu_kernel = _pad_bthd_to_chunk(
-            q, k, v, g, beta, CHUNK_SIZE
-        )
+        q_pad, k_pad, v_pad, g_pad, beta_pad, seq_ranges, cu_kernel = _pad_bthd_to_chunk(q, k, v, g, beta, CHUNK_SIZE)
         cu_list = None
         chunk_indices_list = None
         num_states = q.shape[0]
@@ -529,9 +522,7 @@ def chunk_gated_delta_rule_310(
         if initial_state.device != q.device:
             raise RuntimeError(f"initial_state must be on {q.device}, got {initial_state.device}.")
         if tuple(initial_state.shape) != expected_state_shape:
-            raise ValueError(
-                f"initial_state must have shape {expected_state_shape}, got {tuple(initial_state.shape)}."
-            )
+            raise ValueError(f"initial_state must have shape {expected_state_shape}, got {tuple(initial_state.shape)}.")
 
     if q_pad.shape[1] == 0:
         empty_out = v.new_empty((0, *v.shape[2:])) if input_was_tnd else v.new_empty(v.shape)
