@@ -84,7 +84,11 @@ public:
         this->Attr("sparse_mode").AttrType(OPTIONAL).Int(3); // 3:默认值，只计算下三角
         this->Attr("pre_tokens").AttrType(OPTIONAL).Int(INT64_MAX);
         this->Attr("next_tokens").AttrType(OPTIONAL).Int(INT64_MAX);
+<<<<<<< HEAD
         this->Attr("attention_mode").AttrType(OPTIONAL).Int(2);
+=======
+        this->Attr("attention_mode").AttrType(OPTIONAL).Int(0);
+>>>>>>> private/sfa_cp_op
         this->Attr("return_softmax_lse").AttrType(OPTIONAL).Bool(false);
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)

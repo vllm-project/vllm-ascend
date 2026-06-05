@@ -2,13 +2,25 @@ from typing import TypeVar
 
 import numpy as np
 import torch
+<<<<<<< HEAD
+=======
+import torch.distributed as dist
+>>>>>>> private/sfa_cp_op
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
+<<<<<<< HEAD
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
+=======
+from vllm_ascend.attention.context_parallel.common_cp import (
+    AscendPCPMetadata,
+    _npu_attention_update,
+    _process_attn_out_lse,
+)
+>>>>>>> private/sfa_cp_op
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
@@ -57,6 +69,14 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             device=device,
         )
         self.block_arange_buffer = torch.arange(self.pcp_size * self.dcp_size, dtype=torch.int32, device=device)
+<<<<<<< HEAD
+=======
+        self.decode_actual_seq_lengths_key_buf = torch.zeros(
+            vllm_config.scheduler_config.max_num_seqs,
+            dtype=torch.int32,
+            device=device,
+        )
+>>>>>>> private/sfa_cp_op
 
     def _compact_varlen_decode_slot_mapping(
         self,
@@ -125,6 +145,44 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             assert sfa_cp_metadata is not None
             sfa_cp_metadata.prefill_q_cum_seqlens = prefill_q_cum_seqlens
 
+<<<<<<< HEAD
+=======
+            restore_idx = sfa_cp_metadata.pcp_allgather_restore_idx
+            assert torch.is_tensor(restore_idx), "pcp_allgather_restore_idx must be a device tensor."
+            if num_decode_tokens == 0:
+                sfa_cp_metadata.prefill_allgather_restore_idx = restore_idx
+            else:
+                # pcp_allgather_restore_idx is built for a mixed per-rank layout:
+                #   rank0: [decode, prefill], rank1: [decode, prefill], ...
+                # Here we all-gather only prefill tensors, whose layout is:
+                #   rank0: [prefill], rank1: [prefill], ...
+                # Example: decode=2, prefill=3, pcp=2. Mixed index 8 is
+                # rank1/P1, but in prefill-only layout it becomes index 4.
+                local_tokens_with_decode = num_decode_tokens + num_prefill_tokens
+                rank_idx = torch.div(restore_idx, local_tokens_with_decode, rounding_mode="floor")
+                local_idx = restore_idx.remainder(local_tokens_with_decode)
+                prefill_mask = local_idx >= num_decode_tokens
+                sfa_cp_metadata.prefill_allgather_restore_idx = rank_idx[prefill_mask] * num_prefill_tokens + (
+                    local_idx[prefill_mask] - num_decode_tokens
+                )
+
+        if num_decode_tokens > 0:
+            # Decode reads only the KV blocks stored on this CP rank. The kernel
+            # therefore needs local per-request KV lengths, not global seq_lens.
+            total_cp_size = self.pcp_size * self.dcp_size
+            cp_rank = self.pcp_rank * self.dcp_size + self.dcp_rank
+            decode_seq_lens = metadata_cls.seq_lens[:num_decodes].to(torch.int32)
+            base = decode_seq_lens // self.cp_local_block_size // total_cp_size * self.cp_local_block_size
+            remainder = decode_seq_lens - base * total_cp_size
+            decode_actual_seq_lengths_key = base + torch.clamp(
+                remainder - cp_rank * self.cp_local_block_size,
+                0,
+                self.cp_local_block_size,
+            )
+            self.decode_actual_seq_lengths_key_buf.zero_()
+            self.decode_actual_seq_lengths_key_buf[:num_decodes].copy_(decode_actual_seq_lengths_key)
+            sfa_cp_metadata.decode_actual_seq_lengths_key = self.decode_actual_seq_lengths_key_buf[:num_decodes]
+>>>>>>> private/sfa_cp_op
         if self.pcp_size > 1:
             long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
             assert long_seq_metadata is not None
@@ -150,6 +208,14 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
                     decode_slot_mapping,
                     decode_query_lens,
                 )
+<<<<<<< HEAD
+=======
+            elif num_decode_tokens > 0:
+                self.slot_mapping_buf[:num_decode_tokens] = self.slot_mapping_buf[
+                    : num_decode_tokens * self.pcp_size : self.pcp_size
+                ]
+                self.slot_mapping_buf[num_decode_tokens : num_decode_tokens * self.pcp_size].fill_(-1)
+>>>>>>> private/sfa_cp_op
             metadata_cls.slot_mapping = self.slot_mapping_buf[:num_actual_tokens_pcp_padded]
         metadata_cls.sfa_cp_metadata = sfa_cp_metadata
         return metadata_cls
@@ -175,15 +241,39 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
     ) -> AscendPCPMetadata | None:
         common_long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         assert common_long_seq_metadata is not None
+<<<<<<< HEAD
         num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu.to(seq_lens.device)
         q_head_kv_lens = (seq_lens // 2) * (self.pcp_rank + 1) + num_computed_tokens
         q_tail_kv_lens = seq_lens * self.pcp_size - (seq_lens // 2) * self.pcp_rank + num_computed_tokens
+=======
+        q_head_actual_kv_lens = torch.tensor(
+            common_long_seq_metadata.head_actual_seq_lengths_kv,
+            dtype=torch.int32,
+            device=seq_lens.device,
+        )
+        q_tail_actual_kv_lens = torch.tensor(
+            common_long_seq_metadata.tail_actual_seq_lengths_kv,
+            dtype=torch.int32,
+            device=seq_lens.device,
+        )
+        # pcp_utils stores cumulative TND lengths. SFA PA_BSND expects a
+        # per-request length list, so convert [a, a+b, ...] to [a, b, ...].
+        if q_head_actual_kv_lens.numel() > 1:
+            q_head_actual_kv_lens[1:] -= q_head_actual_kv_lens[:-1].clone()
+        if q_tail_actual_kv_lens.numel() > 1:
+            q_tail_actual_kv_lens[1:] -= q_tail_actual_kv_lens[:-1].clone()
+>>>>>>> private/sfa_cp_op
         return AscendPCPMetadata(
             q_head_idx=common_long_seq_metadata.q_head_idx_tensor,
             q_tail_idx=common_long_seq_metadata.q_tail_idx_tensor,
             q_full_idx=common_long_seq_metadata.q_full_idx,
+<<<<<<< HEAD
             head_attn_nomask_seqlens=q_head_kv_lens,
             tail_attn_nomask_seqlens=q_tail_kv_lens,
+=======
+            head_actual_seq_lengths_kv=q_head_actual_kv_lens,
+            tail_actual_seq_lengths_kv=q_tail_actual_kv_lens,
+>>>>>>> private/sfa_cp_op
             pcp_allgather_restore_idx=common_long_seq_metadata.pcp_allgather_restore_idx,
             block_arange=block_arange,
         )
@@ -245,6 +335,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         num_prefills = attn_metadata.num_prefills
         decode_attn_out = None
         if num_decode_tokens > 0:
+<<<<<<< HEAD
             decode_block_table_src = attn_metadata.block_table[:num_decodes]
             decode_kv, decode_block_num = self.gather_kv_cross_cp(kv, decode_block_table_src)
             decode_key_rope, _ = self.gather_kv_cross_cp(key_rope, decode_block_table_src)
@@ -254,12 +345,34 @@ class AscendSFACPImpl(AscendSFAImpl):
             decode_attn_out = self._execute_sparse_flash_attention(
                 ql_nope[:num_decode_tokens],
                 q_pe[:num_decode_tokens],
+=======
+            decode_block_table = attn_metadata.block_table[:num_decodes]
+            decode_kv = kv
+            decode_key_rope = key_rope
+            decode_actual_seq_lengths_key = sfa_cp_metadata.decode_actual_seq_lengths_key
+            assert decode_actual_seq_lengths_key is not None
+            decode_actual_seq_lengths_key = decode_actual_seq_lengths_key[:num_decodes]
+            decode_ql_nope, decode_q_pe = self._gather_decode_sfa_q_across_dcp(
+                ql_nope[:num_decode_tokens], q_pe[:num_decode_tokens]
+            )
+            decode_partial, decode_softmax_max, decode_softmax_sum = self._execute_sparse_flash_attention(
+                decode_ql_nope,
+                decode_q_pe,
+>>>>>>> private/sfa_cp_op
                 decode_kv,
                 decode_key_rope,
                 decode_block_table,
                 topk_indices[:num_decode_tokens],
                 actual_seq_lengths_query[:num_decodes],
+<<<<<<< HEAD
                 actual_seq_lengths_key[:num_decodes],
+=======
+                decode_actual_seq_lengths_key,
+                return_softmax_lse=True,
+            )
+            decode_attn_out = self._merge_decode_sfa_output(
+                decode_partial, decode_softmax_max, decode_softmax_sum
+>>>>>>> private/sfa_cp_op
             )
 
         if num_prefills < 1:
@@ -275,7 +388,11 @@ class AscendSFACPImpl(AscendSFAImpl):
         prefill_topk_indices = topk_indices[num_decode_tokens:]
         prefill_actual_seq_lengths_key = actual_seq_lengths_key[num_decodes:]
         if self.pcp_size == 1:
+<<<<<<< HEAD
             prefill_attn_out = self._execute_sparse_flash_attention(
+=======
+            prefill_attn_out, _, _ = self._execute_sparse_flash_attention(
+>>>>>>> private/sfa_cp_op
                 prefill_ql_nope,
                 prefill_q_pe,
                 prefill_kv,
@@ -294,8 +411,13 @@ class AscendSFACPImpl(AscendSFAImpl):
         q_tail_idx = sfa_cp_metadata.q_tail_idx
 
         # q head compute
+<<<<<<< HEAD
         q_head_actual_seq_lengths_key = sfa_cp_metadata.head_attn_nomask_seqlens[num_decodes:]
         q_head_output = self._execute_sparse_flash_attention(
+=======
+        q_head_actual_seq_lengths_key = sfa_cp_metadata.head_actual_seq_lengths_kv
+        q_head_output, _, _ = self._execute_sparse_flash_attention(
+>>>>>>> private/sfa_cp_op
             torch.index_select(prefill_ql_nope, 0, q_head_idx),
             torch.index_select(prefill_q_pe, 0, q_head_idx),
             prefill_kv,
@@ -307,8 +429,13 @@ class AscendSFACPImpl(AscendSFAImpl):
         )
 
         # q tail compute
+<<<<<<< HEAD
         q_tail_actual_seq_lengths_key = sfa_cp_metadata.tail_attn_nomask_seqlens[num_decodes:]
         q_tail_output = self._execute_sparse_flash_attention(
+=======
+        q_tail_actual_seq_lengths_key = sfa_cp_metadata.tail_actual_seq_lengths_kv
+        q_tail_output, _, _ = self._execute_sparse_flash_attention(
+>>>>>>> private/sfa_cp_op
             torch.index_select(prefill_ql_nope, 0, q_tail_idx),
             torch.index_select(prefill_q_pe, 0, q_tail_idx),
             prefill_kv,
@@ -349,10 +476,133 @@ class AscendSFACPImpl(AscendSFAImpl):
         aligned[:valid_tokens] = attn_output[:valid_tokens]
         return aligned
 
+<<<<<<< HEAD
     def _execute_sparse_flash_attention(
         self, ql_nope, q_pe, kv, key_rope, block_table, topk_indices, actual_seq_lengths_query, actual_seq_lengths_key
     ):
         attn_output, _, _ = torch.ops._C_ascend.npu_sparse_flash_attention(
+=======
+    def _all_gather_rank_dim(self, tensor: torch.Tensor) -> torch.Tensor:
+        # Gather local topk scores into an explicit leading CP-rank dimension:
+        # [cp_rank, token, kv_head, topk].
+        rank_tensor = tensor.unsqueeze(0)
+        if self.dcp_size > 1:
+            dcp_out = torch.empty(
+                (self.dcp_size, *tensor.shape),
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+            dist.all_gather_into_tensor(dcp_out, tensor.contiguous(), group=self.dcp_group)
+            rank_tensor = dcp_out
+
+        if self.pcp_size > 1:
+            cp_world_size = self.pcp_size * self.dcp_size
+            pcp_out = torch.empty(
+                (self.pcp_size, *rank_tensor.shape),
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+            dist.all_gather_into_tensor(pcp_out, rank_tensor.contiguous(), group=self.pcp_group)
+            rank_tensor = pcp_out.reshape(cp_world_size, *tensor.shape)
+
+        return rank_tensor
+
+    def _global_topk_to_local_indices(self, local_indices: torch.Tensor, local_scores: torch.Tensor) -> torch.Tensor:
+        valid_score = local_scores.to(torch.float32)
+        valid_score = torch.where(local_indices >= 0, valid_score, torch.full_like(valid_score, -float("inf")))
+
+        gathered_scores = self._all_gather_rank_dim(valid_score)
+        rank_count = gathered_scores.shape[0]
+        topk_count = gathered_scores.shape[-1]
+        flat_scores = gathered_scores.permute(1, 2, 0, 3).reshape(
+            local_scores.shape[0],
+            local_scores.shape[1],
+            rank_count * topk_count,
+        )
+        global_scores, global_positions = torch.topk(flat_scores, topk_count, dim=-1)
+        # global_positions encodes both owner rank and that rank's local topk
+        # slot. Keep only winners owned by this rank; other ranks will keep
+        # their own winners for the same global topk set.
+        owner_rank = torch.div(global_positions, topk_count, rounding_mode="floor")
+        local_slot = global_positions.remainder(topk_count)
+
+        cp_rank = self.pcp_rank * self.dcp_size + self.dcp_rank
+        current_mask = owner_rank == cp_rank
+        current_scores = torch.where(current_mask, global_scores, torch.full_like(global_scores, -float("inf")))
+        _, current_order = torch.topk(current_scores, topk_count, dim=-1)
+        current_slot = torch.gather(local_slot, -1, current_order)
+        current_valid = torch.gather(current_mask, -1, current_order)
+        current_indices = torch.gather(local_indices, -1, current_slot)
+        return torch.where(current_valid, current_indices, torch.full_like(current_indices, -1))
+
+    def _merge_decode_sfa_output(
+        self,
+        partial_output: torch.Tensor,
+        softmax_max: torch.Tensor,
+        softmax_sum: torch.Tensor,
+    ) -> torch.Tensor:
+        output_dtype = partial_output.dtype
+        # SFA returns softmax max/sum separately. Convert them to LSE so the
+        # existing CP merge helper can combine local-KV partial outputs.
+        softmax_lse = softmax_max.to(torch.float32) + torch.log(softmax_sum.to(torch.float32))
+        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
+        attn_out_lse = _process_attn_out_lse(partial_output.to(torch.float32), softmax_lse)
+        output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
+        return output.to(output_dtype)
+
+    def _gather_and_restore_prefill_kv_cross_pcp(
+        self, prefill_tensor: torch.Tensor, attn_metadata: M
+    ) -> torch.Tensor:
+        prefill_tokens = prefill_tensor.shape[0]
+        if prefill_tokens == 0:
+            return prefill_tensor
+
+        # Only prefill participates in this PCP all-gather. Use the prefill-only
+        # restore index built from the mixed [decode, prefill] restore index.
+        gathered = get_pcp_group().all_gather(prefill_tensor.contiguous(), 0)
+        assert attn_metadata.sfa_cp_metadata is not None
+        restore_idx = attn_metadata.sfa_cp_metadata.prefill_allgather_restore_idx
+        return torch.index_select(gathered, 0, restore_idx)
+
+    def _pad_decode_tensor_for_pcp_slot_mapping(
+        self,
+        decode_tensor: torch.Tensor,
+        num_decode_tokens: int,
+    ) -> torch.Tensor:
+        if num_decode_tokens == 0 or self.pcp_size == 1:
+            return decode_tensor
+        # slot_mapping still reserves decode_tokens * pcp_size entries. Pad
+        # decode k_li so its rows stay aligned with that PCP-padded mapping.
+        pad_tokens = num_decode_tokens * (self.pcp_size - 1)
+        pad_shape = (pad_tokens, *decode_tensor.shape[1:])
+        pad = torch.zeros(pad_shape, dtype=decode_tensor.dtype, device=decode_tensor.device)
+        return torch.cat([decode_tensor, pad], dim=0)
+
+    def _gather_decode_sfa_q_across_dcp(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.dcp_size == 1:
+            return ql_nope, q_pe
+        q = torch.cat([ql_nope, q_pe], dim=-1)
+        q = get_dcp_group().all_gather(q.contiguous(), 1)
+        return q.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+
+    def _execute_sparse_flash_attention(
+        self,
+        ql_nope,
+        q_pe,
+        kv,
+        key_rope,
+        block_table,
+        topk_indices,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        return_softmax_lse: bool = False,
+    ):
+        sfa_output, softmax_max, softmax_sum = torch.ops._C_ascend.npu_sparse_flash_attention(
+>>>>>>> private/sfa_cp_op
             query=ql_nope,
             key=kv,
             value=kv,
@@ -368,8 +618,14 @@ class AscendSFACPImpl(AscendSFAImpl):
             layout_kv="PA_BSND",
             sparse_mode=3,
             attention_mode=2,
+<<<<<<< HEAD
         )
         return attn_output
+=======
+            return_softmax_lse=return_softmax_lse,
+        )
+        return sfa_output, softmax_max, softmax_sum
+>>>>>>> private/sfa_cp_op
 
     def gather_kv_cross_cp(self, kv_cache: torch.Tensor, block_tables: torch.Tensor) -> tuple[torch.Tensor, int]:
         # Note(qcs): we need set kv_cache_interleave_size = block_size for sfa!!!
@@ -442,19 +698,36 @@ class AscendSFACPImpl(AscendSFAImpl):
         num_prefills = attn_metadata.num_prefills
         decode_topk_indices = None
         if num_decode_tokens > 0:
+<<<<<<< HEAD
             decode_block_table_src = attn_metadata.block_table[:num_decodes]
             decode_key, decode_block_num = self.gather_kv_cross_cp(key, decode_block_table_src)
             decode_block_table = self.gather_block_table(
                 decode_block_num, decode_block_table_src, sfa_cp_metadata.block_arange
             )
             decode_topk_indices = self._execute_indexer_select(
+=======
+            decode_block_table = attn_metadata.block_table[:num_decodes]
+            decode_key = key
+            decode_actual_seq_lengths_key = sfa_cp_metadata.decode_actual_seq_lengths_key
+            assert decode_actual_seq_lengths_key is not None
+            decode_actual_seq_lengths_key = decode_actual_seq_lengths_key[:num_decodes]
+            decode_topk_indices, decode_scores = self._execute_indexer_select(
+>>>>>>> private/sfa_cp_op
                 q[:num_decode_tokens],
                 decode_key,
                 weights[:num_decode_tokens],
                 actual_seq_lengths_query[:num_decodes],
+<<<<<<< HEAD
                 actual_seq_lengths_key[:num_decodes],
                 decode_block_table,
             )
+=======
+                decode_actual_seq_lengths_key,
+                decode_block_table,
+                return_value=True,
+            )
+            decode_topk_indices = self._global_topk_to_local_indices(decode_topk_indices, decode_scores)
+>>>>>>> private/sfa_cp_op
         # prefill compute
         if num_prefills == 0:
             return decode_topk_indices
@@ -467,7 +740,11 @@ class AscendSFACPImpl(AscendSFAImpl):
         prefill_weights = weights[num_decode_tokens:]
         prefill_actual_seq_lengths_key = actual_seq_lengths_key[num_decodes:]
         if self.pcp_size == 1:
+<<<<<<< HEAD
             prefill_topk_indices = self._execute_indexer_select(
+=======
+            prefill_topk_indices, _ = self._execute_indexer_select(
+>>>>>>> private/sfa_cp_op
                 prefill_q,
                 prefill_key,
                 prefill_weights,
@@ -484,8 +761,13 @@ class AscendSFACPImpl(AscendSFAImpl):
         q_tail_idx = sfa_cp_metadata.q_tail_idx
 
         # q head compute
+<<<<<<< HEAD
         q_head_actual_seq_lengths_key = sfa_cp_metadata.head_attn_nomask_seqlens[num_decodes:]
         q_head_topk_indices = self._execute_indexer_select(
+=======
+        q_head_actual_seq_lengths_key = sfa_cp_metadata.head_actual_seq_lengths_kv
+        q_head_topk_indices, _ = self._execute_indexer_select(
+>>>>>>> private/sfa_cp_op
             q=torch.index_select(prefill_q, 0, q_head_idx),
             key=prefill_key,
             weights=torch.index_select(prefill_weights, 0, q_head_idx),
@@ -495,8 +777,13 @@ class AscendSFACPImpl(AscendSFAImpl):
         )
 
         # q tail compute
+<<<<<<< HEAD
         q_tail_actual_seq_lengths_key = sfa_cp_metadata.tail_attn_nomask_seqlens[num_decodes:]
         q_tail_topk_indices = self._execute_indexer_select(
+=======
+        q_tail_actual_seq_lengths_key = sfa_cp_metadata.tail_actual_seq_lengths_kv
+        q_tail_topk_indices, _ = self._execute_indexer_select(
+>>>>>>> private/sfa_cp_op
             q=torch.index_select(prefill_q, 0, q_tail_idx),
             key=prefill_key,
             weights=torch.index_select(prefill_weights, 0, q_tail_idx),
@@ -511,6 +798,7 @@ class AscendSFACPImpl(AscendSFAImpl):
             topk_indices = torch.cat([decode_topk_indices, topk_indices], dim=0)
         return topk_indices
 
+<<<<<<< HEAD
     def _execute_indexer_select(self, q, key, weights, actual_seq_lengths_query, actual_seq_lengths_key, block_table):
         if self.use_torch_npu_lightning_indexer:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
@@ -539,6 +827,32 @@ class AscendSFACPImpl(AscendSFAImpl):
                 sparse_mode=3,
             )
         return topk_indices
+=======
+    def _execute_indexer_select(
+        self,
+        q,
+        key,
+        weights,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+        block_table,
+        return_value: bool = False,
+    ):
+        topk_indices, topk_scores = torch.ops._C_ascend.npu_lightning_indexer(
+            query=q,
+            key=key,
+            weights=weights,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_key=actual_seq_lengths_key,
+            block_table=block_table,
+            layout_query="TND",
+            layout_key="PA_BSND",
+            sparse_count=2048,
+            sparse_mode=3,
+            return_value=return_value,
+        )
+        return topk_indices, topk_scores
+>>>>>>> private/sfa_cp_op
 
     def exec_kv(
         self,
@@ -558,6 +872,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         kv_c_normed = kv_c_normed.view([kv_c_normed.shape[0], self.num_kv_heads, -1])
         k_pe = k_pe.unsqueeze(1)
         k_pe = self.rope_single(k_pe, cos, sin)
+<<<<<<< HEAD
         kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
         kv_c_k_pe = get_pcp_group().all_gather(kv_c_k_pe, 0)
         kv_c_k_pe = torch.index_select(kv_c_k_pe, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)
@@ -566,13 +881,61 @@ class AscendSFACPImpl(AscendSFAImpl):
         torch_npu._npu_reshape_and_cache(
             key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_indices=slot_mapping
         )
+=======
+        slot_mapping = attn_metadata.slot_mapping
+        num_decode_tokens = attn_metadata.num_decode_tokens
+
+        if num_decode_tokens > 0:
+            torch_npu._npu_reshape_and_cache(
+                key=kv_c_normed[:num_decode_tokens],
+                value=k_pe[:num_decode_tokens],
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_indices=slot_mapping[:num_decode_tokens],
+            )
+
+        if kv_c_normed.shape[0] > num_decode_tokens:
+            prefill_kv_c_k_pe = torch.cat(
+                [kv_c_normed[num_decode_tokens:], k_pe[num_decode_tokens:]], dim=-1
+            )
+            prefill_kv_c_k_pe = self._gather_and_restore_prefill_kv_cross_pcp(prefill_kv_c_k_pe, attn_metadata)
+            prefill_kv_c_normed, prefill_k_pe = prefill_kv_c_k_pe.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            prefill_slot_mapping = slot_mapping[num_decode_tokens * self.pcp_size :]
+            torch_npu._npu_reshape_and_cache(
+                key=prefill_kv_c_normed,
+                value=prefill_k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_indices=prefill_slot_mapping,
+            )
+>>>>>>> private/sfa_cp_op
         return None, None
 
     def _get_full_kv(self, k, attn_metadata: M):
         if self.pcp_size == 1 or self.enable_mlapo:
             return k
+<<<<<<< HEAD
         else:
             assert attn_metadata.sfa_cp_metadata is not None
             k = get_pcp_group().all_gather(k.contiguous(), 0)
             k = torch.index_select(k, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)
             return k
+=======
+
+        assert attn_metadata.sfa_cp_metadata is not None
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        decode_k = self._pad_decode_tensor_for_pcp_slot_mapping(k[:num_decode_tokens], num_decode_tokens)
+
+        if k.shape[0] <= num_decode_tokens:
+            return decode_k
+
+        prefill_k = self._gather_and_restore_prefill_kv_cross_pcp(
+            k[num_decode_tokens:],
+            attn_metadata,
+        )
+        if num_decode_tokens == 0:
+            return prefill_k
+        return torch.cat([decode_k, prefill_k], dim=0)
+>>>>>>> private/sfa_cp_op

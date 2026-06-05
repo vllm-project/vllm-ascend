@@ -10,7 +10,11 @@
 add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
+<<<<<<< HEAD
     set(sparse_flash_attention_depends attention/common CACHE INTERNAL "Dependencies for sparse_flash_attention")
+=======
+    set(sparse_flash_attention_depends common CACHE INTERNAL "Dependencies for sparse_flash_attention")
+>>>>>>> private/sfa_cp_op
     target_sources(op_host_aclnnInner PRIVATE
         sparse_flash_attention_def.cpp
     )

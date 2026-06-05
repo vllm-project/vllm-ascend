@@ -159,7 +159,11 @@ struct ConstInfo {
     uint32_t sparseMode = 0;
     int64_t preTokens = INT64_MAX;
     int64_t nextTokens = INT64_MAX;
+<<<<<<< HEAD
     uint32_t attentionMode = 2;
+=======
+    uint32_t attentionMode = 0;
+>>>>>>> private/sfa_cp_op
     bool returnSoftmaxLse = false;
     bool needInit = false;
 

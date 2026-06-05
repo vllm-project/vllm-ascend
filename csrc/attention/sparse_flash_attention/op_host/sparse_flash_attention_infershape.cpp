@@ -9,7 +9,11 @@
  */
 
 /*!
+<<<<<<< HEAD
  * \file sparse_flash_attention_proto.cpp
+=======
+ * \file sparse_flash_attention_infershape.cpp
+>>>>>>> private/sfa_cp_op
  * \brief
  */
 

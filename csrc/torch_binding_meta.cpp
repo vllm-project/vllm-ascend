@@ -330,10 +330,28 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     at::SmallVector<int64_t, SIZE> softmax_size;
     if (return_softmax_lse) {
         if (query.dim() == DIM_3) {
+<<<<<<< HEAD
             softmax_size = {key.size(DIM_1), query.size(DIM_0), query.size(DIM_1) / key.size(DIM_1)};
         } else {
             softmax_size = {
                 query.size(DIM_0), key.size(DIM_2), query.size(DIM_1), query.size(DIM_2) / key.size(DIM_2)};
+=======
+            const auto layout_kv_str = std::string(layout_kv);
+            const auto kv_head_num =
+                layout_kv_str == "PA_BSND" ? key.size(DIM_2) : key.size(DIM_1);
+            softmax_size = {
+                kv_head_num,
+                query.size(DIM_0),
+                query.size(DIM_1) / kv_head_num,
+            };
+        } else {
+            softmax_size = {
+                query.size(DIM_0),
+                key.size(DIM_2),
+                query.size(DIM_1),
+                query.size(DIM_2) / key.size(DIM_2),
+            };
+>>>>>>> private/sfa_cp_op
         }
     } else {
         softmax_size = {0};

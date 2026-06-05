@@ -1792,9 +1792,15 @@ ge::graphStatus SFAInfoParser::GetKvLayout()
         OP_LOGE(opName_, "When layoutKV is PA_BSND, kvDimNum must be 4, but now is %d.", keyDimNum);
         return ge::GRAPH_FAILED;
     }
+<<<<<<< HEAD
     OP_CHECK_IF(*opParamInfo_.returnSoftmaxLse && kvLayout_ == SFALayout::PA_BSND,
                 OP_LOGE(opName_, "when return_softmax_lse is true, key layout do not support PA_BSND."),
                 return ge::GRAPH_FAILED);
+=======
+    // OP_CHECK_IF(*opParamInfo_.returnSoftmaxLse && kvLayout_ == SFALayout::PA_BSND,
+    //             OP_LOGE(opName_, "when return_softmax_lse is true, key layout do not support PA_BSND."),
+    //             return ge::GRAPH_FAILED);
+>>>>>>> private/sfa_cp_op
     return ge::GRAPH_SUCCESS;
 }
 
