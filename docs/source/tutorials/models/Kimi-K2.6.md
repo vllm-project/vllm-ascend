@@ -21,7 +21,6 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `Kimi-K2.6-w4a8`(Quantized version for w4a8): [Download model weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.6-W4A8).
 - `kimi-k2.6-eagle3`(Eagle3 MTP draft model for accelerating inference of Kimi-K2.6): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.6-eagle3)
 - `Kimi-K2.6-DFlash`(a speculative decoding framework that leverages a lightweight block diffusion model for parallel drafting): [Download model weight](https://huggingface.co/z-lab/Kimi-K2.6-DFlash)
-- ``
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -607,7 +606,7 @@ Here are two accuracy evaluation methods.
 2. After execution, you can get the result, here is the result of `Kimi-K2.6-w4a8` in `vllm-ascend:v0.17.0rc1` for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
-|----- | ----- | ----- | ----- | -----| ----- |
+| ----- | ----- | ----- | ----- | ----- | ----- |
 | AIME2026 | - | accuracy | gen | 90.00 | 1 Atlas 800 A3 (64G × 16) |
 | GPQA | - | accuracy | gen | 89.90 | 1 Atlas 800 A3 (64G × 16) |
 | MMMU | - | accuracy | gen | 82.67 | 1 Atlas 800 A3 (64G × 16) |
