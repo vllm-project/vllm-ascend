@@ -1439,6 +1439,11 @@ class NPUModelRunner(GPUModelRunner):
             counts_cpu = self.valid_sampled_token_count_cpu
             assert counts_cpu is not None
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
+            # Keep the CPU-side accepted-token view aligned with the same
+            # authoritative counts that drive the drafter path.
+            self.input_batch.num_accepted_tokens_cpu_tensor[: counts.shape[0]].copy_(
+                counts, non_blocking=True
+            )
             self.valid_sampled_token_count_event.record()
 
         if self.use_async_spec_decode:
