@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_input_batch.py
 #
 
+import warnings
 import numpy as np
 import torch
 from vllm.lora.request import LoRARequest
@@ -27,6 +28,7 @@ from vllm.v1.pool.metadata import PoolingStates
 from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
+from vllm_ascend.ascend_forward_context import is_reduce_sample_enabled
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
@@ -237,3 +239,18 @@ class NPUInputBatch(InputBatch):
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
+
+    def _make_sampling_metadata(self):
+        metadata = super()._make_sampling_metadata()
+        # When enable_reduce_sample is True, logits are sharded [B, V_local]
+        # per rank. Logprobs computation (log_softmax, topk, gather) requires
+        # full [B, V_global] logits and would produce incorrect results on
+        # local shards. Raise an error to prevent silent incorrect output.
+        if is_reduce_sample_enabled():
+            if metadata.max_num_logprobs is not None or metadata.logprob_token_ids is not None:
+                warnings.warn(
+                    "Enabling logprobs_mode will disable the reduce_sampling optimization.",
+                    category=UserWarning,
+                    stacklevel=2
+                )
+        return metadata

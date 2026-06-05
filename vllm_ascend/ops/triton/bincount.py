@@ -24,7 +24,7 @@ import torch
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import is_reduce_sample_enabled
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
