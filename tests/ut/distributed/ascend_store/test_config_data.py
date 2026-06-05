@@ -34,15 +34,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 )
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
+_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 
 
 def _expected_grouped_hash(*block_hashes):
     hasher = hashlib.sha256()
     hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
-    hasher.update(len(block_hashes).to_bytes(4, "big"))
+    hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
     for block_hash in block_hashes:
         hash_bytes = block_hash.encode("utf-8") if isinstance(block_hash, str) else bytes(block_hash)
-        hasher.update(len(hash_bytes).to_bytes(4, "big"))
+        hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
         hasher.update(hash_bytes)
     return hasher.digest()
 

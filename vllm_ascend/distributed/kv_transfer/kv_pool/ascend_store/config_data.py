@@ -13,6 +13,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.core.sched.output import NewRequestData
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
+_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 
 
 # Parameters related to the key
@@ -473,10 +474,10 @@ def get_block_hashes(
 def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
     hasher = hashlib.sha256()
     hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
-    hasher.update(len(block_hashes).to_bytes(4, "big"))
+    hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
     for block_hash in block_hashes:
         hash_bytes = _block_hash_to_bytes(block_hash)
-        hasher.update(len(hash_bytes).to_bytes(4, "big"))
+        hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
         hasher.update(hash_bytes)
     return BlockHash(hasher.digest())
 
