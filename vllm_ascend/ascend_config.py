@@ -462,8 +462,10 @@ class FinegrainedTPConfig:
             self.olora_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
+            if not vllm_config.model_config.is_moe:
+                raise AssertionError("The lmhead parallel feature can be enabled only for MOE models.")
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
-                raise AssertionError("module tp sizes must divide data_parallel_size")
+                raise AssertionError("lmhead_tensor_parallel_size must divide by data_parallel_size.")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
