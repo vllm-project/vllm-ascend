@@ -24,6 +24,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.compilation_config = MagicMock()
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
+        mock_vllm_config.model_config.is_encoder_decoder = False
         mock_vllm_config.parallel_config = MagicMock()
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
@@ -372,7 +373,7 @@ class TestNPUPlatform(TestBase):
             with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
                 self.platform.check_and_update_config(vllm_config)
 
-        self.assertTrue("Compilation disabled, using eager mode by default" in cm.output[0])
+        self.assertTrue(any("Compilation disabled, using eager mode by default" in output for output in cm.output))
 
         self.assertEqual(
             vllm_config.compilation_config.mode,
