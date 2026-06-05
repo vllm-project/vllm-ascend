@@ -3,6 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -64,6 +65,10 @@ def fused_gdn_gating_patch(
     beta: float = 1.0,
     threshold: float = 20.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    logger.debug(
+        f"[TritonOps] fused_gdn_gating_patch: A_log.shape={A_log.shape}, a.shape={a.shape}, b.shape={b.shape}, dt_bias.shape={dt_bias.shape}, "
+        f"beta={beta}, threshold={threshold}"
+    )
     batch, num_heads = a.shape
     seq_len = 1
 

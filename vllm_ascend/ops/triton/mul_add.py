@@ -27,7 +27,9 @@ def muls_add_kernel(
 
 
 def muls_add_triton(x: torch.Tensor, y: torch.Tensor, scale: float) -> torch.Tensor:
-    assert x.shape == y.shape, "Input tensors must have the same shape."
+    assert x.shape == y.shape, (
+        f"[TritonOps] Input tensors must have the same shape, "
+        f"got x.shape={x.shape} and y.shape={y.shape}")
     hidden_size = x.shape[-1]
 
     n_elements = x.numel()
