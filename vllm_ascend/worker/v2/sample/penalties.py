@@ -21,8 +21,6 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-pow = triton.language.extra.libdevice.pow
-
 
 @triton.jit
 def _penalties_kernel(
@@ -162,8 +160,6 @@ def apply_penalties(
     )
 
 
-# In the current CANN version 8.5.1, the atomic_or and atomic_add operators may encounter deadlock issues.
-# This issue will be fixed in the subsequent CANN version 9.0.0
 @triton.jit
 def _bincount_kernel(
     expanded_idx_mapping_ptr,
@@ -192,13 +188,8 @@ def _bincount_kernel(
         prompt_tokens = tl.load(all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask)
         idx = prompt_tokens // 32
 
-        # replace modulus with multiply and subtract
-        # origin code: bit_idx = prompt_tokens % 32
-        bit_idx = prompt_tokens - 32 * idx
-
-        # replace multiply with left shift
-        # origin code: bit = tl.full((BLOCK_SIZE,), 1, tl.int32) << bit_idx
-        bit = pow(2.0, bit_idx)
+        bit_idx = prompt_tokens % 32
+        bit = tl.full((BLOCK_SIZE,), 1, tl.int32) << bit_idx
 
         tl.atomic_or(
             prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride + idx,

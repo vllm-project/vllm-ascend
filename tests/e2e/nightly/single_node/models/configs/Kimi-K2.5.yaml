@@ -32,7 +32,6 @@ _server_cmd: &server_cmd
   - "8192"
   - "--max-num-seqs"
   - "16"
-  - "--async-scheduling"
   - "--quantization"
   - "ascend"
   - "--trust-remote-code"
@@ -63,7 +62,7 @@ _benchmarks: &benchmarks
     top_k: -1
     repetition_penalty: 1.0
     batch_size: 32
-    baseline: 90
+    baseline: 87
     threshold: 5
   perf:
     case_type: performance

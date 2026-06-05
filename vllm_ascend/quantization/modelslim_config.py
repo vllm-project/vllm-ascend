@@ -41,7 +41,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod, VocabParallelEmbedding
 from vllm.model_executor.models.utils import WeightsMapper
 
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, calc_split_factor
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, AscendDeviceType, calc_split_factor, get_ascend_device_type
 
 from .methods import get_scheme_class
 
@@ -549,7 +549,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
             logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa/indexer]")
             return AscendKVCacheMethod(scheme)
-        elif isinstance(layer, AttentionLayerBase) and self.quant_description.get("kv_cache_type") == "C8":
+        elif isinstance(layer, AttentionLayerBase) and self.is_c8_quant_layer(prefix):
             from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
             logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
@@ -616,7 +616,10 @@ class AscendModelSlimConfig(QuantizationConfig):
             and vllm_config.kv_transfer_config.is_kv_consumer
             and not vllm_config.kv_transfer_config.is_kv_producer
         )
-        return bool(is_decode_instance and self.is_fa_quant_layer(layer_name))
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            return self.is_fa_quant_layer(layer_name)
+        else:
+            return bool(is_decode_instance and self.is_fa_quant_layer(layer_name))
 
     def is_indexer_quant_layer(self, prefix):
         if self.enable_indexer_quant:
@@ -625,10 +628,17 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return True
         return False
 
+    def is_c8_quant_layer(self, prefix):
+        if self.enable_c8_quant:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.c8_quant_layers:
+                return True
+        return False
+
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
             ori_dtype = model_config.dtype
-            quant_dtype = torch.int8
+            quant_dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
             # For MLA models like deepseek, we only quantify K cache to ensure accuracy
             if model_config.use_mla:
                 return quant_dtype, ori_dtype
@@ -810,11 +820,14 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
-        self.enable_c8_quant = kv_quant_type != ""
-        if self.enable_fa_quant or self.enable_indexer_quant:
+        self.enable_c8_quant = kv_quant_type == "C8"
+        self.c8_quant_layers = []
+        if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))
                 if "fa_k.scale" in key:
                     self.kvcache_quant_layers.append(int(_id))
                 if "indexer.quant_type" in key:
                     self.indexer_quant_layers.append(int(_id))
+                if "k_proj.kv_cache_scale" in key:
+                    self.c8_quant_layers.append(int(_id))
