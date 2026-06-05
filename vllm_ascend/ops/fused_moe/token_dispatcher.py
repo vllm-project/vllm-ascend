@@ -218,7 +218,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 }
             )
         if self.need_comm_alg:
-            stage1_kwargs.update({"comm_alg": "fullmesh_v2"})
+            stage1_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
@@ -322,7 +322,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 }
             )
         if self.need_comm_alg:
-            stage3_kwargs.update({"comm_alg": "fullmesh_v2"})
+            stage3_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
