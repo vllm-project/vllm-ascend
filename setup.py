@@ -56,7 +56,7 @@ def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""
         env_variable = default_path
     else:
         logging.info("Found existing %s: %s", env_name, env_variable)
-    # cann package seems will check this environments in cmake, need write this env variable back.
+    # cann package seems will check this environments in cmake, so need write this env variable back.
     if env_name == "ASCEND_HOME_PATH":
         os.environ["ASCEND_HOME_PATH"] = env_variable
     cmake_args += [f"-D{env_name}={env_variable}"]
