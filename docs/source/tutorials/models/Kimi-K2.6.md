@@ -515,6 +515,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
 
 **Notice:**
 The parameters are explained as follows:
+
 - `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: enables a large-scale fused operator to replace the original fine-grained small operators, which can significantly reduce kernel launch overhead and improve overall execution performance.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
@@ -610,6 +611,7 @@ Here are two accuracy evaluation methods.
 | AIME2026 | - | accuracy | gen | 90.00 | 1 Atlas 800 A3 (64G × 16) |
 | GPQA | - | accuracy | gen | 89.90 | 1 Atlas 800 A3 (64G × 16) |
 | MMMU | - | accuracy | gen | 82.67 | 1 Atlas 800 A3 (64G × 16) |
+
 ## Performance
 
 ### Using AISBench
