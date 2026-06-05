@@ -20,8 +20,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class CompressAttentionManager(FullAttentionManager):
     def __init__(self, kv_cache_spec: MLAAttentionSpec, block_pool: BlockPool, **kwargs) -> None:
@@ -168,9 +166,6 @@ class CompressAttentionManager(FullAttentionManager):
                 main. v0.20.2 does not expose this argument in the base class.
         """
         num_tokens //= self.compress_ratio
-
-        if vllm_version_is("0.20.2"):
-            return super().cache_blocks(request, num_tokens)
 
         return super().cache_blocks(
             request,
