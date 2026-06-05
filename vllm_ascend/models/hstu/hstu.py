@@ -1149,7 +1149,7 @@ class HSTUInferenceForCausalLM(torch.nn.Module):
                                                    torch.Tensor]]) -> set[str]:
         # use random model
         if self.config.use_random_model:
-            return set()
+            return None
         # 权重加载逻辑保持不变
         params_dict = dict(self.model.named_parameters())
         loaded_weights = set()
