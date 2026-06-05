@@ -270,8 +270,7 @@ def rope_forward_triton(
         k = k.contiguous()
 
     logger.debug(
-        "[TritonOps] rope_forward_triton: q.shape=%s, k.shape=%s, "
-        "rope_dim=%s, is_neox_style=%s",
+        "[TritonOps] rope_forward_triton: q.shape=%s, k.shape=%s, rope_dim=%s, is_neox_style=%s",
         q.shape,
         k.shape,
         rope_dim,
@@ -369,9 +368,7 @@ def rope_forward_triton_siso(
         qk = qk.contiguous()
 
     logger.debug(
-        "[TritonOps] rope_forward_triton_siso: qk.shape=%s, "
-        "cos.shape=%s, sin.shape=%s, "
-        "rope_dim=%s, is_neox_style=%s",
+        "[TritonOps] rope_forward_triton_siso: qk.shape=%s, cos.shape=%s, sin.shape=%s, rope_dim=%s, is_neox_style=%s",
         qk.shape,
         cos.shape if cos is not None else None,
         sin.shape if sin is not None else None,
