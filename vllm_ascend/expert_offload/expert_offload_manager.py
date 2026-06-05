@@ -1,9 +1,13 @@
 """Expert Offload Manager — manages CPU-side expert weights and NPU paging."""
 
+import time
+
+import numpy as np
 import torch
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.logger import logger
+from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.expert_offload.lrc_policy import LRCExpertCachePolicy
@@ -152,6 +156,18 @@ class ExpertOffloadManager:
         )
         self.log2phy_h = torch.zeros(num_total_experts, dtype=torch.int32, device='cpu', pin_memory=True)
         self.log2phy_np = self.log2phy_h.numpy()
+        self.log2phy_cache_hit = CpuGpuBuffer(
+            num_total_experts,
+            dtype=torch.int32,
+            device='npu',
+            pin_memory=True,
+        )
+        self.log2phy_cache_miss = CpuGpuBuffer(
+            num_total_experts,
+            dtype=torch.int32,
+            device='npu',
+            pin_memory=True,
+        )
 
     def process_weights_after_loading(self):
         first_w13 = self.w13_weights_cpu[0][0]
@@ -533,19 +549,18 @@ class ExpertOffloadManager:
 
     def update_weights(self, layer, topk_ids: torch.Tensor,
                         log2phy: torch.Tensor,
-                        topk_weights: torch.Tensor | None = None) -> int:
+                        topk_weights: torch.Tensor | None = None):
         """Incrementally page in needed experts, overwriting unused slots.
 
-        Routes to prefill pool (full-overwrite) when num_tokens exceeds
-        offload_threshold, otherwise uses per-expert paging (decode path).
+        Only copies experts that are NOT already on device. Experts
+        already loaded are left in place.
 
         Args:
             layer: AscendFusedMoE instance.
             topk_ids: [num_tokens, top_k] routed expert indices.
             log2phy: [global_num_experts] CPU tensor, modified in-place.
 
-        Returns: number of CPU→NPU copies performed (decode path),
-                 0 for prefill path (full-overwrite via pool).
+        Returns: (log2phy_cache_hit_gpu, log2phy_cache_miss_gpu) or (None, None)
         """
         num_tokens = topk_ids.size(0)
         if num_tokens > self.offload_threshold:
@@ -555,17 +570,17 @@ class ExpertOffloadManager:
                 try:
                     layer_idx = self.moe_layers.index(layer)
                 except ValueError:
-                    return 0
+                    return (None, None)
                 self._prefill_load_layer(layer_idx, log2phy)
-                return 0
+                return (None, None)
             else:
                 # Profile run or pool not ready — bail out gracefully
-                return 0
+                return (None, None)
 
         try:
             layer_idx = self.moe_layers.index(layer)
         except ValueError:
-            return 0
+            return (None, None)
 
         topk_ids_h = self.topk_ids_h[:num_tokens]
         topk_weights_h = None
@@ -601,7 +616,10 @@ class ExpertOffloadManager:
             self._update_weights(args)
 
         log2phy.copy_(log2phy_h, non_blocking=_EXTRA_CTX.capturing)
-    
+        self.log2phy_cache_hit.copy_to_gpu()
+        self.log2phy_cache_miss.copy_to_gpu()
+        # return (None, None)
+        return (self.log2phy_cache_hit.gpu, self.log2phy_cache_miss.gpu)
     def _update_weights(self, args):
         (
             topk_ids_h,
@@ -611,6 +629,7 @@ class ExpertOffloadManager:
             topk_weights_h,
         ) = args
         with torch_npu.npu.stream(self.load_stream):
+            np.copyto(self.log2phy_cache_hit.np, log2phy_np)
             if self.cache_policy is not None:
                 router_scores = topk_weights_h.tolist() if topk_weights_h is not None else None
                 needed = self.cache_policy.observe(
@@ -713,6 +732,11 @@ class ExpertOffloadManager:
                     reusable_slots.remove(slot)
                 n_copies += 1
 
+            need_to_load_mask = np.zeros_like(log2phy_np)
+            need_to_load_mask[list(need_to_load)] = 1
+            log2phy_need_to_load = np.where(need_to_load_mask, log2phy_np, -1)
+            np.copyto(self.log2phy_cache_miss.np, log2phy_need_to_load)
+
             self.load_stream.synchronize()
 
     # ------------------------------------------------------------------ #
@@ -785,8 +809,7 @@ _EXPERT_OFFLOAD_MANAGER: ExpertOffloadManager = None
 
 
 def maybe_init_expert_offload_manager(vllm_config: VllmConfig):
-    # if no need to init offload manager:
-    #     return
+    print("sicheng's env")
     global _EXPERT_OFFLOAD_MANAGER
     if _EXPERT_OFFLOAD_MANAGER is None:
         _EXPERT_OFFLOAD_MANAGER = ExpertOffloadManager(vllm_config)
