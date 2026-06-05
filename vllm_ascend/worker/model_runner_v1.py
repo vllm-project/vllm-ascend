@@ -3407,7 +3407,6 @@ class NPUModelRunner(GPUModelRunner):
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention,
                     is_profile=is_profile,
-                    profile_cpp=profile_cpp,
                 )
             if is_profile and self.dynamic_eplb:
                 target = self.model.language_model if hasattr(self.model, "language_model") else self.model
