@@ -35,7 +35,6 @@ from tests.ut.attention.utils import (  # noqa: E402
     create_common_attn_metadata,
     create_vllm_config,
 )
-from tests.ut.conftest import npu_test
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl  # noqa: E402
 from vllm_ascend.utils import enable_custom_op
 
@@ -571,7 +570,6 @@ def _make_synthetic_kv_contexts(
     return k_nope, k_rope
 
 
-@npu_test(num_npus=1, npu_type="a2")
 def _test_sfa_cp_correctness(
     batch_spec: BatchSpec,
     model: str,
@@ -827,7 +825,6 @@ _TEST_CASES: list[tuple[str, int, int]] = [
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V3.2-Exp"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
-@npu_test(num_npus=1, npu_type="a2")
 def test_sfa_cp_correctness(
     batch_spec_name: str,
     model: str,
