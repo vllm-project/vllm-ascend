@@ -78,6 +78,10 @@ class ExpertOffloadManager:
         ExpertOffloadManager._instance = self
 
         self.load_stream = torch_npu.npu.Stream()
+        # Reusable event: recorded on load_stream after H2D copies complete.
+        # Compute stream waits on this before cache-miss MLP to overlap
+        # cache-hit compute with weight transfer.
+        self._weights_loaded_event = torch_npu.npu.Event()
 
         # Prefill pool: ndl layers × all experts on NPU, shared round-robin
         self._prefill_w13: list[torch.Tensor] = []
@@ -560,7 +564,8 @@ class ExpertOffloadManager:
             topk_ids: [num_tokens, top_k] routed expert indices.
             log2phy: [global_num_experts] CPU tensor, modified in-place.
 
-        Returns: (log2phy_cache_hit_gpu, log2phy_cache_miss_gpu) or (None, None)
+        Returns: (log2phy_cache_hit_gpu, log2phy_cache_miss_gpu, weights_loaded_event)
+                  or (None, None, None)
         """
         num_tokens = topk_ids.size(0)
         if num_tokens > self.offload_threshold:
@@ -570,17 +575,17 @@ class ExpertOffloadManager:
                 try:
                     layer_idx = self.moe_layers.index(layer)
                 except ValueError:
-                    return (None, None)
+                    return (None, None, None)
                 self._prefill_load_layer(layer_idx, log2phy)
-                return (None, None)
+                return (None, None, None)
             else:
                 # Profile run or pool not ready — bail out gracefully
-                return (None, None)
+                return (None, None, None)
 
         try:
             layer_idx = self.moe_layers.index(layer)
         except ValueError:
-            return (None, None)
+            return (None, None, None)
 
         topk_ids_h = self.topk_ids_h[:num_tokens]
         topk_weights_h = None
@@ -619,7 +624,7 @@ class ExpertOffloadManager:
         self.log2phy_cache_hit.copy_to_gpu()
         self.log2phy_cache_miss.copy_to_gpu()
         # return (None, None)
-        return (self.log2phy_cache_hit.gpu, self.log2phy_cache_miss.gpu)
+        return (self.log2phy_cache_hit.gpu, self.log2phy_cache_miss.gpu, self._weights_loaded_event)
     def _update_weights(self, args):
         (
             topk_ids_h,
@@ -737,7 +742,9 @@ class ExpertOffloadManager:
             log2phy_need_to_load = np.where(need_to_load_mask, log2phy_np, -1)
             np.copyto(self.log2phy_cache_miss.np, log2phy_need_to_load)
 
-            self.load_stream.synchronize()
+            # Record event instead of synchronizing, so that cache-hit
+            # compute can overlap with the tail of H2D copies.
+            self._weights_loaded_event.record(self.load_stream)
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
