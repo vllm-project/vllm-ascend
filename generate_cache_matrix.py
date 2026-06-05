@@ -14,6 +14,7 @@ Usage:
 
 import json
 import os
+import re
 import subprocess
 import sys
 from glob import glob
@@ -28,6 +29,22 @@ except ImportError:
 
 def warn(msg: str) -> None:
     print(f"::warning::{msg}", file=sys.stderr)
+
+
+def normalize_branch(branch: str) -> str:
+    """Normalize a branch name for cache-key use.
+
+    Mirrors the consumer-side logic in _selected_tests.yaml:
+        tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-'
+    Characters ``/``, ``:``, ``@``, `` `` are each replaced by a single
+    ``-``.  Any remaining character outside ``[A-Za-z0-9._-]`` is
+    removed.  An empty string after filtering falls back to
+    ``"unknown-branch"`` (matching the consumer's fallback).
+    """
+    for ch in "/:@ ":
+        branch = branch.replace(ch, "-")
+    branch = re.sub(r"[^A-Za-z0-9._\-]", "", branch)
+    return branch or "unknown-branch"
 
 
 def soc_version(df: str) -> str:
@@ -111,8 +128,9 @@ def main() -> None:
             warn(f"Cannot read release branches from {config_path}: {e}")
 
     # ── 3. arch → runner mapping ─────────────────────────────────────────
+    # Only ARM64: consumers (_selected_tests.yaml) run exclusively on
+    # ARM64 NPU hardware – X64 cache entries would never be consumed.
     arch_runners = {
-        "X64": "linux-amd64-cpu-16-hk",
         "ARM64": "linux-arm64-cpu-16",
     }
 
@@ -128,7 +146,7 @@ def main() -> None:
                 include.append(
                     {
                         "branch": branch,
-                        "branch_normalized": branch.replace("/", "-"),
+                        "branch_normalized": normalize_branch(branch),
                         "dockerfile": df,
                         "image": f"{image_registry}:{tag}",
                         "image_tag": tag,
