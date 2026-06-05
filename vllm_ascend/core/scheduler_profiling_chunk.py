@@ -134,7 +134,7 @@ class ProfilingChunkScheduler(Scheduler):
         t_start = time.perf_counter()
 
         for i in range(total_steps):
-            chunk_size = int(base_chunk_size - max(i - 1, 0) * (base_chunk_size / num_samples))
+            chunk_size = int(base_chunk_size - (i - 1) * (base_chunk_size / num_samples))
             if chunk_size <= 0:
                 break
 
@@ -274,9 +274,6 @@ class ProfilingChunkScheduler(Scheduler):
         while req_index < len(self.running) and token_budget > 0 and time_budget > 0:
             # <<< PROFILING CHUNK <<<
             request = self.running[req_index]
-            current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
-            if current_batch_size == self.max_num_per_batch:
-                break
 
             if (
                 request.num_output_placeholders > 0
@@ -321,7 +318,8 @@ class ProfilingChunkScheduler(Scheduler):
             if (
                 self.profiling_chunk_manager is not None
                 and self.profiling_chunk_manager.is_ready
-                and 0 < request.num_computed_tokens < request.num_prompt_tokens
+                and num_new_tokens > 1
+                and request.num_computed_tokens > 0
             ):
                 predicted_chunk = self.profiling_chunk_manager.predict_chunk_size(
                     num_computed_tokens=request.num_computed_tokens,
@@ -334,7 +332,7 @@ class ProfilingChunkScheduler(Scheduler):
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(request, num_new_tokens)
 
-            if num_new_tokens <= 0:
+            if num_new_tokens == 0:
                 req_index += 1
                 continue
 
@@ -388,7 +386,7 @@ class ProfilingChunkScheduler(Scheduler):
             token_budget -= num_new_tokens
             # Decode requests (num_new_tokens == 1) have negligible latency;
             # skip time_budget accounting so they don't starve other requests.
-            if request.num_computed_tokens < request.num_prompt_tokens:
+            if num_new_tokens > 1:
                 time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
             req_index += 1
 
@@ -436,8 +434,7 @@ class ProfilingChunkScheduler(Scheduler):
             # >>> PROFILING CHUNK >>>
             while (self.waiting or self.skipped_waiting) and token_budget > 0 and time_budget > 0:
                 # <<< PROFILING CHUNK <<<
-                current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
-                if len(self.running) == self.max_num_running_reqs or current_batch_size == self.max_num_per_batch:
+                if len(self.running) == self.max_num_running_reqs:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -519,10 +516,7 @@ class ProfilingChunkScheduler(Scheduler):
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
                 else:
-                    if self.is_mtp_kv_consumer:
-                        num_new_tokens = request.num_tokens_with_spec - num_computed_tokens
-                    else:
-                        num_new_tokens = request.num_tokens - num_computed_tokens
+                    num_new_tokens = request.num_tokens - num_computed_tokens
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
@@ -531,7 +525,8 @@ class ProfilingChunkScheduler(Scheduler):
                     if (
                         self.profiling_chunk_manager is not None
                         and self.profiling_chunk_manager.is_ready
-                        and 0 < request.num_computed_tokens < request.num_prompt_tokens
+                        and num_new_tokens > 1
+                        and request.num_computed_tokens > 0
                     ):
                         predicted_chunk = self.profiling_chunk_manager.predict_chunk_size(
                             num_computed_tokens=num_computed_tokens,
@@ -635,15 +630,6 @@ class ProfilingChunkScheduler(Scheduler):
                     request.num_computed_tokens = num_computed_tokens
                     continue
 
-                # Speculative decode related.
-                if (self.is_mtp_kv_consumer or not self.vllm_config.kv_transfer_config) and request.spec_token_ids:
-                    num_scheduled_spec_tokens = num_new_tokens + num_computed_tokens - request.num_tokens
-                    if num_scheduled_spec_tokens > 0:
-                        del request.spec_token_ids[num_scheduled_spec_tokens:]
-                        scheduled_spec_decode_tokens[request.request_id] = request.spec_token_ids
-                    else:
-                        request.spec_token_ids = []
-
                 self.running.append(request)
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
@@ -661,7 +647,7 @@ class ProfilingChunkScheduler(Scheduler):
                 token_budget -= num_new_tokens
                 # Decode requests (num_new_tokens == 1) have negligible latency;
                 # skip time_budget accounting so they don't starve other requests.
-                if request.num_computed_tokens < request.num_prompt_tokens:
+                if num_new_tokens > 1:
                     time_budget -= self.profiling_chunk_manager.predict_time(
                         num_new_tokens, request.num_computed_tokens
                     )
