@@ -22,9 +22,7 @@ if HAS_TRITON:
 
 def _resolve_triton_ascend_op(op_name: str):
     if not HAS_TRITON:
-        logger.error(
-            f"[TritonOps] Failed to resolve Triton op '{op_name}' because HAS_TRITON is False."
-        )
+        logger.error(f"[TritonOps] Failed to resolve Triton op '{op_name}' because HAS_TRITON is False.")
         raise RuntimeError(f"Triton op '{op_name}' cannot be resolved because HAS_TRITON is False")
 
     if _extension_module is not None:
