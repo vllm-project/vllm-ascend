@@ -42,7 +42,12 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    is_reduce_sample_enabled,
+    override_reduce_sample,
+    set_ascend_forward_context,
+)
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -1036,7 +1041,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
-        with set_ascend_forward_context(
+        # When logprobs are requested and reduce_sample is enabled, force
+        # reduce_sample off so that the draft model's LogitsProcessor
+        # all-gathers the full [B, V_global] logits and the sampler uses
+        # the standard (non-reduce) path.
+        needs_reduce_sample_override = (
+            is_reduce_sample_enabled()
+            and (
+                sampling_metadata.max_num_logprobs is not None
+                or sampling_metadata.logprob_token_ids is not None
+            )
+        )
+        reduce_sample_ctx = (
+            override_reduce_sample(False) if needs_reduce_sample_override else nullcontext()
+        )
+
+        with reduce_sample_ctx, set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
             num_tokens=num_input_tokens,
@@ -1191,7 +1211,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        if get_ascend_config().enable_reduce_sample:
+        if is_reduce_sample_enabled():
             if self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1353,7 +1373,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
-            if get_ascend_config().enable_reduce_sample:
+            if is_reduce_sample_enabled():
                 if self.method in ("eagle3", "dflash", "mtp"):
                     draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                     if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:

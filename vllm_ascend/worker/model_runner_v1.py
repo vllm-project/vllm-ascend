@@ -104,6 +104,7 @@ from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import is_reduce_sample_enabled, override_reduce_sample
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -2386,6 +2387,23 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
+        
+        # When logprobs are requested and reduce_sample is enabled, force
+        # reduce_sample off for the model forward pass so that the
+        # LogitsProcessor all-gathers the full [B, V_global] logits.
+        sampling_metadata = self.input_batch.sampling_metadata
+        needs_reduce_sample_override = (
+            is_reduce_sample_enabled()
+            and (
+                sampling_metadata.max_num_logprobs is not None
+                or sampling_metadata.logprob_token_ids is not None
+            )
+        )
+
+        if needs_reduce_sample_override:
+            reduce_sample_ctx = override_reduce_sample(False)
+            reduce_sample_ctx.__enter__()
+
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2734,7 +2752,7 @@ class NPUModelRunner(GPUModelRunner):
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
-            if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+            if self.input_batch.sampling_metadata.top_k is not None and is_reduce_sample_enabled():
                 max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
                 self.sampler.prepare_sampling(max_topk)
             return self.sampler(
@@ -2744,7 +2762,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
-        if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+        if self.input_batch.sampling_metadata.top_k is not None and is_reduce_sample_enabled():
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
         draft_probs = (
