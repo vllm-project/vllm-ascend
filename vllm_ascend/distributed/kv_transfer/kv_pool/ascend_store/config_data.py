@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -8,8 +9,11 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, BlockHashListWithBlockSize
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.core.sched.output import NewRequestData
+
+_GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
+_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 
 
 # Parameters related to the key
@@ -109,7 +113,8 @@ class LayerPoolKey(PoolKey):
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
-            f"@{self.chunk_hash}@{self.layer_id}"
+            f"@layer_id:{self.layer_id}"
+            f"@{self.chunk_hash}"
         )
 
 
@@ -451,13 +456,28 @@ def get_block_hashes(
     if group_block_size == hash_block_size:
         return block_hashes
     assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
-    if isinstance(block_hashes[0], str):
-        scale_factor = group_block_size // hash_block_size
-        return [
-            "".join(block_hashes[idx : idx + scale_factor])
-            for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
-        ]
-    return BlockHashListWithBlockSize(block_hashes, hash_block_size, group_block_size)
+    scale_factor = group_block_size // hash_block_size
+    return [
+        _rehash_block_hash_group(block_hashes[idx : idx + scale_factor])
+        for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
+    ]
+
+
+def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
+    hasher = hashlib.sha256()
+    hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
+    hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
+    for block_hash in block_hashes:
+        hash_bytes = _block_hash_to_bytes(block_hash)
+        hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
+        hasher.update(hash_bytes)
+    return BlockHash(hasher.digest())
+
+
+def _block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
+    if isinstance(block_hash, str):
+        return block_hash.encode("utf-8")
+    return bytes(block_hash)
 
 
 # Parameters related to the connector metadata
