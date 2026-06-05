@@ -310,7 +310,7 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 ### Verify installation
 
-Ceate and run a simple inference test. The `example.py` can be like:
+Create and run a simple inference test. The `example.py` can be like:
 
 ```python
 from vllm import LLM, SamplingParams
