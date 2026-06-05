@@ -39,9 +39,14 @@ function install_binary_test() {
     config_pip_mirror
     create_vllm_venv
 
-    PIP_VLLM_VERSION=$(get_version pip_vllm_version)
-    VLLM_VERSION=$(get_version vllm_version)
-    PIP_VLLM_ASCEND_VERSION=$(get_version pip_vllm_ascend_version)
+    pip install docutils
+
+    PIP_VLLM_VERSION=$(get_version pip_vllm_version) || _err "Failed to get pip_vllm_version"
+    VLLM_VERSION=$(get_version vllm_version) || _err "Failed to get vllm_version"
+    PIP_VLLM_ASCEND_VERSION=$(get_version pip_vllm_ascend_version) || _err "Failed to get pip_vllm_ascend_version"
+    if [[ -z "${PIP_VLLM_VERSION}" || -z "${VLLM_VERSION}" || -z "${PIP_VLLM_ASCEND_VERSION}" ]]; then
+        _err "Failed to resolve vLLM or vLLM Ascend version from docs/source/conf.py"
+    fi
     _info "====> Install vllm==${PIP_VLLM_VERSION} and vllm-ascend ${PIP_VLLM_ASCEND_VERSION}"
 
     # Setup extra-index-url for x86 & torch_npu dev version
