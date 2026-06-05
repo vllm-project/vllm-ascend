@@ -151,8 +151,7 @@ jobs:
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }} \
-            --run-all-modules \
-            --run-all-cpu
+            --run-all-modules
 
   run-selected-tests:
     needs: lint-and-select-tests
