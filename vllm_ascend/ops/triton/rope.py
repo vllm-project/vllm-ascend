@@ -273,7 +273,7 @@ def rope_forward_triton(
         f"[TritonOps] rope_forward_triton: q.shape={q.shape}, k.shape={k.shape}, "
         f"rope_dim={rope_dim}, is_neox_style={is_neox_style}"
     )
-    
+
     num_tokens, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[1]
     # TODO: use a more robust method to get BLOCK_SIZE_HEAD
@@ -363,7 +363,7 @@ def rope_forward_triton_siso(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not qk.is_contiguous():
         qk = qk.contiguous()
-        
+
     logger.debug(
         f"[TritonOps] rope_forward_triton_siso: qk.shape={qk.shape}, "
         f"cos.shape={cos.shape if cos is not None else None}, sin.shape={sin.shape if sin is not None else None}, "

@@ -43,12 +43,8 @@ def causal_conv1d_ref(
     out: (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
-        logger.error(
-            "[TritonOps] activation must be None, silu, or swish, "
-            f"got activation={activation}.")
-        raise NotImplementedError(
-            "activation must be None, silu, or swish, "
-            f"got activation={activation}.")
+        logger.error(f"[TritonOps] activation must be None, silu, or swish, got activation={activation}.")
+        raise NotImplementedError(f"activation must be None, silu, or swish, got activation={activation}.")
     dtype_in = x.dtype
     x = x.to(weight.dtype)
     seqlen = x.shape[-1]
@@ -119,12 +115,8 @@ def causal_conv1d_fn(
         num_decodes = attn_metadata.num_decodes
 
     if activation not in [None, "silu", "swish"]:
-        logger.error(
-            "[TritonOps] activation must be None, silu, or swish, "
-            f"got activation={activation}.")
-        raise NotImplementedError(
-            f"activation must be None, silu, or swish, "
-            f"got activation={activation}.")
+        logger.error(f"[TritonOps] activation must be None, silu, or swish, got activation={activation}.")
+        raise NotImplementedError(f"activation must be None, silu, or swish, got activation={activation}.")
     if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
@@ -597,7 +589,8 @@ def causal_conv1d_update_npu(
     """
     logger.debug(
         f"[TritonOps] causal_conv1d_update_npu: x.shape={x.shape}, "
-        f"conv_state.shape={conv_state.shape}, weight.shape={weight.shape}, activation={activation}")
+        f"conv_state.shape={conv_state.shape}, weight.shape={weight.shape}, activation={activation}"
+    )
     if not HAS_TRITON:
         return _pytorch_update(
             x,
@@ -670,7 +663,8 @@ def causal_conv1d_update_npu(
     logger.warning_once(
         "[TritonOps] causal_conv1d_update_npu uses hardcoded "
         f"CORE_HINT={CORE_HINT}. Performance may be suboptimal on devices "
-        "with a different vector core count.")
+        "with a different vector core count."
+    )
     # channel tile: 512 when dim large (reduce tasks), else 256
     block_n = 512 if dim >= 512 else 256
     g = triton.cdiv(dim, block_n)

@@ -246,7 +246,8 @@ def split_qkv_tp_rmsnorm_rope_impl(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     logger.debug(
         f"[TritonOps] split_qkv_rmsnorm_rope_impl: input.shape={input.shape}, "
-        f"q_hidden_size={q_hidden_size}, kv_hidden_size={kv_hidden_size}, head_dim={head_dim}")
+        f"q_hidden_size={q_hidden_size}, kv_hidden_size={kv_hidden_size}, head_dim={head_dim}"
+    )
     num_tokens = input.shape[0]
     input_2d = input.view(num_tokens, -1)
     q = torch.empty(num_tokens, q_hidden_size, device=input.device, dtype=input.dtype)

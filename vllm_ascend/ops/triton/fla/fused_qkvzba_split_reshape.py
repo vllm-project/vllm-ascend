@@ -149,7 +149,7 @@ def fused_qkvzba_split_reshape_cat(
     num_heads_v,
     head_qk,
     head_v,
-):  
+):
     logger.debug(
         f"[TritonOps] fused_qkvzba_split_reshape_cat: mixed_qkvz.shape={mixed_qkvz.shape}, mixed_ba.shape={mixed_ba.shape}, "
         f"num_heads_qk={num_heads_qk}, num_heads_v={num_heads_v}, head_qk={head_qk}, head_v={head_v}"

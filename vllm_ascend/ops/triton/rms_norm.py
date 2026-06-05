@@ -38,8 +38,7 @@ def triton_q_rms(
     q,  # bs, 64, 512
     variance_epsilon,
 ):
-    logger.debug(f"[TritonOps] triton_q_rms: q.shape={q.shape}, variance_epsilon={variance_epsilon}"
-    )
+    logger.debug(f"[TritonOps] triton_q_rms: q.shape={q.shape}, variance_epsilon={variance_epsilon}")
     bs, head_num, dim = q.shape
     total_batch = bs * head_num
     q = q.view(total_batch, dim)

@@ -277,7 +277,8 @@ def split_qkv_rmsnorm_rope_impl(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     logger.debug(
         f"[TritonOps] split_qkv_rmsnorm_rope_impl: input.shape={input.shape}, "
-        f"q_hidden_size={q_hidden_size}, kv_hidden_size={kv_hidden_size}, head_dim={head_dim}")
+        f"q_hidden_size={q_hidden_size}, kv_hidden_size={kv_hidden_size}, head_dim={head_dim}"
+    )
     # get available vector core
     num_vectorcore = get_vectorcore_num()
     rope_dim = cos_sin_cache.shape[-1]

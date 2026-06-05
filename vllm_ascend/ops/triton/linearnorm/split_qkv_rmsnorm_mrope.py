@@ -298,7 +298,8 @@ def triton_split_qkv_rmsnorm_mrope(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     logger.debug(
         f"[TritonOps] triton_split_qkv_rmsnorm_mrope: qkv.shape={qkv.shape}, "
-        f"num_q_heads={num_q_heads}, num_kv_heads={num_kv_heads}, head_size={head_size}, rope_dim={rope_dim}")
+        f"num_q_heads={num_q_heads}, num_kv_heads={num_kv_heads}, head_size={head_size}, rope_dim={rope_dim}"
+    )
     core_num = get_vectorcore_num()
 
     q_size = num_q_heads * head_size
