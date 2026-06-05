@@ -80,10 +80,10 @@ jobs:
         run: |
           VERSION_INPUT="${{ inputs.vllm-ascend }}"
           
-          if [[ "$VERSION_INPUT" == "latest" ]]; then
+          if [ "$VERSION_INPUT" = "latest" ]; then
             TAGS=$(git ls-remote --tags --sort=-v:refname https://github.com/vllm-project/vllm-ascend "v*" | cut -f2 | sed 's|refs/tags/||')
             LATEST_TAG=$(echo "$TAGS" | head -n1)
-            if [[ -z "$LATEST_TAG" ]]; then
+            if [ -z "$LATEST_TAG" ]; then
               RESOLVED_VERSION="main"
             else
               RESOLVED_VERSION="$LATEST_TAG"
@@ -103,6 +103,7 @@ jobs:
       - name: Install vllm-project/vllm-ascend
         working-directory: ./vllm-ascend
         env:
+          COMPILE_CUSTOM_KERNELS: "0"
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install -r requirements-dev.txt
