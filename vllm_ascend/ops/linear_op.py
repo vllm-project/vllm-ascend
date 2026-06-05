@@ -71,6 +71,7 @@ from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
+    enable_dsa_cp_with_pcp_shard,
     enable_sp,
     flashcomm2_enable,
     get_flashcomm2_reorgnized_batch_ids,
@@ -444,6 +445,90 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+class PCPShardedColumnParallelOp(CustomColumnParallelOp):
+    def __init__(self, layer):
+        super().__init__(layer)
+        from vllm.distributed import get_pcp_group
+
+        self._pcp_group = get_pcp_group()
+
+    @property
+    def comm_group(self):
+        return self._pcp_group
+
+    @property
+    def tp_rank(self):
+        return self.comm_group.rank_in_group
+
+    @property
+    def tp_size(self):
+        return self.comm_group.world_size
+
+    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        """Linear layer with column parallelism.
+
+        Implemented multiple optimization projects for dense models, such as FlashComm and
+        communication-computation fusion.
+        """
+
+        bias = self.bias if not self.skip_bias_add else None
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        need_all_gather = not (extract_layer_index(self.layer.prefix) == 0 and is_vl_model() and "attn" in self.prefix)
+
+        if need_all_gather:
+            input_ = self._pcp_group.all_gather(input_, dim=0)
+        
+        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = self.comm_group.all_gather(output_parallel)
+        else:
+            output = output_parallel
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+class PCPShardedRowParallelOp(CustomRowParallelOp):
+    def __init__(self, layer):
+        super().__init__(layer)
+        from vllm.distributed import get_pcp_group
+
+        self._pcp_group = get_pcp_group()
+
+    @property
+    def comm_group(self):
+        return self._pcp_group
+
+    @property
+    def tp_rank(self):
+        return self.comm_group.rank_in_group
+
+    @property
+    def tp_size(self):
+        return self.comm_group.world_size
+
+    def apply_impl(
+        self,
+        input_,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        # SFAImpl has already all-gathered the weight and set_ it to layer.weight,
+        # so we just do local matmul with whatever weight is currently set.
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        assert self.quant_method is not None
+        output = self.layer.quant_method.quant_method.apply(self.layer, input_, bias_, tp_rank=self.tp_rank)
+        output = self.comm_group.reduce_scatter(output, 0)
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+    def update_attrs(self):
+        super().update_attrs()
+        self.layer.reduce_results = False
+        self.layer.input_is_parallel = False
+
 
 class Flashcomm2OshardQKVParallelOp(CustomColumnParallelOp):
     def __init__(self, layer):
@@ -630,6 +715,8 @@ def _get_column_parallel_op(
 ) -> MLPColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | Flashcomm2OshardQKVParallelOp | None:
     if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
         return ShardedCPColumnParallelOp(layer)
+    if "gate_up_proj" in prefix and enable_dsa_cp_with_pcp_shard() and not is_moe_layer(prefix):
+        return PCPShardedColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
     if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
@@ -661,8 +748,11 @@ def _get_row_parallel_op(
     | MatmulAllreduceRowParallelOp
     | SequenceRowParallelOp
     | ShardedCPRowParallelOp
+    | PCPShardedRowParallelOp
     | None
 ):
+    if enable_dsa_cp_with_pcp_shard() and ("o_proj" in prefix or "mlp.down_proj" in prefix):
+        return PCPShardedRowParallelOp(layer)
     if enable_dsa_cp_with_layer_shard() and "o_proj" in prefix:
         return ShardedCPRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
@@ -709,6 +799,7 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         | SequenceRowParallelOp
         | ShardedCPRowParallelOp
         | ShardedCPColumnParallelOp
+        | PCPShardedRowParallelOp
         | None
     ) = None
     if direct == "row":

@@ -1403,6 +1403,25 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
 
 
+@lru_cache(maxsize=1)
+def enable_dsa_cp_with_pcp_shard() -> bool:
+    """Enable o_proj weight sharding across PCP ranks.
+
+    Valid when: DSA-CP enabled AND TP=1 AND PCP>1.
+    In this case, PCP ranks shard o_proj weight along input_dim and
+    all-gather at compute time, saving (pcp_size-1)/pcp_size of o_proj memory.
+    """
+    if enable_dsa_cp_with_layer_shard() or enable_dsa_cp_with_o_proj_tp():
+        return False
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    kv_transfer_config = vllm_config.kv_transfer_config
+
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+    return tp_size == 1 and pcp_size > 1 and (kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both")
+
+
 def check_gdn_layer(vllm_config) -> bool:
     """
     gdn layer is marked with `linear_attention`.

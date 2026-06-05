@@ -7,7 +7,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group, get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -34,6 +34,7 @@ from vllm_ascend.attention.utils import (
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
+    split_decodes_and_prefills
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
@@ -55,9 +56,11 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     _round_up,
     dispose_layer,
+    enable_sp,
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,
+    enable_dsa_cp_with_pcp_shard,
     enable_sp,
     get_ascend_device_type,
     get_weight_prefetch_method,
@@ -123,6 +126,8 @@ class DSACPContext:
     slot_mapping_cp: torch.Tensor
     actual_seq_lengths_query: torch.Tensor
     actual_seq_lengths_key: torch.Tensor
+    sin_cp: torch.Tensor
+    cos_cp: torch.Tensor
 
 
 @dataclass
@@ -158,7 +163,12 @@ class AscendSFAMetadata:
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     dsa_cp_context: DSACPContext | None = None
     reshape_cache_event: torch.npu.Event = None
+    prefill_allgather_kli_event: torch.npu.Event = None
+    prefill_allgather_kv_event: torch.npu.Event = None
+    prefill_kli_cache_event: torch.npu.Event = None
+    prefill_kv_cache_event: torch.npu.Event = None
     sfa_cp_metadata: AscendPCPMetadata | None = None
+    prefill_slot_mapping: torch.Tensor | None = None
     num_decodes: int = 0
     num_decode_tokens: int = 0
     num_prefills: int = 0
@@ -212,6 +222,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.enable_dsa_cp = enable_dsa_cp()
+        self.enable_sp = enable_sp()
 
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
@@ -244,6 +255,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
+        )
 
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
@@ -268,7 +282,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         cos, sin = get_cos_and_sin_mla(input_positions, True)
 
         dsa_cp_context = None
-        if self.enable_dsa_cp:
+        if self.enable_sp:
             global_tp_size = get_tp_group().world_size
             num_tokens = num_input_tokens
             num_tokens_pad = _round_up(num_tokens, global_tp_size)
@@ -291,6 +305,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 slot_mapping = slot_mapping[:num_tokens_pad]
             slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
 
+            cos_cp, sin_cp = cos, sin
             cos = cos[local_start:local_end_with_pad]
             sin = sin[local_start:local_end_with_pad]
 
@@ -344,6 +359,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 slot_mapping_cp=slot_mapping_cp,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
+                sin_cp=sin_cp,
+                cos_cp=cos_cp,
             )
 
         if get_ascend_config().c8_enable_reshape_optim:
@@ -357,6 +374,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
+            num_decode_tokens=num_decode_tokens,
             cum_query_lens=cum_query_lens,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
@@ -399,6 +417,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
     o_proj_full_pool: torch.Tensor | None = None
+
+    # Supports forward using the all-gather o_proj weight when PCP shard is enabled.
+    o_proj_pcp_full_pool: torch.Tensor | None = None
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
@@ -502,6 +523,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         # for o_proj weight for prefill stage.
         self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
 
+        # use original PCP o_proj weight in PD mix stage, and full gather
+        # for o_proj weight for prefill stage.
+        self.enable_dsa_cp_with_pcp_shard = enable_dsa_cp_with_pcp_shard()
+        if self.enable_dsa_cp_with_pcp_shard:
+            self.pcp_shard_size = get_pcp_group().world_size
+
+
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
             if self.enable_dsa_cp_with_layer_shard:
@@ -576,6 +604,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                         post_process_after_loading_for_shard_weight_series(layer)
             else:
                 self._init_o_proj_tp_full_params()
+
+        if self.enable_dsa_cp_with_pcp_shard:
+            self._init_o_proj_pcp_shard_params()
 
         if self.enable_mlapo:
             quant_method = getattr(
@@ -807,6 +838,39 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.o_proj_full_aclnn_input_scale = self.o_proj.aclnn_input_scale.repeat(self.tp_size)
         self.o_proj_full_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.repeat(self.tp_size)
         self.o_proj_full_aclnn_input_offset = self.o_proj.aclnn_input_offset.repeat(self.tp_size)
+
+    def _init_o_proj_pcp_shard_params(self):
+        """Initialize shard-mode and Full-mode parameters for o_proj weight in PCP shard mode.
+
+        Each PCP rank holds 1/pcp_shard_size of o_proj weight (sharded along input_dim).
+        At compute time, all-gather across PCP ranks to reconstruct full weight.
+        """
+        if AscendSFAImpl.o_proj_pcp_full_pool is None:
+            sample = self.o_proj.weight
+            AscendSFAImpl.o_proj_pcp_full_pool = torch.empty(
+                (sample.shape[0] * self.pcp_shard_size, sample.shape[1]),
+                dtype=sample.dtype,
+                device=sample.device,
+            )
+
+        # Save shard-mode parameters (PCP-sharded weights)
+        self.o_proj_pcp_shard_weight = self.o_proj.weight.clone().detach()
+        self.o_proj_pcp_shard_aclnn_input_scale = self.o_proj.aclnn_input_scale.clone().detach()
+        self.o_proj_pcp_shard_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.clone().detach()
+        self.o_proj_pcp_shard_aclnn_input_offset = self.o_proj.aclnn_input_offset.clone().detach()
+
+        # Initially switch to PCP mode for graph capture
+        self.o_proj.weight.set_(self.o_proj_pcp_shard_weight)
+        self.o_proj.aclnn_input_scale.set_(self.o_proj_pcp_shard_aclnn_input_scale)
+        self.o_proj.aclnn_input_scale_reciprocal.set_(self.o_proj_pcp_shard_aclnn_input_scale_reciprocal)
+        self.o_proj.aclnn_input_offset.set_(self.o_proj_pcp_shard_aclnn_input_offset)
+
+        # Precompute Full-mode quantization parameters by repeating shard parameters across all PCP ranks
+        self.o_proj_pcp_full_aclnn_input_scale = self.o_proj.aclnn_input_scale.repeat(self.pcp_shard_size)
+        self.o_proj_pcp_full_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.repeat(
+            self.pcp_shard_size
+        )
+        self.o_proj_pcp_full_aclnn_input_offset = self.o_proj.aclnn_input_offset.repeat(self.pcp_shard_size)
 
     def _handle_o_proj_weight_switch_and_forward(
         self,
@@ -1139,6 +1203,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             actual_seq_lengths_query = attn_metadata.cum_query_lens
             actual_seq_lengths_key = attn_metadata.seq_lens
+            if self.enable_sp:
+                cos = attn_metadata.dsa_cp_context.cos_cp
+                sin = attn_metadata.dsa_cp_context.sin_cp
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
