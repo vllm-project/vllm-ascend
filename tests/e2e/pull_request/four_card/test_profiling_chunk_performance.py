@@ -39,6 +39,8 @@ BASELINE_TTFT_S = 5.2
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+        # Leave more NPU memory headroom for HCCL without reducing KV cache blocks.
+        "HCCL_BUFFSIZE": "128",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.95)
@@ -51,7 +53,7 @@ def test_profiling_chunk_ttft_performance() -> None:
         block_size=128,
         enable_expert_parallel=True,
         enable_prefix_caching=False,
-        gpu_memory_utilization=0.9,
+        gpu_memory_utilization=0.85,
         max_num_batched_tokens=12288,
         distributed_executor_backend="mp",
         enforce_eager=True,
