@@ -15,6 +15,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
+    get_packed_modules_mapping,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
@@ -203,6 +204,31 @@ class TestAscendModelSlimConfig(TestBase):
         config = AscendModelSlimConfig(bad_config)
         with self.assertRaises(ValueError):
             config.is_layer_skipped_ascend("fused_layer", fused_mapping)
+
+    def test_bailing_hybrid_mtp_packed_modules_mapping(self):
+        self.assertEqual(
+            get_packed_modules_mapping("bailing_hybrid_mtp"),
+            get_packed_modules_mapping("bailing_hybrid"),
+        )
+
+    def test_bailing_mtp_shared_head_falls_back_to_lm_head(self):
+        config = AscendModelSlimConfig({"lm_head.weight": "FLOAT"})
+
+        prefix = config.quant_prefix_mapper("bailing_hybrid_mtp", "model.layers.80.shared_head.head")
+
+        self.assertEqual(prefix, "lm_head")
+
+    def test_bailing_mtp_shared_head_keeps_existing_prefix(self):
+        config = AscendModelSlimConfig(
+            {
+                "lm_head.weight": "FLOAT",
+                "model.layers.80.shared_head.head.weight": "W8A8_DYNAMIC",
+            }
+        )
+
+        prefix = config.quant_prefix_mapper("bailing_hybrid_mtp", "model.layers.80.shared_head.head")
+
+        self.assertEqual(prefix, "model.layers.80.shared_head.head")
 
     def test_init_with_default_config(self):
         config = AscendModelSlimConfig()

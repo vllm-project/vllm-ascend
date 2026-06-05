@@ -306,8 +306,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 target_embed_tokens = target_language_model.model.embed_tokens
             elif hasattr(target_language_model.model, "embedding"):
                 target_embed_tokens = target_language_model.model.embedding
+            elif hasattr(target_language_model.model, "word_embeddings"):
+                target_embed_tokens = target_language_model.model.word_embeddings
             else:
-                raise AttributeError("Target model does not have 'embed_tokens' or 'embedding' attribute")
+                raise AttributeError(
+                    "Target model does not have 'embed_tokens', 'embedding', or 'word_embeddings' attribute"
+                )
             # If pp>1, the weights of mtp and the main model's embedding are not on the same device.
             # check if mtp model use main model's embedding and LMhead
             share_embeddings = False
@@ -386,10 +390,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else:
                     logger.warning("Target model has no accessible lm_head for sharing.")
 
-        if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
-            for _, layer_module in self.model.model.layers.items():
-                if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
-                    layer_module.shared_head.head = model.lm_head
+        if self.method == "mtp":
+            if supports_multimodal(model):
+                target_lm_head = getattr(model.get_language_model(), "lm_head", None)
+            else:
+                target_lm_head = getattr(model, "lm_head", None)
+
+            if target_lm_head is not None:
+                inner = getattr(self.model, "model", None)
+                layers = getattr(inner, "layers", None) if inner else None
+                if layers is not None:
+                    items = layers.values() if isinstance(layers, nn.ModuleDict) else layers
+                    for layer_module in items:
+                        shared_head = getattr(layer_module, "shared_head", None)
+                        if shared_head is not None and hasattr(shared_head, "head"):
+                            shared_head.head = target_lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()

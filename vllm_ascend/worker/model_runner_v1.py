@@ -53,6 +53,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -2927,8 +2928,10 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
-                assert ubid is None, "UBatching not supported with GDN yet"
+            if use_spec_decode and isinstance(
+                builder, (GDNAttentionMetadataBuilder, LinearAttentionMetadataBuilder)
+            ):
+                assert ubid is None, "UBatching not supported with spec decode metadata yet"
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
                     num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
@@ -3486,9 +3489,8 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
-        # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
-        self.need_accepted_tokens = any(
-            [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
+        self.need_accepted_tokens = (
+            self._requires_accepted_tokens_for_spec_decode()
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
@@ -4251,26 +4253,40 @@ class NPUModelRunner(GPUModelRunner):
 
     def calculate_reorder_batch_threshold(self) -> None:
         """
-        Check that if any backends reorder batches; that the reordering
-        is compatible (e.g., decode threshold is the same)
+        Choose the minimum reorder batch threshold from all attention groups.
+        Backends can support lower thresholds than they request, with a
+        possible performance penalty from treating some decode-shaped requests
+        as prefills.
         """
+        self.reorder_batch_threshold = None
         for group in self._attn_group_iterator():
             attn_metadata_builder_i = group.get_metadata_builder()
-            if hasattr(attn_metadata_builder_i, "reorder_batch_threshold"):  # noqa
-                # check that if any backends reorder batches; that the reordering
-                # is compatible (e.g., decode threshold is the same)
-                reorder_batch_threshold_i = attn_metadata_builder_i.reorder_batch_threshold
-                if reorder_batch_threshold_i is not None:  # noqa
-                    if self.reorder_batch_threshold is not None:
-                        if reorder_batch_threshold_i != self.reorder_batch_threshold:
-                            raise ValueError(
-                                f"Attention backend reorders decodes with "
-                                f"threshold {reorder_batch_threshold_i} but other "
-                                f"backend uses threshold "
-                                f"{self.reorder_batch_threshold}"
-                            )
-                    else:
-                        self.reorder_batch_threshold = reorder_batch_threshold_i  # noqa
+            reorder_batch_threshold_i = getattr(
+                attn_metadata_builder_i, "reorder_batch_threshold", None
+            )
+            if reorder_batch_threshold_i is None:
+                continue
+            if self.reorder_batch_threshold is None:
+                self.reorder_batch_threshold = reorder_batch_threshold_i
+            else:
+                self.reorder_batch_threshold = min(
+                    self.reorder_batch_threshold,
+                    reorder_batch_threshold_i,
+                )
+
+    def _requires_accepted_tokens_for_spec_decode(self) -> bool:
+        if self.speculative_config is None:
+            return False
+
+        # Hybrid models need accepted-token counts to shift recurrent/linear
+        # attention state after speculative tokens are accepted or rejected.
+        if self.model_config.is_hybrid:
+            return True
+
+        return any(
+            isinstance(attn_group[0].kv_cache_spec, MambaSpec)
+            for attn_group in self.attn_groups
+        )
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
