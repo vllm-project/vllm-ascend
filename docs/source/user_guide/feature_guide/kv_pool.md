@@ -655,7 +655,11 @@ echo "vLLM started. Log file: log_mix.log"
 
 ```
 
+<<<<<<< HEAD
 #### [2. Run Inference](#2-run-inference)
+=======
+#### [2. Run Inference](#2run-inference)
+>>>>>>> bffbd3d82fa33155127a51f0821fc08109bcd21b
 
 ## Example of using Yuanrong as a KV Pool backend
 
