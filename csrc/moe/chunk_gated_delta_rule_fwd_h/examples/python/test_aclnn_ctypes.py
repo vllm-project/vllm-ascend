@@ -69,11 +69,11 @@ _acl.aclrtFree.restype = c_int
 _acl.aclrtFree.argtypes = [c_void_p]
 
 # Our kernel
-_getws = getattr(_opapi, "aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize", None)
-_exec = getattr(_opapi, "aclnnChunkGatedDeltaRuleFwdH", None)
-if not _getws or not _exec:
+if not hasattr(_opapi, "aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize") or not hasattr(_opapi, "aclnnChunkGatedDeltaRuleFwdH"):
     print("ERROR: aclnn kernel symbols not found. Install the .run package first.", file=sys.stderr)
     sys.exit(1)
+_getws = _opapi.aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize
+_exec = _opapi.aclnnChunkGatedDeltaRuleFwdH
 
 # GetWorkspaceSize(k,w,u, g,gk,init, outFS,chunkSz,saveNV, cuSeq,chunkIdx, exp2,transpose, h,vn,fs, wsSize,executor)
 _getws.restype = c_int
