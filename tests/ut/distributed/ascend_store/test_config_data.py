@@ -157,7 +157,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
     def test_process_tokens_rehashes_grouped_hashes(self):
-        db = ChunkedTokenDatabase(self.meta, block_size=16, partitions=None, hash_block_size=8)
+        db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None, hash_block_size=8)
         result = list(db.process_tokens(32, ["a", "b", "c", "d"]))
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())

@@ -101,6 +101,7 @@ sys.modules["vllm.logger"].logger = MagicMock()  # type: ignore[attr-defined]
 _base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
 _base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]
 _base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})  # type: ignore[attr-defined]
+_base_mod.KVConnectorWorkerMetadata = type("KVConnectorWorkerMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
 _base_mod.KVConnectorRole.WORKER = "WORKER"
