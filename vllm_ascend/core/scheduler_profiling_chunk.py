@@ -636,17 +636,11 @@ class ProfilingChunkScheduler(Scheduler):
                     continue
 
                 # Speculative decode related.
-                if (
-                    self.is_mtp_kv_consumer or not self.vllm_config.kv_transfer_config
-                ) and request.spec_token_ids:
-                    num_scheduled_spec_tokens = (
-                        num_new_tokens + num_computed_tokens - request.num_tokens
-                    )
+                if (self.is_mtp_kv_consumer or not self.vllm_config.kv_transfer_config) and request.spec_token_ids:
+                    num_scheduled_spec_tokens = num_new_tokens + num_computed_tokens - request.num_tokens
                     if num_scheduled_spec_tokens > 0:
                         del request.spec_token_ids[num_scheduled_spec_tokens:]
-                        scheduled_spec_decode_tokens[request.request_id] = (
-                            request.spec_token_ids
-                        )
+                        scheduled_spec_decode_tokens[request.request_id] = request.spec_token_ids
                     else:
                         request.spec_token_ids = []
 

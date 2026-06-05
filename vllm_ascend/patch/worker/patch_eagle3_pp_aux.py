@@ -131,9 +131,7 @@ def _patch_make_empty_intermediate_tensors(inner_model: nn.Module) -> None:
         aux_layers = getattr(inner_model, "aux_hidden_state_layers", ())
         # A non-first PP rank only receives aux hidden states produced by
         # earlier pipeline stages. Local aux states are appended during forward.
-        num_incoming_aux_layers = sum(
-            layer_idx < inner_model.start_layer for layer_idx in aux_layers
-        )
+        num_incoming_aux_layers = sum(layer_idx < inner_model.start_layer for layer_idx in aux_layers)
         hidden_size = inner_model.config.hidden_size
         for i in range(num_incoming_aux_layers):
             result.tensors[f"{_AUX_KEY_PREFIX}{i}"] = torch.zeros(
