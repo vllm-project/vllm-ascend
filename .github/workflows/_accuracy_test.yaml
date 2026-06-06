@@ -144,6 +144,7 @@ jobs:
 
       - name: Run accuracy test
         id: report
+        working-directory: ./vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
@@ -155,9 +156,10 @@ jobs:
           TORCH_VERSION: ${{ env.GHA_TORCH_VERSION }}
           TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
         run: |
-          mkdir -p ./benchmarks/accuracy
+          mkdir -p ../benchmarks/accuracy
           pytest -sv ./tests/e2e/models/test_lm_eval_correctness.py \
-          --config ./tests/e2e/models/configs/${{ inputs.model_name }}.yaml
+          --config ./tests/e2e/models/configs/${{ inputs.model_name }}.yaml \
+          --report-dir ../benchmarks/accuracy
 
       - name: Generate step summary
         if: ${{ always() }}
