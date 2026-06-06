@@ -194,9 +194,9 @@ def _resolve_config_inheritance(config: list[dict]) -> list[dict]:
         for base_name in _as_base_list(module.get("base")):
             base_module = resolve(base_name)
             for field in inherited_fields:
-                inherited_values[field] = _merge_unique(inherited_values[field], base_module.get(field, []))
+                inherited_values[field] = _merge_unique(inherited_values[field], base_module.get(field) or [])
         for field in inherited_fields:
-            module[field] = _merge_unique(inherited_values[field], module.get(field, []))
+            module[field] = _merge_unique(inherited_values[field], module.get(field) or [])
         resolving.remove(name)
         resolved[name] = module
         return module
