@@ -1366,6 +1366,7 @@ class NPUModelRunner(GPUModelRunner):
 
         slot_mapping = getattr(runtime_common, "slot_mapping", None)
         if torch.is_tensor(slot_mapping):
+            assert isinstance(slot_mapping, torch.Tensor)
             mtp_slot_mapping = drafter.slot_mapping_group[0]
             active_slot_mapping_len = int(
                 getattr(runtime_common, "num_actual_tokens", self.query_start_loc.np[active_num_reqs])
