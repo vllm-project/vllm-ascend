@@ -45,18 +45,29 @@ jobs:
 
           if [ "$ACTOR" = "$PR_AUTHOR" ]; then
             echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            PERMISSION=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission')
+            case "$PERMISSION" in
+              triage|write|maintain|admin)
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::User $ACTOR is not the PR author and does not have triage+ permission."
+                echo "authorized=false" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
           fi
 
-          PERMISSION=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission')
-          case "$PERMISSION" in
-            triage|write|maintain|admin)
-              echo "authorized=true" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "::error::User $ACTOR is not the PR author and does not have triage+ permission."
-              echo "authorized=false" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.authorized != 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
+          body: |
+            rerun command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /rerun.
+          reactions: confused
 
       - name: Re-run failed workflows
         id: rerun
@@ -101,12 +112,3 @@ jobs:
             - **Ref**: `${{ github.event.client_payload.pull_request.head.sha }}`
             - **Workflow run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           reactions: hooray
-
-      - name: Add unauthorized reaction
-        if: steps.auth.outputs.authorized != 'true'
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
-          reactions: confused

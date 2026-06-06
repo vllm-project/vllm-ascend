@@ -53,19 +53,19 @@ jobs:
           if [ "$ACTOR" = "$PR_AUTHOR" ]; then
             echo "User $ACTOR is the PR author, authorized."
             echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            PERMISSION=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission')
+            case "$PERMISSION" in
+              triage|write|maintain|admin)
+                echo "User $ACTOR has $PERMISSION permission, authorized."
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::User $ACTOR is not the PR author and does not have triage+ permission."
+                echo "authorized=false" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
           fi
-
-          PERMISSION=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission')
-          case "$PERMISSION" in
-            triage|write|maintain|admin)
-              echo "User $ACTOR has $PERMISSION permission, authorized."
-              echo "authorized=true" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "::error::User $ACTOR is not the PR author and does not have triage+ permission."
-              echo "authorized=false" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
 
       - name: Post workflow URL
         id: notify
