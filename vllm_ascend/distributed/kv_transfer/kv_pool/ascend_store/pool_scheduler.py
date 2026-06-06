@@ -803,7 +803,7 @@ class KVPoolScheduler:
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
     ) -> ReqMeta | None:
-        if not self.save_decode_cache and not self.prfflllffload:
+        if not self.save_decode_cache and not self.layerwise_offload:
             return None
         request_tracker = self._request_trackers.get(req_id)
         if request_tracker is None:
