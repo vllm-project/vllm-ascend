@@ -971,9 +971,9 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
 
-        # Sync num_accepted_tokens from CPU (set by
-        # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
+        # Sync num_accepted_tokens from CPU only when the current step is
+        # actually running a spec path that consumes accepted-token semantics.
+        if self._step_needs_accepted_tokens(use_spec_decode) and self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
             # Async mode: condense() reordered indices, use prev_positions mapping
             if self.use_async_scheduling and prev_req_id_to_index:
@@ -1471,6 +1471,9 @@ class NPUModelRunner(GPUModelRunner):
             group=tp_group.device_group,
         )
         return spec_num_output_tokens_per_req
+
+    def _step_needs_accepted_tokens(self, use_spec_decode: bool) -> bool:
+        return bool(use_spec_decode and self.need_accepted_tokens)
 
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
@@ -2235,7 +2238,8 @@ class NPUModelRunner(GPUModelRunner):
                 positions=positions,
             )
 
-        if self.need_accepted_tokens:
+        step_needs_accepted_tokens = self._step_needs_accepted_tokens(spec_decode_metadata is not None)
+        if step_needs_accepted_tokens:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
 
@@ -2377,7 +2381,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self._finalize_dump_data()
 
-        if self.need_accepted_tokens:
+        if step_needs_accepted_tokens:
             assert self.sampling_done_event is not None
             with (
                 record_function_or_nullcontext("async_state_update"),
@@ -3636,9 +3640,13 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
-        # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
+        # accepted-token semantics are consumed by Mamba paths and by GDN
+        # speculative attention metadata. Keep this conservative, but avoid
+        # enabling it for unrelated backends.
         self.need_accepted_tokens = any(
-            [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
+            isinstance(attn_group[0].kv_cache_spec, MambaSpec)
+            or isinstance(attn_group[0].get_metadata_builder(0), GDNAttentionMetadataBuilder)
+            for attn_group in self.attn_groups
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)

@@ -251,6 +251,34 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertTrue(torch.equal(result, torch.tensor([4, 3], dtype=torch.int32)))
         mock_broadcast.assert_called_once()
 
+    def test_step_needs_accepted_tokens_requires_spec_step(self):
+        runner = self._build_runner()
+        runner.need_accepted_tokens = True
+
+        self.assertFalse(runner._step_needs_accepted_tokens(False))
+        self.assertTrue(runner._step_needs_accepted_tokens(True))
+
+    def test_gdn_builder_enables_need_accepted_tokens(self):
+        class DummyGDN:
+            pass
+
+        runner = self._build_runner()
+        with patch("vllm_ascend.worker.model_runner_v1.GDNAttentionMetadataBuilder", DummyGDN):
+            gdn_builder = DummyGDN()
+            fake_group = [
+                SimpleNamespace(
+                    kv_cache_spec=object(),
+                    get_metadata_builder=MagicMock(return_value=gdn_builder),
+                )
+            ]
+            runner.attn_groups = [fake_group]
+            runner.need_accepted_tokens = any(
+                isinstance(attn_group[0].get_metadata_builder(0), DummyGDN)
+                for attn_group in runner.attn_groups
+            )
+
+            self.assertTrue(runner.need_accepted_tokens)
+
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):
     def _build_runner(self, debugger=None):
