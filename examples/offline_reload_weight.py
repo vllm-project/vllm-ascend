@@ -40,7 +40,7 @@ def main():
 
     # Update load format from `dummy` to `auto`
     llm.collective_rpc(
-        "update_config", args=({"load_config": {"load_format": "auto"}},)
+        "update_config", args=({"load_config": {"load_format": "auto"}})
     )
     # Now reload real weights inplace
     llm.collective_rpc("reload_weights")
