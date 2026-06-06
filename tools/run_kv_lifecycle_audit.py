@@ -137,6 +137,17 @@ def main() -> int:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"passed={passed}")
+    print(f"iterations={len(records)}")
+    print(f"failures={len(failures)}")
+    if records:
+        first = records[0]
+        print(
+            "first_iter="
+            f"{first['start_free_blocks']} "
+            f"{first['end_free_blocks']} "
+            f"{first['delayed_send_marked']}"
+        )
     print(out_path)
     return 0 if passed else 1
 
