@@ -68,6 +68,7 @@ _vllm_mock_modules = [
     "vllm.distributed.parallel_state",
     "vllm.envs",
     "vllm.forward_context",
+    "vllm.logger",
     "vllm.model_executor",
     "vllm.model_executor.layers",
     "vllm.model_executor.layers.linear",
@@ -95,10 +96,12 @@ for _mod_name in _vllm_mock_modules:
         sys.modules[_mod_name] = MagicMock()
 
 sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
+sys.modules["vllm.logger"].logger = MagicMock()  # type: ignore[attr-defined]
 
 _base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
 _base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]
 _base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})  # type: ignore[attr-defined]
+_base_mod.KVConnectorWorkerMetadata = type("KVConnectorWorkerMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
 _base_mod.KVConnectorRole.WORKER = "WORKER"
