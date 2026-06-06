@@ -218,6 +218,39 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertTrue(torch.equal(counts, expected_counts))
         runner.spec_sampling_executor.execute_from_runtime.assert_called_once()
 
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    @patch("torch.distributed.broadcast")
+    def test_sync_mtp_output_counts_across_tp_noop_for_single_tp(self, mock_broadcast, mock_get_tp_group):
+        runner = self._build_runner()
+        runner.speculative_config = SimpleNamespace(method="mtp")
+        mock_get_tp_group.return_value = SimpleNamespace(world_size=1, device_group="tp")
+
+        counts = torch.tensor([2, 1], dtype=torch.int32)
+        result = runner._sync_mtp_output_counts_across_tp(counts)
+
+        self.assertTrue(torch.equal(result, counts))
+        mock_broadcast.assert_not_called()
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    @patch("torch.distributed.broadcast")
+    def test_sync_mtp_output_counts_across_tp_broadcasts_from_rank0(
+        self, mock_broadcast, mock_get_tp_group
+    ):
+        runner = self._build_runner()
+        runner.speculative_config = SimpleNamespace(method="mtp")
+        mock_get_tp_group.return_value = SimpleNamespace(world_size=2, device_group="tp")
+
+        def _fill_from_rank0(tensor, src=0, group=None):
+            tensor.copy_(torch.tensor([4, 3], dtype=tensor.dtype))
+
+        mock_broadcast.side_effect = _fill_from_rank0
+        counts = torch.tensor([2, 1], dtype=torch.int32)
+
+        result = runner._sync_mtp_output_counts_across_tp(counts)
+
+        self.assertTrue(torch.equal(result, torch.tensor([4, 3], dtype=torch.int32)))
+        mock_broadcast.assert_called_once()
+
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):
     def _build_runner(self, debugger=None):

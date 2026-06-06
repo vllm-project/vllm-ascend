@@ -1451,6 +1451,21 @@ class NPUModelRunner(GPUModelRunner):
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
+    def _sync_mtp_output_counts_across_tp(
+        self,
+        spec_num_output_tokens_per_req: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if spec_num_output_tokens_per_req is None:
+            return None
+        if not self.speculative_config or self.speculative_config.method != "mtp":
+            return spec_num_output_tokens_per_req
+        tp_group = get_tp_group()
+        if tp_group.world_size <= 1:
+            return spec_num_output_tokens_per_req
+        synced = spec_num_output_tokens_per_req.clone()
+        torch.distributed.broadcast(synced, src=0, group=tp_group.device_group)
+        return synced
+
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
         self,
@@ -2202,6 +2217,9 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output, spec_num_output_tokens_per_req = self._sample(
                 logits, spec_decode_metadata
+            )
+            spec_num_output_tokens_per_req = self._sync_mtp_output_counts_across_tp(
+                spec_num_output_tokens_per_req
             )
             self._maybe_dump_mtp_spec_sampling_case(
                 logits=logits,
