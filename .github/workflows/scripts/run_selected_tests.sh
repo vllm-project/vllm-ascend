@@ -66,6 +66,7 @@ run_pytest_target() {
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
   set +e
+  . /usr/local/Ascend/ascend-toolkit/set_env.sh
   pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
   local status=${PIPESTATUS[0]}
   set -e
