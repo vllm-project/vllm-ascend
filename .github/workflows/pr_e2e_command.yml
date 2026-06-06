@@ -34,7 +34,7 @@ permissions:
 jobs:
   e2e-test:
     name: Run /e2e tests
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: ubuntu-latest
     outputs:
       pr_sha: ${{ steps.resolve.outputs.pr_sha }}
       test_groups: ${{ steps.groups.outputs.test_groups }}
