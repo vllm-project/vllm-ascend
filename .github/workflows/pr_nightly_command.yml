@@ -53,9 +53,34 @@ jobs:
             *)
               echo "::error::User $ACTOR does not have triage+ permission and is not authorized to trigger nightly tests."
               echo "is_authorized=false" >> "$GITHUB_OUTPUT"
-              exit 1
               ;;
           esac
+
+      - name: Post workflow URL
+        if: steps.auth.outputs.is_authorized == 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
+          body: |
+            /nightly command triggered. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+          reactions: rocket
+
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.is_authorized == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
+          body: |
+            /nightly command failed: you do not have permission. Only users with triage+ permission can trigger /nightly.
+          reactions: confused
+
+      - name: Fail if unauthorized
+        if: steps.auth.outputs.is_authorized == 'false'
+        run: exit 1
 
       - name: Resolve test cases and branch
         id: resolve
@@ -132,33 +157,3 @@ jobs:
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}'
           echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
-
-  report:
-    name: Report result
-    needs: [authorize, dispatch-a2, dispatch-a3]
-    if: always() && needs.authorize.result != 'skipped'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Add reaction
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
-          reactions: ${{ needs.authorize.result == 'success' && 'hooray' || 'confused' }}
-
-      - name: Create comment
-        if: needs.authorize.result == 'success'
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
-          body: |
-            /nightly command dispatched.
-
-            - **Test cases**: `${{ needs.authorize.outputs.test_cases }}`
-            - **Branch**: `${{ needs.authorize.outputs.branch }}`
-            - **A2 run**: https://github.com/${{ github.event.client_payload.github.payload.repository.full_name }}/actions/workflows/schedule_nightly_test_a2.yaml
-            - **A3 run**: https://github.com/${{ github.event.client_payload.github.payload.repository.full_name }}/actions/workflows/schedule_nightly_test_a3.yaml
-          reactions: hooray

@@ -136,7 +136,7 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: matrix.os == 'openeuler'
         run: |
-          yum install -y gcc gcc-c++ cmake numactl-devel clang patch
+          yum install -y gcc gcc-c++ cmake numactl-devel clang patch zstd
           pip install uv
 
       - name: Get image tag

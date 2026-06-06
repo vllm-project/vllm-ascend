@@ -84,7 +84,7 @@ jobs:
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
-          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install uv
 
@@ -133,6 +133,7 @@ jobs:
 
       - uses: dorny/paths-filter@v4
         id: csrc-filter
+        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         with:
           filters: |
             csrc:
@@ -188,7 +189,12 @@ jobs:
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         run: |
-          echo "CSRC cache restored from cache: ${{ steps.cache-csrc.outputs.cache-hit }}"
+          CACHE_HIT="${{ steps.cache-csrc.outputs.cache-hit }}"
+          if [ -n "$CACHE_HIT" ]; then
+            echo "CSRC cache restored from cache: $CACHE_HIT"
+          else
+            echo "CSRC cache miss: no cache entry found"
+          fi
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
           pip install uc-manager
           uv pip install -r requirements-dev.txt
@@ -208,7 +214,6 @@ jobs:
           COMPILE_CUSTOM_KERNELS: 0
         run: |
           pip install uc-manager
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           uv pip install -r requirements-dev.txt
           uv pip install -e .
 
@@ -235,7 +240,6 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \

@@ -102,6 +102,7 @@ jobs:
 
             - **Re-ran**: ${{ steps.rerun.outputs.rerun_count }} failed workflow(s)
             - **Ref**: `${{ github.event.client_payload.pull_request.head.sha }}`
+            - **Workflow run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           reactions: hooray
 
       - name: Add unauthorized reaction

@@ -39,6 +39,7 @@ jobs:
       pr_sha: ${{ steps.resolve.outputs.pr_sha }}
       test_groups: ${{ steps.groups.outputs.test_groups }}
       has_tests: ${{ steps.groups.outputs.has_tests }}
+      notify_comment_id: ${{ steps.notify.outputs.comment-id }}
     steps:
       - name: Check user authorization
         id: auth
@@ -49,14 +50,12 @@ jobs:
           PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
-          # Allow PR author
           if [ "$ACTOR" = "$PR_AUTHOR" ]; then
             echo "User $ACTOR is the PR author, authorized."
             echo "authorized=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Allow users with triage+ permission
           PERMISSION=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission')
           case "$PERMISSION" in
             triage|write|maintain|admin)
@@ -66,12 +65,45 @@ jobs:
             *)
               echo "::error::User $ACTOR is not the PR author and does not have triage+ permission."
               echo "authorized=false" >> "$GITHUB_OUTPUT"
-              exit 1
               ;;
           esac
 
+      - name: Post workflow URL
+        id: notify
+        if: steps.auth.outputs.authorized == 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
+          body: |
+            /e2e command triggered. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+          reactions: rocket
+
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.authorized == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
+          body: |
+            /e2e command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /e2e.
+          reactions: confused
+
+      - name: Fail if unauthorized
+        if: steps.auth.outputs.authorized == 'false'
+        run: exit 1
+
+      - name: Checkout repo
+        if: steps.auth.outputs.authorized == 'true'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
       - name: Resolve PR info and test names
         id: resolve
+        if: steps.auth.outputs.authorized == 'true'
         run: |
           PR_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
           echo "pr_sha=$PR_SHA" >> "$GITHUB_OUTPUT"
@@ -81,76 +113,33 @@ jobs:
 
       - name: Validate test paths
         id: validate
+        if: steps.auth.outputs.authorized == 'true'
         env:
           ALL_ARGS: ${{ steps.resolve.outputs.all_args }}
         run: |
           TESTS=$(echo "$ALL_ARGS" | tr '\n' ' ' | xargs)
+          if [ -z "$TESTS" ]; then
+            echo "::error::No test paths provided. Usage: /e2e <test-path-1> [test-path-2] ..."
+            exit 1
+          fi
           for TEST in $TESTS; do
-            case "$TEST" in
-              tests/e2e/pull_request/*)
-                ;;
-              *)
-                echo "::error::Unsupported test path: $TEST"
-                echo "Only tests under tests/e2e/pull_request/ are supported."
-                exit 1
-                ;;
-            esac
+            if [[ ! "$TEST" =~ ^tests/e2e/pull_request/[^/]+/ ]]; then
+              echo "::error::Unsupported test path: $TEST"
+              echo "Only tests under tests/e2e/pull_request/<subdir>/ are supported."
+              exit 1
+            fi
           done
           echo "All test paths are valid."
           echo "tests=$TESTS" >> "$GITHUB_OUTPUT"
 
       - name: Categorize tests by runner
         id: groups
-        env:
-          TEST_LIST: ${{ steps.validate.outputs.tests }}
+        if: steps.auth.outputs.authorized == 'true'
         run: |
-          echo "All specified tests: $TEST_LIST"
-
-          SINGLECARD_TESTS=""
-          MULTICARD_2_TESTS=""
-          MULTICARD_4_TESTS=""
-          P310_SINGLECARD_TESTS=""
-          P310_MULTICARD_TESTS=""
-
-          for TEST in $TEST_LIST; do
-            if echo "$TEST" | grep -q "four_card/_310p"; then
-              P310_MULTICARD_TESTS="$P310_MULTICARD_TESTS $TEST"
-            elif echo "$TEST" | grep -q "_310p"; then
-              P310_SINGLECARD_TESTS="$P310_SINGLECARD_TESTS $TEST"
-            elif echo "$TEST" | grep -q "four_card"; then
-              MULTICARD_4_TESTS="$MULTICARD_4_TESTS $TEST"
-            elif echo "$TEST" | grep -q "two_card"; then
-              MULTICARD_2_TESTS="$MULTICARD_2_TESTS $TEST"
-            else
-              SINGLECARD_TESTS="$SINGLECARD_TESTS $TEST"
-            fi
-          done
-
-          python3 - <<'PY'
-          import json, os
-
-          specs = [
-              ("SINGLECARD_TESTS", 1, "a2", "linux-aarch64-a2b3-1", "9.0.0-910b-ubuntu22.04-py3.11"),
-              ("MULTICARD_2_TESTS", 2, "a3", "linux-aarch64-a3-2", "9.0.0-a3-ubuntu22.04-py3.11"),
-              ("MULTICARD_4_TESTS", 4, "a3", "linux-aarch64-a3-4", "9.0.0-a3-ubuntu22.04-py3.11"),
-              ("P310_SINGLECARD_TESTS", 1, "310p", "linux-aarch64-310p-1", "9.1.0-beta.1-310p-ubuntu22.04-py3.11"),
-              ("P310_MULTICARD_TESTS", 4, "310p", "linux-aarch64-310p-4", "9.1.0-beta.1-310p-ubuntu22.04-py3.11"),
-          ]
-          groups = []
-          for env_name, num_npus, npu_type, runner, image_tag in specs:
-              tests = " ".join(os.environ.get(env_name, "").split())
-              if tests:
-                  groups.append({
-                      "num_npus": num_npus,
-                      "npu_type": npu_type,
-                      "runner": runner,
-                      "tests": tests,
-                      "image_tag": image_tag,
-                  })
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              print(f"has_tests={str(bool(groups)).lower()}", file=f)
-              print(f"test_groups={json.dumps(groups, separators=(',', ':'))}", file=f)
-          PY
+          TESTS=$(echo "${{ steps.validate.outputs.tests }}" | tr '\n' ' ')
+          read -ra TEST_ARRAY <<< "$TESTS"
+          python3 .github/workflows/scripts/select_tests.py \
+            --changed-files "${TEST_ARRAY[@]}"
 
   trigger-selected-tests:
     name: e2e-comment (${{ matrix.vllm_version }})
@@ -167,26 +156,17 @@ jobs:
       test_groups: ${{ needs.e2e-test.outputs.test_groups }}
 
   report:
-    name: Report result on PR
+    name: Report result
     needs: [e2e-test, trigger-selected-tests]
-    if: always() && needs.e2e-test.result != 'skipped'
+    if: always() && needs.e2e-test.result == 'success' && needs.e2e-test.outputs.notify_comment_id != ''
     runs-on: ubuntu-latest
     steps:
-      - name: Add reaction
+      - name: Update comment with result
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
-          reactions: ${{ (needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped') && 'hooray' || 'confused' }}
-
-      - name: Create comment
-        if: needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped'
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
+          comment-id: ${{ needs.e2e-test.outputs.notify_comment_id }}
           body: |
-            /e2e command completed. Check the [workflow run](https://github.com/${{ github.event.client_payload.github.payload.repository.full_name }}/actions) for details.
-          reactions: hooray
+            /e2e command ${{ (needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped') && 'completed successfully' || 'failed' }}. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+          reactions: ${{ (needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped') && 'hooray' || 'confused' }}
