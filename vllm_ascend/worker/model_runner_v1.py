@@ -1462,9 +1462,15 @@ class NPUModelRunner(GPUModelRunner):
         tp_group = get_tp_group()
         if tp_group.world_size <= 1:
             return spec_num_output_tokens_per_req
-        synced = spec_num_output_tokens_per_req.clone()
-        torch.distributed.broadcast(synced, src=0, group=tp_group.device_group)
-        return synced
+        # In-place broadcast is sufficient here: the synchronized tensor is
+        # only consumed after this point, so we can avoid an extra device-side
+        # clone on every MTP step.
+        torch.distributed.broadcast(
+            spec_num_output_tokens_per_req,
+            src=0,
+            group=tp_group.device_group,
+        )
+        return spec_num_output_tokens_per_req
 
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
@@ -2556,8 +2562,12 @@ class NPUModelRunner(GPUModelRunner):
                 )
         else:
             valid_sampled_token_ids = []
-            invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
-            invalid_req_indices_set = set(invalid_req_indices)
+            if discard_sampled_tokens_req_indices.numel() > 0:
+                invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
+                invalid_req_indices_set = set(invalid_req_indices)
+            else:
+                invalid_req_indices = []
+                invalid_req_indices_set = set()
 
             if self.num_spec_tokens <= 0:
                 assert sampled_token_ids.shape[-1] == 1
