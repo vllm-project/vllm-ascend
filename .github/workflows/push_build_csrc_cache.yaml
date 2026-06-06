@@ -28,6 +28,7 @@ on:
       - .github/workflows/push_build_csrc_cache.yaml
       - 'pyproject.toml'
   workflow_dispatch:
+  pull_request:
 
 defaults:
   run:
