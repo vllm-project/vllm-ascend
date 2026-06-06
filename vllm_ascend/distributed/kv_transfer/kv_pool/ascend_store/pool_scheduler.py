@@ -526,6 +526,9 @@ class KVPoolScheduler:
         if self.use_gva_layerwise:
             num_external_hit_tokens = self._get_layerwise_gva_hit_tokens(
                 request, token_len, num_computed_tokens)
+        elif self.use_layerwise:
+            num_external_hit_tokens = self._get_store_lookup_hit_tokens(
+                request, token_len, num_computed_tokens)
         else:
             if self.client is None:
                 self.client = LookupKeyClient(self.vllm_config)
