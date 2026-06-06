@@ -99,6 +99,7 @@ benchmarks:
     baseline: 1
     threshold: 0.97
 
+
   acc-gpqa:
     case_type: accuracy
     dataset_path: vllm-ascend/gpqa
