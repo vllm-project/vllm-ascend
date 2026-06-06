@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-22 04:30+0000\n"
+"POT-Creation-Date: 2026-06-04 05:04+0000\n"
 "PO-Revision-Date: 2026-01-22 16:18+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -54,12 +54,12 @@ msgid "Text-Only Language Models"
 msgstr "纯文本语言模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:14
-#: ../../source/user_guide/support_matrix/supported_models.md:76
+#: ../../source/user_guide/support_matrix/supported_models.md:77
 msgid "Generative Models"
 msgstr "生成模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:16
-#: ../../source/user_guide/support_matrix/supported_models.md:78
+#: ../../source/user_guide/support_matrix/supported_models.md:79
 msgid "Core Supported Models"
 msgstr "核心支持的模型"
 
@@ -310,7 +310,7 @@ msgid "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
 msgstr "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:34
-#: ../../source/user_guide/support_matrix/supported_models.md:88
+#: ../../source/user_guide/support_matrix/supported_models.md:89
 msgid "Extended Compatible Models"
 msgstr "扩展兼容模型"
 
@@ -395,6 +395,14 @@ msgid "Mistral/Mistral-Instruct"
 msgstr "Mistral/Mistral-Instruct"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Hy3-preview"
+msgstr "Hy3-preview"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "A3"
+msgstr "A3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
 msgid "DeepSeek V2.5"
 msgstr "DeepSeek V2.5"
 
@@ -410,7 +418,7 @@ msgstr "Mllama"
 msgid "MiniMax-Text"
 msgstr "MiniMax-Text"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:61
+#: ../../source/user_guide/support_matrix/supported_models.md:62
 msgid "Pooling Models"
 msgstr "池化模型"
 
@@ -466,7 +474,7 @@ msgstr "Bert"
 msgid "Reward Model, gsm8k_correctness accuracy=0.80"
 msgstr "奖励模型，gsm8k_correctness 准确率=0.80"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:74
+#: ../../source/user_guide/support_matrix/supported_models.md:75
 msgid "Multimodal Language Models"
 msgstr "多模态语言模型"
 

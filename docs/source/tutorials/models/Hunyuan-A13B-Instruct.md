@@ -62,7 +62,7 @@ cd ..
 ```
 
 ### Software Stack Version Verification
-
+ <!-- TODO: update to Python 3.12 after verification -->
 The environment is based on CANN built into the GiteeAI platform, and successfully runs vLLM |vllm_ascend_version|, and vLLM-Ascend:|vllm_ascend_version| through the Python 3.11.6 Conda environment.
 
 ## Deployment
