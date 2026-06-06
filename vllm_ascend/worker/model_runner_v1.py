@@ -331,11 +331,16 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_sparse:
             if get_ascend_device_type() == AscendDeviceType.A5 and self.ascend_config.enable_sparse_c8:
                 # A5 sparse C8: kv_lora and k_rope are merged into a single CKV FP8 tensor.
-                # The merged dimension = kv_lora_rank + qk_rope_head_dim * 2 + quant_scale(16).
                 # qk_rope_head_dim = 0 signals the merged layout.
+                # ckv_dim = kv_lora_rank                    (fp8, 1 byte/elem)
+                #         + qk_rope_head_dim * 2             (bf16→fp8: 2/1 bytes)
+                #         + 4 * 4                            (quant_scale metadata:
+                #                                              4 = kv_lora_rank / tile_size(128),
+                #                                              4 = float32→fp8: 4/1 bytes)
+                A5_CKV_SCALE_METADATA_BYTES = 4 * 4
                 ckv = self.model_config.hf_text_config.kv_lora_rank
                 rope = self.model_config.hf_text_config.qk_rope_head_dim
-                a5_ckv_dim = ckv + rope * 2 + 4 * 4
+                a5_ckv_dim = ckv + rope * 2 + A5_CKV_SCALE_METADATA_BYTES
                 self.sparse_head_dim = (
                     a5_ckv_dim,
                     0,
@@ -4054,7 +4059,10 @@ class NPUModelRunner(GPUModelRunner):
                             k_dim,
                         )
                         if self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
-                            # A5 sparse C8: CKV tensor includes merged kv_lora, k_rope, and scale metadata
+                            # A5 sparse C8: CKV tensor = kv_lora(fp8) + k_rope(bf16→fp8) + quant_scale_metadata
+                            #   kv_lora_rank                    : fp8, 1 byte/elem
+                            #   qk_rope_head_dim * 2            : bf16→fp8 ratio (2/1 bytes)
+                            #   4 * 4                           : quant_scale (4 elements × float32→fp8 ratio)
                             k_shape = (
                                 mla_num_blocks,
                                 mla_block_size,
