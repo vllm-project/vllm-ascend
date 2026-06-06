@@ -1705,6 +1705,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 "remote_block_ids": ([10, 11], [10, 11]),
                 "local_block_ids": ([20, 21], [20, 21]),
                 "num_prompt_blocks": 6,
+                "num_committed_blocks": 8,
                 "num_external_blocks": 4,
             },
             {
@@ -1721,6 +1722,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 "remote_block_ids": ([30, 31, 32], [30, 31, 32]),
                 "local_block_ids": ([40, 41], [40, 41]),
                 "num_prompt_blocks": 5,
+                "num_committed_blocks": 7,
                 "num_external_blocks": 4,
             },
         ]
@@ -1745,6 +1747,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 local_block_ids=case["local_block_ids"],
                                 num_external_tokens=case["num_external_blocks"] * worker.block_size,
                                 num_prompt_blocks=case["num_prompt_blocks"],
+                                num_committed_blocks=case["num_committed_blocks"],
                                 remote_engine_id=f"remote_{case['name']}_{tp_rank}_{pcp_rank}_{dcp_rank}",
                                 remote_host="localhost",
                                 remote_multi_nodes_meta_mapping={},
