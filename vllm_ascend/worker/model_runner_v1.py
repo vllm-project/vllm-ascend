@@ -973,7 +973,11 @@ class NPUModelRunner(GPUModelRunner):
 
         # Sync num_accepted_tokens from CPU only when the current step is
         # actually running a spec path that consumes accepted-token semantics.
-        if self._step_needs_accepted_tokens(use_spec_decode) and self.num_accepted_tokens_event is not None:
+        if (
+            self._step_needs_accepted_tokens(use_spec_decode)
+            and self.use_async_scheduling
+            and self.num_accepted_tokens_event is not None
+        ):
             self.num_accepted_tokens_event.synchronize()
             # Async mode: condense() reordered indices, use prev_positions mapping
             if self.use_async_scheduling and prev_req_id_to_index:
