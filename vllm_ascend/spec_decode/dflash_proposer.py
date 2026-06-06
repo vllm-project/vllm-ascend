@@ -209,6 +209,8 @@ class AscendDflashProposer(AscendEagleProposer):
                 per_layer_attn_metadata[layer_name] = attn_metadata_dflash
             multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
+        self.token_indices_to_sample.fill_(0)
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
             self.vllm_config,

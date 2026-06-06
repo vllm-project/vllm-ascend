@@ -37,7 +37,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.action != 'labeled' || github.event.label.name == 'ready' && 'run' || 'noop' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -150,8 +150,7 @@ jobs:
           git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }} \
-            --run-all-cpu
+            --diff-base origin/${{ github.base_ref }}
 
   run-selected-tests:
     needs: lint-and-select-tests
