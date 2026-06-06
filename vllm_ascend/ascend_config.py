@@ -238,16 +238,7 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-        # Disable Sparse C8 for A5
-        # A5 has not been fully validated for this path and may carry hidden risks.
-        # TODO(rjg-lyh): Enable A5 support after sufficient validation.
-        self.enable_sparse_c8 = (
-            additional_config.get("enable_sparse_c8", False)
-            and use_sparse
-            and get_ascend_device_type() != AscendDeviceType.A5
-        )
+        self.enable_sparse_c8 = additional_config.get("enable_sparse_c8", False) and use_sparse
         quant_config = getattr(vllm_config, "quant_config", None)
         self._sparse_c8_layer_ids, self._sparse_c8_layer_names = self._parse_sparse_c8_layers_from_quant_config(
             quant_config
@@ -338,21 +329,24 @@ class AscendConfig:
         if not isinstance(quant_description, dict):
             return set(), set()
 
+        QUANT_SUFFIXES = (".indexer.quant_type", ".indexer.wq_b_weight")
+        VALID_QUANT_TYPES = ("INT8_DYNAMIC", "W8A8_MXFP8")
+
         layer_ids: set[int] = set()
         layer_names: set[str] = set()
-        suffix = ".indexer.quant_type"
         from vllm.model_executor.models.utils import extract_layer_index
 
         for key, value in quant_description.items():
-            if not isinstance(key, str) or not key.endswith(suffix):
+            if not isinstance(key, str):
                 continue
-            if value != "INT8_DYNAMIC":
+            matched_suffix = next((s for s in QUANT_SUFFIXES if key.endswith(s)), None)
+            if matched_suffix is None or value not in VALID_QUANT_TYPES:
                 continue
-            layer_name = key[: -len(suffix)].rstrip(".")
+            layer_name = key[: -len(matched_suffix)].rstrip(".")
             if not layer_name:
                 continue
             layer_names.add(layer_name)
-            layer_ids.update({extract_layer_index(layer_name)})
+            layer_ids.add(extract_layer_index(layer_name))
         return layer_ids, layer_names
 
     def is_sparse_c8_layer(self, layer_name: str | None) -> bool:

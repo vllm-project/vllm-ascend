@@ -80,7 +80,6 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if x.dim() > 2:
             x = x.view(-1, x.shape[-1])
         quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
-        pertoken_scale = dynamic_scale
         output_dtype = x.dtype
         if bias is not None and bias.dtype != torch.float32:
             bias = bias.to(torch.float32)
@@ -90,7 +89,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             layer.weight,
             layer.weight_scale,
             scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-            pertoken_scale=pertoken_scale,
+            pertoken_scale=dynamic_scale,
             pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             bias=bias,
             output_dtype=output_dtype,
