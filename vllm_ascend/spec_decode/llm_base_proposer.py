@@ -371,24 +371,6 @@ class _FusedModelWithMTP:
             self.draft_token_ids_buf[:num_reqs, : all_draft_ids.shape[1]].copy_(all_draft_ids)
         return hidden_states
 
-
-def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
-    tp_group = get_tp_group()
-    B, V_local = logits.shape
-    rank = tp_group.rank_in_group
-
-    local_max_logits, local_max_indices = logits.max(dim=-1)
-
-    local_global_idx = local_max_indices + rank * V_local  # [B]
-
-    # [B, world_size]
-    gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
-    gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
-    global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
-    target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
-    return target_argmax
-
-
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
