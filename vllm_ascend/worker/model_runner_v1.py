@@ -3461,15 +3461,17 @@ class NPUModelRunner(GPUModelRunner):
         return async_output
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
-    def _sample(self, logits, spec_decode_metadata, sample_positions):
+    def _sample(self, logits, spec_decode_metadata, sample_positions=None):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
-                sample_positions = sample_positions[: self.input_batch.num_reqs]
-            self._attach_sampling_runtime_metadata(sampling_metadata, sample_positions, spec_decode_metadata)
+                if sample_positions is not None:
+                    sample_positions = sample_positions[: self.input_batch.num_reqs]
+            if sample_positions is not None:
+                self._attach_sampling_runtime_metadata(sampling_metadata, sample_positions, spec_decode_metadata)
             if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
                 max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
                 self.sampler.prepare_sampling(max_topk)
@@ -3480,11 +3482,13 @@ class NPUModelRunner(GPUModelRunner):
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
-            sample_positions = sample_positions[: len(spec_decode_metadata.logits_indices)]
+            if sample_positions is not None:
+                sample_positions = sample_positions[: len(spec_decode_metadata.logits_indices)]
         if self.use_async_scheduling and self._draft_token_req_ids is not None:
             draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
             self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
-        self._attach_sampling_runtime_metadata(sampling_metadata, sample_positions, spec_decode_metadata)
+        if sample_positions is not None:
+            self._attach_sampling_runtime_metadata(sampling_metadata, sample_positions, spec_decode_metadata)
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)

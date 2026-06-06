@@ -92,6 +92,24 @@ def split_inputs_tp_to_sp(hidden_states, out):
     return out[:padded_num_tokens_per_rank]
 
 
+def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
+    tp_group = get_tp_group()
+    _, vocab_local = logits.shape
+    rank = tp_group.rank_in_group
+
+    local_max_logits, local_max_indices = logits.max(dim=-1)
+    local_global_idx = local_max_indices + rank * vocab_local
+
+    gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
+    gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)
+    global_max_rank = gathered_logits.argmax(dim=-1)
+    target_argmax = gathered_global_idx.gather(
+        dim=-1,
+        index=global_max_rank.unsqueeze(-1),
+    ).squeeze(-1)
+    return target_argmax
+
+
 class _FusedModelWithMTP:
     """Wrap the target model forward together with all MTP draft steps."""
 
@@ -741,13 +759,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
         if self.method in ("eagle", "dflash"):
-            logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
-            if hasattr(model, "lm_head"):
-                self.model.lm_head = model.lm_head
-            elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
-                self.model.lm_head = model.get_language_model().lm_head
+            draft_has_own_lm_head = (
+                self.method == "dflash" and getattr(self.model, "draft_id_to_target_id", None) is not None
+            )
+            if draft_has_own_lm_head:
+                logger.info(
+                    "DFlash draft uses d2t vocab remapping; keeping the draft's own "
+                    "lm_head instead of sharing the target lm_head."
+                )
             else:
-                logger.warning("Target model has no accessible lm_head for sharing.")
+                logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
+                if hasattr(model, "lm_head"):
+                    self.model.lm_head = model.lm_head
+                elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
+                    self.model.lm_head = model.get_language_model().lm_head
+                else:
+                    logger.warning("Target model has no accessible lm_head for sharing.")
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
