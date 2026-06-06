@@ -77,7 +77,8 @@ jobs:
       fail-fast: false
     uses: ./.github/workflows/_accuracy_test.yaml
     with:
-      vllm: v0.11.0
+      vllm: main
+      vllm-ascend: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.vllm-ascend-version || 'main' }}
       runner:  linux-aarch64-${{ matrix.runner }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
       model_name: ${{ matrix.model_name }}
