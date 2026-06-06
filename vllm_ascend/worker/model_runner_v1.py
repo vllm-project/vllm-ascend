@@ -4015,8 +4015,52 @@ class NPUModelRunner(GPUModelRunner):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
-                    k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
-                    v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
+                    
+                    # 标记哪些 raw_tensor 与 mamba 层共享（混合 group）
+                    _tensor_shared_with_mamba: set[int] = set()
+                    for _name, _spec in layer_kv_cache_spec.items():
+                        if isinstance(_spec, MambaSpec) and _name in kv_cache_raw_tensors:
+                            _t = kv_cache_raw_tensors[_name]
+                            if not isinstance(_t, tuple):
+                                _tensor_shared_with_mamba.add(id(_t))
+
+
+                    # 判断是否为纯 attention 单 tensor（不共享 mamba），对齐上游 HMA 方案
+                    _is_pure_attn_single_tensor = (
+                        self.hybrid_with_attn_and_mamba
+                        and raw_k_tensor is raw_v_tensor
+                        and id(raw_k_tensor) not in _tensor_shared_with_mamba
+                        and current_kv_cache_spec.page_size_padded is not None
+                    )
+
+                    if _is_pure_attn_single_tensor:
+                        # 对齐上游 vllm: 单 tensor 同时包含 K/V，通过 as_strided 创建视图
+                        # kv_cache_shape = (2, num_blocks, block_size, N, H)
+                        # stride[0] = page_size_bytes // 2 // dtype_size  (K→V 间距)
+                        # stride[1] = page_size_bytes // dtype_size        (block→block 间距)
+                        # 布局: [K_block0, V_block0, K_block1, V_block1, ...]
+                        dtype_size = get_dtype_size(k_cache_dtype)
+                        kv_page_stride = current_kv_cache_spec.page_size_bytes // dtype_size
+                        k_v_stride = kv_page_stride // 2  # K→V 间距（半个 page）
+
+                        # 构建 stride: 基于 (2, num_blocks, block_size, N, H) 的默认 stride
+                        # stride[0]=k_v_stride, stride[1]=kv_page_stride, stride[2:]=默认连续
+                        kv_full_shape = kv_cache_shape  # (2, num_blocks, block_size, N, H)
+                        strides = list(torch.empty(kv_full_shape, dtype=k_cache_dtype, device="meta").stride())
+                        strides[0] = k_v_stride       # K → V
+                        strides[1] = kv_page_stride    # block → block
+
+                        raw_tensor_view = raw_k_tensor.view(k_cache_dtype)
+                        kv_cache = torch.as_strided(
+                            raw_tensor_view,
+                            size=kv_full_shape,
+                            stride=tuple(strides),
+                        )
+                        k_cache = kv_cache[0]
+                        v_cache = kv_cache[1]
+                    else:
+                        k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
+                        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
 
                     if self.use_sparse:
                         dsa_k_cache_shape = (
