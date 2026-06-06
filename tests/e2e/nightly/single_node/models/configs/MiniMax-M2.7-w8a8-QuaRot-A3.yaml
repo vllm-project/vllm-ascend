@@ -21,6 +21,8 @@ test_cases:
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--trust-remote-code"
+      - "--port"
+      - "$SERVER_PORT"
       - "--max-model-len"
       - "196608"
       - "--max-num-batched-tokens"
@@ -29,8 +31,6 @@ test_cases:
       - "16"
       - "--data-parallel-size"
       - "1"
-      - "--port"
-      - "$SERVER_PORT"
       - "--pipeline-parallel-size"
       - "1"
       - "--prefill-context-parallel-size"
