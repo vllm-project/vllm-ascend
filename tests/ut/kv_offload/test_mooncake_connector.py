@@ -507,6 +507,37 @@ class TestCoreFunctionality(unittest.TestCase):
         mock_send_recv.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
         self.mock_queue.task_done.assert_called_once()
 
+    @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
+    @patch.object(KVCacheRecvingThread, "_send_done_signal_to_free_remote_port")
+    @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
+    def test_handle_request_carries_failure_across_partial_groups(
+        self, mock_transfer, mock_send_free, mock_send_recv
+    ):
+        partial_req = dict(self.test_req)
+        partial_req["all_task_done"] = False
+        final_req = dict(self.test_req)
+        final_req["all_task_done"] = True
+
+        mock_transfer.side_effect = [RuntimeError("partial transfer failed")]
+        mock_send_free.return_value = None
+        mock_send_recv.return_value = None
+        self.thread.task_tracker = MagicMock()
+
+        # First partial group fails and records the request as failed, but
+        # does not clear the failure marker because more groups remain.
+        self.thread._handle_request(partial_req)
+        self.assertSetEqual(self.thread.invalid_block_ids, {1, 2})
+        self.assertTrue(self.thread._is_failed_recv_request("req1"))
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_not_called()
+
+        # Final group for the same request should skip transfer, preserve the
+        # invalid blocks, mark the task done, and clear the failed marker.
+        self.thread._handle_request(final_req)
+        self.assertSetEqual(self.thread.invalid_block_ids, {1, 2})
+        self.assertFalse(self.thread._is_failed_recv_request("req1"))
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
+        self.assertEqual(mock_transfer.call_count, 1)
+
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_kv_cache(self, mock_get_meta):
         with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
