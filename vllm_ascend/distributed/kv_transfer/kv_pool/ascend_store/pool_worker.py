@@ -295,7 +295,7 @@ class KVPoolWorker:
         self.prefetch_layer_map = layerwise_config.prefetch_layer_map
         self.sync_save_events = None
 
-        if self.use_gva_layerwise and self.layerwise_offload:
+        if self.use_gva_layerwise and self.layerwise_offload and self.kv_role == "kv_both":
             self.layer_transfer_finished_events = [
                 threading.Event() for _ in range(self.num_layers)
             ]
