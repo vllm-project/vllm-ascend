@@ -66,10 +66,10 @@ jobs:
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
           body: |
-            rerun command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /rerun.
+            [Bot]: rerun command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /rerun.
           reactions: confused
 
-      - name: Re-run failed workflows
+      - name: Re-run failed jobs
         id: rerun
         if: steps.auth.outputs.authorized == 'true'
         env:
@@ -90,12 +90,12 @@ jobs:
           while IFS= read -r RUN; do
             RUN_ID=$(echo "$RUN" | cut -d'|' -f1)
             RUN_NAME=$(echo "$RUN" | cut -d'|' -f2)
-            echo "Re-running $RUN_NAME (ID: $RUN_ID)..."
-            gh api "repos/$REPO/actions/runs/$RUN_ID/rerun" -X POST --silent
+            echo "Re-running failed jobs in $RUN_NAME (ID: $RUN_ID)..."
+            gh api "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs" -X POST --silent
             COUNT=$((COUNT + 1))
           done <<< "$FAILED_RUNS"
 
-          echo "Successfully re-ran $COUNT failed workflow run(s)."
+          echo "Successfully re-ran failed jobs in $COUNT workflow run(s)."
           echo "rerun_count=$COUNT" >> "$GITHUB_OUTPUT"
 
       - name: Comment result on PR
@@ -106,9 +106,9 @@ jobs:
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            rerun completed.
+            [Bot]: rerun completed.
 
-            - **Re-ran**: ${{ steps.rerun.outputs.rerun_count }} failed workflow(s)
+            - **Re-ran failed jobs in**: ${{ steps.rerun.outputs.rerun_count }} workflow run(s)
             - **Ref**: `${{ github.event.client_payload.pull_request.head.sha }}`
             - **Workflow run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           reactions: hooray

@@ -41,14 +41,17 @@ jobs:
             [
               {
                 "command": "e2e",
+                "permission": "none",
                 "issue_type": "pull-request"
               },
               {
                 "command": "rerun",
+                "permission": "none",
                 "issue_type": "pull-request"
               },
               {
                 "command": "nightly",
+                "permission": "none",
                 "issue_type": "both"
               }
             ]

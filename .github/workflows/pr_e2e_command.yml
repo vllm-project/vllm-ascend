@@ -74,9 +74,9 @@ jobs:
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            e2e command triggered. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+            [Bot]: e2e command triggered. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
           reactions: rocket
 
       - name: Post unauthorized comment
@@ -85,9 +85,9 @@ jobs:
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            e2e command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /e2e.
+            [Bot]: e2e command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /e2e.
           reactions: confused
 
       - name: Fail if unauthorized
@@ -168,5 +168,5 @@ jobs:
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ needs.e2e-test.outputs.notify_comment_id }}
           body: |
-            e2e command ${{ (needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped') && 'completed successfully' || 'failed' }}. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+            [Bot]: e2e command ${{ (needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped') && 'completed successfully' || 'failed' }}.
           reactions: ${{ (needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped') && 'hooray' || 'confused' }}
