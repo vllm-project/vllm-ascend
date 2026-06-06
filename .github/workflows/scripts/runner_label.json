@@ -1,4 +1,24 @@
 {
+    "linux-aarch64-a3-0": {
+        "chip": "a3",
+        "npu_num": 0,
+        "image_tag": "9.0.0-a3-ubuntu22.04-py3.12"
+    },
+    "linux-aarch64-a3-1": {
+        "chip": "a3",
+        "npu_num": 1,
+        "image_tag": "9.0.0-a3-ubuntu22.04-py3.12"
+    },
+    "linux-aarch64-a3-16": {
+        "chip": "a3",
+        "npu_num": 16,
+        "image_tag": "9.0.0-a3-ubuntu22.04-py3.12"
+    },
+    "linux-aarch64-a2b3-8": {
+        "chip": "a2",
+        "npu_num": 8,
+        "image_tag": "9.0.0-910b-ubuntu22.04-py3.12"
+    },
     "linux-aarch64-310p-1": {
         "chip": "310p",
         "npu_num": 1,

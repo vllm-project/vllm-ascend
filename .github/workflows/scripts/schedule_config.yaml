@@ -1,0 +1,179 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+# Central scheduling configuration for periodic CI tests.
+#
+# To add a new test:
+#   1. Place the YAML config (or .py file / directory) under tests/e2e/schedule/.
+#   2. Register its path below in the relevant schedule section.
+#
+# All entries must be plain path strings. Do not add chip, npu_num, runner,
+# framework, route, multi_node_type, or extra_components — these are inferred
+# from the path by parse_schedule_config.py.
+#
+# Directory layout rules (framework is always the 4th path segment):
+#   tests/e2e/schedule/model/<Family>/<resource_dir>/*.yaml       -> model tests
+#   tests/e2e/schedule/accuracy/<resource_dir>/<chip>/*.yaml      -> accuracy tests (direct configs)
+#   tests/e2e/schedule/ops/<resource_dir>/*.py                    -> ops tests (file)
+#   tests/e2e/schedule/ops/<resource_dir>/                        -> ops tests (directory)
+#
+# Supported resource directories (English form only):
+#   one_card, two_card, four_card, eight_card, one_node, two_node, four_node
+#
+# Chip is auto-detected from filename (a2/A2 token -> a2, else a3), or from the
+# explicit a2/a3/310p directory for accuracy configs.
+# Accuracy configs are real executable YAML files (not model-list groups); a
+# directory entry is grouped into one job per chip (config_paths list).
+# External DP: filename stem must contain external_dp -> external routing.
+
+periodic_tests:
+
+  # =========================================================================
+  # nightly-main  (runs every day at 23:45 Beijing time = 15:45 UTC)
+  # =========================================================================
+  - name: nightly-main
+    cron: "45 15 * * *"
+    files:
+      # -------------------------------------------------------------------
+      # A3 four-node  (64 NPUs, runs first to claim largest resource window)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/DeepSeek/four_node/DeepSeek-V3_2-W8A8-EP.yaml
+
+      # -------------------------------------------------------------------
+      # A3 two-node internal DP
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/DeepSeek/two_node/DeepSeek-R1-W8A8-longseq.yaml
+      - tests/e2e/schedule/model/DeepSeek/two_node/DeepSeek-V3_2-W8A8-A3-dual-nodes.yaml
+      - tests/e2e/schedule/model/DeepSeek/two_node/DeepSeek-V3.1-BF16.yaml
+      - tests/e2e/schedule/model/Qwen/two_node/Qwen3-235B-A22B.yaml
+      - tests/e2e/schedule/model/Qwen/two_node/Qwen3-235B-W8A8-EPLB.yaml
+      - tests/e2e/schedule/model/Qwen/two_node/Qwen3-235B-A22B-Mooncake-Layerwise.yaml
+      - tests/e2e/schedule/model/Qwen/two_node/Qwen3-235B-W8A8-longseq.yaml
+      - tests/e2e/schedule/model/Qwen/two_node/Qwen3-235B-disagg-pd.yaml
+      - tests/e2e/schedule/model/Qwen/two_node/Qwen3-VL-235B-disagg-pd.yaml
+      - tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-A3-dual-nodes.yaml
+
+      # A3 two-node external DP (filename contains external_dp -> external routing)
+      - tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml
+
+      # -------------------------------------------------------------------
+      # A3 one_node  (full 16-NPU node)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-R1-0528-W8A8.yaml
+      - tests/e2e/schedule/model/DeepSeek/one_node/MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - tests/e2e/schedule/model/DeepSeek/one_node/Prefix-Cache-DeepSeek-R1-0528-W8A8.yaml
+      - tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8.yaml
+      - tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V4-Flash-W8A8-A3.yaml
+      - tests/e2e/schedule/model/GLM/one_node/GLM-4.7.yaml
+      - tests/e2e/schedule/model/Kimi/one_node/Kimi-K2-Thinking.yaml
+      - tests/e2e/schedule/model/Kimi/one_node/Kimi-K2.5.yaml
+      - tests/e2e/schedule/model/Qwen/one_node/Qwen3-235B-A22B-W8A8.yaml
+      - tests/e2e/schedule/model/Qwen/one_node/Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
+      - tests/e2e/schedule/model/Qwen/one_node/Qwen3.5-122B-A10B-W8A8-A3.yaml
+      - tests/e2e/schedule/model/Qwen/one_node/Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
+      - tests/e2e/schedule/model/MiniMax/one_node/MiniMax-M2.5-w8a8-QuaRot-A3.yaml
+      - tests/e2e/schedule/model/Hy/one_node/Hy3-preview.yaml
+
+      # -------------------------------------------------------------------
+      # A3 four_card  (4-NPU partial node)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/Qwen/four_card/Qwen3-30B-A3B-W8A8.yaml
+      - tests/e2e/schedule/model/Qwen/four_card/Qwen3-32B-Int8.yaml
+      - tests/e2e/schedule/model/Qwen/four_card/Prefix-Cache-Qwen3-32B-Int8.yaml
+
+      # -------------------------------------------------------------------
+      # A3 two_card  (2-NPU partial node)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/Qwen/two_card/Qwen3.5-27B-w8a8-A3.yaml
+      - tests/e2e/schedule/model/Qwen/two_card/Qwen3-30B-A3B-W4A8-llm-compressor.yaml
+      - tests/e2e/schedule/model/Qwen/two_card/Qwen3-30B-QuaRot-eagle3.yaml
+      - tests/e2e/schedule/model/Qwen/two_card/Qwen3-32B-QuaRot-eagle3.yaml
+
+      # -------------------------------------------------------------------
+      # A2 two-node
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/Qwen/two_node/Qwen3-235B-A22B-A2.yaml
+      - tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-A2-dual-nodes.yaml
+      - tests/e2e/schedule/model/Kimi/two_node/Kimi-K2_5-W4A8-A2-dual-nodes.yaml
+
+      # -------------------------------------------------------------------
+      # A2 one_node  (full 8-NPU node; chip auto-detected from filename)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/MiniMax/one_node/MiniMax-M2.5-w8a8-QuaRot-A2.yaml
+      - tests/e2e/schedule/model/Qwen/one_node/Qwen3.5-397B-A17B-w4a8-mtp-A2.yaml
+
+      # -------------------------------------------------------------------
+      # A2 four_card  (4-NPU; chip auto-detected from filename)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/Qwen/four_card/Qwen3-VL-32B-Instruct-W8A8-A2.yaml
+      - tests/e2e/schedule/model/Qwen/four_card/Qwen3-32B-Int8-A2.yaml
+
+      # -------------------------------------------------------------------
+      # A2 two_card  (2-NPU; chip auto-detected from filename)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/Qwen/two_card/Qwen3.5-27B-w8a8-A2.yaml
+
+      # -------------------------------------------------------------------
+      # Ops tests (chip and runner derived from path/filename)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/ops/one_card/
+      - tests/e2e/schedule/ops/four_card/test_matmul_allreduce_add_rmsnorm_a2.py
+      - tests/e2e/schedule/ops/one_node/
+
+      # -------------------------------------------------------------------
+      # Accuracy tests (direct config YAMLs; chip from the a2/a3/310p dir,
+      # parser groups each directory's configs into one job per chip)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/accuracy/one_card/a2/
+      - tests/e2e/schedule/accuracy/two_card/a2/
+      - tests/e2e/schedule/accuracy/four_card/a2/
+
+  # =========================================================================
+  # weekly-main  (runs every Monday at 23:45 Beijing time = 15:45 UTC)
+  # =========================================================================
+  - name: weekly-main
+    cron: "45 15 * * 1"
+    files:
+      # -------------------------------------------------------------------
+      # A3 two-node (weekly-only configs)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/DeepSeek/two_node/DeepSeek-V3_2-W8A8-EP_weekly.yaml
+      - tests/e2e/schedule/model/DeepSeek/two_node/DeepSeek-V3.yaml
+      - tests/e2e/schedule/model/GLM/two_node/GLM-4.7-W8A8C8-Mooncake-Layerwise.yaml
+
+      # -------------------------------------------------------------------
+      # A3 one_node (weekly-unique configs)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8_A3_weekly.yaml
+      - tests/e2e/schedule/model/GLM/one_node/GLM-5_1-W8A8_A3_weekly.yaml
+      - tests/e2e/schedule/model/GLM/one_node/GLM-5.yaml
+      - tests/e2e/schedule/model/Kimi/one_node/Kimi-K2.5-32k-512.yaml
+      - tests/e2e/schedule/model/MiniMax/one_node/MiniMax-M2.5-W8A8-A3.yaml
+      - tests/e2e/schedule/model/Qwen/one_node/Qwen3.5-397B-A17B-W8A8-mtp-A3_weekly.yaml
+
+      # -------------------------------------------------------------------
+      # A3 four_card (weekly-unique)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/Qwen/four_card/Qwen2.5-VL-7B-Instruct-EPD.yaml
+      - tests/e2e/schedule/model/Qwen/four_card/Qwen3-30B-A3B-W8A8-eagle3-mooncake.yaml
+
+      # -------------------------------------------------------------------
+      # Shared with nightly (same file runs on both schedules)
+      # -------------------------------------------------------------------
+      - tests/e2e/schedule/model/Kimi/one_node/Kimi-K2.5.yaml
+      - tests/e2e/schedule/model/MiniMax/one_node/MiniMax-M2.5-w8a8-QuaRot-A3.yaml
+      - tests/e2e/schedule/model/Qwen/one_node/Qwen3.5-122B-A10B-W8A8-A3.yaml
+      - tests/e2e/schedule/model/Qwen/two_card/Qwen3.5-27B-w8a8-A3.yaml

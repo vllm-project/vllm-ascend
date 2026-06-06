@@ -26,13 +26,16 @@ on:
       image:
         required: true
         type: string
-      model_list:
-        required: true
+      config_paths:
+        required: false
         type: string
+        default: ''
+        description: JSON array of direct accuracy config YAML paths
       model_filter:
         required: false
         type: string
         default: ''
+        description: "'all' or a comma-bounded list of config stems to filter config_paths"
       upload:
         required: false
         type: boolean
@@ -66,12 +69,12 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 2 cards / 4 cards test type
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.runner }}-${{inputs.model_list}}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.runner }}-${{ inputs.config_paths }}
   cancel-in-progress: true
 
 jobs:
   e2e-nightly:
-    name: ${{inputs.model_list}} accuracy test
+    name: accuracy test
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.is_run }}
     container:
@@ -130,7 +133,7 @@ jobs:
           uv pip install -e .
 
       - name: Install tensorflow (for Molmo-7B-D-0924)
-        if: ${{ inputs.runner == 'linux-aarch64-a2b3-1' && contains(inputs.model_list, 'Molmo-7B-D-0924') }}
+        if: ${{ inputs.runner == 'linux-aarch64-a2b3-1' && contains(inputs.config_paths, 'Molmo-7B-D-0924') }}
         shell: bash -l {0}
         run: |
           pip install tensorflow==2.19.1 --no-cache-dir
@@ -169,44 +172,36 @@ jobs:
             pip show vllm-ascend | grep "Version:" | awk '{print "GHA_VLLM_ASCEND_VERSION="$2}' | sed 's/+.*//'
           } >> "$GITHUB_ENV"
 
-      - name: Compute effective model list
+      - name: Compute effective config paths
+        if: ${{ inputs.config_paths != '' }}
         run: |
-          model_filter='${{ inputs.model_filter }}'
-          all_models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+          config_filter='${{ inputs.model_filter }}'
+          all_configs=$(echo '${{ inputs.config_paths }}' | jq -r '.[]')
 
-          if [[ "$model_filter" == "all" ]] || [[ -z "$model_filter" ]]; then
-            effective_models="$all_models"
+          if [[ "$config_filter" == "all" ]] || [[ -z "$config_filter" ]]; then
+            effective_configs="$all_configs"
           else
-            any_model_in_filter=false
-            while IFS= read -r model; do
-              if [[ "$model_filter" == *",${model},"* ]]; then
-                any_model_in_filter=true
-                break
+            effective_configs=""
+            while IFS= read -r config; do
+              file_name=$(basename "$config")
+              stem="${file_name%.*}"
+              if [[ "$config_filter" == *",${stem},"* ]] || [[ "$config_filter" == "$stem" ]]; then
+                effective_configs+="$config"$'\n'
               fi
-            done <<< "$all_models"
-
-            if [[ "$any_model_in_filter" == "true" ]]; then
-              effective_models=""
-              while IFS= read -r model; do
-                if [[ "$model_filter" == *",${model},"* ]]; then
-                  effective_models+="$model"$'\n'
-                fi
-              done <<< "$all_models"
-              effective_models="${effective_models%$'\n'}"
-            else
-              effective_models="$all_models"
-            fi
+            done <<< "$all_configs"
+            effective_configs="${effective_configs%$'\n'}"
           fi
 
-          echo "Effective models to test:"
-          echo "$effective_models"
+          echo "Effective accuracy configs to test:"
+          echo "$effective_configs"
           {
-            echo 'EFFECTIVE_MODELS<<EOF'
-            echo "$effective_models"
+            echo 'EFFECTIVE_CONFIGS<<EOF'
+            echo "$effective_configs"
             echo 'EOF'
           } >> "$GITHUB_ENV"
 
       - name: Run vllm-project/vllm-ascend accuracy test
+        if: ${{ inputs.config_paths != '' }}
         id: report
         working-directory: /vllm-workspace/vllm-ascend
         env:
@@ -225,24 +220,27 @@ jobs:
         run: |
           mkdir -p benchmarks/accuracy
           echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
-          echo "Received model_list: ${{ inputs.model_list }}"
-          models="$EFFECTIVE_MODELS"
+          configs="$EFFECTIVE_CONFIGS"
           any_failure=0
-          for model in $models; do
-            echo "Running test for model: $model"
-            config_path="./tests/e2e/models/configs/${model}.yaml"
+          for config_path in $configs; do
+            echo "Running accuracy config: ${config_path}"
+            if [ ! -f "${config_path}" ]; then
+              echo "Config not found: ${config_path}"
+              any_failure=1
+              continue
+            fi
             model_type=$(python3 -c "import yaml,sys; c=yaml.safe_load(open('${config_path}')); print(c.get('model_type','vllm'))" 2>/dev/null || echo "vllm")
             if [[ "$model_type" == "vllm-asr" ]]; then
-              test_script="./tests/e2e/models/test_asr_eval_correctness.py"
+              test_script="./tests/e2e/schedule/scripts/accuracy/test_asr_eval_correctness.py"
             elif [[ "$model_type" == "vllm-rm" ]]; then
-              test_script="./tests/e2e/models/test_rm_eval_correctness.py"
+              test_script="./tests/e2e/schedule/scripts/accuracy/test_rm_eval_correctness.py"
             else
-              test_script="./tests/e2e/models/test_lm_eval_correctness.py"
+              test_script="./tests/e2e/schedule/scripts/accuracy/test_lm_eval_correctness.py"
             fi
-            echo "  model_type=${model_type} → ${test_script}"
+            echo "  model_type=${model_type} -> ${test_script}"
             pytest -sv "${test_script}" \
               --config "${config_path}" || {
-              echo "Test failed for model: $model"
+              echo "Test failed for config: ${config_path}"
               any_failure=1
             }
           done
@@ -252,14 +250,18 @@ jobs:
           fi
 
       - name: Generate step summary
-        if: ${{ always() }}
+        if: ${{ always() && inputs.config_paths != '' }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
-          models="$EFFECTIVE_MODELS"
-          for model in $models; do
-            echo "Processing model: $model"
-            model_base_name=$(basename "$model")
-            cat benchmarks/accuracy/${model_base_name}.md >> $GITHUB_STEP_SUMMARY
+          configs="$EFFECTIVE_CONFIGS"
+          for config_path in $configs; do
+            config_base_name=$(basename "$config_path")
+            config_stem="${config_base_name%.*}"
+            if [ -f "benchmarks/accuracy/${config_stem}.md" ]; then
+              cat "benchmarks/accuracy/${config_stem}.md" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "No summary found for ${config_stem}" >> "$GITHUB_STEP_SUMMARY"
+            fi
           done
 
       - name: Set artifact timestamp

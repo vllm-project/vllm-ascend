@@ -18,7 +18,7 @@
    - how to run OpenAI-compatible validation
    - optional eager fallback command
    - optional `TORCHDYNAMO_DISABLE=1` fallback command (if relevant)
-4. Test config YAML at `tests/e2e/models/configs/<ModelName>.yaml` — must include `model_name`, `hardware`, `tasks` with accuracy metrics (name + value), and `num_fewshot`. Use accuracy results from evaluation to populate metric values. Follow the schema of existing configs (e.g. `Qwen3-8B.yaml`).
+4. Test config YAML at `tests/e2e/schedule/accuracy/<resource_dir>/<chip>/<ModelName>.yaml` (e.g. `one_card/a2/`) — must include `model_name`, `hardware`, `tasks` with accuracy metrics (name + value), and `num_fewshot`. Use accuracy results from evaluation to populate metric values. Follow the schema of existing configs (e.g. `Qwen3-8B.yaml`).
 5. Tutorial doc at `docs/source/tutorials/models/<ModelName>.md` — must follow the standard template: Introduction, Supported Features, Environment Preparation (with docker tabs for A2/A3), Deployment (with serve script), Functional Verification (with curl example), Accuracy Evaluation, Performance. Fill in model-specific details (HF path, hardware requirements, TP size, max-model-len, served-model-name, sample curl, accuracy table).
 6. Post SKILL.md content or AI-assisted workflow summary as a comment on the originating GitHub issue.
 

@@ -178,10 +178,10 @@ msgstr "精度评估"
 #: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:153
 msgid ""
 "The repository already contains an end-to-end accuracy baseline for this "
-"model in `tests/e2e/models/configs/llava-onevision-qwen2-0.5b-ov-"
-"hf.yaml`."
+"model in `tests/e2e/schedule/accuracy/one_card/a2/llava-onevision-"
+"qwen2-0.5b-ov-hf.yaml`."
 msgstr ""
-"代码库中已包含该模型的端到端精度基准，位于 `tests/e2e/models/configs/llava-onevision-qwen2-0.5b-ov-hf.yaml`。"
+"代码库中已包含该模型的端到端精度基准，位于 `tests/e2e/schedule/accuracy/one_card/a2/llava-onevision-qwen2-0.5b-ov-hf.yaml`。"
 
 #: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:29
 msgid "dataset"

@@ -81,7 +81,7 @@ Reviewers must verify:
 
 - **Unit Tests (UT)**: Located in `tests/ut/`, cover core logic, edge cases, and error conditions
 - **System Tests (ST)**: Located in `tests/e2e/`, verify end-to-end behavior and integration points
-- **Nightly Tests**: Include benchmarks for NPU-specific code paths in `tests/e2e/nightly/`
+- **Nightly Tests**: Include benchmarks for NPU-specific code paths in `tests/e2e/schedule/`
 
 **Test Coverage Guidelines:**
 

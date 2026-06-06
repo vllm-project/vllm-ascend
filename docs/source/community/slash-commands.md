@@ -31,7 +31,7 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 | `two_card` | A3 2-card |
 | Others (e.g. `one_card`) | A2 single card |
 
-> Only test paths under `tests/e2e/pull_request/` are supported. Tests in `tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are not accepted by `/e2e`. Use `/nightly` for nightly tests.
+> Only test paths under `tests/e2e/pull_request/` are supported. Tests in `tests/e2e/schedule/` or `tests/e2e/doctests/` are not accepted by `/e2e`. Use `/nightly` for nightly tests.
 
 Tests are run against both the community vLLM version and the latest release.
 

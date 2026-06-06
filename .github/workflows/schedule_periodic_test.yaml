@@ -1,0 +1,278 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Unified periodic test workflow.
+#
+# Adding a new test:
+#   1. Place the config/script under tests/e2e/schedule/<Family|accuracy|ops>/<resource_dir>/
+#   2. Register its path in .github/workflows/scripts/schedule_config.yaml
+#   (No changes to this workflow file required)
+
+name: Periodic-Test
+
+on:
+  schedule:
+    # Nightly: 23:45 Beijing time (UTC+8) = 15:45 UTC
+    - cron: "45 15 * * *"
+    # Weekly: every Monday at 23:45 Beijing time
+    - cron: "45 15 * * 1"
+  workflow_dispatch:
+    inputs:
+      vllm_ascend_branch:
+        description: 'Branch to test'
+        required: true
+        default: 'main'
+        type: string
+      schedule_name:
+        description: 'Schedule section to run (nightly-main / weekly-main / manual)'
+        required: false
+        default: 'manual'
+        type: string
+      test_filter:
+        description: 'Test filter: "all", or a name / filename stem / path segment to select specific tests'
+        required: false
+        default: 'all'
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: periodic-test-${{ github.ref }}-${{ github.event.schedule || inputs.schedule_name }}
+  cancel-in-progress: true
+
+env:
+  ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Parse schedule_config.yaml -> produce test matrices
+  # ---------------------------------------------------------------------------
+  parse-config:
+    name: Parse schedule config
+    runs-on: ubuntu-latest
+    outputs:
+      single_node_matrix:    ${{ steps.parse.outputs.single_node_matrix }}
+      multi_node_matrix:     ${{ steps.parse.outputs.multi_node_matrix }}
+      accuracy_matrix:       ${{ steps.parse.outputs.accuracy_matrix }}
+      ops_matrix:            ${{ steps.parse.outputs.ops_matrix }}
+      image_build_targets:   ${{ steps.parse.outputs.image_build_targets }}
+      selected_cases_summary: ${{ steps.parse.outputs.selected_cases_summary }}
+      branch_ref:            ${{ steps.branches.outputs.branch_ref }}
+      branch_tag:            ${{ steps.branches.outputs.branch_tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Resolve branch ref and tag
+        id: branches
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            branch_ref="${{ inputs.vllm_ascend_branch }}"
+          else
+            branch_ref="main"
+          fi
+          branch_tag=$(echo "${branch_ref}" | tr '/' '-')
+          echo "branch_ref=${branch_ref}" >> "$GITHUB_OUTPUT"
+          echo "branch_tag=${branch_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Parse schedule config
+        id: parse
+        run: |
+          python3 .github/workflows/scripts/parse_schedule_config.py \
+            --config .github/workflows/scripts/schedule_config.yaml \
+            --runner-label .github/workflows/scripts/runner_label.json \
+            --event-name "${{ github.event_name }}" \
+            --cron "${{ github.event.schedule }}" \
+            --schedule-name "${{ inputs.schedule_name || '' }}" \
+            --test-filter "${{ inputs.test_filter || 'all' }}"
+
+      - name: Print selected cases summary
+        run: echo "${{ steps.parse.outputs.selected_cases_summary }}"
+
+  # ---------------------------------------------------------------------------
+  # 2. Build nightly images (one per hardware target)
+  # ---------------------------------------------------------------------------
+  build-image:
+    name: Build nightly image (${{ matrix.target }} / ${{ needs.parse-config.outputs.branch_tag }})
+    needs: parse-config
+    if: needs.parse-config.outputs.image_build_targets != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.parse-config.outputs.image_build_targets) }}
+    uses: ./.github/workflows/_nightly_image_build.yaml
+    with:
+      target: ${{ matrix.target }}
+      # Pass branch_ref (real branch) for checkout; the image-build workflow
+      # normalizes it internally to the same tag the test jobs reference.
+      vllm_ascend_branch: ${{ needs.parse-config.outputs.branch_ref }}
+    secrets:
+      HW_USERNAME: ${{ secrets.HW_USERNAME }}
+      HW_TOKEN: ${{ secrets.HW_TOKEN }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # 3. Multi-node tests (sequential, max-parallel: 1 to respect A3 NPU budget)
+  #    Parser pre-sorts: 4-node entries first (largest resource consumer).
+  # ---------------------------------------------------------------------------
+  multi-node-tests:
+    name: multi-node / ${{ matrix.test_config.name }}
+    needs: [parse-config, build-image]
+    if: >-
+      always() &&
+      needs.parse-config.outputs.multi_node_matrix != '[]' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config: ${{ fromJSON(needs.parse-config.outputs.multi_node_matrix) }}
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version:      ${{ matrix.test_config.chip }}
+      runner:           ${{ matrix.test_config.runner }}
+      image:            swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ needs.parse-config.outputs.branch_tag }}-${{ matrix.test_config.chip }}
+      config_path:      ${{ matrix.test_config.config_path }}
+      multi_node_type:  ${{ matrix.test_config.multi_node_type }}
+      extra_components: ${{ matrix.test_config.extra_components }}
+      size:             ${{ matrix.test_config.size }}
+      name:             ${{ matrix.test_config.name }}
+      should_run:       true
+      ascend_log_prefix: /root/.cache/ascend-logs/${{ needs.parse-config.outputs.branch_tag }}
+      vllm_ascend_branch: ${{ needs.parse-config.outputs.branch_ref }}
+    secrets:
+      KUBECONFIG_B64:  ${{ matrix.test_config.chip == 'a2' && secrets.KUBECONFIG_HK_001_INTERNAL_B64 || secrets.KUBECONFIG_B64 }}
+      OBS_ACCESS_KEY:  ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY:  ${{ secrets.OBS_SECRET_KEY }}
+
+  # ---------------------------------------------------------------------------
+  # 4. Single-node tests (after multi-node, to keep A3 resource window clear)
+  # ---------------------------------------------------------------------------
+  single-node-tests:
+    name: single-node / ${{ matrix.test_config.name }}
+    needs: [parse-config, build-image, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-config.outputs.single_node_matrix != '[]' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        test_config: ${{ fromJSON(needs.parse-config.outputs.single_node_matrix) }}
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      runner:      ${{ matrix.test_config.runner }}
+      image:       swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ needs.parse-config.outputs.branch_tag }}-${{ matrix.test_config.chip }}
+      config_path: ${{ matrix.test_config.config_path }}
+      tests:       ${{ matrix.test_config.tests }}
+      name:        ${{ matrix.test_config.name }}
+      should_run:  true
+      vllm_ascend_branch: ${{ needs.parse-config.outputs.branch_ref }}
+    secrets:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+
+  # ---------------------------------------------------------------------------
+  # 5. Accuracy tests (parallel with single-node, independent resource pool)
+  # ---------------------------------------------------------------------------
+  accuracy-tests:
+    name: accuracy / ${{ matrix.test_config.name }}
+    needs: [parse-config, build-image]
+    if: >-
+      always() &&
+      needs.parse-config.outputs.accuracy_matrix != '[]' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config: ${{ fromJSON(needs.parse-config.outputs.accuracy_matrix) }}
+    uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
+    with:
+      runner:       ${{ matrix.test_config.runner }}
+      config_paths: ${{ toJson(matrix.test_config.config_paths) }}
+      model_filter: all
+      image:        swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ needs.parse-config.outputs.branch_tag }}-${{ matrix.test_config.chip }}
+      is_run:       true
+      upload:       false
+
+  # ---------------------------------------------------------------------------
+  # 6. Ops tests (lightweight pytest-driven, independent resource pool)
+  # ---------------------------------------------------------------------------
+  ops-tests:
+    name: ops / ${{ matrix.test_config.name }}
+    needs: [parse-config, build-image]
+    if: >-
+      always() &&
+      needs.parse-config.outputs.ops_matrix != '[]' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config: ${{ fromJSON(needs.parse-config.outputs.ops_matrix) }}
+    uses: ./.github/workflows/_e2e_periodic_ops.yaml
+    with:
+      runner:             ${{ matrix.test_config.runner }}
+      image:              swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ needs.parse-config.outputs.branch_tag }}-${{ matrix.test_config.chip }}
+      tests:              ${{ matrix.test_config.tests }}
+      name:               ${{ matrix.test_config.name }}
+      should_run:         true
+      vllm_ascend_branch: ${{ needs.parse-config.outputs.branch_ref }}
+
+  # ---------------------------------------------------------------------------
+  # 7. Clear PVC logs (schedule-only, runs after multi-node completes)
+  # ---------------------------------------------------------------------------
+  clear-pre-logs:
+    name: Clear pre-run logs from PVC
+    needs: [parse-config, multi-node-tests]
+    if: >-
+      github.event_name == 'schedule' &&
+      needs.multi-node-tests.result != 'skipped'
+    runs-on: linux-aarch64-a3-0
+    steps:
+      - name: Clear logs generated before the test run
+        run: rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+
+  # ---------------------------------------------------------------------------
+  # 8. Merge benchmark artifacts
+  # ---------------------------------------------------------------------------
+  merge-benchmark-artifacts:
+    name: Merge benchmark artifacts
+    needs: [parse-config, single-node-tests, multi-node-tests, accuracy-tests, ops-tests]
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      needs.parse-config.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge all benchmark result artifacts
+        continue-on-error: true
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: periodic-test-results
+          pattern: nightly-test-benchmark-results-*
+          compression-level: 0
+          delete-merged: true

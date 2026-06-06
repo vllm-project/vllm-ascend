@@ -75,7 +75,7 @@ Write the doc block like this:
 ```{model-code}
 :block_name: qwen3_8b_single_node
 :converter_tag: single_node
-:test_case_path: tests/e2e/nightly/single_node/models/configs/your_model.yaml
+:test_case_path: tests/e2e/schedule/model/Qwen/one_node/your_model.yaml
 :case_index: 0
 
 set -eux
@@ -135,7 +135,7 @@ Write the doc block like this:
 ```{model-code}
 :block_name: qwen3_235b_worker_1
 :converter_tag: multi_node
-:test_case_path: tests/e2e/nightly/multi_node/internal_dp/config/your_model.yaml
+:test_case_path: tests/e2e/schedule/scripts/multi_node/internal_dp/config/your_model.yaml
 :host_index: 1
 
 set -eux
@@ -214,7 +214,7 @@ Write the doc block like this:
 ```{model-code}
 :block_name: glm_external_dp_template_node0
 :converter_tag: external_dp_template
-:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
+:test_case_path: tests/e2e/schedule/scripts/multi_node/external_dp/config/your_model.yaml
 :host_index: 0
 
 set -eux
@@ -283,7 +283,7 @@ Write the doc block like this:
 ```{model-code}
 :block_name: glm_external_dp_launch
 :converter_tag: external_dp_launch
-:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
+:test_case_path: tests/e2e/schedule/scripts/multi_node/external_dp/config/your_model.yaml
 
 set -eux
 {{ generated }}
@@ -341,7 +341,7 @@ Write the doc block like this:
 ```{model-code}
 :block_name: glm_external_dp_proxy
 :converter_tag: external_dp_proxy
-:test_case_path: tests/e2e/nightly/multi_node/external_dp/config/your_model.yaml
+:test_case_path: tests/e2e/schedule/scripts/multi_node/external_dp/config/your_model.yaml
 
 set -eux
 {{ generated }}

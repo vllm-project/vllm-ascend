@@ -283,7 +283,7 @@ You can't run the E2E test on CPUs.
 ```bash
 cd /vllm-workspace/vllm-ascend/
 # run all single-card op tests
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/schedule/ops/one_card/
 ```
 
 ::::
@@ -294,10 +294,10 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/singlecard
 ```bash
 cd /vllm-workspace/vllm-ascend/
 # run all multi-card op tests on A2
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a2/
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/schedule/ops/four_card/
 
 # run all multi-card op tests on A3
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/schedule/ops/one_node/
 ```
 
 ::::
@@ -308,7 +308,7 @@ For running nightly single-node model test cases locally, refer to the following
 
 ```bash
 export CONFIG_YAML_PATH=Qwen3-32B.yaml
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/schedule/scripts/single_node/test_single_node.py
 ```
 
 For running nightly multi-node model test cases locally, refer to the `Running Locally` section in [Multi Node Test](./multi_node_test.md).

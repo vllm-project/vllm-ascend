@@ -175,7 +175,7 @@ def _build_shell_script(
 
 
 # docs_codegen emits a *copy-pasteable* script, so unlike the e2e runtime's
-# format_server_cmd() (tests/e2e/nightly/multi_node/external_dp/scripts/utils.py),
+# format_server_cmd() (tests/e2e/schedule/scripts/multi_node/external_dp/utils.py),
 # which shlex-quotes everything for a one-off *log* line, we need two
 # context-specific quoters that both keep ``$VAR`` / ``${VAR}`` / ``$1`` as live
 # shell expansions the reader can still edit.
@@ -313,7 +313,7 @@ class MultiNodeConverter(BaseConverter):
 #
 # These read the external-DP YAML schema directly (``model`` / ``routing`` /
 # ``config`` / ``templates``) used by
-# tests/e2e/nightly/multi_node/external_dp/config/*.yaml. They are tightly
+# tests/e2e/schedule/scripts/multi_node/external_dp/config/*.yaml. They are tightly
 # coupled to that schema by design.
 # ============================================================================
 
@@ -321,7 +321,7 @@ LAUNCH_ONLINE_DP_SCRIPT = "launch_online_dp.py"
 PROXY_SCRIPT = "load_balance_proxy_server_example.py"
 ROUTING_DISAGGREGATED_PREFILL = "disaggregated_prefill"
 
-# Mirror tests/e2e/nightly/multi_node/external_dp/scripts/external_dp_config.py
+# Mirror tests/e2e/schedule/scripts/multi_node/external_dp/external_dp_config.py
 # (proxy runs on node 0, port 1999); these are not part of the YAML.
 EXTERNAL_DP_PROXY_NODE_INDEX = 0
 EXTERNAL_DP_PROXY_PORT = 1999

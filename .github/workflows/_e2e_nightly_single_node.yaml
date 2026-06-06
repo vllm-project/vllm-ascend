@@ -30,14 +30,10 @@ on:
       tests:
         required: false
         type: string
-      config_file_path:
+      config_path:
         required: false
         type: string
-      config_base_path:
-        required: false
-        type: string
-        default: ''
-        description: override CONFIG_BASE_PATH used by the yaml loader (defaults to nightly path)
+        description: full relative path to the YAML config (e.g. tests/e2e/schedule/model/DeepSeek/one_node/X.yaml)
       name:
         required: false
         type: string
@@ -75,12 +71,12 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path || inputs.tests }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_path || inputs.tests }}
   cancel-in-progress: true
 
 jobs:
   e2e-nightly:
-    name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
+    name: ${{ inputs.name || inputs.config_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
     timeout-minutes: 600
@@ -208,8 +204,8 @@ jobs:
 
       - name: Validate Inputs
         run: |
-          if [[ -z "${{ inputs.tests }}" && -z "${{ inputs.config_file_path }}" ]]; then
-            echo "Error: Either 'tests' or 'config_file_path' must be provided."
+          if [[ -z "${{ inputs.tests }}" && -z "${{ inputs.config_path }}" ]]; then
+            echo "Error: Either 'tests' or 'config_path' must be provided."
             exit 1
           fi
 
@@ -224,33 +220,32 @@ jobs:
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "Running pytest with tests path: ${{ inputs.tests }}"
           pytest -sv "${{ inputs.tests }}" \
-          --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
+          --ignore=tests/e2e/schedule/ops/one_card/test_fused_moe.py
 
       - name: Run Pytest (YAML-driven)
-        if: ${{ always() && inputs.config_file_path != '' }}
+        if: ${{ always() && inputs.config_path != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
-          CONFIG_YAML_PATH: ${{ inputs.config_file_path }}
-          CONFIG_BASE_PATH: ${{ inputs.config_base_path }}
+          CONFIG_YAML_PATH: ${{ inputs.config_path }}
           BENCHMARK_JOB_NAME: ${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
-          echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
-          pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+          echo "Running YAML-driven test with config: ${{ inputs.config_path }}"
+          pytest -sv tests/e2e/schedule/scripts/single_node/test_single_node.py
 
       - name: Set benchmark artifact timestamp
-        if: ${{ always() && inputs.config_file_path != '' }}
+        if: ${{ always() && inputs.config_path != '' }}
         id: bench_ts
         run: |
           echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
           echo "effective_name=${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}" >> $GITHUB_OUTPUT
 
       - name: Upload benchmark results
-        if: ${{ always() && inputs.config_file_path != '' }}
+        if: ${{ always() && inputs.config_path != '' }}
         continue-on-error: true
         uses: ascend-gha-runners/artifact/upload@v0.3
         with:
@@ -262,7 +257,7 @@ jobs:
           retention-days: 90
 
       - name: Upload benchmark results (GitHub Artifacts)
-        if: ${{ always() && inputs.config_file_path != '' }}
+        if: ${{ always() && inputs.config_path != '' }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
