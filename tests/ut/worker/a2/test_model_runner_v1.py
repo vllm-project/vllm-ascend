@@ -258,6 +258,15 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertFalse(runner._step_needs_accepted_tokens(False))
         self.assertTrue(runner._step_needs_accepted_tokens(True))
 
+    def test_step_needs_seq_lens_cpu_sync_requires_spec_step(self):
+        runner = self._build_runner()
+        runner._needs_seq_lens_cpu_sync = True
+        runner.use_async_spec_decode = True
+        runner.valid_sampled_token_count_gpu = torch.tensor([1], dtype=torch.int32)
+
+        self.assertFalse(runner._step_needs_seq_lens_cpu_sync(False, {"req": 0}))
+        self.assertTrue(runner._step_needs_seq_lens_cpu_sync(True, {"req": 0}))
+
     def test_gdn_builder_enables_need_accepted_tokens(self):
         class DummyGDN:
             pass

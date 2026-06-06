@@ -721,6 +721,7 @@ class NPUModelRunner(GPUModelRunner):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+        use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -1068,12 +1069,7 @@ class NPUModelRunner(GPUModelRunner):
         # attention backends (which use _seq_lens_cpu) get the right values.
         # Use non_blocking copy to pinned memory and record an event;
         # _build_attention_metadata will synchronize before reading.
-        if (
-            self._needs_seq_lens_cpu_sync
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
-            and prev_req_id_to_index
-        ):
+        if self._step_needs_seq_lens_cpu_sync(use_spec_decode, prev_req_id_to_index):
             self.optimistic_seq_lens_cpu[:num_reqs].copy_(
                 self.seq_lens[:num_reqs], non_blocking=True
             )
@@ -1087,12 +1083,7 @@ class NPUModelRunner(GPUModelRunner):
         num_computed_tokens_for_compress = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs]
         )
-        if (
-            self.use_compress
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
-            and prev_req_id_to_index
-        ):
+        if self.use_compress and self._step_needs_seq_lens_cpu_sync(use_spec_decode, prev_req_id_to_index):
             # Async spec decode keeps the CPU counter optimistic until after
             # target forward is launched. DSV4 compressed KV slot mapping is
             # CPU-built today, so use the GPU-corrected counter before
@@ -1138,7 +1129,6 @@ class NPUModelRunner(GPUModelRunner):
             target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
             target.gpu[:, :total_num_scheduled_tokens] += drift
 
-        use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
             # partial requests. While we should not sample any token
@@ -1478,6 +1468,19 @@ class NPUModelRunner(GPUModelRunner):
 
     def _step_needs_accepted_tokens(self, use_spec_decode: bool) -> bool:
         return bool(use_spec_decode and self.need_accepted_tokens)
+
+    def _step_needs_seq_lens_cpu_sync(
+        self,
+        use_spec_decode: bool,
+        prev_req_id_to_index,
+    ) -> bool:
+        return bool(
+            use_spec_decode
+            and self._needs_seq_lens_cpu_sync
+            and self.use_async_spec_decode
+            and self.valid_sampled_token_count_gpu is not None
+            and prev_req_id_to_index
+        )
 
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
