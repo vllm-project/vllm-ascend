@@ -241,7 +241,7 @@ class KVPoolWorker:
             self.m_store = real_backend(  # type: ignore[misc]
                 parallel_config,
                 memcache_client_cpus,
-                defer_init=True,
+                lazy_init=True,
             )
         else:
             backend_kwargs = {}
