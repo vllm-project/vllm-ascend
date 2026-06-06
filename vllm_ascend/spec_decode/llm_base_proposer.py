@@ -91,7 +91,6 @@ def split_inputs_tp_to_sp(hidden_states, out):
     out[: hidden_states_curr_rank.shape[0]] = hidden_states_curr_rank
     return out[:padded_num_tokens_per_rank]
 
-
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     tp_group = get_tp_group()
     _, vocab_local = logits.shape
