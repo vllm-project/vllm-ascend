@@ -558,6 +558,7 @@
     - tests/ut/test_meta_registration.py
     - tests/ut/test_profiling_config.py
     - tests/ut/test_utils.py
+    - tests/ut/test_platform.py
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
 
