@@ -18,7 +18,7 @@ all_yaml_e2e_paths = set()
 all_yaml_ut_paths = set()
 
 for module in config:
-    for t in module.get("tests", []):
+    for t in module.get("tests") or []:
         t = t.rstrip("/")
         all_yaml_paths.add(t)
         if "tests/e2e/" in t:

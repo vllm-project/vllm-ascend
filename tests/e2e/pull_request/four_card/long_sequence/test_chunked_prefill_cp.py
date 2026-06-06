@@ -63,6 +63,7 @@ def generate_prompts(input_len, batchsize):
     prompts = [" ".join([f"{random.choice(string.ascii_letters)}" for _ in range(input_len)]) for _ in range(batchsize)]
     return prompts
 
+
 @pytest.mark.skip(reason="OOM")
 @patch.dict(
     os.environ, {"HCCL_BUFFSIZE": "768", "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1", "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1"}
