@@ -70,13 +70,9 @@ jobs:
         UV_SYSTEM_PYTHON: 1
     steps:
       - name: Check NPU availability
-        id: check_npu
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
-          if npu-smi info > /dev/null 2>&1; then
-            echo "has_npu=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_npu=false" >> $GITHUB_OUTPUT
-          fi
+          npu-smi info
 
       - name: Install packages
         run: |
@@ -133,7 +129,7 @@ jobs:
 
       - uses: dorny/paths-filter@v4
         id: csrc-filter
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         with:
           filters: |
             csrc:
@@ -144,7 +140,7 @@ jobs:
 
       - name: Restore vllm-ascend csrc cache
         id: cache-csrc
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         uses: runs-on/cache/restore@v5
         with:
           path: |
@@ -157,7 +153,7 @@ jobs:
             vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-
 
       - name: Save vllm-ascend csrc cache
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' && steps.csrc-filter.outputs.csrc == 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.csrc-filter.outputs.csrc == 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
         uses: runs-on/cache/save@v5
         with:
           path: |
@@ -168,7 +164,7 @@ jobs:
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install Mooncake wheel
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           set -euxo pipefail
 
@@ -187,7 +183,7 @@ jobs:
           pip show mooncake-transfer-engine-ascend || true
 
       - name: Install vllm-project/vllm-ascend with device
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           CACHE_HIT="${{ steps.cache-csrc.outputs.cache-hit }}"
           if [ -n "$CACHE_HIT" ]; then
@@ -208,7 +204,7 @@ jobs:
           fi
 
       - name: Install vllm-project/vllm-ascend no device
-        if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
+        if: ${{ matrix.group.npu_type == 'cpu' }}
         env:
           SOC_VERSION: ascend910b1
           COMPILE_CUSTOM_KERNELS: 0
@@ -218,12 +214,12 @@ jobs:
           uv pip install -e .
 
       - name: Uninstall Triton for 310P tests
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' && matrix.group.npu_type == '310p' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
         run: |
           pip uninstall -y triton-ascend triton
 
       - name: Run selected tests with device
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
@@ -236,7 +232,7 @@ jobs:
             ${{ matrix.group.tests }}
 
       - name: Run selected tests without device
-        if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
+        if: ${{ matrix.group.npu_type == 'cpu' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
