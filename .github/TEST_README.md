@@ -6,11 +6,10 @@ This document describes the CI workflows for `vllm-ascend`, how to add tests, an
 
 | Workflow | Trigger | What it runs |
 |----------|---------|---------------|
-| `pr_test_light.yaml` | PR to main/dev/release branches | Lint + selective tests (UT + light E2E) |
-| `pr_test_full.yaml` | PR with `ready` + `ready-for-test` labels | Selective tests (UT + full E2E) |
-| `_selected_tests.yaml` | Called by `pr_test_light` / `pr_test_full` | Runs tests selected by `select_tests.py` |
+| `pr_test.yaml` | PR to main/dev/release branches | Lint + selective tests (UT + E2E) |
+| `_selected_tests.yaml` | Called by `pr_test.yaml` | Runs tests selected by `select_tests.py` |
 | `_parse_trigger.yaml` | PR comment `/e2e` | Parses comment to run specific E2E tests |
-| `_pre_commit.yml` | Called by `pr_test_light` | Lint and format checks |
+| `_pre_commit.yml` | Called by `pr_test.yaml` | Lint and format checks |
 | `schedule_nightly_test_a2.yaml` | Cron | Nightly E2E on A2 runners |
 | `schedule_nightly_test_a3.yaml` | Cron | Nightly E2E on A3 runners |
 | `schedule_weekly_test_a3.yaml` | Cron | Weekly E2E on A3 runners |
@@ -26,8 +25,8 @@ PR changed files
 test_config.yaml ──► resolve base inheritance ──► match modules ──► collect test paths
                                                                          │
                                                                 Route by convention:
-                                                                  UT:  a2/, a2_2/, a3_2/, a3_4/, 310p/
-                                                                  E2E: one_card, two_card(s), four_card(s), *_310p.py
+                                                                 UT:  a2/, a2_2/, a3_2/, a3_4/, 310p/
+                                                                 E2E: one_card, two_card, four_card, *_310p.py
                                                                          │
                                                                 runner_label.json
                                                                          │
@@ -136,17 +135,11 @@ All E2E tests run on NPU. E2E routing is determined by directory or `_310p` file
 
 | Pattern | Runner |
 |---------|--------|
-| `tests/e2e/pull_request/{light,full}/one_card/` | A2 NPU x1 |
-| `tests/e2e/pull_request/{light,full}/two_card/` or `two_cards/` | A3 NPU x2 |
-| `tests/e2e/pull_request/{light,full}/four_card/` or `four_cards/` | A3 NPU x4 |
+| `tests/e2e/pull_request/one_card/` | A2 NPU x1 |
+| `tests/e2e/pull_request/two_card/` | A3 NPU x2 |
+| `tests/e2e/pull_request/four_card/` | A3 NPU x4 |
 | `*_310p.py` under one/two-card paths | 310P NPU x1 |
 | `*_310p.py` under four-card paths | 310P NPU x4 |
-
-### E2E Type Filtering
-
-`--e2e-type light` keeps only `tests/e2e/pull_request/light/` paths.
-`--e2e-type full` keeps only `tests/e2e/pull_request/full/` paths.
-Non-`pull_request` E2E paths are always included.
 
 ## Adding a New UT Test
 
@@ -170,16 +163,15 @@ Non-`pull_request` E2E paths are always included.
     - tests/ut/my_module
 ```
 
-If `tests` points to a directory, `select_tests.py` scans `test_*.py` files and routes NPU subdirectories automatically.
+If `tests` points to a directory, `select_tests.py` scans `test_*.py` files and routes them to the correct runner automatically.
 
 ## Adding a New E2E Test
 
-1. Put the test under the correct PR directory:
+1. Put the test under the correct card directory:
 
-   - Light 1-card: `tests/e2e/pull_request/light/one_card/test_new_feature.py`
-   - Full 1-card: `tests/e2e/pull_request/full/one_card/test_new_feature.py`
-   - Full 2-card: `tests/e2e/pull_request/full/two_cards/test_new_feature.py`
-   - Full 4-card: `tests/e2e/pull_request/full/four_cards/test_new_feature.py`
+   - 1-card: `tests/e2e/pull_request/one_card/test_new_feature.py`
+   - 2-card: `tests/e2e/pull_request/two_card/test_new_feature.py`
+   - 4-card: `tests/e2e/pull_request/four_card/test_new_feature.py`
 
 2. Register it in `.github/workflows/scripts/test_config.yaml` for PR selective testing.
 
@@ -190,11 +182,9 @@ Example:
   optional: true
   source_file_dependencies:
     - vllm_ascend/my_feature
-    - tests/e2e/pull_request/full/one_card/test_my_feature.py
   tests:
-    - tests/e2e/pull_request/light/one_card/test_my_feature_light.py
-    - tests/e2e/pull_request/full/one_card/test_my_feature.py
-    - tests/e2e/pull_request/full/two_cards/test_my_feature_distributed.py
+    - tests/e2e/pull_request/one_card/test_my_feature.py
+    - tests/e2e/pull_request/two_card/test_my_feature_distributed.py
 ```
 
 ## Running Selective Tests Locally
@@ -205,12 +195,6 @@ python3 .github/workflows/scripts/select_tests.py --diff-base origin/main
 
 # Route based on explicit changed files
 python3 .github/workflows/scripts/select_tests.py --changed-files vllm_ascend/ops/foo.py
-
-# Light E2E only
-python3 .github/workflows/scripts/select_tests.py --diff-base origin/main --e2e-type light
-
-# Full E2E only
-python3 .github/workflows/scripts/select_tests.py --diff-base origin/main --e2e-type full
 
 # Run all CPU UT tests regardless of module matching
 python3 .github/workflows/scripts/select_tests.py --diff-base origin/main --run-all-cpu
