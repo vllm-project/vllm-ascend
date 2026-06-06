@@ -208,6 +208,15 @@ class TestGetAndClearFinishedRequests(unittest.TestCase):
         mock_get_clear.assert_called_once()
         self.assertEqual(result, expected_requests)
 
+    def test_get_and_clear_finished_requests_returns_expired_delayed_request(self):
+        current_time = time.time()
+        self.thread.task_tracker.add_req_to_process("req_timeout")
+        self.thread.task_tracker.add_delayed_request("req_timeout", current_time - 100000)
+
+        result = self.thread.get_and_clear_finished_requests()
+
+        self.assertEqual(result, {"req_timeout"})
+
 
 class TestKVCacheSendingThread(unittest.TestCase):
     def test_run_handles_get_meta_and_done_recv_msgs(self):
