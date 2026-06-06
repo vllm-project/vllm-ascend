@@ -2239,7 +2239,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         step_needs_accepted_tokens = self._step_needs_accepted_tokens(spec_decode_metadata is not None)
-        if step_needs_accepted_tokens:
+        if step_needs_accepted_tokens and self.use_async_scheduling:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
 
@@ -2381,7 +2381,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self._finalize_dump_data()
 
-        if step_needs_accepted_tokens:
+        if step_needs_accepted_tokens and self.use_async_scheduling:
             assert self.sampling_done_event is not None
             with (
                 record_function_or_nullcontext("async_state_update"),
