@@ -1154,6 +1154,11 @@ class MooncakeConnectorScheduler:
                 transfer_block_ids.append(blocks)
         return tuple(transfer_block_ids)
 
+    @staticmethod
+    def _get_committed_token_count(request: "Request") -> int:
+        prompt_len = len(request.prompt_token_ids or [])
+        return prompt_len + len(request.output_token_ids)
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
@@ -1272,7 +1277,9 @@ class MooncakeConnectorScheduler:
             self._reqs_need_send[request.request_id] = time.time()
             computed_block_ids = self.get_sw_clipped_blocks(computed_block_ids)
 
+        committed_token_count = self._get_committed_token_count(request)
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        num_committed_blocks = math.ceil(committed_token_count / self.block_size)
         computed_block_ids = self._compute_transfer_block_ids(computed_block_ids, len(request.prompt_token_ids))
 
         return delay_free_blocks, dict(
@@ -1287,6 +1294,7 @@ class MooncakeConnectorScheduler:
             last_token_id=request.output_token_ids[-1],
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
+            num_committed_blocks=num_committed_blocks,
         )
 
     def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:

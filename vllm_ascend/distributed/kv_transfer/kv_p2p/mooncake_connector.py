@@ -1350,6 +1350,11 @@ class MooncakeConnectorScheduler:
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
 
+    @staticmethod
+    def _get_committed_token_count(request: "Request") -> int:
+        prompt_len = len(request.prompt_token_ids or [])
+        return prompt_len + len(request.output_token_ids)
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
@@ -1464,7 +1469,9 @@ class MooncakeConnectorScheduler:
             logger.info("Delaying free of %d blocks for request %s", len(computed_block_ids), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
 
+        committed_token_count = self._get_committed_token_count(request)
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        num_committed_blocks = math.ceil(committed_token_count / self.block_size)
         computed_block_ids = tuple(
             block_ids[:num_prompt_blocks]
             if not isinstance(self.kv_cache_groups[i].kv_cache_spec, MambaSpec)
@@ -1486,6 +1493,7 @@ class MooncakeConnectorScheduler:
             last_token_id=request.output_token_ids[-1],
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
+            num_committed_blocks=num_committed_blocks,
         )
 
     def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:

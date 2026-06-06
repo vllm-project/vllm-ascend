@@ -1101,6 +1101,23 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         assert params is not None
         self.assertEqual(params["remote_block_ids"], ([1],))
 
+    def test_request_finished_exposes_committed_block_count(self):
+        self.scheduler.block_size = 2
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=[1, 2, 3, 4],
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+        request.output_token_ids = [101, 102, 103]
+
+        delay_free, params = self.scheduler.request_finished(request, ([1, 2, 3, 4, 5],))
+
+        self.assertTrue(delay_free)
+        assert params is not None
+        self.assertEqual(params["num_prompt_blocks"], 2)
+        self.assertEqual(params["num_committed_blocks"], 4)
+
 
 class TestUtils(unittest.TestCase):
     def test_string_to_int64_hash(self):
