@@ -15,14 +15,11 @@
 # This file is a part of the vllm-ascend project.
 from __future__ import annotations
 
-import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
-
-logger = logging.getLogger(__name__)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -143,26 +140,6 @@ class MoECommMethod(ABC):
         if fused_experts_input.routing.log2phy is not None:
             routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
 
-        # [DEBUG] Log routed_topk_ids computation chain for LoRA diagnosis
-        if fused_experts_input.lora_context is not None:
-            log2phy = fused_experts_input.routing.log2phy
-            logger.warning(
-                "[MoE LoRA DEBUG] routed_topk_ids computation: "
-                "original_topk_ids shape=%s dtype=%s min=%s max=%s, "
-                "log2phy is %s%s, "
-                "routed_topk_ids shape=%s dtype=%s min=%s max=%s",
-                list(fused_experts_input.topk_ids.shape),
-                fused_experts_input.topk_ids.dtype,
-                fused_experts_input.topk_ids.min().item() if fused_experts_input.topk_ids.numel() > 0 else "N/A",
-                fused_experts_input.topk_ids.max().item() if fused_experts_input.topk_ids.numel() > 0 else "N/A",
-                "None" if log2phy is None else f"shape={list(log2phy.shape)} dtype={log2phy.dtype}",
-                "" if log2phy is None else f" values={log2phy.tolist()}",
-                list(routed_topk_ids.shape),
-                routed_topk_ids.dtype,
-                routed_topk_ids.min().item() if routed_topk_ids.numel() > 0 else "N/A",
-                routed_topk_ids.max().item() if routed_topk_ids.numel() > 0 else "N/A",
-            )
-
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,
             topk_ids=routed_topk_ids,
@@ -233,59 +210,11 @@ class MoECommMethod(ABC):
             # IDs — the _build_lora_expert_indices helper needs the same
             # expert IDs to correctly identify which expert each dispatched
             # token belongs to.
-
-            # [DEBUG] Log AllGather _build_lora_expert_indices inputs
-            token_lora_indices = lora_context.punica_wrapper.token_lora_indices
-            expanded_row_idx = combine_metadata.expanded_row_idx
-            lora_a_shape = (list(lora_context.w13_lora_a_stacked[0].shape)
-                            if lora_context.w13_lora_a_stacked else "empty")
-            logger.warning(
-                "[MoE LoRA DEBUG] AllGather _build_lora_expert_indices inputs: "
-                "token_lora_indices shape=%s dtype=%s min=%s max=%s, "
-                "expanded_row_idx shape=%s dtype=%s min=%s max=%s, "
-                "routed_topk_ids shape=%s dtype=%s min=%s max=%s, "
-                "lora_context.num_experts=%s, "
-                "w13_lora_a_stacked[0] shape=%s, "
-                "lora_a_merged total rows = num_loras * num_experts = %s",
-                list(token_lora_indices.shape),
-                token_lora_indices.dtype,
-                token_lora_indices.min().item() if token_lora_indices.numel() > 0 else "N/A",
-                token_lora_indices.max().item() if token_lora_indices.numel() > 0 else "N/A",
-                list(expanded_row_idx.shape),
-                expanded_row_idx.dtype,
-                expanded_row_idx.min().item() if expanded_row_idx.numel() > 0 else "N/A",
-                expanded_row_idx.max().item() if expanded_row_idx.numel() > 0 else "N/A",
-                list(routed_topk_ids.shape),
-                routed_topk_ids.dtype,
-                routed_topk_ids.min().item() if routed_topk_ids.numel() > 0 else "N/A",
-                routed_topk_ids.max().item() if routed_topk_ids.numel() > 0 else "N/A",
-                lora_context.num_experts,
-                lora_a_shape,
-                (lora_a_shape[0] * lora_a_shape[1]) if isinstance(lora_a_shape, list) and len(lora_a_shape) >= 2 else "N/A",
-            )
-
             lora_expert_indices = _build_lora_expert_indices(
                 lora_indices=lora_context.punica_wrapper.token_lora_indices,
                 expanded_row_idx=combine_metadata.expanded_row_idx,
                 topk_ids=routed_topk_ids,
                 num_experts=lora_context.num_experts,
-            )
-
-            # [DEBUG] Log AllGather _build_lora_expert_indices output
-            lora_a_merged_rows = (lora_a_shape[0] * lora_a_shape[1]) if isinstance(lora_a_shape, list) and len(lora_a_shape) >= 2 else -1
-            out_of_range = (lora_expert_indices >= lora_a_merged_rows).sum().item() if lora_a_merged_rows > 0 else "N/A"
-            negative_count = (lora_expert_indices < 0).sum().item()
-            logger.warning(
-                "[MoE LoRA DEBUG] AllGather _build_lora_expert_indices output: "
-                "lora_expert_indices shape=%s dtype=%s min=%s max=%s, "
-                "negative_count=%s, out_of_range_count=%s (lora_a_merged_rows=%s)",
-                list(lora_expert_indices.shape),
-                lora_expert_indices.dtype,
-                lora_expert_indices.min().item() if lora_expert_indices.numel() > 0 else "N/A",
-                lora_expert_indices.max().item() if lora_expert_indices.numel() > 0 else "N/A",
-                negative_count,
-                out_of_range,
-                lora_a_merged_rows,
             )
         elif isinstance(combine_metadata, MoEAllToAllCombineMetadata):
             # AlltoAll: tokens are split across TP ranks then exchanged
