@@ -107,11 +107,38 @@ def run_one_iteration(iteration: int, args: argparse.Namespace) -> dict[str, obj
 def main() -> int:
     args = parse_args()
     records = [run_one_iteration(i, args) for i in range(args.iterations)]
+    passed = True
+    failures: list[dict[str, object]] = []
+    for record in records:
+        final_state = record["states"][-1]
+        ok = (
+            record["start_free_blocks"] == record["end_free_blocks"]
+            and record["delayed_send_marked"] is True
+            and final_state["req_to_blocks"] == {}
+            and final_state["num_requests"] == 0
+        )
+        if not ok:
+            passed = False
+            failures.append(
+                {
+                    "iteration": record["iteration"],
+                    "start_free_blocks": record["start_free_blocks"],
+                    "end_free_blocks": record["end_free_blocks"],
+                    "delayed_send_marked": record["delayed_send_marked"],
+                    "final_state": final_state,
+                }
+            )
+
+    report = {
+        "passed": passed,
+        "iterations": records,
+        "failures": failures,
+    }
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps({"iterations": records}, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(out_path)
-    return 0
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":
