@@ -172,3 +172,49 @@ def test_remote_decode_marks_request_for_delayed_send_after_finish():
     connector_scheduler = scheduler.connector.connector_scheduler
     assert connector_scheduler is not None
     assert request.request_id in connector_scheduler._reqs_need_send
+
+
+def test_remote_decode_committed_block_lifecycle_frees_after_finished_sending():
+    """Committed-block sizing should still preserve the delayed-free -> true
+    free lifecycle once finished_sending is reported."""
+
+    vllm_config = create_vllm_config(block_size=2, max_num_batched_tokens=32)
+    scheduler = create_scheduler(vllm_config)
+
+    request = create_request(
+        request_id=8,
+        max_tokens=1,
+        num_tokens=4,
+        do_remote_decode=True,
+        block_size=2,
+    )
+
+    scheduler.add_request(request)
+    request_id = request.request_id
+
+    # Step 1: finish decode, enter delayed-send state.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(reqs=[request])
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert scheduler.connector is not None
+    connector_scheduler = scheduler.connector.connector_scheduler
+    assert connector_scheduler is not None
+    assert request_id in connector_scheduler._reqs_need_send
+
+    # Step 2: scheduler emits finished req id, but blocks still retained.
+    scheduler_output = scheduler.schedule()
+    assert request_id in scheduler_output.finished_req_ids
+    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_id]
+    for block in blocks:
+        assert block.ref_cnt == 1
+
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    # Step 3: finished_sending arrives, scheduler should fully free.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.kv_connector_output = KVConnectorOutput(finished_sending={request_id})
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert_scheduler_empty(scheduler)
