@@ -235,3 +235,37 @@ def test_remote_prefill_invalid_blocks_finish_request_with_error():
     assert request.status == RequestStatus.FINISHED_ERROR
     output = engine_core_outputs[request.client_index].outputs[0]
     assert output.finish_reason == request.get_finished_reason()
+
+
+def test_remote_prefill_finished_recving_and_invalid_blocks_do_not_leave_stale_state():
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=12,
+        num_tokens=block_size * 2,
+        do_remote_prefill=True,
+        block_size=block_size,
+    )
+    request_id = request.request_id
+
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_id]
+    block_ids = {block.block_id for block in blocks}
+
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_recving={request_id},
+        invalid_block_ids=block_ids,
+    )
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.is_finished()
+    assert request.status == RequestStatus.FINISHED_ERROR
+    output = engine_core_outputs[request.client_index].outputs[0]
+    assert output.finish_reason == request.get_finished_reason()
+    assert request_id not in scheduler.finished_recving_kv_req_ids
+    assert request_id not in scheduler.requests
+    assert request_id not in scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks
