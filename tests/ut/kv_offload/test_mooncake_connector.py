@@ -15,6 +15,7 @@ import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.request import RequestStatus
+from vllm.v1.kv_cache_interface import MambaSpec
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -1118,6 +1119,47 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertEqual(params["num_prompt_blocks"], 2)
         self.assertEqual(params["num_committed_blocks"], 4)
         self.assertEqual(params["remote_block_ids"], ([1, 2, 3, 4],))
+
+    def test_request_finished_all_groups_uses_committed_blocks_for_attention_group(self):
+        class DummyMambaSpec:
+            pass
+
+        kv_cache_groups = [
+            MockKVCacheGroup(kv_cache_spec=MagicMock()),
+            MockKVCacheGroup(kv_cache_spec=DummyMambaSpec()),
+        ]
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.MambaSpec",
+                DummyMambaSpec,
+            ),
+        ):
+            self.scheduler = MooncakeConnectorScheduler(self.config, "test_engine", MockKVCacheConfig(kv_cache_groups))
+
+        self.scheduler.block_size = 2
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=[1, 2, 3, 4],
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+        request.output_token_ids = [101, 102, 103]
+
+        delay_free, params = self.scheduler.request_finished(
+            request,
+            ([1, 2, 3, 4, 5], [10, 11, 12]),
+        )
+
+        self.assertTrue(delay_free)
+        assert params is not None
+        self.assertEqual(params["num_prompt_blocks"], 2)
+        self.assertEqual(params["num_committed_blocks"], 4)
+        self.assertEqual(params["remote_block_ids"], ([1, 2, 3, 4], [10, 11, 12]))
 
 
 class TestUtils(unittest.TestCase):
