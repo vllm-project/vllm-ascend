@@ -38,7 +38,6 @@ BASELINE_TTFT_S = 5.2
     {
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
     },
 )
 def test_profiling_chunk_ttft_performance() -> None:
@@ -58,6 +57,7 @@ def test_profiling_chunk_ttft_performance() -> None:
         additional_config={
             "profiling_chunk_config": {"enabled": True, "smooth_factor": 0.9},
             "enable_cpu_binding": False,
+            "enable_flashcomm1": True,
         },
         hf_overrides={
             "rope_parameters": {
