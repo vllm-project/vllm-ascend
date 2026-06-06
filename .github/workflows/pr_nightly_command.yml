@@ -64,7 +64,7 @@ jobs:
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
           body: |
-            /nightly command triggered. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+            nightly command triggered. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
           reactions: rocket
 
       - name: Post unauthorized comment
@@ -75,7 +75,7 @@ jobs:
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
           body: |
-            /nightly command failed: you do not have permission. Only users with triage+ permission can trigger /nightly.
+            nightly command failed: you do not have permission. Only users with triage+ permission can trigger /nightly.
           reactions: confused
 
       - name: Fail if unauthorized
