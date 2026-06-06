@@ -1117,6 +1117,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         assert params is not None
         self.assertEqual(params["num_prompt_blocks"], 2)
         self.assertEqual(params["num_committed_blocks"], 4)
+        self.assertEqual(params["remote_block_ids"], ([1, 2, 3, 4],))
 
 
 class TestUtils(unittest.TestCase):

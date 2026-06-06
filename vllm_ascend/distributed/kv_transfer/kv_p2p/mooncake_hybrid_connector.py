@@ -97,6 +97,7 @@ class ReqMeta:
     remote_ptp_size: int | None
     remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
     num_prompt_blocks: int
+    num_committed_blocks: int = 0
 
 
 @dataclass
@@ -898,6 +899,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_ptp_size=kv_transfer_params.get("remote_ptp_size"),
             remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
+            num_committed_blocks=kv_transfer_params.get(
+                "num_committed_blocks",
+                kv_transfer_params.get("num_prompt_blocks", 0),
+            ),
         )
 
 
@@ -1280,7 +1285,7 @@ class MooncakeConnectorScheduler:
         committed_token_count = self._get_committed_token_count(request)
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
         num_committed_blocks = math.ceil(committed_token_count / self.block_size)
-        computed_block_ids = self._compute_transfer_block_ids(computed_block_ids, len(request.prompt_token_ids))
+        computed_block_ids = self._compute_transfer_block_ids(computed_block_ids, committed_token_count)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
