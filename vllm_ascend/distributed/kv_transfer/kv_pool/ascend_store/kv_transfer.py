@@ -303,6 +303,22 @@ class KVTransferThread(threading.Thread):
         with self.done_task_lock:
             self.finished_requests.add(req_id)
 
+    def add_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            self.stored_requests[req_id] += 1
+
+    def dec_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            if req_id in self.stored_requests:
+                self.stored_requests[req_id] -= 1
+
+    def try_finish_and_delete_stored_request(self, req_id: str) -> bool:
+        with self.done_task_lock:
+            if req_id in self.stored_requests and self.stored_requests[req_id] == 0:
+                del self.stored_requests[req_id]
+                return True
+            return False
+
     @staticmethod
     def _split_transfer_packets(
         gvas: np.ndarray,
@@ -534,26 +550,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.kv_role = kv_role
         self.enable_kv_event = enable_kv_event
 
-    def add_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            self.stored_requests[req_id] += 1
-
-    def dec_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
-
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
             if req_id in self.stored_requests:
                 del self.stored_requests[req_id]
-
-    def try_finish_and_delete_stored_request(self, req_id: str) -> bool:
-        with self.done_task_lock:
-            if req_id in self.stored_requests and self.stored_requests[req_id] == 0:
-                del self.stored_requests[req_id]
-                return True
-            return False
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.token_len_chunk
@@ -1061,10 +1061,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             num_ranks_per_layer,
             page_size_bytes,
         )
-
-    def add_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            self.stored_requests[req_id] += 1
 
     def add_request(  # type: ignore[override]
         self, req_meta: list[LayerTransferTask]
