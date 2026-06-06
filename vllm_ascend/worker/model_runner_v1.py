@@ -638,7 +638,7 @@ class NPUModelRunner(GPUModelRunner):
         if sampling_metadata.max_num_logprobs is not None:
             return f"logprobs={sampling_metadata.max_num_logprobs}"
         logitsprocs = getattr(sampling_metadata, "logitsprocs", None)
-        if logitsprocs is not None and getattr(logitsprocs, "argmax_invariant", ()):
+        if logitsprocs is not None and getattr(logitsprocs, "argmax_invariant", False):
             return "argmax_invariant_logitsproc"
         sampling_block_reason = self._get_fused_mtp_sampling_block_reason(sampling_metadata)
         if sampling_block_reason is not None:
@@ -837,20 +837,20 @@ class NPUModelRunner(GPUModelRunner):
         input_ids = getattr(self, "input_ids", None)
         if input_ids is not None:
             input_ids_gpu = getattr(input_ids, "gpu", None)
-            if torch.is_tensor(input_ids_gpu):
+            if isinstance(input_ids_gpu, torch.Tensor):
                 input_ids_gpu[start:end].fill_(0)
             input_ids_cpu = getattr(input_ids, "cpu", None)
-            if torch.is_tensor(input_ids_cpu):
+            if isinstance(input_ids_cpu, torch.Tensor):
                 input_ids_cpu[start:end].fill_(0)
 
         if self.uses_mrope:
             positions = getattr(self, "mrope_positions", None)
             if positions is not None:
                 positions_gpu = getattr(positions, "gpu", None)
-                if torch.is_tensor(positions_gpu):
+                if isinstance(positions_gpu, torch.Tensor):
                     positions_gpu[:, start:end].zero_()
                 positions_cpu = getattr(positions, "cpu", None)
-                if torch.is_tensor(positions_cpu):
+                if isinstance(positions_cpu, torch.Tensor):
                     positions_cpu[:, start:end].zero_()
             return
 
@@ -858,10 +858,10 @@ class NPUModelRunner(GPUModelRunner):
             positions = getattr(self, "xdrope_positions", None)
             if positions is not None:
                 positions_gpu = getattr(positions, "gpu", None)
-                if torch.is_tensor(positions_gpu):
+                if isinstance(positions_gpu, torch.Tensor):
                     positions_gpu[:, start:end].zero_()
                 positions_cpu = getattr(positions, "cpu", None)
-                if torch.is_tensor(positions_cpu):
+                if isinstance(positions_cpu, torch.Tensor):
                     positions_cpu[:, start:end].zero_()
             return
 
@@ -870,10 +870,10 @@ class NPUModelRunner(GPUModelRunner):
             return
         pad_position = 127 if self.use_compress else 0
         positions_gpu = getattr(positions, "gpu", None)
-        if torch.is_tensor(positions_gpu):
+        if isinstance(positions_gpu, torch.Tensor):
             positions_gpu[start:end].fill_(pad_position)
         positions_cpu = getattr(positions, "cpu", None)
-        if torch.is_tensor(positions_cpu):
+        if isinstance(positions_cpu, torch.Tensor):
             positions_cpu[start:end].fill_(pad_position)
         positions_np = getattr(positions, "np", None)
         if positions_np is not None:
@@ -896,7 +896,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _token_ids_for_input_buffer(self, token_ids: torch.Tensor) -> torch.Tensor:
         input_ids_gpu = getattr(getattr(self, "input_ids", None), "gpu", None)
-        if torch.is_tensor(input_ids_gpu) and token_ids.dtype != input_ids_gpu.dtype:
+        if isinstance(input_ids_gpu, torch.Tensor) and token_ids.dtype != input_ids_gpu.dtype:
             return token_ids.to(input_ids_gpu.dtype)
         return token_ids
 
@@ -970,7 +970,7 @@ class NPUModelRunner(GPUModelRunner):
             and self.drafter.slot_mapping_group
         ):
             slot_mapping = getattr(spec_decode_common_attn_metadata, "slot_mapping", None)
-            if torch.is_tensor(slot_mapping):
+            if isinstance(slot_mapping, torch.Tensor):
                 mtp_slot_mapping = self.drafter.slot_mapping_group[0]
                 slot_mapping_len = min(active_num_tokens, slot_mapping.shape[0], mtp_slot_mapping.shape[0])
                 mtp_slot_mapping[:slot_mapping_len].copy_(
@@ -981,6 +981,7 @@ class NPUModelRunner(GPUModelRunner):
         dummy_sample_idx = wrapper.sample_idx_mapping_buf.shape[0] - 1
 
         def fill_padded_logits_indices() -> None:
+            assert wrapper is not None
             if num_tokens_padded is None or self.num_spec_tokens <= 0:
                 return
             decode_query_len = self.num_spec_tokens + 1
@@ -998,6 +999,7 @@ class NPUModelRunner(GPUModelRunner):
             wrapper.logits_indices_buf[num_reqs:padded_num_reqs].zero_()
 
         def fill_padded_sample_rows(num_sample_rows: int) -> None:
+            assert wrapper is not None
             if num_tokens_padded is None:
                 return
             pad_end = min(
@@ -1371,8 +1373,8 @@ class NPUModelRunner(GPUModelRunner):
             slot_mapping_len = min(
                 active_slot_mapping_len,
                 int(num_tokens),
-                slot_mapping.shape[0],
-                mtp_slot_mapping.shape[0],
+                int(slot_mapping.shape[0]),
+                int(mtp_slot_mapping.shape[0]),
             )
             mtp_slot_mapping[:slot_mapping_len].copy_(
                 slot_mapping[:slot_mapping_len].to(dtype=mtp_slot_mapping.dtype, device=mtp_slot_mapping.device)
@@ -1407,10 +1409,12 @@ class NPUModelRunner(GPUModelRunner):
         block_table = self.input_batch.block_table[0].get_device_tensor()[:num_reqs]
 
         class _DecodeStub:
-            pass
+            seq_lens_list: list[int]
+            actual_seq_lengths_q: list[int]
+            block_table: torch.Tensor
 
         class _MetaStub:
-            pass
+            decode: _DecodeStub
 
         draft_attn_metadatas = []
         num_draft_steps = max(getattr(self.drafter, "num_speculative_tokens", 1), 1)
