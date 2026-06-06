@@ -221,3 +221,40 @@ def test_remote_decode_committed_block_lifecycle_frees_after_finished_sending():
 
     assert_scheduler_empty(scheduler)
     assert scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks == start_free_blocks
+
+
+def test_remote_decode_abort_during_delayed_send_still_frees_after_finished_sending():
+    vllm_config = create_vllm_config(block_size=2, max_num_batched_tokens=32)
+    scheduler = create_scheduler(vllm_config)
+    start_free_blocks = scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
+
+    request = create_request(
+        request_id=11,
+        max_tokens=1,
+        num_tokens=4,
+        do_remote_decode=True,
+        block_size=2,
+    )
+    scheduler.add_request(request)
+    request_id = request.request_id
+
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(reqs=[request])
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert scheduler.connector is not None
+    connector_scheduler = scheduler.connector.connector_scheduler
+    assert connector_scheduler is not None
+    assert request_id in connector_scheduler._reqs_need_send
+
+    # Abort after the request has entered delayed-send lifecycle.
+    scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.is_finished()
+
+    scheduler_output = scheduler.schedule()
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.kv_connector_output = KVConnectorOutput(finished_sending={request_id})
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert_scheduler_empty(scheduler)
+    assert scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks == start_free_blocks

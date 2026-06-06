@@ -500,7 +500,8 @@ class TestCoreFunctionality(unittest.TestCase):
 
         self.thread._handle_request(self.test_req)
 
-        self.assertIn("req1", self.thread.invalid_block_ids)
+        self.assertSetEqual(self.thread.invalid_block_ids, {1, 2})
+        self.assertFalse(self.thread._is_failed_recv_request("req1"))
         cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
         mock_send_free.assert_called_once_with("req1", "localhost", {6666: 1})
         mock_send_recv.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
