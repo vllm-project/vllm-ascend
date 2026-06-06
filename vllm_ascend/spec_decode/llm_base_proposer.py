@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.sequence import IntermediateTensors
 from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_pp_group,
@@ -28,6 +27,7 @@ from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
+from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -92,6 +92,7 @@ def split_inputs_tp_to_sp(hidden_states, out):
     out[: hidden_states_curr_rank.shape[0]] = hidden_states_curr_rank
     return out[:padded_num_tokens_per_rank]
 
+
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     tp_group = get_tp_group()
     _, vocab_local = logits.shape
@@ -124,9 +125,7 @@ class _FusedModelWithMTP:
         max_num_tokens = drafter.runner.max_num_tokens
         device = drafter.device
 
-        self.logits_indices_buf = torch.zeros(
-            max_num_reqs * (1 + num_spec_tokens), dtype=torch.int64, device=device
-        )
+        self.logits_indices_buf = torch.zeros(max_num_reqs * (1 + num_spec_tokens), dtype=torch.int64, device=device)
         self.sample_logits_indices_buf = torch.zeros(
             max_num_reqs * (1 + num_spec_tokens), dtype=torch.int64, device=device
         )
@@ -134,9 +133,7 @@ class _FusedModelWithMTP:
             max_num_reqs * (1 + num_spec_tokens), dtype=torch.int32, device=device
         )
         self.bonus_row_indices_buf = torch.zeros((max_num_reqs,), dtype=torch.int64, device=device)
-        self.target_row_indices_buf = torch.zeros(
-            (max_num_reqs * num_spec_tokens,), dtype=torch.int64, device=device
-        )
+        self.target_row_indices_buf = torch.zeros((max_num_reqs * num_spec_tokens,), dtype=torch.int64, device=device)
         self.num_reqs_buf = torch.zeros(1, dtype=torch.int32, device=device)
         self.num_actual_tokens_buf = torch.zeros(1, dtype=torch.int32, device=device)
         self.num_sample_rows_buf = torch.zeros(1, dtype=torch.int32, device=device)
@@ -145,20 +142,14 @@ class _FusedModelWithMTP:
         self.target_logits_indices_buf = torch.full(
             (max_num_reqs, num_spec_tokens), -1, dtype=torch.int64, device=device
         )
-        self.spec_decode_token_ids_buf = torch.zeros(
-            (max_num_reqs, num_spec_tokens), dtype=torch.int64, device=device
-        )
-        self.draft_token_ids_flat_buf = torch.zeros(
-            (max_num_reqs * num_spec_tokens,), dtype=torch.int64, device=device
-        )
+        self.spec_decode_token_ids_buf = torch.zeros((max_num_reqs, num_spec_tokens), dtype=torch.int64, device=device)
+        self.draft_token_ids_flat_buf = torch.zeros((max_num_reqs * num_spec_tokens,), dtype=torch.int64, device=device)
         self.backup_next_token_ids_buf = torch.zeros((max_num_reqs,), dtype=torch.int64, device=device)
         self.discarded_req_mask_buf = torch.zeros((max_num_reqs,), dtype=torch.bool, device=device)
         self.sampled_token_ids_buf = torch.full(
             (max_num_reqs, num_spec_tokens + 1), -1, dtype=torch.int32, device=device
         )
-        self.draft_token_ids_buf = torch.zeros(
-            (max_num_reqs, num_spec_tokens), dtype=torch.int64, device=device
-        )
+        self.draft_token_ids_buf = torch.zeros((max_num_reqs, num_spec_tokens), dtype=torch.int64, device=device)
         self.next_token_ids_buf = torch.zeros((max_num_reqs,), dtype=torch.int64, device=device)
         self.valid_sampled_tokens_count_buf = torch.zeros((max_num_reqs,), dtype=torch.int32, device=device)
         self.mtp_last_hidden_states_buf = torch.zeros(
@@ -262,9 +253,7 @@ class _FusedModelWithMTP:
                 accepted_or_sampled_target_ids,
                 bonus_token_ids,
             )
-            self.sampled_token_ids_buf[:, 0].copy_(
-                torch.where(active_req_mask, first_token_ids, placeholder_token_ids)
-            )
+            self.sampled_token_ids_buf[:, 0].copy_(torch.where(active_req_mask, first_token_ids, placeholder_token_ids))
             self.sampled_token_ids_buf[:, 1].copy_(
                 torch.where(accepted_bonus_mask, bonus_token_ids, placeholder_token_ids)
             )
@@ -302,9 +291,7 @@ class _FusedModelWithMTP:
             )
             output_columns = torch.arange(max_spec_len + 1, device=device, dtype=torch.int64)
             bonus_column = draft_counts.clamp(min=0, max=max_spec_len)
-            bonus_mask = prefix_accepted.unsqueeze(1) & (
-                output_columns.unsqueeze(0) == bonus_column.unsqueeze(1)
-            )
+            bonus_mask = prefix_accepted.unsqueeze(1) & (output_columns.unsqueeze(0) == bonus_column.unsqueeze(1))
             sampled_token_ids = torch.where(
                 bonus_mask,
                 bonus_token_ids.unsqueeze(1),
@@ -333,11 +320,7 @@ class _FusedModelWithMTP:
         )
         forward_context = get_forward_context()
         is_capturing = getattr(forward_context, "capturing", False)
-        if (
-            is_capturing
-            and self.capture_mtp_enabled
-            and not isinstance(hidden_states, IntermediateTensors)
-        ):
+        if is_capturing and self.capture_mtp_enabled and not isinstance(hidden_states, IntermediateTensors):
             raw_hidden = hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
             if getattr(forward_context, "flash_comm_v1_enabled", False):
                 from vllm.distributed import tensor_model_parallel_all_gather
@@ -370,6 +353,7 @@ class _FusedModelWithMTP:
             num_reqs = all_draft_ids.shape[0]
             self.draft_token_ids_buf[:num_reqs, : all_draft_ids.shape[1]].copy_(all_draft_ids)
         return hidden_states
+
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
@@ -599,9 +583,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def _prepare_graph_capture_query_start_loc(self, num_tokens: int, num_reqs: int) -> int:
         actual_num_reqs = num_reqs
-        self.query_start_loc.cpu[: actual_num_reqs + 1].copy_(
-            self.runner.query_start_loc.cpu[: actual_num_reqs + 1]
-        )
+        self.query_start_loc.cpu[: actual_num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: actual_num_reqs + 1])
         uniform_decode_query_len = getattr(self.runner, "uniform_decode_query_len", self.decode_threshold)
         if not isinstance(uniform_decode_query_len, int):
             uniform_decode_query_len = self.decode_threshold
@@ -852,11 +834,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if hidden_states.dim() == 2 and hidden_states.shape[-1] == hc_mult * hidden_size:
             hidden_states = hidden_states.view(-1, hc_mult, hidden_size)
 
-        if (
-            hidden_states.dim() == 3
-            and hidden_states.shape[1] == hc_mult
-            and hidden_states.shape[2] == hidden_size
-        ):
+        if hidden_states.dim() == 3 and hidden_states.shape[1] == hc_mult and hidden_states.shape[2] == hidden_size:
             return (
                 torch.where(
                     active_token_mask.view(-1, 1, 1),
@@ -919,9 +897,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         next_token_ids = next_token_ids[:batch_size]
         token_offsets_i64 = token_offsets.to(torch.int64)
         bonus_write_mask = (
-            (raw_logits_indices.unsqueeze(1) == token_offsets_i64.unsqueeze(0))
-            & active_batch_mask.unsqueeze(1)
-        )
+            raw_logits_indices.unsqueeze(1) == token_offsets_i64.unsqueeze(0)
+        ) & active_batch_mask.unsqueeze(1)
         bonus_update_mask = bonus_write_mask.any(dim=0)
         bonus_values = (bonus_write_mask.to(next_token_ids.dtype) * next_token_ids.unsqueeze(1)).sum(dim=0)
         current_input_ids.copy_(
@@ -941,12 +918,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         incoming_hidden_states = hidden_states[:num_tokens]
-        model_hidden_states_buffer, uses_mtp_hidden_model_buffer = (
-            self._prepare_mtp_previous_hidden_states_for_graph(
-                raw_model,
-                incoming_hidden_states,
-                active_token_mask,
-            )
+        model_hidden_states_buffer, uses_mtp_hidden_model_buffer = self._prepare_mtp_previous_hidden_states_for_graph(
+            raw_model,
+            incoming_hidden_states,
+            active_token_mask,
         )
         if not uses_mtp_hidden_model_buffer:
             current_hidden_states = self.hidden_states[:num_tokens]
@@ -995,9 +970,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             model_input_ids = self.input_ids[:num_tokens]
             model_positions = self._get_positions(num_tokens)
             model_hidden_states = model_hidden_states_buffer
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(
-                model_hidden_states, model_positions
-            )
+            model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
 
             model_kwargs: dict[str, torch.Tensor] = {
                 "input_ids": model_input_ids,
@@ -1055,9 +1028,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
             with draft_forward_context(step_attn_metadata):
-                model_hidden_states, model_positions = self.maybe_pad_and_reduce(
-                    model_hidden_states, model_positions
-                )
+                model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
                 model_kwargs = {
                     "input_ids": model_input_ids,
                     "positions": model_positions,
