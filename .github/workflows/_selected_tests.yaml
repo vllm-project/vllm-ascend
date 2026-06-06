@@ -228,6 +228,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
