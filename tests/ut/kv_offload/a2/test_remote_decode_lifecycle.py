@@ -144,3 +144,31 @@ def test_prefix_cache_lifecycle():
     model_runner_output.kv_connector_output = KVConnectorOutput(finished_sending={request_remote.request_id})
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
+
+
+def test_remote_decode_marks_request_for_delayed_send_after_finish():
+    """Remote decode finish should enter the delayed-send lifecycle after the
+    first output update."""
+
+    vllm_config = create_vllm_config(block_size=2, max_num_batched_tokens=32)
+    scheduler = create_scheduler(vllm_config)
+
+    # Prompt uses exactly 2 blocks. One generated token should expand the
+    # committed footprint to 3 blocks.
+    request = create_request(
+        request_id=7,
+        max_tokens=1,
+        num_tokens=4,
+        do_remote_decode=True,
+        block_size=2,
+    )
+
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(reqs=[request])
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert scheduler.connector is not None
+    connector_scheduler = scheduler.connector.connector_scheduler
+    assert connector_scheduler is not None
+    assert request.request_id in connector_scheduler._reqs_need_send
