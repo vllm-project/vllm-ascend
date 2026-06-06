@@ -487,6 +487,25 @@ class TestCoreFunctionality(unittest.TestCase):
         cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
         self.mock_queue.task_done.assert_called_once()
 
+    @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
+    @patch.object(KVCacheRecvingThread, "_send_done_signal_to_free_remote_port")
+    @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
+    def test_handle_request_marks_failure_and_finishes_request(
+        self, mock_transfer, mock_send_free, mock_send_recv
+    ):
+        mock_transfer.side_effect = RuntimeError("transfer failed")
+        mock_send_free.return_value = None
+        mock_send_recv.return_value = None
+        self.thread.task_tracker = MagicMock()
+
+        self.thread._handle_request(self.test_req)
+
+        self.assertIn("req1", self.thread.invalid_block_ids)
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
+        mock_send_free.assert_called_once_with("req1", "localhost", {6666: 1})
+        mock_send_recv.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
+        self.mock_queue.task_done.assert_called_once()
+
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_kv_cache(self, mock_get_meta):
         with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
