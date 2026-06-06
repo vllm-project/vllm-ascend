@@ -1062,6 +1062,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             page_size_bytes,
         )
 
+    def add_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            self.stored_requests[req_id] += 1
+
     def add_request(  # type: ignore[override]
         self, req_meta: list[LayerTransferTask]
     ) -> torch.Tensor:
