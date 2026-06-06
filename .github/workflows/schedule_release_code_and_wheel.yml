@@ -33,6 +33,7 @@ on:
         type: choice
         options:
           - main
+          - v0.20.2rc1
           - v0.19.1rc1
           - v0.18.0
           - v0.18.0rc1
@@ -277,6 +278,17 @@ jobs:
         with:
           tool-cache: true
           docker-images: false
+
+      - name: Patch 310p Dockerfile base image to manylinux_2_34
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          FILE=.github/workflows/dockerfiles/Dockerfile.buildwheel.310p
+          if ! grep -q 'quay.io/ascend/manylinux:9\.1\.0-beta\.1-310p-manylinux_2_28' "$FILE"; then
+            echo "ERROR: Expected base image pattern not found in $FILE"
+            exit 1
+          fi
+          sed -i 's|9\.1\.0-beta\.1-310p-manylinux_2_28|9.1.0-beta.1-310p-manylinux_2_34|' "$FILE"
+          grep '^FROM' "$FILE"
 
       - name: Build wheel
         run: |
