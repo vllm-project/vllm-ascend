@@ -30,9 +30,6 @@ from vllm.config import KVTransferConfig
 
 from tests.e2e.conftest import VllmRunner
 
-os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
 QWEN_DENSE_MODELS = [
     "vllm-ascend/Qwen3-0.6B-W8A8",
 ]
