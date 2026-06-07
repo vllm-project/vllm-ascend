@@ -978,8 +978,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
                         continue
                     block_hash = request.block_hashes[block_index]
                     chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
-                    key = PoolKey(
-                        self.token_database.metadata,
+                    key = self.token_database._make_key_by_hash(
                         chunk_hash,
                     ).split_layers(self.final_layer_id + 1)[layer_id]
                     group_block_size = self._get_block_size(0)
