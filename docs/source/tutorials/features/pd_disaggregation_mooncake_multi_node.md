@@ -295,7 +295,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_producer",
   "kv_port": "36000",
-  "engine_id": "0",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -354,7 +353,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_producer",
   "kv_port": "36100",
-  "engine_id": "1",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -413,7 +411,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_consumer",
   "kv_port": "36200",
-  "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -471,7 +468,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_consumer",
   "kv_port": "36200",
-  "engine_id": "2",
   "kv_connector_extra_config": {
             
             "prefill": {
@@ -538,7 +534,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "36000",
-  "engine_id": "0",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -597,7 +592,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "36100",
-  "engine_id": "1",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -656,7 +650,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "36200",
-  "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,
@@ -714,7 +707,6 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "36200",
-  "engine_id": "2",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 2,

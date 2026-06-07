@@ -875,3 +875,18 @@
 #    Future Plan:
 #       Remove this patch when upstream vLLM supports MoE communication type abstraction that
 #       can be extended by hardware plugins like vllm-ascend.
+#
+# ** 29. File: platform/patch_mamba_manager.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
+#      `vllm.v1.core.single_type_kv_cache_manager.spec_manager_map[MambaSpec]`
+#    Why:
+#       Upstream hybrid prefix cache lookup does not support PCP/DCP.
+#    How:
+#       Replace MambaManager with AscendMambaManager for prefix cache hit lookup
+#       on hybrid Mamba paths (logical mamba block_size when caching is enabled).
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/40996
+#    Future Plan:
+#       Upstream PR #40996 adds hybrid prefix cache lookup for DCP only; PCP is
+#       not supported yet. Remove this patch once upstream supports both PCP and DCP.

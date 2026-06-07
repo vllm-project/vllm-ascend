@@ -206,8 +206,6 @@ vllm serve "/home/p00929506/Qwen3-VL-8B-Instruct" \
       '{"kv_connector": "MooncakeLayerwiseConnector",
       "kv_role": "kv_producer",
       "kv_port": "50001",
-      "engine_id": "0",
-      "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
       "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {
@@ -249,8 +247,6 @@ vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
       '{"kv_connector": "MooncakeLayerwiseConnector",
         "kv_role": "kv_consumer",
         "kv_port": "50001",
-        "engine_id": "1",
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
         "kv_connector_extra_config": {
                   "use_ascend_direct": true,
                   "prefill": {
