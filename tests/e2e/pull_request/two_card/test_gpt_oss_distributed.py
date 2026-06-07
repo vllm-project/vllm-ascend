@@ -21,14 +21,9 @@
 Run `pytest tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py`.
 """
 
-import os
-
 import pytest
 
 from tests.e2e.conftest import VllmRunner
-
-os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 GPT_OSS_MODELS = [
     "unsloth/gpt-oss-20b-BF16",
