@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend import envs
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -284,6 +285,9 @@ def get_kv_cache_coordinator(
     dcp_world_size: int,
     pcp_world_size: int,
     hash_block_size: int,
+    # ``scheduler_block_size`` was added on vLLM main (version B); v0.21.0 has
+    # no such parameter. Keep it optional so both upstream call sites work.
+    scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
@@ -307,18 +311,22 @@ def get_kv_cache_coordinator(
     # Only CP hybrid prefix caching needs AscendHybridKVCacheCoordinator.
     # Otherwise keep upstream coordinators (non-CP / unitary / no-prefix-cache).
     if not cp_enabled or len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
-        return _orig_get_kv_cache_coordinator(
-            kv_cache_config,
-            max_model_len,
-            max_num_batched_tokens,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
-            dcp_world_size,
-            pcp_world_size,
-            hash_block_size,
-            metrics_collector,
+        orig_kwargs = dict(
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
+            use_eagle=use_eagle,
+            enable_caching=enable_caching,
+            enable_kv_cache_events=enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
         )
+        # ``scheduler_block_size`` only exists in the version B signature.
+        if not vllm_version_is("0.21.0"):
+            orig_kwargs["scheduler_block_size"] = scheduler_block_size
+        return _orig_get_kv_cache_coordinator(**orig_kwargs)
     return AscendHybridKVCacheCoordinator(
         kv_cache_config,
         max_model_len,

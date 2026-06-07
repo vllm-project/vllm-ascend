@@ -310,7 +310,7 @@
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionRequest`
 #      `vllm.tokenizers.deepseek_v4`
 #    Why:
-#       Supported vLLM v0.20.2 predates newer DeepSeek V4 reasoning-effort
+#       Supported vLLM v0.21.0 predates newer DeepSeek V4 reasoning-effort
 #       handling: `minimal`, `xhigh`, and `max` are rejected at request
 #       validation time, reasoning effort does not automatically enable
 #       thinking, and `reasoning_effort="none"` does not force chat mode in
@@ -320,7 +320,7 @@
 #       backport the newer `build_chat_params` enable_thinking behavior, and
 #       monkey-patch the DeepSeek V4 tokenizer reasoning-effort mapping.
 #    Related PR (if no, explain why):
-#       Upstream vLLM main behavior after v0.20.2.
+#       Upstream vLLM main behavior after v0.21.0.
 #    Future Plan:
 #       Remove this patch once vllm-ascend upgrades to a vLLM version with the
 #       same DeepSeek V4 thinking behavior.
@@ -329,7 +329,7 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tool_parsers.minimax_m2_tool_parser.MinimaxM2ToolParser`
 #    Why:
-#       vLLM 0.20.2 only emits MiniMax-M2 tool-call arguments after a complete
+#       vLLM 0.21.0 only emits MiniMax-M2 tool-call arguments after a complete
 #       `<invoke>...</invoke>` block, so long arguments are buffered instead of
 #       streamed incrementally.
 #    How:
@@ -412,9 +412,7 @@
 #    How：
 #       Import `triton` from vllm.triton_utils (which handles both
 #       real Triton and TritonPlaceholder) and inject `next_power_of_2`
-#       onto the module. For vLLM versions that have
-#       `vllm.utils.math_utils.next_power_of_2`, reuse that implementation;
-#       for v0.20.2 (which lacks it), skip the patch.
+#       onto the module, reusing `vllm.utils.math_utils.next_power_of_2`.
 #    Related PR (if no, explain why):
 #       No, torch_npu Triton compatibility issue.
 #    Future Plan:

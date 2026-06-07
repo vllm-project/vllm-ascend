@@ -14,6 +14,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     MambaSpec,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class AscendMambaManager(MambaManager):
     def __init__(self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs) -> None:
@@ -50,4 +52,5 @@ class AscendMambaManager(MambaManager):
 
 
 single_type_kv_cache_manager.MambaManager = AscendMambaManager
-single_type_kv_cache_manager.spec_manager_map[MambaSpec] = AscendMambaManager
+if vllm_version_is("0.21.0"):
+    single_type_kv_cache_manager.spec_manager_map[MambaSpec] = AscendMambaManager

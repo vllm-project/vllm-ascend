@@ -35,8 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -58,6 +56,10 @@ from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
+from vllm_ascend.distributed.utils import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
+)
 from vllm_ascend.utils import enable_custom_op
 
 # isort: off

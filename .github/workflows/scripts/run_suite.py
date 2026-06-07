@@ -71,7 +71,7 @@ def _print_github_actions_annotation(annotation: str, message: str) -> None:
 
 def run_tests(
     files: list[TestFile],
-    continue_on_error: bool = False,
+    continue_on_error: bool = True,
 ) -> tuple[int, list[TestRecord]]:
     """
     Run each TestFile with pytest and collect timing results.

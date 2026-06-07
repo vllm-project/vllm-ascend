@@ -68,7 +68,7 @@ myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.20.2",
+    "vllm_version": "v0.21.0",
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
@@ -76,13 +76,13 @@ myst_substitutions = {
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
     "pip_vllm_ascend_version": "0.20.2rc1",
-    "pip_vllm_version": "0.20.2",
+    "pip_vllm_version": "0.21.0",
     # CANN image tag
     "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.12",
     # vLLM commit hash for main branch
-    "main_vllm_commit": "9090368b650896bf5fc990c921df7eb4c20355a5",
+    "main_vllm_commit": "efc347f1b2e635753ae8a594e9714109c200fcd3",
     # vLLM tag for main branch
-    "main_vllm_tag": "v0.20.2",
+    "main_vllm_tag": "v0.21.0",
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.13",
     # CANN version for main branch

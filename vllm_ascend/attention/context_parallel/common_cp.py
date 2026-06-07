@@ -3,7 +3,9 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import get_dcp_group, get_decode_context_model_parallel_world_size, get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
+
+from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
 @dataclass

@@ -6,8 +6,6 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_dcp_group,
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
     get_pcp_group,
 )
 from vllm.utils.math_utils import cdiv
@@ -16,6 +14,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.utils import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
+)
 
 # isort: off
 from vllm_ascend.attention.mla_v1 import (

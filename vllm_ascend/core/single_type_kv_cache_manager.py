@@ -9,7 +9,6 @@ from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SingleTypeKVCacheManager,
-    spec_manager_map,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -162,9 +161,14 @@ class CompressAttentionManager(FullAttentionManager):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
+            alignment_tokens: The cache-hit alignment used by upstream vLLM
+                main. v0.21.0 does not expose this argument in the base class.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // (self.block_size * self.compress_ratio)
+
+        if vllm_version_is("0.21.0"):
+            return super().cache_blocks(request, num_tokens)
 
         if num_cached_blocks >= num_full_blocks:
             return
@@ -250,7 +254,15 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
-    manager_class = spec_manager_map[type(kv_cache_spec)]
+    if vllm_version_is("0.21.0"):
+        from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map  # type: ignore[import-not-found]
+
+        manager_class = spec_manager_map[type(kv_cache_spec)]
+    else:
+        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
+
+        manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+        assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
     if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
         if max_model_len is not None:

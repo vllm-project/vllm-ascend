@@ -1,5 +1,6 @@
 # mypy: ignore-errors
 
+import itertools
 from typing import Any
 
 import torch
@@ -140,7 +141,14 @@ def preprocess_mamba(
     # TODO(Chen): we need to optimize this function a lot
     # assert cache_config.enable_prefix_caching
     block_size = mamba_spec.block_size
-    mamba_utils.cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
+    # Clear stale ``mamba_state_idx`` for finished/preempted/resumed reqs.
+    # vLLM main factored this into ``mamba_utils.cleanup_mamba_state_idx`` while
+    # v0.21.0 keeps it inline; inline it here so both versions work.
+    finished_req_ids = scheduler_output.finished_req_ids
+    preempted_req_ids = scheduler_output.preempted_req_ids or set()
+    resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+    for req_id in itertools.chain(finished_req_ids, preempted_req_ids, resumed_req_ids):
+        mamba_state_idx.pop(req_id, None)
 
     copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):
