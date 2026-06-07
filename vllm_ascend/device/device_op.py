@@ -18,6 +18,7 @@
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 
 from vllm_ascend.device.mxfp_compat import (
