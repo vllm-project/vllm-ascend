@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.20.2"):
+if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
         GatedDeltaNetAttention,
     )
@@ -292,7 +292,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             ba, _ = self.in_proj_ba(hidden_states)
             z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
-            if vllm_version_is("0.20.2"):
+            if vllm_version_is("0.21.0"):
                 b, a = ba.chunk(2, dim=-1)
             else:
                 b, a = self.split_ba(ba)
@@ -307,7 +307,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 ba, _ = self.in_proj_ba(hidden_states)
-                if vllm_version_is("0.20.2"):
+                if vllm_version_is("0.21.0"):
                     b, a = ba.chunk(2, dim=-1)
                 else:
                     b, a = self.split_ba(ba)
@@ -339,12 +339,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        if vllm_version_is("0.20.2"):
+        if vllm_version_is("0.21.0"):
             torch.ops.vllm.gdn_attention_core(
                 mixed_qkv,
                 b,
                 a,
                 core_attn_out,
+                False,
                 self.prefix,
             )
         else:
