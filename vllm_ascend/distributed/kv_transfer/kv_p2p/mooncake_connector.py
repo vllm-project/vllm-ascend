@@ -58,7 +58,7 @@ from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, is_vl_model
 
 # isort: off
 if TYPE_CHECKING:
@@ -409,6 +409,19 @@ class KVCacheRecvingThread(threading.Thread):
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
             for rank in range(self._prefill_pp_size)
         }
+        if not is_vl_model(self.vllm_config):
+            if self.use_mla:
+                self.k_head_dim = hf_text_config.kv_lora_rank
+                self.v_head_dim = hf_text_config.qk_rope_head_dim
+                self.num_kv_heads = 1
+            else:
+                self.k_head_dim = hf_text_config.head_dim
+                self.v_head_dim = hf_text_config.head_dim
+                self.num_kv_heads = max(hf_text_config.num_key_value_heads // self.tp_size, 1)
+        else:
+            self.k_head_dim = hf_text_config.head_dim
+            self.v_head_dim = hf_text_config.head_dim
+            self.num_kv_heads = max(hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
         self.failed_recv_requests: set[str] = set()
         self.invalid_block_ids: set[int] = set()
