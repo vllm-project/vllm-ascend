@@ -14,16 +14,23 @@ Please refer to the [Supported Features List](../../user_guide/support_matrix/su
 
 Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
 
-## 3 Environment Preparation
+## 3 Prerequisites
 
 ### 3.1 Model Weight
 
 The following model variants are available. It is recommended to download the model weight to a shared directory across multiple nodes (e.g., `/root/.cache/`).
 
+**BF16 Version:**
+
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
 | Qwen3-235B-A22B (BF16) | 1 Atlas 800I A3 (64G × 16) node, 1 Atlas 800I A2 (64G × 8) node, or 2 Atlas 800I A2 (32G × 8) nodes | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
-| Qwen3-235B-A22B-W8A8 | 1 Atlas 800I A3 (64G × 16) node, 1 Atlas 800I A2 (64G × 8) node, or 2 Atlas 800I A2 (32G × 8) nodes | [Download](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8) |
+
+**Quantized Version (Pre-converted):**
+
+| Model | Quantization | Hardware Requirement | Download |
+|-------|-------------|---------------------|----------|
+| Qwen3-235B-A22B-W8A8 | W8A8 | 1 Atlas 800I A3 (64G × 16) node, 1 Atlas 800I A2 (64G × 8) node, or 2 Atlas 800I A2 (32G × 8) nodes | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -33,13 +40,23 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 
 ## 4 Installation
 
-:::::{tab-set}
-::::{tab-item} Use Docker image
+### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the Docker image on your node. Refer to [Using Docker](../../installation.md#set-up-using-docker) for details.
+You can use the official all-in-one Docker image for Qwen3-235B-A22B deployment.
+
+**Docker Pull:**
 
 ```{code-block} bash
    :substitutions:
+
+docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```
+
+**Docker Run:**
+
+```{code-block} bash
+   :substitutions:
+
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7], Atlas A3:/dev/davinci[0-15]).
 # Update the vllm-ascend image according to your environment.
 # Note: download the weight to /root/.cache in advance.
@@ -71,23 +88,46 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-::::
-::::{tab-item} Build from source
+The default workdir is `/workspace`. vLLM and vLLM-Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`), so changes take effect immediately without requiring a new installation.
 
-You can build all from source.
-
-- Install `vllm-ascend`, refer to [set up using python](../../installation.md#set-up-using-python).
-
-::::
-:::::
+To verify the successful installation of the environment, please refer to [installation](../../installation.md).
 
 If deploying a multi-node environment, set up the environment on each node.
+
+### 4.2 Source Code Installation
+
+In addition, if you don't want to use the Docker image as above, you can also build all from source:
+
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+
+If you want to deploy a multi-node environment, you need to set up environment on each node.
 
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
 Qwen3-235B-A22B and Qwen3-235B-A22B-W8A8 can both be deployed on 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8). Quantized versions require `--quantization ascend`.
+
+#### BF16 Models (e.g., Qwen3-235B-A22B)
+
+```shell
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
+# To reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve Qwen/Qwen3-235B-A22B \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor-parallel-size 8 \
+    --served-model-name qwen3 \
+    --max-model-len 32768 \
+    --gpu-memory-utilization 0.9 \
+    --trust-remote-code \
+    --async-scheduling
+```
+
+#### W8A8 Quantized Model (e.g., Qwen3-235B-A22B-W8A8)
 
 The following example demonstrates best practices for Qwen3-235B-A22B-W8A8 on a single node, targeting 128K context with DP=1, TP=8:
 
@@ -131,9 +171,38 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 - If the model is not a quantized model, remove the `--quantization ascend` parameter.
 :::
 
+After the service is started, you can verify the deployment by sending a request:
+
+```bash
+curl http://<node0_ip>:<port>/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qwen3",
+        "prompt": "The future of AI is",
+        "max_tokens": 50,
+        "temperature": 0
+    }'
+```
+
+Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
+
 ### 5.2 Multi-Node MP Deployment (Recommended)
 
 Assume you have Atlas 800I A3 (64G × 16) nodes (or 2× A2 nodes), and want to deploy the Qwen3-235B-A22B model across multiple nodes with Data Parallelism.
+
+The key parameters are explained as follows:
+
+| Parameter | Description |
+|-----------|-------------|
+| `--tensor-parallel-size` | Degrades the model across multiple NPUs within a single node. For A3 (16 cards) or A2 (8 cards), set to 8 for optimal performance. |
+| `--data-parallel-size` | Number of data parallel groups across all nodes. For 2-node deployment, set to 2. |
+| `--data-parallel-size-local` | Number of data parallel groups per node (typically 1 per node). |
+| `--data-parallel-address` | IP address of the master node (Node 0) for DP communication. |
+| `--data-parallel-rpc-port` | RPC port for DP communication across nodes. |
+| `--data-parallel-start-rank` | Starting rank for DP. Node 0 uses 0, Worker Node uses 1. |
+| `--enable-expert-parallel` | Enables Expert Parallelism for MoE models to distribute experts across GPUs. |
+| `HCCL_BUFFSIZE` | HCCL communication buffer size. For MoE models, 1024 improves communication efficiency for multi-node. |
+| `--headless` | Worker nodes use this flag to join the server without starting their own API endpoints. |
 
 **Node 0 (Master):**
 
@@ -238,7 +307,9 @@ Refer to [Ray Distributed (Qwen/Qwen3-235B-A22B)](../features/ray.md).
 
 ### 5.4 Prefill-Decode Disaggregation
 
-Refer to [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](../features/pd_disaggregation_mooncake_multi_node.md).
+Refer to [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](../features/pd_disaggregation_mooncake_multi_node.md) for the detailed deployment guide.
+
+For the recommended configuration and startup scripts, see [Section 9.3.2 Three Node A3 — PD Disaggregation](#932-three-node-a3--pd-disaggregation).
 
 ## 6 Functional Verification
 
@@ -259,7 +330,9 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+This section describes the standardized methods and tools for evaluating the output quality (accuracy) of the Qwen3-235B-A22B model. [AISBench](https://gitcode.com/ascend/aisbench) is used as the primary evaluation tool.
+
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -269,7 +342,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 |----- | ----- | ----- | ----- | -----|
 | cevaldataset | - | accuracy | gen | 91.16 |
 
-### Using Language Model Evaluation Harness
+### 7.2 Using Language Model Evaluation Harness
 
 Using the `gsm8k` dataset as an example, run the accuracy evaluation in online mode:
 
@@ -286,11 +359,13 @@ lm_eval \
 
 ## 8 Performance
 
-### Using AISBench
+This section describes the standardized methods and tools for evaluating the performance of the Qwen3-235B-A22B model. [AISBench](https://gitcode.com/ascend/aisbench) and the [vLLM Benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) suite are used for performance evaluation.
+
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
@@ -316,11 +391,81 @@ vllm bench serve \
 
 After several minutes, you will get the performance evaluation result.
 
-## 9 Best Practices
+## 9 Performance Tuning
 
-The following reference configurations have been validated for optimal performance with Qwen3-235B-A22B.
+> **Important**: The configurations provided in this section are validated in specific test environments and are **not** guaranteed to be globally optimal. Actual performance depends on factors such as input/output length distribution, request rate, prefix cache hit rate, hardware configuration, and precision requirements. It is strongly recommended to use the following as a starting point and refer to [Section 9.2](#92-tuning-guidelines) for tuning based on your own workload.
 
-### 9.1 Single Node A3 (64G × 16) — High Throughput
+### 9.1 Recommended Configurations
+
+#### Table 1: Scenario Overview
+
+| Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
+|----------|----------------|-------------|----------------|---------------------|
+| High Throughput<br>(3.5K → 1.5K) | Single-node | 16 (A3) | Qwen3-235B-A22B-W8A8 | For high throughput with MoE models, try tuning DP and TP sizes (DP=4, TP=4), enabling FlashComm (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`), Fused MC2 (`VLLM_ASCEND_ENABLE_FUSED_MC2=1`), and expanding `max-num-seqs` for larger batch concurrency |
+| High Throughput<br>(3.5K → 1.5K) | PD Disaggregation (3 nodes) | 48 (3×A3) | Qwen3-235B-A22B-W8A8 | For PD disaggregation, try tuning prefill/decode TP and DP ratios, using Fused MC2=2 for large-scale EP, and tuning `max-num-batched-tokens` for prefill vs decode balance |
+| Low Latency<br>(TPOT bound) | PD Hybrid (single node) | 16 (A3) | Qwen3-235B-A22B-W8A8 | For low latency, try reducing TP to 16 with DP=1 (full model on all NPUs), enabling speculative decoding (Eagle3), and disabling unnecessary optimizations |
+| Long Context<br>(up to 135K) | PD Hybrid (single node) | 16 (A3) | Qwen3-235B-A22B-W8A8 | For long context scenarios, try enabling Context Parallelism (`--decode-context-parallel-size 2`), yarn rope-scaling (`--hf-overrides`), and reducing `max-num-seqs` to fit KV cache |
+
+#### Table 2: Detailed Node Configuration
+
+| Scenario | Total NPUs | Tensor Parallel | Data Parallel | Expert Parallel | Context Parallel | Max Num Seqs | Max Model Len | Max Batched Tokens | Speculative | FlashComm | Fused MC2 |
+|----------|-----------|----------------|---------------|----------------|-----------------|-------------|--------------|-------------------|-------------|-----------|-----------|
+| Single-Node High Throughput | 16 | 4 | 4 | Yes | - | 128 | 40960 | 16384 | No | Yes | 1 |
+| PD Disaggregation High Throughput | 48 | P:8 / D:4 | P:2 / D:8 | Yes | - | P:24 / D:128 | 40960 | P:16384 / D:256 | No | Yes | 2 |
+| PD Hybrid Low Latency | 16 | 16 | 1 | Yes | - | 128 | 32768 | 16384 | Eagle3 | Yes | No |
+| PD Hybrid Long Context | 16 | 8 | 1 | Yes | 2 | 32 | 135000 | 16384 | No | Yes | 1 |
+
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Guidelines
+
+- **DP vs TP ratio**: For MoE models, increasing DP reduces inter-device communication per replica but increases total memory usage. A good starting point is DP × TP = total NPUs per node.
+- **Expert Parallelism**: Always enable `--enable-expert-parallel` for MoE models to distribute experts efficiently.
+- **FlashComm**: Use `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` when TP > 1 and concurrency is high (e.g., `max-num-seqs` > 32).
+- **Fused MC2**: Use `VLLM_ASCEND_ENABLE_FUSED_MC2=1` for W8A8 quantized MoE on Atlas A3. Use `=2` for large-scale EP (EP ≥ 16).
+- **CPU Binding**: Use `--additional-config '{"enable_cpu_binding":true}'` for better NUMA locality.
+- **JEMalloc**: Preload `libjemalloc.so.2` via `LD_PRELOAD` for better memory management.
+
+#### 9.2.2 Optimization Highlights
+
+The following optimizations are enabled by default and require no additional configuration:
+
+| Optimization Technique | Technical Principle | Performance Benefit |
+|------------------------|--------------------|---------------------|
+| Rope Optimization | The cos_sin_cache and indexing operations of positional encoding are executed only in the first layer, and subsequent layers reuse them directly | Reduces redundant computation during the decoding phase, accelerating inference |
+| FullGraph Optimization | Captures and replays the entire decoding graph at once using `compilation_config={"cudagraph_mode":"FULL_DECODE_ONLY"}` | Significantly reduces scheduling latency, stabilizes multi-device performance |
+
+The following advanced optimizations require explicit enablement:
+
+| Optimization Technique | Enablement Method | Applicable Scenarios | Precautions |
+|------------------------|-------------------|----------------------|-------------|
+| FlashComm_v1 | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | High-concurrency, TP > 1 scenarios with MoE models | Currently only supported for MoE in scenarios where TP > 1 |
+| Fused MC2 | `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` (or `=2`) | W8A8 quantization on Atlas A3 servers | Experimental. Value `2` is recommended for EP32 scenarios (e.g., PD disaggregation) |
+| Asynchronous Scheduling | `--async-scheduling` | Large-scale models, high-concurrency scenarios | Should be used in coordination with FullGraph optimization |
+| Weight Prefetch | `--additional-config '{"weight_prefetch_config":{"enabled":true}}'` | High-throughput decode with MoE | Reduces weight loading latency during expert routing |
+| CPU Binding | `--additional-config '{"enable_cpu_binding":true}'` | All NPU deployments | Improves NUMA locality and reduces memory access latency |
+| Context Parallelism | `--decode-context-parallel-size N` / `--prefill-context-parallel-size N` | Long context scenarios beyond 64K | Splits KV cache across NPUs for extended context |
+
+##### Fused MC2
+
+Setting `VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption in both prefill and decode. For large-scale EP scenarios (e.g., EP32 in PD disaggregation), use `VLLM_ASCEND_ENABLE_FUSED_MC2=2` which enables a different fusion strategy optimized for higher EP degrees. This is an experimental feature currently only supporting W8A8 quantization on Atlas A3 servers.
+
+##### Long Context with Yarn Rope-Scaling
+
+Qwen3-235B-A22B originally supports 40960 context. For 128K or longer contexts, yarn rope-scaling is required:
+
+- For vLLM >= v0.12.0: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}'`
+- For vLLM < v0.12.0: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}'`
+
+If using weights like [Qwen3-235B-A22B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) which natively support long contexts, no rope-scaling parameter is needed.
+
+##### HCCL_BUFFSIZE
+
+For large MoE models like Qwen3-235B-A22B, setting `HCCL_BUFFSIZE=512` or `1024` can improve communication efficiency. Smaller values (512) are typically sufficient for single-node deployments; larger values (1024) may benefit multi-node scenarios.
+
+### 9.3 Reference Configurations
+
+#### 9.3.1 Single Node A3 (64G × 16) — High Throughput
 
 This configuration targets maximum throughput on a single Atlas 800I A3 node with W8A8 quantization, DP=4, TP=4, and FlashComm:
 
@@ -380,11 +525,11 @@ Reference results (input 3584 / output 1536, max concurrency 160):
 | 720 | 144 | 4717.45 | 48.69 | 2761.72 |
 
 :::{note}
-- `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in both prefill and decode. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers. If you encounter problems, disable it by setting `VLLM_ASCEND_ENABLE_FUSED_MC2=0`.
+- `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers.
 - Prefix cache is disabled because of random datasets. Enable prefix cache if requests have long common prefixes.
 :::
 
-### 9.2 Three Node A3 — PD Disaggregation
+#### 9.3.2 Three Node A3 — PD Disaggregation
 
 On three Atlas 800I A3 (64G × 16) servers, the recommended setup uses one node as the Prefill instance and two nodes as the Decode instance.
 
@@ -594,64 +739,161 @@ Reference results (input 3584 / output 1536, max concurrency 576):
 | 2880 | 576 | 3735.98 | 52.07 | 8593.44 |
 
 :::{note}
-- We recommend setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=2` for this scenario (typically EP32 for Qwen3-235B). This enables a different MoE fusion operator optimized for large-scale EP.
+- Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=2` is recommended for this scenario (EP32) for optimized MoE fusion.
 :::
 
-## 10 Performance Tuning
+#### 9.3.3 PD Hybrid — High Throughput (TPOT ~50ms)
 
-### 10.1 Key Optimization Points
+Single-node PD hybrid deployment optimized for maximum throughput on Atlas 800I A3 (64G × 16):
 
-In this section, we introduce the key optimization points that can significantly improve the performance of Qwen3-235B-A22B.
+```bash
+export HCCL_IF_IP=<node_ip>
+export GLOO_SOCKET_IFNAME=<ifname>
+export TP_SOCKET_IFNAME=<ifname>
+export HCCL_SOCKET_IFNAME=<ifname>
 
-#### 10.1.1 Basic Optimizations
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-The following optimizations are enabled by default and require no additional configuration:
+export OMP_NUM_THREADS=1
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-| Optimization Technique | Technical Principle | Performance Benefit |
-|------------------------|--------------------|---------------------|
-| Rope Optimization | The cos_sin_cache and indexing operations of positional encoding are executed only in the first layer, and subsequent layers reuse them directly | Reduces redundant computation during the decoding phase, accelerating inference |
-| FullGraph Optimization | Captures and replays the entire decoding graph at once using `compilation_config={"cudagraph_mode":"FULL_DECODE_ONLY"}` | Significantly reduces scheduling latency, stabilizes multi-device performance |
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-#### 10.1.2 Advanced Optimizations (Require Explicit Enablement)
+vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
+    --served-model-name "qwen" \
+    --host 0.0.0.0 \
+    --port 20002 \
+    --async-scheduling \
+    --tensor-parallel-size 4 \
+    --data-parallel-size 4 \
+    --data-parallel-size-local 4 \
+    --data-parallel-start-rank 0 \
+    --data-parallel-address <node_ip> \
+    --data-parallel-rpc-port 13395 \
+    --enable-expert-parallel \
+    --max-num-seqs 128 \
+    --max-model-len 32768 \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.9 \
+    --trust-remote-code \
+    --quantization ascend \
+    --no-enable-prefix-caching \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true}'
+```
 
-| Optimization Technique | Technical Principle | Enablement Method | Applicable Scenarios | Precautions |
-|------------------------|--------------------|-------------------|----------------------|-------------|
-| FlashComm_v1 | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | High-concurrency, TP > 1 scenarios with MoE models | Currently only supported for MoE in scenarios where TP > 1 |
-| Fused MC2 | MoE fused operators that reduce time consumption in both prefill and decode | `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` (or `2` for large-scale EP) | W8A8 quantization on Atlas A3 servers | Experimental feature. Value `2` is recommended for EP32 scenarios (e.g., Qwen3-235B PD disaggregation) |
-| Asynchronous Scheduling | Non-blocking task scheduling to improve concurrent processing capability | `--async-scheduling` | Large-scale models, high-concurrency scenarios | Should be used in coordination with FullGraph optimization |
+#### 9.3.4 PD Hybrid — Low Latency (TPOT ~20ms)
 
-### 10.2 Parameter Reference
+Single-node PD hybrid deployment optimized for low latency with speculative decoding (Eagle3):
 
-The key parameters used in deployment commands are explained below:
+```bash
+export HCCL_IF_IP=<node_ip>
+export GLOO_SOCKET_IFNAME=<ifname>
+export TP_SOCKET_IFNAME=<ifname>
+export HCCL_SOCKET_IFNAME=<ifname>
 
-- **`--data-parallel-size` and `--tensor-parallel-size`**: Common settings for Data Parallelism (DP) and Tensor Parallelism (TP). DP replicates the model across groups; TP shards layers within a group.
-- **`--max-model-len`**: The context length — the maximum value of input plus output for a single request.
-- **`--max-num-seqs`**: The maximum number of requests that each DP group can process concurrently. Requests exceeding this limit will wait in the queue. For performance benchmarking, ensure `max-num-seqs` × `data-parallel-size` >= the actual target concurrency.
-- **`--max-num-batched-tokens`**: The maximum number of tokens processed in a single step. With Chunked Prefill / SplitFuse enabled by default in vLLM V1:
-  - Requests with input longer than this value are split into multiple rounds.
-  - Decode requests are prioritized; prefill requests are scheduled only if capacity is available.
-  - Larger values reduce overall latency but increase activation memory pressure.
-- **`--gpu-memory-utilization`**: The proportion of HBM used for inference. KV cache size = `gpu-memory-utilization` × HBM size − peak memory usage (from warm-up profiling). Higher values allow more KV cache but risk OOM due to EP load imbalance. Default is `0.9`.
-- **`--enable-expert-parallel`**: Enables Expert Parallelism (EP) for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP.
-- **`--no-enable-prefix-caching`**: Disables prefix caching. Remove this option to enable it for workloads with shared prefixes.
-- **`--quantization ascend`**: Enables Ascend quantization. Remove for BF16 models.
-- **`--compilation-config`**: Contains graph mode configurations. `"cudagraph_mode": "FULL_DECODE_ONLY"` is recommended. `"cudagraph_capture_sizes"` specifies graph capture levels; the default (evenly distributed values from 1 to `max-num-seqs`) is usually sufficient.
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-### 10.3 Optimization Highlights
+export OMP_NUM_THREADS=1
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-#### Fused MC2
+vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
+    --served-model-name "qwen" \
+    --host 0.0.0.0 \
+    --port 20002 \
+    --async-scheduling \
+    --tensor-parallel-size 16 \
+    --data-parallel-size 1 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 0 \
+    --data-parallel-address <node_ip> \
+    --data-parallel-rpc-port 13395 \
+    --enable-expert-parallel \
+    --max-num-seqs 128 \
+    --max-model-len 32768 \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.9 \
+    --trust-remote-code \
+    --quantization ascend \
+    --no-enable-prefix-caching \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --speculative-config '{"method": "eagle3", "model":"/mnt/share/weight/Qwen3-235B-A22B-EAGLE3-rotated/", "num_speculative_tokens": 3}' \
+    --additional-config '{"enable_cpu_binding":true}'
+```
 
-Setting `VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption in both prefill and decode. For large-scale EP scenarios (e.g., EP32 in PD disaggregation), use `VLLM_ASCEND_ENABLE_FUSED_MC2=2` which enables a different fusion strategy optimized for higher EP degrees. This is an experimental feature currently only supporting W8A8 quantization on Atlas A3 servers.
+#### 9.3.5 PD Hybrid — Long Context (up to 135K)
 
-#### Long Context with Yarn Rope-Scaling
+Single-node PD hybrid deployment optimized for long context with Context Parallelism and yarn rope-scaling:
 
-Qwen3-235B-A22B originally supports 40960 context. For 128K or longer contexts, yarn rope-scaling is required. The appropriate `--hf-overrides` or `--rope_scaling` parameter must be set based on your vLLM version. See the notes in [5.1](#51-single-node-online-deployment) for exact parameters.
+```bash
+export HCCL_IF_IP=<node_ip>
+export GLOO_SOCKET_IFNAME=<ifname>
+export TP_SOCKET_IFNAME=<ifname>
+export HCCL_SOCKET_IFNAME=<ifname>
 
-#### HCCL_BUFFSIZE
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-For large MoE models like Qwen3-235B-A22B, setting `HCCL_BUFFSIZE=512` or `1024` can improve communication efficiency. Smaller values (512) are typically sufficient for single-node deployments; larger values (1024) may benefit multi-node scenarios.
+export OMP_NUM_THREADS=1
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-## 11 FAQ
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+
+vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
+    --served-model-name "qwen" \
+    --host 0.0.0.0 \
+    --port 20002 \
+    --tensor-parallel-size 8 \
+    --data-parallel-size 1 \
+    --decode-context-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --enable-expert-parallel \
+    --cp-kv-cache-interleave-size 128 \
+    --max-num-seqs 32 \
+    --max-model-len 135000 \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.85 \
+    --trust-remote-code \
+    --quantization ascend \
+    --no-enable-prefix-caching \
+    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":131072}}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true}'
+```
+
+:::{note}
+- **High Throughput**: Enable FlashComm, Fused MC2, CPU binding. Use DP=4, TP=4 for balanced throughput on A3.
+- **Low Latency**: Use TP=16 to maximize single-replica compute. Enable Eagle3 speculative decoding to reduce effective TPOT.
+- **Long Context**: Use Context Parallelism (CP=2) with TP=8 to split KV cache across NPUs. Yarn rope-scaling (`--hf-overrides`) is required for 135K context. Reduce `gpu-memory-utilization` to 0.85 to accommodate larger KV cache.
+- Adjust paths (`/mnt/share/weight/...`, `--host`, `--port`) and network interface names to match your environment.
+:::  
+
+## 10 FAQ
+
+For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section only covers issues specific to Qwen3-235B-A22B.
 
 ### Q: What hardware is required for Qwen3-235B-A22B?
 
@@ -668,3 +910,11 @@ Single-node deployment is simpler and recommended when the model fits within a s
 ### Q: What is the difference between `VLLM_ASCEND_ENABLE_FUSED_MC2=1` and `=2`?
 
 Value `1` enables the base MoE fused operator, suitable for typical EP configurations. Value `2` enables an alternative fusion strategy optimized for large-scale EP (e.g., EP32 in PD disaggregation scenarios). Both are experimental and currently only support W8A8 quantization on Atlas A3 servers.
+
+### Q: When should I use Expert Parallelism?
+
+Expert Parallelism (EP) should always be enabled for Qwen3-235B-A22B (an MoE model) via `--enable-expert-parallel`. It distributes FFN experts across NPUs to reduce per-device computation. EP works alongside TP, where MoE layers use EP and non-MoE layers use TP.
+
+### Q: How do I choose between Context Parallelism and PD Disaggregation?
+
+Context Parallelism (CP) splits the KV cache of a single request across multiple NPUs, suitable for long context scenarios on a single node. PD Disaggregation separates Prefill and Decode across nodes, suitable for high-throughput serving with many concurrent requests. 
