@@ -37,7 +37,10 @@ class MooncakeBackend(Backend):
             # and only can be used for 800 I/T A3 series.
             # Required supporting hardware versions are as follows:
             if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
-                transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
+                transfer_engine = global_te.get_transfer_engine(
+                    local_hostname,
+                    device_name=str(torch.npu.current_device()),
+                )
                 self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
                 ret = self.store.setup(
                     self.local_seg,
