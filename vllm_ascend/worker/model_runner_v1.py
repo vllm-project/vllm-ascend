@@ -2573,8 +2573,17 @@ class NPUModelRunner(GPUModelRunner):
                 )
         else:
             valid_sampled_token_ids = []
-            if discard_sampled_tokens_req_indices.numel() > 0:
-                invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
+            num_invalid_req_indices = (
+                discard_sampled_tokens_req_indices.numel()
+                if hasattr(discard_sampled_tokens_req_indices, "numel")
+                else len(discard_sampled_tokens_req_indices)
+            )
+            if num_invalid_req_indices > 0:
+                invalid_req_indices = (
+                    discard_sampled_tokens_req_indices.tolist()
+                    if hasattr(discard_sampled_tokens_req_indices, "tolist")
+                    else list(discard_sampled_tokens_req_indices)
+                )
                 invalid_req_indices_set = set(invalid_req_indices)
             else:
                 invalid_req_indices = []
