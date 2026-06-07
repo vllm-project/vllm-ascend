@@ -332,10 +332,7 @@ class ChunkedTokenDatabase:
     def prepare_addr_from_block_id(self, block_id: int, layer_id: int) -> list[int]:
         length = len(self.block_len)
         base_offset = layer_id * length
-        return [
-            self.kv_caches_base_addr[base_offset + i] + block_id * self.block_len[i]
-            for i in range(length)
-        ]
+        return [self.kv_caches_base_addr[base_offset + i] + block_id * self.block_len[i] for i in range(length)]
 
     def prepare_addrs_from_block_ids(self, block_ids: list[int], layer_id: int) -> list[int]:
         length = len(self.block_len)
@@ -386,7 +383,7 @@ class ChunkedTokenDatabase:
             return
         if not isinstance(block_hashes[0], str):
             block_hashes = [
-                h.hex() if not isinstance(h, str) else h   # type: ignore[union-attr]
+                h.hex() if not isinstance(h, str) else h  # type: ignore[union-attr]
                 for h in block_hashes
             ]
         start_idx = 0
@@ -747,24 +744,16 @@ class ReqMeta:
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
         num_tokens_to_save = (
-            target_token_len // block_size * block_size
-        ) if discard_partial_chunks else target_token_len
+            (target_token_len // block_size * block_size) if discard_partial_chunks else target_token_len
+        )
         full_block_count = target_token_len // block_size
         boundary_without_hash = (
-            target_token_len > 0
-            and target_token_len % block_size == 0
-            and full_block_count > len(block_hashes)
+            target_token_len > 0 and target_token_len % block_size == 0 and full_block_count > len(block_hashes)
         )
         if boundary_without_hash:
             num_tokens_to_save = len(block_hashes) * block_size
-        if tracker.last_block_gva is not None and (
-            target_token_len % block_size != 0 or boundary_without_hash
-        ):
-            partial_block_index = (
-                full_block_count
-                if target_token_len % block_size != 0
-                else full_block_count - 1
-            )
+        if tracker.last_block_gva is not None and (target_token_len % block_size != 0 or boundary_without_hash):
+            partial_block_index = full_block_count if target_token_len % block_size != 0 else full_block_count - 1
         else:
             partial_block_index = None
 
@@ -838,12 +827,9 @@ class LayerBatchReqMeta:
     req_ids: list[str]
     layer_id: int
     is_last_chunks: list[bool | None] = field(default_factory=list)
-    addr_array: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.int64))
-    size_array: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.int64))
-    gvas_array: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.int64))
+    addr_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    size_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    gvas_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
 
 
 @dataclass
@@ -855,9 +841,23 @@ class LayerBlockRange:
 
 
 @dataclass
+class SharedBlockData:
+    """Pre-computed block data shared across all layers for the same request."""
+
+    block_ids_arr: np.ndarray
+    block_gvas_arr: np.ndarray
+    req_ids: list[str]
+    is_last_chunks: list[bool | None]
+
+
+@dataclass
 class LayerTransferTask:
     layer_id: int
     block_ranges: list[LayerBlockRange]
+    shared_block_data: SharedBlockData | None = None
+    # Cache for KVCacheStoreKeyLayerSendingThread:
+    # maps block_range index -> list of (start, end, key_all_layers)
+    cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
 
 
 @dataclass

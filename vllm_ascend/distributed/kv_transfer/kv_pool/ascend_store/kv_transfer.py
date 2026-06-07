@@ -25,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerTransferTask,
     PoolKey,
     ReqMeta,
+    SharedBlockData,
     get_block_hashes,
 )
 # isort: on
@@ -47,7 +48,6 @@ def _circular_shift_array(value: np.ndarray, offset: int) -> np.ndarray:
 
 
 class LayerBatchBuilder:
-
     def __init__(
         self,
         token_database: ChunkedTokenDatabase,
@@ -63,10 +63,12 @@ class LayerBatchBuilder:
             token_database.kv_caches_base_addr,
             dtype=np.int64,
         )
-        self._full_block_inner_offsets_np = np.concatenate((
-            np.zeros(1, dtype=np.int64),
-            np.cumsum(self._block_len_np[:-1], dtype=np.int64),
-        ))
+        self._full_block_inner_offsets_np = np.concatenate(
+            (
+                np.zeros(1, dtype=np.int64),
+                np.cumsum(self._block_len_np[:-1], dtype=np.int64),
+            )
+        )
         self._block_ids_scratch_np: np.ndarray | None = None
         self._block_gvas_scratch_np: np.ndarray | None = None
         self._last_block_ids_scratch_np: np.ndarray | None = None
@@ -133,21 +135,12 @@ class LayerBatchBuilder:
         block_len_np = self._block_len_np
         length = block_len_np.shape[0]
         base_offset = layer_id * length
-        layer_base_addrs = self._kv_caches_base_addr_np[base_offset:base_offset + length]
-        rank_layer_offset = (
-            layer_id * self.num_ranks_per_layer + self.my_key_index
-        ) * self.page_size_bytes
+        layer_base_addrs = self._kv_caches_base_addr_np[base_offset : base_offset + length]
+        rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
 
-        addr_arr = (
-            layer_base_addrs[None, :]
-            + block_ids_arr[:, None] * block_len_np[None, :]
-        )
+        addr_arr = layer_base_addrs[None, :] + block_ids_arr[:, None] * block_len_np[None, :]
         size_arr = np.broadcast_to(block_len_np, addr_arr.shape)
-        gvas_arr = (
-            base_gvas_arr[:, None]
-            + rank_layer_offset
-            + self._full_block_inner_offsets_np[None, :]
-        )
+        gvas_arr = base_gvas_arr[:, None] + rank_layer_offset + self._full_block_inner_offsets_np[None, :]
 
         return (
             addr_arr.ravel(),
@@ -164,7 +157,8 @@ class LayerBatchBuilder:
             raise RuntimeError("ReqMeta numpy block metadata is not initialized")
         return request.block_ids_np, request.block_gvas_np
 
-    def build(self, task: LayerTransferTask) -> LayerBatchReqMeta | None:
+    def build_shared(self, task: LayerTransferTask) -> SharedBlockData | None:
+        """Pre-compute shared block data that is identical across all layers."""
         if not task.block_ranges:
             return None
 
@@ -201,7 +195,7 @@ class LayerBatchBuilder:
                         f"range [{block_range.start_block}, {block_range.end_block}) "
                         f"with offset {request.gva_block_offset}"
                     )
-                block_ids_arr[offset:end] = block_ids_np[block_range.start_block:block_range.end_block]
+                block_ids_arr[offset:end] = block_ids_np[block_range.start_block : block_range.end_block]
                 block_gvas_arr[offset:end] = block_gvas_np[gva_start:gva_end]
                 offset = end
 
@@ -223,17 +217,39 @@ class LayerBatchBuilder:
             block_ids_arr,
             block_gvas_arr,
         )
+
+        return SharedBlockData(
+            block_ids_arr=block_ids_arr,
+            block_gvas_arr=block_gvas_arr,
+            req_ids=req_ids,
+            is_last_chunks=is_last_chunks,
+        )
+
+    def build_addrs(
+        self,
+        shared: SharedBlockData,
+        layer_id: int,
+    ) -> LayerBatchReqMeta:
+        """Compute per-layer addresses from pre-computed shared block data."""
         addr_array, size_array, gvas_array = self._build_transfer_arrays(
-            block_ids_arr, block_gvas_arr, task.layer_id)
+            shared.block_ids_arr, shared.block_gvas_arr, layer_id
+        )
 
         return LayerBatchReqMeta(
-            req_ids=req_ids,
-            layer_id=task.layer_id,
-            is_last_chunks=is_last_chunks,
+            req_ids=shared.req_ids,
+            layer_id=layer_id,
+            is_last_chunks=shared.is_last_chunks,
             addr_array=addr_array,
             size_array=size_array,
             gvas_array=gvas_array,
         )
+
+    def build(self, task: LayerTransferTask) -> LayerBatchReqMeta | None:
+        """Full build: shared data + per-layer addresses (backward compat)."""
+        shared = self.build_shared(task)
+        if shared is None:
+            return None
+        return self.build_addrs(shared, task.layer_id)
 
 
 class KVTransferThread(threading.Thread):
@@ -818,6 +834,37 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
 
+    def build_cached_process_tokens(self, task: LayerTransferTask) -> dict[int, list[tuple[int, int, list]]] | None:
+        """Pre-compute process_tokens results for all layers (Key path).
+
+        Returns a dict mapping block_range index to a list of
+        (start, end, key_all_layers) tuples, where key_all_layers is the
+        result of key.split_layers().
+        """
+        if not task.block_ranges:
+            return None
+
+        group_block_size = self._get_block_size(0)
+        cache: dict[int, list[tuple[int, int, list]]] = {}
+
+        for br_idx, block_range in enumerate(task.block_ranges):
+            request = block_range.request
+            mask_num = request.save_start_token // group_block_size * group_block_size
+            entries = []
+            for start, end, key in self.token_database.process_tokens(
+                request.save_end_token,
+                request.block_hashes,
+                mask_num,
+            ):
+                block_index = start // group_block_size
+                if block_index < block_range.start_block or block_index >= block_range.end_block:
+                    continue
+                key_all = key.split_layers(self.final_layer_id + 1)
+                entries.append((start, end, key_all))
+            cache[br_idx] = entries
+
+        return cache
+
     def add_request(  # type: ignore[override]
         self, req_meta: list[LayerTransferTask]
     ) -> torch.Tensor:
@@ -840,7 +887,10 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
         req_ids = []
         is_last_chunks = []
 
-        for block_range in transfer_task.block_ranges:
+        # Reuse pre-computed process_tokens results if available
+        cached_tokens = transfer_task.cached_process_tokens
+
+        for br_idx, block_range in enumerate(transfer_task.block_ranges):
             request = block_range.request
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
@@ -848,19 +898,29 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
             ends = []
             keys = []
             group_block_size = self._get_block_size(0)
-            mask_num = request.save_start_token // group_block_size * group_block_size
-            for start, end, key in self.token_database.process_tokens(
-                request.save_end_token,
-                request.block_hashes,
-                mask_num,
-            ):
-                block_index = start // group_block_size
-                if (block_index < block_range.start_block
-                        or block_index >= block_range.end_block):
-                    continue
-                starts.append(start)
-                ends.append(end)
-                keys.append(key.split_layers(self.final_layer_id + 1)[layer_id])
+
+            if cached_tokens is not None:
+                # Fast path: reuse cached (start, end, key_all) tuples
+                for start, end, key_all in cached_tokens[br_idx]:
+                    block_index = start // group_block_size
+                    if block_index < block_range.start_block or block_index >= block_range.end_block:
+                        continue
+                    starts.append(start)
+                    ends.append(end)
+                    keys.append(key_all[layer_id])
+            else:
+                mask_num = request.save_start_token // group_block_size * group_block_size
+                for start, end, key in self.token_database.process_tokens(
+                    request.save_end_token,
+                    request.block_hashes,
+                    mask_num,
+                ):
+                    block_index = start // group_block_size
+                    if block_index < block_range.start_block or block_index >= block_range.end_block:
+                        continue
+                    starts.append(start)
+                    ends.append(end)
+                    keys.append(key.split_layers(self.final_layer_id + 1)[layer_id])
 
             if not self.dcp_size > 1:
                 starts = starts[self.tp_rank % self.put_step :: self.put_step]
@@ -883,10 +943,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
 
         if key_list:
             exists_states = self.lookup(key_list)
-            missing_indices = [
-                index for index, exists in enumerate(exists_states)
-                if not exists
-            ]
+            missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
             keys_to_put = [key_list[index] for index in missing_indices]
             addrs_to_put = [addr_list[index] for index in missing_indices]
             sizes_to_put = [size_list[index] for index in missing_indices]
@@ -972,8 +1029,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
                 request = block_range.request
                 req_ids.append(request.req_id)
                 is_last_chunks.append(request.is_last_chunk)
-                for block_index in range(block_range.start_block,
-                                         block_range.end_block):
+                for block_index in range(block_range.start_block, block_range.end_block):
                     if block_index >= len(request.block_hashes):
                         continue
                     block_hash = request.block_hashes[block_index]
@@ -1032,7 +1088,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         layer_save_finished_events: list[threading.Event],
         sync_save_events: list[torch.npu.Event],
         enable_kv_event: bool = False,
-        layer_transfer_finished_events = None,
+        layer_transfer_finished_events=None,
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
     ):
@@ -1061,6 +1117,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             page_size_bytes,
         )
 
+    def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
+        """Pre-compute shared block data for all layers (GVA path)."""
+        return self.layer_batch_builder.build_shared(task)
+
     def add_request(  # type: ignore[override]
         self, req_meta: list[LayerTransferTask]
     ) -> torch.Tensor:
@@ -1074,9 +1134,14 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             return
         if len(transfer_tasks) > 1:
             raise ValueError(f"Expected at most one layer transfer task, got {len(transfer_tasks)}")
-        req_meta = self.layer_batch_builder.build(transfer_tasks[0])
+        task = transfer_tasks[0]
+        shared = task.shared_block_data
+        if shared is not None:
+            req_meta = self.layer_batch_builder.build_addrs(shared, task.layer_id)
+        else:
+            req_meta = self.layer_batch_builder.build(task)
         if req_meta is None:
-            layer_id = transfer_tasks[0].layer_id
+            layer_id = task.layer_id
             if self.layer_transfer_finished_events is not None:
                 is_finish = self.layer_transfer_finished_events[layer_id].wait(timeout=30)
                 if not is_finish:
@@ -1089,9 +1154,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             return
         layer_id = req_meta.layer_id
         rank_start = self.tp_rank % self.put_step
-        addr_array = req_meta.addr_array[rank_start::self.put_step]
-        size_array = req_meta.size_array[rank_start::self.put_step]
-        gvas_array = req_meta.gvas_array[rank_start::self.put_step]
+        addr_array = req_meta.addr_array[rank_start :: self.put_step]
+        size_array = req_meta.size_array[rank_start :: self.put_step]
+        gvas_array = req_meta.gvas_array[rank_start :: self.put_step]
         for req_id in req_meta.req_ids:
             self.dec_stored_request(req_id)
         self.sync_save_events[layer_id].synchronize()
@@ -1263,8 +1328,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         if res != 0:
             logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
         elif layer_id == self.final_layer_id:
-            for req_id, is_last_chunk in zip(req_meta.req_ids,
-                                             req_meta.is_last_chunks):
+            for req_id, is_last_chunk in zip(req_meta.req_ids, req_meta.is_last_chunks):
                 if is_last_chunk:
                     self.set_finished_request(req_id)
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "

@@ -103,8 +103,7 @@ class KVPoolWorker:
 
     def _init_parallelism_info(self, model_config, parallel_config) -> None:
         self.local_rank = envs.LOCAL_RANK
-        self.cpu_binding_rank = get_cpu_binding_rank(
-            self.local_rank, parallel_config)
+        self.cpu_binding_rank = get_cpu_binding_rank(self.local_rank, parallel_config)
 
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
@@ -174,9 +173,11 @@ class KVPoolWorker:
         else:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
-        self.my_key_index = (self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step) +
-                             self.dcp_rank * (self.tp_size // self.put_step) +
-                             self.head_or_tp_rank)
+        self.my_key_index = (
+            self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step)
+            + self.dcp_rank * (self.tp_size // self.put_step)
+            + self.head_or_tp_rank
+        )
         self.num_ranks_per_layer = self.pcp_size * self.dcp_size * (self.tp_size // self.put_step)
 
     def _init_metadata(self, model_config, vllm_config, extra_config) -> None:
@@ -287,8 +288,7 @@ class KVPoolWorker:
                 )
 
         self.next_layer_to_submit = 0
-        layerwise_config = get_layerwise_config(
-            self.num_layers, self._extra_config)
+        layerwise_config = get_layerwise_config(self.num_layers, self._extra_config)
         self.layerwise_offload = layerwise_config.has_layer_reuse
         self.num_prefetch_layers = layerwise_config.num_prefetch_layers
         self.independent_layers = layerwise_config.independent_layers
@@ -296,9 +296,7 @@ class KVPoolWorker:
         self.sync_save_events = None
 
         if self.use_gva_layerwise and self.layerwise_offload and self.kv_role == "kv_both":
-            self.layer_transfer_finished_events = [
-                threading.Event() for _ in range(self.num_layers)
-            ]
+            self.layer_transfer_finished_events = [threading.Event() for _ in range(self.num_layers)]
             globals()["_shared_layer_transfer_events"] = self.layer_transfer_finished_events
 
     def _bind_kv_transfer_thread(
@@ -819,23 +817,17 @@ class KVPoolWorker:
             if load_previous_last_block:
                 full_blocks = max(0, cached_full_blocks - 1)
             needs_last_block_at_boundary = (
-                cached_tokens > 0
-                and cached_tokens % self.block_size == 0
-                and full_blocks < cached_full_blocks
+                cached_tokens > 0 and cached_tokens % self.block_size == 0 and full_blocks < cached_full_blocks
             )
             if request.last_block_gva is not None and (
-                cached_tokens % self.block_size != 0
-                or needs_last_block_at_boundary
+                cached_tokens % self.block_size != 0 or needs_last_block_at_boundary
             ):
                 partial_block_index = (
-                    cached_full_blocks
-                    if cached_tokens % self.block_size != 0
-                    else cached_full_blocks - 1
+                    cached_full_blocks if cached_tokens % self.block_size != 0 else cached_full_blocks - 1
                 )
             else:
                 partial_block_index = None
-            if (partial_block_index is not None
-                    and partial_block_index < load_start_block):
+            if partial_block_index is not None and partial_block_index < load_start_block:
                 partial_block_index = None
             if load_start_block >= full_blocks and partial_block_index is None:
                 continue
@@ -855,11 +847,43 @@ class KVPoolWorker:
                 )
             )
 
+    def _build_shared_save_data(self) -> None:
+        """Build shared block data once and attach to all layer save tasks.
+
+        For GVA path (KVCacheStoreLayerSendingThread): pre-computes
+        SharedBlockData via LayerBatchBuilder.build_shared().
+
+        For Key path (KVCacheStoreKeyLayerSendingThread): pre-computes
+        cached process_tokens via build_cached_process_tokens().
+        """
+        # Find the first non-empty layer task (all have identical block_ranges)
+        first_task = None
+        for layer_id in range(self.num_layers):
+            if self.layer_save_tasks[layer_id]:
+                first_task = self.layer_save_tasks[layer_id][0]
+                break
+        if first_task is None:
+            return
+
+        if isinstance(self.kv_send_thread, KVCacheStoreLayerSendingThread):
+            shared = self.kv_send_thread.build_shared_data(first_task)
+            if shared is not None:
+                for layer_id in range(self.num_layers):
+                    for task in self.layer_save_tasks[layer_id]:
+                        task.shared_block_data = shared
+        elif isinstance(self.kv_send_thread, KVCacheStoreKeyLayerSendingThread):
+            cached = self.kv_send_thread.build_cached_process_tokens(first_task)
+            if cached is not None:
+                for layer_id in range(self.num_layers):
+                    for task in self.layer_save_tasks[layer_id]:
+                        task.cached_process_tokens = cached
+
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
             return
         for layer_id in range(self.num_layers):
             self._process_save_for_layer_batch(requests, layer_id)
+        self._build_shared_save_data()
         for layer_id in range(self.num_layers):
             self._process_load_for_layer_batch(requests, layer_id)
 
@@ -885,8 +909,7 @@ class KVPoolWorker:
 
         submit_count = self.num_prefetch_layers if self.current_layer == 0 else 1
         submitted_layers = 0
-        while (submitted_layers < submit_count
-               and self.next_layer_to_submit < self.num_layers):
+        while submitted_layers < submit_count and self.next_layer_to_submit < self.num_layers:
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1
             if submit_layer_load(layer_id):
@@ -915,8 +938,7 @@ class KVPoolWorker:
         self.sync_save_events[self.current_layer].record()
         if self.layer_save_tasks[self.current_layer]:
             for block_range in self.layer_save_tasks[self.current_layer][0].block_ranges:
-                self.kv_send_thread.add_stored_request(
-                    block_range.request.req_id)
+                self.kv_send_thread.add_stored_request(block_range.request.req_id)
             self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
         elif self.layerwise_offload:
             layer_task = LayerTransferTask(
@@ -979,23 +1001,17 @@ class KVPoolWorker:
                 self.kv_send_thread.get_and_clear_finished_requests()
                 done_sending = set()
             else:
-                stale_finished_req_ids = (
-                    finished_req_ids - meta.delayed_free_req_ids)
-                self.kv_send_thread.discard_finished_requests(
-                    stale_finished_req_ids)
-                done_sending = self.kv_send_thread.get_and_clear_finished_requests(
-                    meta.delayed_free_req_ids
-                )
+                stale_finished_req_ids = finished_req_ids - meta.delayed_free_req_ids
+                self.kv_send_thread.discard_finished_requests(stale_finished_req_ids)
+                done_sending = self.kv_send_thread.get_and_clear_finished_requests(meta.delayed_free_req_ids)
         else:
             done_sending = set()
 
         done_recving = set()
         if self.kv_recv_thread is not None:
-            self.kv_recv_thread.discard_finished_requests(
-                meta.preempted_req_ids)
+            self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
             if self.load_async:
-                done_recving = self.kv_recv_thread.get_and_clear_finished_requests(
-                    meta.loading_req_ids)
+                done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
