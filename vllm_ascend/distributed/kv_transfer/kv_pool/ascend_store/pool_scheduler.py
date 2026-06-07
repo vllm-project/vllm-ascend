@@ -286,8 +286,11 @@ class KVPoolScheduler:
         self,
         block_hashes,
         include_layers: bool = False,
+        kv_cache_group_id: int = 0,
     ) -> list[list[str]]:
         head_or_tp_ranks = self.tp_size // self.put_step
+        cache_family = self._get_group_family(
+            self.kv_cache_group_families, kv_cache_group_id)
         keys_by_block = []
         for block_hash in block_hashes:
             block_keys = []
@@ -304,6 +307,8 @@ class KVPoolScheduler:
                                     pcp_rank,
                                     dcp_rank,
                                     pp_rank,
+                                    kv_cache_group_id=kv_cache_group_id,
+                                    cache_family=cache_family,
                                 ),
                                 chunk_hash,
                             )
@@ -528,7 +533,8 @@ class KVPoolScheduler:
                 request, token_len, num_computed_tokens)
         elif self.use_layerwise:
             num_external_hit_tokens = self._get_store_lookup_hit_tokens(
-                request, token_len, num_computed_tokens)
+                request, token_len, num_computed_tokens,
+                include_layers=True)
         else:
             if self.client is None:
                 self.client = LookupKeyClient(self.vllm_config)
