@@ -16,13 +16,17 @@ ENV_POC_DUMP_MAX_CASES = "VLLM_ASCEND_SPEC_SAMPLING_POC_MAX_CASES"
 
 _dump_lock = threading.Lock()
 _dump_case_count = 0
+_dump_dir_cached: Path | None = None
+_dump_dir_initialized = False
 
 
 def _get_dump_dir() -> Path | None:
-    dump_dir = os.getenv(ENV_POC_DUMP_DIR)
-    if not dump_dir:
-        return None
-    return Path(dump_dir)
+    global _dump_dir_cached, _dump_dir_initialized
+    if not _dump_dir_initialized:
+        dump_dir = os.getenv(ENV_POC_DUMP_DIR)
+        _dump_dir_cached = Path(dump_dir) if dump_dir else None
+        _dump_dir_initialized = True
+    return _dump_dir_cached
 
 
 def _get_max_cases() -> int:
@@ -61,7 +65,8 @@ def write_spec_sampling_marker(stage: str, extra: dict[str, Any] | None = None) 
     }
     if extra:
         payload["extra"] = extra
-    marker_path = dump_dir / f"marker_{stage}.json"
+    rank = os.getenv("RANK", "0")
+    marker_path = dump_dir / f"marker_{stage}_rank{rank}.json"
     with open(marker_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     return marker_path

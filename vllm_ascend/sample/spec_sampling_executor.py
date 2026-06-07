@@ -50,6 +50,19 @@ class SpecSamplingNPUExecutor:
         self.rejection_sampler = rejection_sampler
 
     @staticmethod
+    def _ensure_index_tensor(
+        indices: torch.Tensor | list[int],
+        device: torch.device,
+    ) -> torch.Tensor:
+        if not isinstance(indices, torch.Tensor):
+            return torch.tensor(indices, device=device, dtype=torch.long)
+        if indices.device != device:
+            return indices.to(device=device, dtype=torch.long)
+        if indices.dtype != torch.long:
+            return indices.to(dtype=torch.long)
+        return indices
+
+    @staticmethod
     def build_inputs(
         *,
         metadata: SpecDecodeMetadata,
@@ -99,8 +112,14 @@ class SpecSamplingNPUExecutor:
         logits = inputs.logits
 
         assert metadata.max_spec_len <= MAX_SPEC_LEN
-        bonus_logits_indices = metadata.bonus_logits_indices
-        target_logits_indices = metadata.target_logits_indices
+        bonus_logits_indices = self._ensure_index_tensor(
+            metadata.bonus_logits_indices,
+            logits.device,
+        )
+        target_logits_indices = self._ensure_index_tensor(
+            metadata.target_logits_indices,
+            logits.device,
+        )
 
         bonus_logits = logits[bonus_logits_indices]
         bonus_sampler_output = self.sampler(
