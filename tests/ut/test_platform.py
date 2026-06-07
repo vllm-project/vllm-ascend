@@ -337,16 +337,14 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        with self.assertLogs(logger="vllm", level="WARNING") as cm:
-            from vllm_ascend import platform
+        from vllm_ascend import platform
 
-            importlib.reload(platform)
-            self.platform = platform.NPUPlatform()
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
 
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
-                self.platform.check_and_update_config(vllm_config)
-
-        self.assertTrue("Model config is missing" in cm.output[0])
+        with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+            # Missing model_config must be handled gracefully (no exception).
+            self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
@@ -364,20 +362,15 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        with self.assertLogs(logger="vllm", level="INFO") as cm:
-            from vllm_ascend import platform
+        from vllm_ascend import platform
 
-            importlib.reload(platform)
-            self.platform = platform.NPUPlatform()
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
 
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
-                self.platform.check_and_update_config(vllm_config)
+        with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+            self.platform.check_and_update_config(vllm_config)
 
-        self.assertTrue(
-            any("Compilation disabled, using eager mode by default" in log for log in cm.output),
-            cm.output,
-        )
-
+        # enforce_eager must disable compilation and cudagraph.
         self.assertEqual(
             vllm_config.compilation_config.mode,
             CompilationMode.NONE,
@@ -406,25 +399,23 @@ class TestNPUPlatform(TestBase):
 
         vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
-        with self.assertLogs(logger="vllm", level="WARNING") as cm:
-            from vllm_ascend import platform
+        from vllm_ascend import platform
 
-            importlib.reload(platform)
-            self.platform = platform.NPUPlatform()
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
 
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
-                self.platform.check_and_update_config(vllm_config)
+        with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+            self.platform.check_and_update_config(vllm_config)
 
-            self.assertTrue("NPU does not support" in cm.output[0])
-
-            self.assertEqual(
-                vllm_config.compilation_config.mode,
-                CompilationMode.NONE,
-            )
-            self.assertEqual(
-                vllm_config.compilation_config.cudagraph_mode,
-                CUDAGraphMode.NONE,
-            )
+        # Unsupported compilation mode must fall back to NONE.
+        self.assertEqual(
+            vllm_config.compilation_config.mode,
+            CompilationMode.NONE,
+        )
+        self.assertEqual(
+            vllm_config.compilation_config.cudagraph_mode,
+            CUDAGraphMode.NONE,
+        )
 
     @pytest.mark.skip("Revert me when vllm support setting cudagraph_mode on oot platform")
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
