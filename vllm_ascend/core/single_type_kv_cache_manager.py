@@ -155,7 +155,9 @@ class CompressAttentionManager(FullAttentionManager):
         self,
         request: Request,
         num_tokens: int,
+        retention_interval: int | None = None,
         alignment_tokens: int | None = None,
+        use_eagle: bool = False,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -164,8 +166,12 @@ class CompressAttentionManager(FullAttentionManager):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
+            retention_interval: Sparse local-checkpoint granularity. Compressed
+                MLA groups cache densely and ignore this value.
             alignment_tokens: The cache-hit alignment used by upstream vLLM
                 main. v0.21.0 does not expose this argument in the base class.
+            use_eagle: Whether the group is used for EAGLE/MTP lookup. Compressed
+                MLA groups ignore this value.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // (self.block_size * self.compress_ratio)
