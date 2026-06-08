@@ -1,7 +1,6 @@
 import math
 import os
-from collections import OrderedDict
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +13,7 @@ from vllm_ascend.distributed.parallel_state import get_p_tp_group
 
 MAX_HCCL_REGISTER_REGIONS = 256
 REGISTER_MERGE_GAP_BYTES = 4096
+
 
 def kv_alltoall_and_rearrange(pd_tp_ratio: int, key: torch.Tensor, value: torch.TensorType):
     if pd_tp_ratio <= 1:
@@ -316,6 +316,12 @@ class RegisterRange:
 class RegisterRegions:
     ptrs: list[int]
     lengths: list[int]
+    logical_tensor_count: int | None = None
+    logical_total_bytes: int | None = None
+
+    @property
+    def registered_bytes(self) -> int:
+        return sum(self.lengths)
 
 
 def iter_kv_cache_tensors(obj: Any) -> Iterator[torch.Tensor]:
@@ -336,10 +342,6 @@ def iter_kv_cache_tensors(obj: Any) -> Iterator[torch.Tensor]:
         for item in obj.values():
             yield from iter_kv_cache_tensors(item)
         return
-
-
-def tensor_nbytes(tensor: torch.Tensor) -> int:
-    return tensor.numel() * tensor.element_size()
 
 
 def tensor_storage_key(tensor: torch.Tensor) -> int:
@@ -367,6 +369,8 @@ def collect_storage_merged_register_regions(
     register_buffer should use the merged memory ranges returned here.
     """
     ranges_by_storage: OrderedDict[int, list[RegisterRange]] = OrderedDict()
+    logical_tensor_count = 0
+    logical_total_bytes = 0
 
     for tensor in iter_kv_cache_tensors(kv_caches):
         if tensor is None or tensor.numel() == 0:
@@ -382,13 +386,15 @@ def collect_storage_merged_register_regions(
                 hex(tensor.data_ptr()),
             )
 
+        nbytes = tensor.nbytes
         start = tensor.data_ptr()
-        end = start + tensor_nbytes(tensor)
+        end = start + nbytes
         storage_key = tensor_storage_key(tensor)
 
-        ranges_by_storage.setdefault(storage_key, []).append(
-            RegisterRange(start, end)
-        )
+        logical_tensor_count += 1
+        logical_total_bytes += nbytes
+
+        ranges_by_storage.setdefault(storage_key, []).append(RegisterRange(start, end))
 
     register_ptrs: list[int] = []
     register_lengths: list[int] = []
@@ -411,17 +417,29 @@ def collect_storage_merged_register_regions(
         register_ptrs.append(merged_start)
         register_lengths.append(merged_end - merged_start)
 
-    return RegisterRegions(ptrs=register_ptrs, lengths=register_lengths)
+    return RegisterRegions(
+        ptrs=register_ptrs,
+        lengths=register_lengths,
+        logical_tensor_count=logical_tensor_count,
+        logical_total_bytes=logical_total_bytes,
+    )
 
 
-def warn_if_register_regions_exceed_limit(regions: RegisterRegions) -> None:
-    if len(regions.ptrs) <= MAX_HCCL_REGISTER_REGIONS:
+def validate_register_region_count(regions: RegisterRegions) -> None:
+    region_count = len(regions.ptrs)
+    if region_count <= MAX_HCCL_REGISTER_REGIONS:
         return
 
-    logger.warning(
-        "Mooncake register_buffer merged region count %d exceeds "
-        "HCCL per-process limit %d. This may still fail. "
-        "Consider merging k/v/dsa/scale allocation further.",
-        len(regions.ptrs),
-        MAX_HCCL_REGISTER_REGIONS,
+    detail = f"registered_bytes={regions.registered_bytes}"
+    if regions.logical_tensor_count is not None:
+        detail += f", logical_tensors={regions.logical_tensor_count}, logical_bytes={regions.logical_total_bytes}"
+
+    raise RuntimeError(
+        "Mooncake register_buffer region count "
+        f"{region_count} exceeds HCCL per-process limit "
+        f"{MAX_HCCL_REGISTER_REGIONS}. "
+        "KV cache registration would fail. "
+        f"{detail}. "
+        "Please reduce KV cache allocation fragmentation or merge "
+        "k/v/dsa/scale allocations further."
     )

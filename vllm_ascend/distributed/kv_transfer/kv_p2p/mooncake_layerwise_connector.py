@@ -58,7 +58,9 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    RegisterRegions,
     align_memory,
+    collect_storage_merged_register_regions,
     context_parallel_parameters_check,
     get_cp_group,
     get_local_remote_block_port_mappings,
@@ -66,11 +68,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     kv_alltoall_and_rearrange,
     parallel_info,
-)
-from vllm_ascend.distributed.kv_transfer.utils.utils import (
-    RegisterRegions,
-    collect_storage_merged_register_regions,
-    warn_if_register_regions_exceed_limit,
+    validate_register_region_count,
 )
 from vllm_ascend.utils import npu_stream_switch, trans_nd_to_nz
 
@@ -1248,7 +1246,7 @@ class MooncakeLayerwiseConnectorWorker:
             # ranges while keeping layer metadata at logical tensor addresses.
             register_regions = collect_storage_merged_register_regions(kv_caches)
 
-        warn_if_register_regions_exceed_limit(register_regions)
+        validate_register_region_count(register_regions)
         global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 
         if use_kv_buffer:

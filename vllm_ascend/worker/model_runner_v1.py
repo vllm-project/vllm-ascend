@@ -3844,17 +3844,18 @@ class NPUModelRunner(GPUModelRunner):
                     # Allocate raw int8 tensors. Even bf16/fp16 KV cache entries
                     # are allocated as int8 raw bytes first and then viewed as
                     # the target dtype in _reshape_kv_cache_tensors.
+                    dsa_k_tensor = None
+                    dsa_k_scale_tensor = None
+                    v_tensor = None
                     k_tensor = self._allocate_int8_cache_tensor(
                         k_tensor_size,
                         alignment,
                     )
-                    v_tensor = self._allocate_int8_cache_tensor(
-                        v_tensor_size,
-                        alignment,
-                    )
-
-                    dsa_k_tensor = None
-                    dsa_k_scale_tensor = None
+                    if v_tensor_size is not None:
+                        v_tensor = self._allocate_int8_cache_tensor(
+                            v_tensor_size,
+                            alignment,
+                        )
 
                     if self.use_sparse:
                         assert dsa_k_tensor_size is not None

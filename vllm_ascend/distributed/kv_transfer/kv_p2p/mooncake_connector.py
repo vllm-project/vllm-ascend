@@ -57,13 +57,13 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
     collect_storage_merged_register_regions,
-    warn_if_register_regions_exceed_limit,
+    get_transfer_timeout_value,
+    validate_register_region_count,
 )
+from vllm_ascend.utils import enable_custom_op
 
 # isort: off
 if TYPE_CHECKING:
@@ -1768,7 +1768,7 @@ class MooncakeConnectorWorker:
             # storage to avoid exceeding the HCCL per-process region limit.
             register_regions = collect_storage_merged_register_regions(kv_caches)
 
-        warn_if_register_regions_exceed_limit(register_regions)
+        validate_register_region_count(register_regions)
         global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 
         logger.debug(
