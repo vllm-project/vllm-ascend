@@ -22,8 +22,8 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-Coder-30B-A3B-Instruct (BF16) | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct) |
-| Qwen3-Coder-30B-A3B-Instruct-W8A8 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8) |
+| Qwen3-Coder-30B-A3B-Instruct (BF16) | Atlas 800I A2 or A3 (64G, 1~4 cards) | [Download](https://modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct) |
+| Qwen3-Coder-30B-A3B-Instruct-W8A8 | Atlas 800I A2 or A3 (64G, 1~4 cards) | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 

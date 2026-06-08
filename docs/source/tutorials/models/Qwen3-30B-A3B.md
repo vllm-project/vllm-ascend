@@ -22,8 +22,8 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-30B-A3B (BF16) | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) |
-| Qwen3-30B-A3B-W8A8 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelscope.cn/models/vllm-ascend/Qwen3-30B-A3B-W8A8) |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A2 or A3 (64G, 1~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) |
+| Qwen3-30B-A3B-W8A8 | Atlas 800I A2 or A3 (64G, 1~4 cards) | [Download](https://modelscope.cn/models/vllm-ascend/Qwen3-30B-A3B-W8A8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
