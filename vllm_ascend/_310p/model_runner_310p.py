@@ -80,7 +80,7 @@ class NPUModelRunner310(NPUModelRunner):
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
-        logger.info_once("[310P] Weight layout uses FRACTAL_NZ.")
+        logger.info_once("Weight layout uses FRACTAL_NZ.")
         self.sampler = AscendSampler310()
         if getattr(self, "rejection_sampler", None) is not None:
             self.rejection_sampler = RejectionSampler(self.sampler)
@@ -88,7 +88,7 @@ class NPUModelRunner310(NPUModelRunner):
             # 310P ngram requires decode-only graph shapes to be built with q_len=1.
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.
             self.cudagraph_dispatcher.uniform_decode_query_len = _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN
-            logger.info_once("[310P] Ngram speculative decoding uses uniform_decode_query_len=1 for graph capture.")
+            logger.info_once("Ngram speculative decoding uses uniform_decode_query_len=1 for graph capture.")
 
     def _update_states(self, scheduler_output: SchedulerOutput):
         deferred = super()._update_states(scheduler_output)
@@ -613,19 +613,19 @@ class NPUModelRunner310(NPUModelRunner):
         """
         # 310P limitation: KV transfer is not supported
         if self.vllm_config.kv_transfer_config is not None:
-            logger.error("[310P] KV cache transfer is not supported.")
+            logger.error("KV cache transfer is not supported.")
             raise ValueError("KV cache transfer is not supported for 310P.")
         if self.use_sparse:
-            logger.error("[310P] Deepseek Sparse Attention is not supported.")
+            logger.error("Deepseek Sparse Attention is not supported.")
             raise ValueError("Deepseek Sparse Attention is not supported for 310P.")
         if self.model_config.use_mla:
-            logger.error("[310P] MLAAttention is not supported.")
+            logger.error("MLAAttention is not supported.")
             raise ValueError("MLAAttention is not supported for 310P.")
         # Initialize the memory buffer for KV cache
         kv_caches = self._allocate_kv_cache_tensors(kv_cache_config)
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
-            logger.debug("[310P] %s reuses KV cache of %s", layer_name, target_layer_name)
+            logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         from vllm.v1.worker.utils import bind_kv_cache
