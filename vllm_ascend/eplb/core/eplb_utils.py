@@ -24,7 +24,7 @@ from vllm.logger import logger
 
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.20.2"):
+if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 else:
     from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map

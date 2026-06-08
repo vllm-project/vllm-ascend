@@ -8,10 +8,8 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_recurrent_gated_delta_rule_fwd_kernel
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update_npu
-from vllm_ascend.utils import vllm_version_is
 
-if not vllm_version_is("0.20.2"):
-    triton.next_power_of_2 = next_power_of_2
+triton.next_power_of_2 = next_power_of_2
 
 vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_update = causal_conv1d_update_npu
 vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_fn = causal_conv1d_fn
@@ -24,9 +22,8 @@ vllm.model_executor.layers.fla.ops.chunk_gated_delta_rule = chunk_gated_delta_ru
 # On NPU platforms without an active Triton backend (e.g. 310P), replace the
 # Triton-based fused_post_conv_prep with a pure-PyTorch fallback so that
 # qwen_gdn_linear_attn's from-import picks up the replacement before model
-# load.  fused_post_conv_prep was introduced alongside Qwen3-Next GDN support
-# and does not exist in v0.20.2.
-if not HAS_TRITON and not vllm_version_is("0.20.2"):
+# load.
+if not HAS_TRITON:
     import torch
     import torch.nn.functional as _F
 

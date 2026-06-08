@@ -21,8 +21,6 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables, _load_ptr
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class AscendBlockTables(BlockTables):
     """Block table for Ascend NPUs."""
@@ -39,7 +37,9 @@ class AscendBlockTables(BlockTables):
         cp_rank: int = 0,
         cp_interleave: int = 1,
     ):
-        if vllm_version_is("0.20.2"):
+        from vllm_ascend.utils import vllm_version_is
+
+        if vllm_version_is("0.21.0"):
             super().__init__(
                 block_sizes,
                 max_num_reqs,

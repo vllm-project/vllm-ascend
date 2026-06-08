@@ -19,8 +19,8 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
 
-# v2 model runner is only supported on vllm > 0.20.2.
-_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.20.2")
+# v2 model runner patches depend on upstream main APIs beyond v0.21.0.
+_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.21.0")
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
