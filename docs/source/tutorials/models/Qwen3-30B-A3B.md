@@ -6,7 +6,7 @@ Qwen3-30B-A3B is a Mixture-of-Experts (MoE) model in the Qwen3 series, featuring
 
 This document will demonstrate the main validation steps for Qwen3-30B-A3B in the vLLM-Ascend environment, including supported features, environment preparation, single-node deployment, as well as accuracy and performance evaluation.
 
-The Qwen3-30B-A3B model is first supported in v0.8.4rc2. This document is validated and written based on **vLLM-Ascend v0.13.0**. All **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use v0.13.0 or a later version.
+The Qwen3-30B-A3B model is first supported in v0.8.4rc2. This document is validated and written based on **vLLM-Ascend v0.13.0**. All **v0.13.0 and later versions** can run stably. To use the latest features, it is recommended to use v0.13.0 or a later version.
 
 ## 2 Supported Features
 
@@ -31,9 +31,6 @@ These are the recommended numbers of cards, which can be adjusted according to t
 If the W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
 :::
 
-### 3.2 Verify Multi-node Communication (Optional)
-
-If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
 
 ## 4 Installation
 
