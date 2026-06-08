@@ -56,6 +56,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -166,7 +167,6 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
-    from vllm.config.speculative import SpeculativeConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
@@ -244,10 +244,6 @@ class ExecuteModelState(NamedTuple):
 
 
 class NPUModelRunner(GPUModelRunner):
-    speculative_config: "SpeculativeConfig | None"
-    _draft_token_ids: torch.Tensor | list[list[int]] | None
-    _draft_token_req_ids: list[str] | None
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
         # used to expand some buffers, which need to be reverted after
@@ -610,9 +606,7 @@ class NPUModelRunner(GPUModelRunner):
         self.num_discarded_requests = 0
 
     def _get_drafter(self):
-        speculative_config = self.speculative_config
-        assert speculative_config is not None
-        return get_spec_decode_method(speculative_config.method, self.vllm_config, self.device, self)
+        return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
 
     def _use_aclgraph(self) -> bool:
         return (
@@ -1511,12 +1505,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # For the overlay of the PCP feature and the eagle3, attn_state needs to be recovered
         # TODO: Resolved the conflict between the sunset of attn_state and the PCP that requires this interface.
-        speculative_config = self.speculative_config
-        if (
-            attn_state == AscendAttentionState.SpecDecoding
-            and speculative_config is not None
-            and speculative_config.method != "mtp"
-        ):
+        if attn_state == AscendAttentionState.SpecDecoding and self.speculative_config.method != "mtp":
             self.attn_state = AscendAttentionState.ChunkedPrefill  # type: ignore
         else:
             self.attn_state = attn_state  # type: ignore
@@ -1654,8 +1643,6 @@ class NPUModelRunner(GPUModelRunner):
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
-        speculative_config = self.speculative_config
-        assert speculative_config is not None
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
@@ -1710,7 +1697,7 @@ class NPUModelRunner(GPUModelRunner):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
             )
-        elif speculative_config.uses_extract_hidden_states():
+        elif self.speculative_config.uses_extract_hidden_states():
             # Handle extract_hidden_states method
             assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
             assert isinstance(valid_sampled_token_ids, torch.Tensor), (
@@ -1739,7 +1726,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             )
             self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
-        elif speculative_config.use_eagle() or speculative_config.uses_draft_model():
+        elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids
 
@@ -1869,7 +1856,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
         else:
-            raise ValueError(f"Unknown speculative decoding method: {speculative_config.method}")
+            raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
         return draft_token_ids
 
@@ -1985,9 +1972,9 @@ class NPUModelRunner(GPUModelRunner):
                             req_state.prev_num_draft_len = 0
 
                 # Update persistent batch states.
-                if scheduler_output.total_num_scheduled_tokens != 0:
-                    deferred_state_corrections_fn = self._update_states(
-                        scheduler_output)
+                deferred_state_corrections_fn = self._update_states(
+                    scheduler_output
+                )
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
@@ -2427,8 +2414,6 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         with record_function_or_nullcontext("draft_token"):
-            self._draft_token_ids = None
-            self._draft_token_req_ids = None
             if self.speculative_config:
                 use_padded_batch = (
                     self.speculative_config
@@ -2455,36 +2440,6 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
-            # Get draft token ids if available
-            output_spec_token_ids = None
-            draft_token_ids = self._draft_token_ids
-            if draft_token_ids is not None:
-                # Use synchronous copy to avoid NPU async stream/event
-                # synchronization issues. _get_draft_token_ids_cpu relies on
-                # event.synchronize() which may not properly wait for the
-                # async copy on NPU, resulting in stale data.
-                if isinstance(draft_token_ids, torch.Tensor):
-                    num_reqs = draft_token_ids.shape[0]
-                    draft_ids_list = draft_token_ids[:num_reqs].cpu().tolist()
-                    draft_req_ids = self._draft_token_req_ids
-                else:
-                    draft_ids_list = draft_token_ids
-                    draft_req_ids = self.input_batch.req_ids
-                if draft_ids_list and draft_req_ids:
-                    draft_by_req_id = dict(
-                        zip(draft_req_ids, draft_ids_list))
-                    output_spec_token_ids = [
-                        draft_by_req_id.get(req_id, [])
-                        for req_id in req_ids_output_copy
-                    ]
-
-        if self.routed_experts_initialized and vllm_version_is("0.21.0"):
-            issue_routing_d2h_copy(
-                input_batch_req_ids=self.input_batch.req_ids,
-                num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
-                positions=self.positions,
-                positions_cpu=self._positions_cpu,
-            )
 
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
@@ -2506,7 +2461,6 @@ class NPUModelRunner(GPUModelRunner):
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=output_spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             kv_connector_output=kv_connector_output,
@@ -4787,8 +4741,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         try:
             if skip_parent_drafter_init:
-                # vLLM releases before the PP guard still try to initialize the
-                # drafter on every PP rank. Ascend only creates it on last rank.
                 self.speculative_config = None
             with update_pass_config(self):
                 super()._check_and_update_cudagraph_mode(
@@ -4841,9 +4793,6 @@ class NPUModelRunner(GPUModelRunner):
         return result
 
     def _maybe_initialize_drafter_cudagraph_keys(self) -> None:
-        # Keep a local fallback for vLLM variants that do not initialize the
-        # drafter here. When the parent already did it, keys_initialized avoids
-        # rebuilding the drafter dispatch keys.
         if not self.speculative_config:
             return
         if not (
