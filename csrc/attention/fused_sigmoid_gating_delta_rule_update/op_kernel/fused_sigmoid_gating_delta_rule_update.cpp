@@ -11,7 +11,11 @@
  * \file fused_sigmoid_gating_delta_rule_update.cpp
  * \brief
  */
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#include "arch35/fused_sigmoid_gating_delta_rule_update.h"
+#else
 #include "fused_sigmoid_gating_delta_rule_update.h"
+#endif
 #include "fused_sigmoid_gating_delta_rule_update_tiling_data.h"
 
 
