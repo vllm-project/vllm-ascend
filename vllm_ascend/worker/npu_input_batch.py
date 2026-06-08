@@ -251,6 +251,6 @@ class NPUInputBatch(InputBatch):
                 warnings.warn(
                     "Enabling logprobs_mode will disable the reduce_sampling optimization.",
                     category=UserWarning,
-                    stacklevel=2
+                    stacklevel=2,
                 )
         return metadata

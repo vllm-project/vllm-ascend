@@ -36,9 +36,7 @@ _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", defa
 # When set to a non-None value, overrides enable_reduce_sample from AscendConfig.
 # This allows the reduce_sample behavior to be disabled per-forward when logprobs
 # are requested, without modifying the global config.
-_REDUCE_SAMPLE_OVERRIDE: ContextVar[bool | None] = ContextVar(
-    "_REDUCE_SAMPLE_OVERRIDE", default=None
-)
+_REDUCE_SAMPLE_OVERRIDE: ContextVar[bool | None] = ContextVar("_REDUCE_SAMPLE_OVERRIDE", default=None)
 
 
 def is_reduce_sample_enabled() -> bool:
