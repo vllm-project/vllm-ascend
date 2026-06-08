@@ -345,17 +345,22 @@ class cmake_build_ext(build_ext):
             cmake_args += [f"-DVLLM_ASCEND_ENABLE_BATCH_MEMCPY={envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY}"]
 
         build_tool = []
-        # if shutil.which("ninja") is not None:
-        #     build_tool += ["-G", "Ninja"]
+        # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build
+        # if which('ninja') is not None:
+        #     build_tool += ['-G', 'Ninja']
+        # Default build tool to whatever cmake picks.
 
         cmake_args += [source_dir]
-        configure_cmd = ["cmake", *build_tool, *cmake_args]
-
-        logging.info("cmake config command: %s", configure_cmd)
+        logging.info("cmake config command: %s", cmake_args)
         try:
-            subprocess.check_call(configure_cmd, cwd=self.build_temp)
+            subprocess.check_call(cmake_args, cwd=self.build_temp)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"CMake configuration failed: {e}")
+
+        subprocess.check_call(
+            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
+            cwd=self.build_temp,
+        )
 
     def build_extensions(self) -> None:
         if not envs.COMPILE_CUSTOM_KERNELS:
