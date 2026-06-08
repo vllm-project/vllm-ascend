@@ -190,7 +190,6 @@ _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "matmul_allreduce",
     "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
-    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "context_parallel",
     "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
 }
 
@@ -258,8 +257,6 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
         features.append(speculative.get("method", "speculative"))
 
     # Features from direct flags
-    if "--async-scheduling" in cmd_list:
-        features.append("async_scheduling")
     if "--enable-expert-parallel" in cmd_list:
         features.append("expert_parallel")
 

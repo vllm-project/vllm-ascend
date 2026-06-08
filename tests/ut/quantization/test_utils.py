@@ -3,6 +3,8 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
+from vllm.config import KVTransferConfig
+
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import FAKQUANT_CONFIG, W8A8_CONFIG
 from vllm_ascend.quantization import AscendCompressedTensorsConfig
@@ -184,7 +186,7 @@ class TestEnableFaQuant(TestBase):
     def test_fa3_quantization_scenario(self):
         vllm_config = MagicMock()
         vllm_config.quant_config = AscendModelSlimConfig(FAKQUANT_CONFIG)
-        vllm_config.kv_transfer_config = None
+        vllm_config.kv_transfer_config = KVTransferConfig(kv_connector="MultiConnector", kv_role="kv_consumer")
         result = enable_fa_quant(vllm_config)
         self.assertTrue(result)
         result = enable_fa_quant(vllm_config, layer_name="test_layer")

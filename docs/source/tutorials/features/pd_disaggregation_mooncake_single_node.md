@@ -4,7 +4,7 @@
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide provides step-by-step instructions to verify this features in resource-constrained environments.
 
-Using the Qwen2.5-VL-7B-Instruct model as an example, use vLLM-Ascend v0.11.0rc1 (with vLLM v0.11.0) on 1 Atlas 800T A2 server to deploy the "1P1D" architecture (one Prefiller and one Decoder on the same node). Assume the IP address is 192.0.0.1.
+Using the Qwen2.5-VL-7B-Instruct model as an example, use vLLM-Ascend {{vllm_ascend_version}} (with vLLM {{vllm_version}}) on 1 Atlas 800T A2 server to deploy the "1P1D" architecture (one Prefiller and one Decoder on the same node). Assume the IP address is 192.0.0.1.
 
 ## Verify Communication Environment
 
@@ -138,7 +138,7 @@ Set environment variables.
 - Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
 
 ```shell
-export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LIBRARY_PATH
 ```
 
 ## Prefiller/Decoder Deployment
@@ -173,7 +173,6 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
   "kv_port": "30000",
-  "engine_id": "0",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 1,
@@ -215,7 +214,6 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_port": "30100",
-  "engine_id": "1",
   "kv_connector_extra_config": {
             "prefill": {
                     "dp_size": 1,

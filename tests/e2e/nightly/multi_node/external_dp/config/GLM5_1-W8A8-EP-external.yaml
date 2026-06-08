@@ -1,0 +1,335 @@
+test_name: "multi-node-glm-5.1-w8a8-ep-external-dp"
+model: "Eco-Tech/GLM-5.1-w8a8"
+num_nodes: 4
+npu_per_node: 16
+
+special_dependencies:
+  transformers: "5.2.0"
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0, 1]
+    decoder: [2, 3]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 4
+    dp_size_local: 2
+    dp_rank_start: 2
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 2
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_2_IP}"
+
+  - node_index: 3
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 4
+    dp_rank_start: 4
+    tp_size: 4
+    dp_address: "${NODE_2_IP}"
+
+env_common: &env_common
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_USE_MODELSCOPE: "true"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_BUFFSIZE: "1024"
+  VLLM_TORCH_PROFILER_WITH_STACK: "0"
+  ASCEND_AGGREGATE_ENABLE: "1"
+  ASCEND_TRANSPORT_PRINT: "1"
+  ACL_OP_INIT_MODE: "1"
+  ASCEND_A3_ENABLE: "1"
+  VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
+  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+  HCCL_CONNECT_TIMEOUT: "1200"
+  HCCL_INTRA_PCIE_ENABLE: "1"
+  HCCL_INTRA_ROCE_ENABLE: "0"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --speculative-config
+      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+      - "--profiler-config"
+      - '{"profiler":"torch","torch_profiler_dir":"./profile","torch_profiler_with_stack":false}'
+      - "--seed"
+      - "1024"
+      - --max-model-len
+      - "131072"
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - --max-num-batched-tokens
+      - "4096"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "64"
+      - --quantization
+      - ascend
+      - --gpu-memory-utilization
+      - "0.95"
+      - --enforce-eager
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm45
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "kv_connector_extra_config": {
+          "use_ascend_direct": true,
+          "prefill": {
+            "dp_size": 4,
+            "tp_size": 8
+          },
+          "decode": {
+            "dp_size": 8,
+            "tp_size": 4
+          }
+        }}'
+
+  - node_index: 1
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --speculative-config
+      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+      - "--profiler-config"
+      - '{"profiler":"torch","torch_profiler_dir":"./profile","torch_profiler_with_stack":false}'
+      - "--seed"
+      - "1024"
+      - --max-model-len
+      - "131072"
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - --max-num-batched-tokens
+      - "4096"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "64"
+      - --quantization
+      - ascend
+      - --gpu-memory-utilization
+      - "0.95"
+      - --enforce-eager
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm45
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "kv_connector_extra_config": {
+          "use_ascend_direct": true,
+          "prefill": {
+            "dp_size": 4,
+            "tp_size": 8
+          },
+          "decode": {
+            "dp_size": 8,
+            "tp_size": 4
+          }
+        }}'
+
+  - node_index: 2
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      TASK_QUEUE_ENABLE: "1"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --speculative-config
+      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+      - "--profiler-config"
+      - '{"profiler":"torch","torch_profiler_dir":"./profile","torch_profiler_with_stack":false}'
+      - "--seed"
+      - "1024"
+      - --max-model-len
+      - "202752"
+      - --max-num-batched-tokens
+      - "32"
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - --max-num-batched-tokens
+      - "4096"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "8"
+      - --quantization
+      - ascend
+      - --gpu-memory-utilization
+      - "0.92"
+      - --async-scheduling
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm45
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30100",
+        "kv_connector_extra_config": {
+          "use_ascend_direct": true,
+          "prefill": {
+            "dp_size": 4,
+            "tp_size": 8
+          },
+          "decode": {
+            "dp_size": 8,
+            "tp_size": 4
+          }
+        }}'
+
+  - node_index: 3
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      TASK_QUEUE_ENABLE: "1"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --speculative-config
+      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+      - "--profiler-config"
+      - '{"profiler":"torch","torch_profiler_dir":"./profile","torch_profiler_with_stack":false}'
+      - "--seed"
+      - "1024"
+      - --max-model-len
+      - "202752"
+      - --max-num-batched-tokens
+      - "32"
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - --max-num-batched-tokens
+      - "4096"
+      - --trust-remote-code
+      - --max-num-seqs
+      - "8"
+      - --quantization
+      - ascend
+      - --gpu-memory-utilization
+      - "0.92"
+      - --async-scheduling
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm45
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30100",
+        "kv_connector_extra_config": {
+          "use_ascend_direct": true,
+          "prefill": {
+            "dp_size": 4,
+            "tp_size": 8
+          },
+          "decode": {
+            "dp_size": 8,
+            "tp_size": 4
+          }
+        }}'
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 160
+    max_out_len: 1500
+    batch_size: 40
+    request_rate: 0
+    baseline: 1
+    threshold: 0.97

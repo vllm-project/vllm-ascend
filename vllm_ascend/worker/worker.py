@@ -61,6 +61,7 @@ from vllm_ascend.utils import (
     enable_sp,
     get_ascend_device_type,
     register_ascend_customop,
+    setup_ascend_local_comm_res,
     vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -127,6 +128,9 @@ class NPUWorker(WorkerBase):
         # Profiler is lazily initialized on first profile(is_start=True) call (RFC #6954)
         self.profiler_config = vllm_config.profiler_config
         self.profiler: TorchNPUProfilerWrapper | None = None
+        self.torch_reserved = 0
+        self.torch_allocated = 0
+        self.npugraph_memory_bytes = 0
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
@@ -269,6 +273,9 @@ class NPUWorker(WorkerBase):
         gc.collect()
         torch.npu.empty_cache()
 
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
+
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot()
         self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
@@ -397,10 +404,21 @@ class NPUWorker(WorkerBase):
 
         return int(self.available_kv_cache_memory_bytes)
 
+    def profile_memory(self) -> None:
+        """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
+        self.torch_reserved = torch.npu.memory_reserved()
+        self.torch_allocated = torch.npu.memory_allocated()
+        logger.debug(
+            "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB",
+            self.torch_reserved / GiB_bytes,
+            self.torch_allocated / GiB_bytes,
+        )
+
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        self.profile_memory()
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
@@ -522,6 +540,7 @@ class NPUWorker(WorkerBase):
                 + self.non_torch_memory
                 + npugraph_memory_bytes
             )
+            self.npugraph_memory_bytes = npugraph_memory_bytes
             suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
             suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
             msg = (
@@ -730,6 +749,7 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
+        self.profile_memory()
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:

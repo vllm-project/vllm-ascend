@@ -21,7 +21,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
-from vllm.distributed import get_ep_group
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -29,7 +29,7 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.flash_common3_context import get_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, enable_dsa_cp, maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
@@ -83,25 +83,70 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             need_unsqz = True
             quantized_x = quantized_x.squeeze(dim=1)
             pertoken_scale = pertoken_scale.squeeze(dim=1)
-        output = torch_npu.npu_quant_matmul(
-            quantized_x,
-            layer.weight,
-            layer.weight_scale,
-            pertoken_scale=pertoken_scale,
-            bias=bias,
-            output_dtype=x.dtype,
-        )
+
+        chunk_size = getattr(layer, "_chunk_size", 0)
+        if isinstance(chunk_size, int) and chunk_size > 0:
+            bias_1 = bias[:chunk_size] if bias is not None else None
+            bias_2 = bias[chunk_size:] if bias is not None else None
+            output = torch.cat(
+                [
+                    torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        layer.weight_1,
+                        layer.weight_1_scale,
+                        pertoken_scale=pertoken_scale,
+                        bias=bias_1,
+                        output_dtype=x.dtype,
+                    ),
+                    torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        layer.weight_2,
+                        layer.weight_2_scale,
+                        pertoken_scale=pertoken_scale,
+                        bias=bias_2,
+                        output_dtype=x.dtype,
+                    ),
+                ],
+                dim=-1,
+            )
+        else:
+            output = torch_npu.npu_quant_matmul(
+                quantized_x,
+                layer.weight,
+                layer.weight_scale,
+                pertoken_scale=pertoken_scale,
+                bias=bias,
+                output_dtype=x.dtype,
+            )
         if need_unsqz:
             output = output.unsqueeze(dim=1)
         return output
 
     def process_weights_after_loading(self, layer):
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        # cast quantized weight tensors in NZ format for higher inference speed
-        layer.weight.data = maybe_trans_nz(layer.weight.data)
-        layer.weight_scale.data = layer.weight_scale.data.flatten()
-        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
-        layer.weight_offset.data = layer.weight_offset.data.flatten()
+        if "wq_b" in getattr(layer, "prefix", "") and layer.weight.shape[1] >= 65536 and enable_dsa_cp():
+            # TODO(jianzs): Remove this workaround after
+            # `torch_npu.npu_quant_matmul` supports large weight dimensions.
+            chunk_size = layer.weight.shape[1] // 2
+            assert chunk_size < 65536, "Even after chunking, the weight dimension is still larger than 65536."
+            layer._chunk_size = chunk_size
+            layer.weight_1 = maybe_trans_nz(layer.weight.data[:, :chunk_size].contiguous())
+            layer.weight_2 = maybe_trans_nz(layer.weight.data[:, chunk_size:].contiguous())
+            layer.weight_1_scale = layer.weight_scale.data[:chunk_size].flatten().contiguous()
+            layer.weight_2_scale = layer.weight_scale.data[chunk_size:].flatten().contiguous()
+            layer.weight_1_scale_fp32 = layer.weight_1_scale.to(torch.float32)
+            layer.weight_2_scale_fp32 = layer.weight_2_scale.to(torch.float32)
+            layer.weight_1_offset = layer.weight_offset.data[:chunk_size].flatten().contiguous()
+            layer.weight_2_offset = layer.weight_offset.data[chunk_size:].flatten().contiguous()
+            del layer.weight
+            del layer.weight_scale
+            del layer.weight_offset
+        else:
+            # cast quantized weight tensors in NZ format for higher inference speed
+            layer.weight.data = maybe_trans_nz(layer.weight.data)
+            layer.weight_scale.data = layer.weight_scale.data.flatten()
+            layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
+            layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
 @register_scheme("W8A8_DYNAMIC", "moe")
@@ -112,8 +157,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.W8A8
 
     def __init__(self):
-        self.ep_group = get_ep_group()
-
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
         self.use_aclgraph = (
@@ -133,6 +176,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             backend = device_group._get_backend(torch.device("npu"))
             self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
         except AttributeError:
+            logger.warning_once(
+                "[vllm-ascend/W8A8_DYNAMIC] MC2 group metadata unavailable, "
+                "falling back to empty moe_all_to_all_group_name."
+            )
             self.moe_all_to_all_group_name = ""
 
     def get_weight(
@@ -201,12 +248,19 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         if zero_expert_num == 0 or zero_expert_type is None:
             assert router_logits.shape[1] == num_logical_experts, (
-                "Number of global experts mismatch (excluding redundancy)"
+                "[vllm-ascend/W8A8_DYNAMIC] Number of global experts mismatch "
+                "(excluding redundancy). "
+                f"router_experts={router_logits.shape[1]}, "
+                f"expected_experts={num_logical_experts}, "
+                f"zero_expert_num={zero_expert_num}, "
+                f"zero_expert_type={zero_expert_type}"
             )
 
         if self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
-            assert fc3_context is not None
+            assert fc3_context is not None, (
+                "[vllm-ascend/W8A8_DYNAMIC] flash_common3 context is required when multistream_overlap_gate is enabled."
+            )
             topk_weights = fc3_context.topk_weights
             topk_ids = fc3_context.topk_ids
         else:

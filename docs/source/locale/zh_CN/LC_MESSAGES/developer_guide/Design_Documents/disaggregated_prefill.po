@@ -328,10 +328,9 @@ msgstr "1.配置参数验证"
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:89
 msgid ""
 "Validate KV transfer config by checking whether the kv_connector type is "
-"supported and whether kv_connector_module_path exists and is loadable. On"
-" transfer failures, emit clear error logs for diagnostics."
+"supported. On transfer failures, emit clear error logs for diagnostics."
 msgstr ""
-"通过检查 kv_connector 类型是否受支持以及 kv_connector_module_path 是否存在且可加载，来验证 KV "
+"通过检查 kv_connector 类型是否受支持，来验证 KV "
 "传输配置。传输失败时，输出清晰的错误日志以便诊断。"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:91

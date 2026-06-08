@@ -136,6 +136,7 @@ def _make_vllm_config(
             tensor_parallel_size=1,
         ),
         model_config=model_config,
+        additional_config=None,
     )
 
 
