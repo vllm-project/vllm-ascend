@@ -112,6 +112,7 @@ jobs:
           ref: ${{ inputs.vllm_ascend_ref }}
           path: ./temp-vllm-ascend
           fetch-depth: 1
+          submodules: recursive
 
       - name: Move vllm-ascend code to /vllm-workspace
         if: ${{ inputs.request_id != '' }}
