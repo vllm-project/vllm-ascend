@@ -44,7 +44,7 @@ case "${ARCH_INFO}" in
         ARCH_SUFFIX="x86_64"
         ;;
     *)
-        log "Unknown architecture ${ARCH_INFO}; cannot determine batch_invariant package"
+        log "Warning: unknown architecture ${ARCH_INFO}; cannot determine batch_invariant package"
         exit 0
         ;;
 esac
@@ -55,7 +55,7 @@ BATCH_INVARIANT_RUN_FILE="cann-ops-batch_invariant-${BATCH_INVARIANT_DEVICE}-1.0
 
 log "Downloading batch_invariant run package..."
 unset ASCEND_CUSTOM_OPP_PATH
-if curl --max-time 60 -sS -k -O "${BATCH_INVARIANT_RUN_URL}"; then
+if curl --max-time 60 -sS -k -O "${BATCH_INVARIANT_RUN_URL}" && [[ -f "${BATCH_INVARIANT_RUN_FILE}" ]]; then
     chmod +x "${BATCH_INVARIANT_RUN_FILE}"
     log "Running installer: ${BATCH_INVARIANT_RUN_FILE}"
     if "./${BATCH_INVARIANT_RUN_FILE}"; then
@@ -74,19 +74,22 @@ BATCH_INVARIANT_WHL_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vl
 BATCH_INVARIANT_WHL_FILE="batch_invariant-torch_ops_extension-1.0.0.zip"
 
 log "Downloading batch_invariant whl package..."
-if curl --max-time 3 -sS -k -O "${BATCH_INVARIANT_WHL_URL}" >/dev/null 2>&1; then
-    unzip -o "${BATCH_INVARIANT_WHL_FILE}" >/dev/null 2>&1
-    if [[ -d "torch_ops_extension/batch_invariant_ops" ]]; then
-        cd torch_ops_extension/batch_invariant_ops
-        log "Building and installing batch_invariant whl package..."
-        if bash build_and_install.sh; then
-            log "batch_invariant whl package installed successfully"
+if curl --max-time 3 -sS -k -O "${BATCH_INVARIANT_WHL_URL}" >/dev/null 2>&1 && [[ -f "${BATCH_INVARIANT_WHL_FILE}" ]]; then
+    if unzip -o "${BATCH_INVARIANT_WHL_FILE}" >/dev/null 2>&1; then
+        if [[ -d "torch_ops_extension/batch_invariant_ops" ]]; then
+            cd torch_ops_extension/batch_invariant_ops
+            log "Building and installing batch_invariant whl package..."
+            if bash build_and_install.sh; then
+                log "batch_invariant whl package installed successfully"
+            else
+                log "Failed to build and install batch_invariant whl package"
+            fi
+            cd -
         else
-            log "Failed to build and install batch_invariant whl package"
+            log "batch_invariant_ops directory not found in zip"
         fi
-        cd -
     else
-        log "batch_invariant_ops directory not found in zip"
+        log "Failed to unzip batch_invariant whl package"
     fi
 else
     log "Failed to download batch_invariant whl package: ${BATCH_INVARIANT_WHL_URL}"
