@@ -464,7 +464,7 @@ class FinegrainedTPConfig:
         for module_tp_size in module_tp_sizes:
             # If it is a dense model, then expert parallel is not needed,
             # and data parallel is also not needed. If the data parallel size is set
-            # to greater than 1 in the model launch configuration, its value will be changed to 1 later. 
+            # to greater than 1 in the model launch configuration, its value will be changed to 1 later.
             # This will cause an issue when lmhead parallel is enabled, as the lmhead
             # cannot be split into the data parallel communication group, leading to an error.
             if module_tp_size > 0 and not vllm_config.model_config.is_moe:
