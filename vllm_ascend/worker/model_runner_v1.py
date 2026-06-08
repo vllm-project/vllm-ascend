@@ -1538,21 +1538,24 @@ class NPUModelRunner(GPUModelRunner):
                     dequant_scale_q_nope,
                     fak_descale_float,
                 ) = param
-                seq_lens_list = getattr(metadata.decode, "seq_lens_list", None)
+                decode = getattr(metadata, "decode", None)
+                if decode is None:
+                    continue
+                seq_lens_list = getattr(decode, "seq_lens_list", None)
                 if seq_lens_list is None:
-                    seq_lens_list = self._to_int_list(metadata.decode.seq_lens)
-                actual_seq_lengths = getattr(metadata.decode, "actual_seq_lengths_q", None)
+                    seq_lens_list = self._to_int_list(decode.seq_lens)
+                actual_seq_lengths = getattr(decode, "actual_seq_lengths_q", None)
                 if actual_seq_lengths is None:
-                    query_start_loc = getattr(metadata.decode, "query_start_loc_cpu", None)
+                    query_start_loc = getattr(decode, "query_start_loc_cpu", None)
                     if query_start_loc is None:
-                        query_start_loc = getattr(metadata.decode, "query_start_loc", None)
+                        query_start_loc = getattr(decode, "query_start_loc", None)
                     actual_seq_lengths = self._to_int_list(
                         query_start_loc[1:] if query_start_loc is not None else None
                     )
                 if actual_seq_lengths is None:
                     continue
 
-                block_table = metadata.decode.block_table
+                block_table = decode.block_table
                 spec_config = self.speculative_config
                 if spec_config and spec_config.disable_padded_drafter_batch:
                     block_table = block_table[: len(actual_seq_lengths)]

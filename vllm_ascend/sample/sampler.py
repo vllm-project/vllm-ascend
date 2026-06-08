@@ -1,6 +1,7 @@
 import torch
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.model_executor.layers.logits_processor import apply_top_k_top_p
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
