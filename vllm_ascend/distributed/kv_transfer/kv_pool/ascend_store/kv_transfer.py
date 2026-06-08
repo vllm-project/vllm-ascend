@@ -83,12 +83,16 @@ class KVTransferThread(threading.Thread):
             try:
                 request_data = self.request_queue.get()
                 if request_data is None:
-                    logger.warning("Received a None request!")
+                    logger.warning("Received a None request. This indicates queue shutdown or invalid request.")
                     self.request_queue.task_done()
                     continue
                 self._handle_request(request_data)
             except Exception as e:
-                logger.error("Error in KVCacheTransferThread: %s", e)
+                logger.error(
+                    "Error in KVCacheTransferThread. type=%s, error=%s. Check thread state and request processing.",
+                    type(e).__name__,
+                    e,
+                )
 
     def _handle_request(self, req_meta: Any):
         pass
@@ -108,7 +112,11 @@ class KVTransferThread(threading.Thread):
                 exists_list[index] = value == 1
             return exists_list
         except Exception as e:
-            logger.error("Remote connection failed in contains: %s", e)
+            logger.error(
+                "Remote connection failed in lookup. type=%s, error=%s. Check network and remote store.",
+                type(e).__name__,
+                e,
+            )
             return [False] * len(keys)
 
     def update_kv_event(self, event: list[BlockStored]):
@@ -742,5 +750,9 @@ def record_failed_blocks(
         if code != 0:
             failed_blocks.add(block_id)
     if failed_blocks:
-        logger.error("Failed to load blocks: %s", failed_blocks)
+        logger.error(
+            "Failed to load blocks. failed_count=%d, failed_blocks=%s. Check block availability and memory state.",
+            len(failed_blocks),
+            failed_blocks,
+        )
     return failed_blocks

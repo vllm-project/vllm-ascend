@@ -205,20 +205,24 @@ This package will install `librosa` and its related dependencies, resolving the 
 
 ### 17. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
 
-```shell
-error example in detail: 
-ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph sizes capture fail: RuntimeError:
-ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph has insufficient available streams to capture the configured number of sizes.Please verify both the availability of adequate streams and the appropriateness of the configured size count.
+```text
+capture_begin:../torch_npu/csrc/core/npu/NPUGraph.cpp:230 NPU function error: c10_npu::acl::AclmdlRICaptureBegin(capture_stream_, capture_mode), error code is 207008
+[Error]: Stream resources are insufficient.
+[PID: ...] Insufficient_Stream_Resources(EL0009): The stream resources are insufficient.
 ```
+
+When vLLM Ascend recognizes this capture-time stream-resource signature in the error text, it re-raises the error with targeted guidance for ACL graph sizing and mitigation.
 
 Recommended mitigation strategies:
 
-1. Manually configure the compilation_config parameter with a reduced size set: '{"cudagraph_capture_sizes":[size1, size2, size3, ...]}'.
-2. If your workload is mostly uniform decode, employ ACLGraph's `FULL` or `FULL_DECODE_ONLY` mode as an alternative to the piecewise approach.
-3. If you use `PIECEWISE` or `FULL_AND_PIECEWISE`, it is recommended to set `cudagraph_capture_sizes` manually according to your workload.
+1. Upgrade to a newer HDK/CANN stack if one is available for your environment. Recent releases improve ACL graph capacity, so older workarounds may no longer be necessary.
+2. Manually reduce the configured graph sizes, for example: '{"cudagraph_capture_sizes":[size1, size2, size3, ...]}', or lower `max_cudagraph_capture_size`.
+3. If your workload is mostly uniform decode, try ACLGraph's `FULL` or `FULL_DECODE_ONLY` mode instead of the `PIECEWISE`.
+4. If you use `PIECEWISE` or `FULL_AND_PIECEWISE` and still hit this failure after upgrading, set `cudagraph_capture_sizes` manually according to your real workload and reduce the configured coverage.
+5. If you are debugging a startup failure, temporarily disable graph mode (`cudagraph_mode="NONE"` / `enforce_eager=True`) to confirm the issue is capture-related.
 
 Root cause analysis:
-The current stream requirement calculation for size captures only accounts for measurable factors including: data parallel size, tensor parallel size, expert parallel configuration, piece graph count, multistream-overlap shared expert settings, and HCCL communication mode (AIV/AICPU). However, numerous unquantifiable elements, such as operator characteristics and specific hardware features, consume additional streams outside of this calculation framework, resulting in stream resource exhaustion during size capture operations.
+ACL graph capture can still fail when the runtime resources required by the selected graph sizes exceed what the current software/hardware stack can provide. This is most visible in `PIECEWISE` scenarios because the number of captured graphs scales with model depth and capture-size coverage. vLLM Ascend no longer auto-shrinks the PIECEWISE capture-size set locally, so the practical mitigations are to upgrade the HDK/CANN stack or reduce the configured graph sizes explicitly. The runtime guidance is intentionally narrow: it is only added when capture fails with the confirmed stream-resource signature above.
 
 ### 18. How to install custom version of torch_npu?
 

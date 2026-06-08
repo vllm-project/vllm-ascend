@@ -25,6 +25,7 @@ import vllm
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -34,15 +35,9 @@ from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import PrefillEagleCudaGraph
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, update_eagle_draft_inputs
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
-
-if vllm_version_is("0.20.2"):
-    from vllm.v1.worker.gpu.attn_utils import AttentionBackend
-else:
-    from vllm.v1.attention.backend import AttentionBackend
 
 
 class AscendEagleSpeculator(EagleSpeculator):
