@@ -168,7 +168,7 @@ class AscendRejectionSampler(RejectionSampler):
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
-            logprobs_tensors = self._get_logprobs_tensors(
+            logprobs_tensors = self.build_logprobs_tensors_from_prepared_inputs(
                 sampling_metadata.max_num_logprobs,
                 metadata,
                 logits,
@@ -180,6 +180,26 @@ class AscendRejectionSampler(RejectionSampler):
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+        )
+
+    def build_logprobs_tensors_from_prepared_inputs(
+        self,
+        max_num_logprobs: int | None,
+        metadata: SpecDecodeMetadata,
+        logits: torch.Tensor,
+        target_logits_for_logprobs: torch.Tensor,
+        bonus_logprobs: torch.Tensor,
+        output_token_ids: torch.Tensor,
+    ):
+        if max_num_logprobs is None:
+            return None
+        return self._get_logprobs_tensors(
+            max_num_logprobs,
+            metadata,
+            logits,
+            target_logits_for_logprobs,
+            bonus_logprobs,
+            output_token_ids,
         )
 
 

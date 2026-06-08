@@ -14,7 +14,7 @@ from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypeAlias, TypedDict, cast
 
 import msgspec
 import numpy as np
@@ -71,6 +71,9 @@ if TYPE_CHECKING:
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 
+FlatBlockIds: TypeAlias = list[int]
+NestedBlockIds: TypeAlias = list[list[int]] | list[tuple[int, ...]]
+
 
 class RemotePortInfo(TypedDict):
     num: int
@@ -104,6 +107,7 @@ class ReqMeta:
     remote_ptp_size: int | None
     remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
     num_prompt_blocks: int
+    num_committed_blocks: int = 0
 
 
 @dataclass(frozen=True)
@@ -480,10 +484,18 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
-    def _mark_failed_recv_request(self, request_id: str, local_block_ids: list[int]) -> None:
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds | FlatBlockIds) -> None:
+        if local_block_ids and isinstance(local_block_ids[0], (list, tuple)):
+            grouped_block_ids = cast(NestedBlockIds, local_block_ids)
+            flattened_block_ids: set[int] = {
+                block_id for group_block_ids in grouped_block_ids for block_id in group_block_ids
+            }
+        else:
+            flat_block_ids = cast(FlatBlockIds, local_block_ids)
+            flattened_block_ids = set(flat_block_ids) if flat_block_ids else set()
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            self.invalid_block_ids.update(local_block_ids)
+            self.invalid_block_ids.update(flattened_block_ids)
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -1194,6 +1206,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_ptp_size=kv_transfer_params.get("remote_ptp_size"),
             remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
+            num_committed_blocks=kv_transfer_params.get(
+                "num_committed_blocks",
+                kv_transfer_params.get("num_prompt_blocks", 0),
+            ),
         )
 
 
@@ -1350,6 +1366,11 @@ class MooncakeConnectorScheduler:
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
 
+    @staticmethod
+    def _get_committed_token_count(request: "Request") -> int:
+        prompt_len = len(request.prompt_token_ids or [])
+        return prompt_len + len(request.output_token_ids)
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
@@ -1464,9 +1485,11 @@ class MooncakeConnectorScheduler:
             logger.info("Delaying free of %d blocks for request %s", len(computed_block_ids), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
 
+        committed_token_count = self._get_committed_token_count(request)
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        num_committed_blocks = math.ceil(committed_token_count / self.block_size)
         computed_block_ids = tuple(
-            block_ids[:num_prompt_blocks]
+            block_ids[:num_committed_blocks]
             if not isinstance(self.kv_cache_groups[i].kv_cache_spec, MambaSpec)
             else block_ids
             for i, block_ids in enumerate(computed_block_ids)
@@ -1486,6 +1509,7 @@ class MooncakeConnectorScheduler:
             last_token_id=request.output_token_ids[-1],
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
+            num_committed_blocks=num_committed_blocks,
         )
 
     def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
@@ -2040,19 +2064,20 @@ class MooncakeConnectorWorker:
             f"num_external_blocks({num_external_blocks}), cp_size({self.pcp_size * self.dcp_size}), "
             f"local_block_ids_len ({len(meta.local_block_ids[sequence_group_idx])})"
         )
-        assert meta.num_prompt_blocks >= num_external_blocks, (
-            f"meta.num_prompt_blocks({meta.num_prompt_blocks}), num_external_blocks({num_external_blocks})"
+        total_committed_blocks = meta.num_committed_blocks or meta.num_prompt_blocks
+        assert total_committed_blocks >= num_external_blocks, (
+            f"total_committed_blocks({total_committed_blocks}), num_external_blocks({num_external_blocks})"
         )
 
         remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
-        remote_block_nums_all = [meta.num_prompt_blocks // remote_cp_size] * remote_cp_size
-        num_remain_blocks = meta.num_prompt_blocks % remote_cp_size
+        remote_block_nums_all = [total_committed_blocks // remote_cp_size] * remote_cp_size
+        num_remain_blocks = total_committed_blocks % remote_cp_size
         for i in range(num_remain_blocks):
             remote_block_nums_all[i] += 1
         last_block_location = (num_remain_blocks + remote_cp_size - 1) % remote_cp_size
 
         # Considering prefix cache, the remote_block_nums_all should be revised
-        num_prefix_cached_blocks = meta.num_prompt_blocks - num_external_blocks
+        num_prefix_cached_blocks = total_committed_blocks - num_external_blocks
         remote_block_nums_all = [num - num_prefix_cached_blocks // remote_cp_size for num in remote_block_nums_all]
         num_remain_blocks = num_prefix_cached_blocks % remote_cp_size
         for i in range(num_remain_blocks):

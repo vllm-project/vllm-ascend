@@ -68,6 +68,47 @@ class BalanceScheduler(Scheduler):
         running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
         dist.all_gather(self.balance_queue, running_tensor, group=dp_group)
 
+    def _request_has_allocated_blocks(self, req_id: str) -> bool:
+        if not hasattr(self, "kv_cache_manager") or not hasattr(self.kv_cache_manager, "coordinator"):
+            return False
+        return any(
+            req_id in manager.req_to_blocks for manager in self.kv_cache_manager.coordinator.single_type_managers
+        )
+
+    def _update_from_kv_xfer_finished(self, kv_connector_output):
+        """Handle duplicate finished KV notifications idempotently.
+
+        The upstream scheduler assumes finished_sending / finished_recving
+        request ids are always still present in self.requests. In our delayed
+        free / rollback paths, duplicated connector signals can legitimately
+        arrive after the request has already been fully freed. Treat those
+        duplicates as no-ops instead of asserting.
+        """
+        if self.connector is not None:
+            self.connector.update_connector_output(kv_connector_output)
+
+        for req_id in kv_connector_output.finished_recving or ():
+            logger.debug("Finished recving KV transfer for request %s", req_id)
+            req = self.requests.get(req_id)
+            if req is None:
+                logger.debug("Ignoring duplicate finished_recving for freed request %s", req_id)
+                continue
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                self.finished_recving_kv_req_ids.add(req_id)
+            else:
+                assert RequestStatus.is_finished(req.status)
+                if self._request_has_allocated_blocks(req_id):
+                    self._free_blocks(req)
+
+        for req_id in kv_connector_output.finished_sending or ():
+            logger.debug("Finished sending KV transfer for request %s", req_id)
+            req = self.requests.get(req_id)
+            if req is None:
+                logger.debug("Ignoring duplicate finished_sending for freed request %s", req_id)
+                continue
+            if self._request_has_allocated_blocks(req_id):
+                self._free_blocks(req)
+
     def schedule(self) -> SchedulerOutput:
         if not self._balance_enabled:
             return super().schedule()

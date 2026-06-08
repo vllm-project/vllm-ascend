@@ -14,6 +14,7 @@ import msgspec
 import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.request import RequestStatus
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -206,6 +207,15 @@ class TestGetAndClearFinishedRequests(unittest.TestCase):
         result = self.thread.get_and_clear_finished_requests()
         mock_get_clear.assert_called_once()
         self.assertEqual(result, expected_requests)
+
+    def test_get_and_clear_finished_requests_returns_expired_delayed_request(self):
+        current_time = time.time()
+        self.thread.task_tracker.add_req_to_process("req_timeout")
+        self.thread.task_tracker.add_delayed_request("req_timeout", current_time - 100000)
+
+        result = self.thread.get_and_clear_finished_requests()
+
+        self.assertEqual(result, {"req_timeout"})
 
 
 class TestKVCacheSendingThread(unittest.TestCase):
@@ -475,6 +485,53 @@ class TestCoreFunctionality(unittest.TestCase):
         mock_send.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
         cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
         self.mock_queue.task_done.assert_called_once()
+
+    @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
+    @patch.object(KVCacheRecvingThread, "_send_done_signal_to_free_remote_port")
+    @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
+    def test_handle_request_marks_failure_and_finishes_request(self, mock_transfer, mock_send_free, mock_send_recv):
+        mock_transfer.side_effect = RuntimeError("transfer failed")
+        mock_send_free.return_value = None
+        mock_send_recv.return_value = None
+        self.thread.task_tracker = MagicMock()
+
+        self.thread._handle_request(self.test_req)
+
+        self.assertSetEqual(self.thread.invalid_block_ids, {1, 2})
+        self.assertFalse(self.thread._is_failed_recv_request("req1"))
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
+        mock_send_free.assert_called_once_with("req1", "localhost", {6666: 1})
+        mock_send_recv.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
+        self.mock_queue.task_done.assert_called_once()
+
+    @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
+    @patch.object(KVCacheRecvingThread, "_send_done_signal_to_free_remote_port")
+    @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
+    def test_handle_request_carries_failure_across_partial_groups(self, mock_transfer, mock_send_free, mock_send_recv):
+        partial_req = dict(self.test_req)
+        partial_req["all_task_done"] = False
+        final_req = dict(self.test_req)
+        final_req["all_task_done"] = True
+
+        mock_transfer.side_effect = [RuntimeError("partial transfer failed")]
+        mock_send_free.return_value = None
+        mock_send_recv.return_value = None
+        self.thread.task_tracker = MagicMock()
+
+        # First partial group fails and records the request as failed, but
+        # does not clear the failure marker because more groups remain.
+        self.thread._handle_request(partial_req)
+        self.assertSetEqual(self.thread.invalid_block_ids, {1, 2})
+        self.assertTrue(self.thread._is_failed_recv_request("req1"))
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_not_called()
+
+        # Final group for the same request should skip transfer, preserve the
+        # invalid blocks, mark the task done, and clear the failed marker.
+        self.thread._handle_request(final_req)
+        self.assertSetEqual(self.thread.invalid_block_ids, {1, 2})
+        self.assertFalse(self.thread._is_failed_recv_request("req1"))
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
+        self.assertEqual(mock_transfer.call_count, 1)
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_kv_cache(self, mock_get_meta):
@@ -1069,6 +1126,87 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertFalse(delay_free)
         self.assertIsNone(params)
 
+    def test_request_finished_requires_length_capped_status(self):
+        request = MockRequest(
+            "req1",
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.RUNNING,
+        )
+        delay_free, params = self.scheduler.request_finished(request, ([1, 2, 3],))
+        self.assertFalse(delay_free)
+        self.assertIsNone(params)
+
+    def test_request_finished_clips_remote_blocks_to_prompt_span(self):
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=[1, 2, 3, 4],
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+        delay_free, params = self.scheduler.request_finished(request, ([1, 2, 3],))
+        self.assertTrue(delay_free)
+        assert params is not None
+        self.assertEqual(params["remote_block_ids"], ([1],))
+
+    def test_request_finished_exposes_committed_block_count(self):
+        self.scheduler.block_size = 2
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=[1, 2, 3, 4],
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+        request.output_token_ids = [101, 102, 103]
+
+        delay_free, params = self.scheduler.request_finished(request, ([1, 2, 3, 4, 5],))
+
+        self.assertTrue(delay_free)
+        assert params is not None
+        self.assertEqual(params["num_prompt_blocks"], 2)
+        self.assertEqual(params["num_committed_blocks"], 4)
+        self.assertEqual(params["remote_block_ids"], ([1, 2, 3, 4],))
+
+    def test_request_finished_all_groups_uses_committed_blocks_for_attention_group(self):
+        class DummyMambaSpec:
+            pass
+
+        kv_cache_groups = [
+            MockKVCacheGroup(kv_cache_spec=MagicMock()),
+            MockKVCacheGroup(kv_cache_spec=DummyMambaSpec()),
+        ]
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.MambaSpec",
+                DummyMambaSpec,
+            ),
+        ):
+            self.scheduler = MooncakeConnectorScheduler(self.config, "test_engine", MockKVCacheConfig(kv_cache_groups))
+
+        self.scheduler.block_size = 2
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=[1, 2, 3, 4],
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+        request.output_token_ids = [101, 102, 103]
+
+        delay_free, params = self.scheduler.request_finished(
+            request,
+            ([1, 2, 3, 4, 5], [10, 11, 12]),
+        )
+
+        self.assertTrue(delay_free)
+        assert params is not None
+        self.assertEqual(params["num_prompt_blocks"], 2)
+        self.assertEqual(params["num_committed_blocks"], 4)
+        self.assertEqual(params["remote_block_ids"], ([1, 2, 3, 4], [10, 11, 12]))
+
 
 class TestUtils(unittest.TestCase):
     def test_string_to_int64_hash(self):
@@ -1655,6 +1793,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 "remote_block_ids": ([10, 11], [10, 11]),
                 "local_block_ids": ([20, 21], [20, 21]),
                 "num_prompt_blocks": 6,
+                "num_committed_blocks": 8,
                 "num_external_blocks": 4,
             },
             {
@@ -1671,6 +1810,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 "remote_block_ids": ([30, 31, 32], [30, 31, 32]),
                 "local_block_ids": ([40, 41], [40, 41]),
                 "num_prompt_blocks": 5,
+                "num_committed_blocks": 7,
                 "num_external_blocks": 4,
             },
         ]
@@ -1695,6 +1835,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 local_block_ids=case["local_block_ids"],
                                 num_external_tokens=case["num_external_blocks"] * worker.block_size,
                                 num_prompt_blocks=case["num_prompt_blocks"],
+                                num_committed_blocks=case["num_committed_blocks"],
                                 remote_engine_id=f"remote_{case['name']}_{tp_rank}_{pcp_rank}_{dcp_rank}",
                                 remote_host="localhost",
                                 remote_multi_nodes_meta_mapping={},

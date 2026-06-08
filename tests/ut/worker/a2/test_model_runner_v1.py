@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -151,6 +152,130 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         actual_output_token_ids = actual_sampling_metadata.output_token_ids
         self.assertEqual(actual_output_token_ids[0], [1, 2, 3, 6])
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
+
+    @patch("torch.npu.current_stream")
+    @patch("torch.npu.stream")
+    def test_copy_valid_sampled_token_count_syncs_host_accepted_counts(self, mock_npu_stream, mock_current_stream):
+        mock_current_stream.return_value = MagicMock()
+        mock_npu_stream.side_effect = lambda _stream: nullcontext()
+
+        runner = self._build_runner()
+        runner.valid_sampled_token_count_event = MagicMock()
+        runner.valid_sampled_token_count_copy_stream = MagicMock()
+        runner.use_async_spec_decode = False
+        runner.valid_sampled_token_count_cpu = torch.zeros(4, dtype=torch.int32)
+        runner.input_batch = SimpleNamespace(
+            num_accepted_tokens_cpu_tensor=torch.zeros(4, dtype=torch.int32),
+            prev_sampled_token_ids=None,
+        )
+
+        next_token_ids = torch.tensor([11, 12], dtype=torch.int32)
+        valid_counts = torch.tensor([3, 1], dtype=torch.int32)
+
+        runner._copy_valid_sampled_token_count(next_token_ids, valid_counts)
+
+        self.assertTrue(torch.equal(runner.input_batch.num_accepted_tokens_cpu_tensor[:2], valid_counts))
+        self.assertTrue(torch.equal(runner.input_batch.prev_sampled_token_ids, next_token_ids.unsqueeze(1)))
+
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
+    def test_sample_mtp_returns_executor_counts_explicitly(self, mock_get_ascend_config, mock_lmhead_tp_enable):
+        mock_lmhead_tp_enable.return_value = False
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_reduce_sample = False
+        mock_get_ascend_config.return_value = mock_ascend_config
+
+        runner = self._build_runner()
+        runner.input_batch = MagicMock()
+        runner.input_batch.sampling_metadata = MagicMock()
+        runner.input_batch.sampling_metadata.top_k = None
+        runner.input_batch.top_k_cpu = None
+        runner.input_batch.num_reqs = 2
+        runner.input_batch.update_async_output_token_ids = MagicMock()
+        runner.speculative_config = SimpleNamespace(method="mtp")
+        runner.num_spec_tokens = 3
+        expected_output = MagicMock()
+        expected_counts = torch.tensor([4, 2], dtype=torch.int32)
+        runner.spec_sampling_executor = MagicMock()
+        runner.spec_sampling_executor.execute_from_runtime.return_value = SimpleNamespace(
+            sampler_output=expected_output,
+            num_output_tokens_per_req=expected_counts,
+        )
+
+        logits = torch.randn(4, 32)
+        spec_decode_metadata = MagicMock()
+        sampler_output, counts = runner._sample(logits, spec_decode_metadata)
+
+        self.assertIs(sampler_output, expected_output)
+        self.assertTrue(torch.equal(counts, expected_counts))
+        runner.spec_sampling_executor.execute_from_runtime.assert_called_once()
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    @patch("torch.distributed.broadcast")
+    def test_sync_mtp_output_counts_across_tp_noop_for_single_tp(self, mock_broadcast, mock_get_tp_group):
+        runner = self._build_runner()
+        runner.speculative_config = SimpleNamespace(method="mtp")
+        mock_get_tp_group.return_value = SimpleNamespace(world_size=1, device_group="tp")
+
+        counts = torch.tensor([2, 1], dtype=torch.int32)
+        result = runner._sync_mtp_output_counts_across_tp(counts)
+
+        self.assertTrue(torch.equal(result, counts))
+        mock_broadcast.assert_not_called()
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    @patch("torch.distributed.broadcast")
+    def test_sync_mtp_output_counts_across_tp_broadcasts_from_rank0(self, mock_broadcast, mock_get_tp_group):
+        runner = self._build_runner()
+        runner.speculative_config = SimpleNamespace(method="mtp")
+        mock_get_tp_group.return_value = SimpleNamespace(world_size=2, device_group="tp")
+
+        def _fill_from_rank0(tensor, src=0, group=None):
+            tensor.copy_(torch.tensor([4, 3], dtype=tensor.dtype))
+
+        mock_broadcast.side_effect = _fill_from_rank0
+        counts = torch.tensor([2, 1], dtype=torch.int32)
+
+        result = runner._sync_mtp_output_counts_across_tp(counts)
+
+        self.assertTrue(torch.equal(result, torch.tensor([4, 3], dtype=torch.int32)))
+        mock_broadcast.assert_called_once()
+
+    def test_step_needs_accepted_tokens_requires_spec_step(self):
+        runner = self._build_runner()
+        runner.need_accepted_tokens = True
+
+        self.assertFalse(runner._step_needs_accepted_tokens(False))
+        self.assertTrue(runner._step_needs_accepted_tokens(True))
+
+    def test_step_needs_seq_lens_cpu_sync_requires_spec_step(self):
+        runner = self._build_runner()
+        runner._needs_seq_lens_cpu_sync = True
+        runner.use_async_spec_decode = True
+        runner.valid_sampled_token_count_gpu = torch.tensor([1], dtype=torch.int32)
+
+        self.assertFalse(runner._step_needs_seq_lens_cpu_sync(False, {"req": 0}))
+        self.assertTrue(runner._step_needs_seq_lens_cpu_sync(True, {"req": 0}))
+
+    def test_gdn_builder_enables_need_accepted_tokens(self):
+        class DummyGDN:
+            pass
+
+        runner = self._build_runner()
+        with patch("vllm_ascend.worker.model_runner_v1.GDNAttentionMetadataBuilder", DummyGDN):
+            gdn_builder = DummyGDN()
+            fake_group = [
+                SimpleNamespace(
+                    kv_cache_spec=object(),
+                    get_metadata_builder=MagicMock(return_value=gdn_builder),
+                )
+            ]
+            runner.attn_groups = [fake_group]
+            runner.need_accepted_tokens = any(
+                isinstance(attn_group[0].get_metadata_builder(0), DummyGDN) for attn_group in runner.attn_groups
+            )
+
+            self.assertTrue(runner.need_accepted_tokens)
 
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):

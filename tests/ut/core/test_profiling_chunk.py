@@ -418,3 +418,34 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler.update_from_output(output, model_output)
 
         self.assertEqual(len(scheduler.running), 3)
+
+    def test_update_from_output_rolls_back_rejected_spec_tokens(self):
+        scheduler = self.create_scheduler()
+        scheduler.num_spec_tokens = 3
+        request = create_requests(num_requests=1, num_tokens=32, max_tokens=16)[0]
+        request.spec_token_ids = [101, 102, 103]
+        request.num_output_placeholders = 3
+        scheduler.add_request(request)
+
+        output = scheduler.schedule()
+        req_id = request.request_id
+        # Simulate one decode token plus three speculative tokens scheduled.
+        output.scheduled_spec_decode_tokens = {req_id: [101, 102, 103]}
+        request.num_computed_tokens = 20
+        request.num_output_placeholders = 3
+
+        model_output = ModelRunnerOutput(
+            req_ids=[req_id],
+            req_id_to_index={req_id: 0},
+            # bonus token included => accepted draft tokens = len(...) - 1 = 1
+            sampled_token_ids=[[200, 201]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+
+        scheduler.update_from_output(output, model_output)
+
+        # 3 draft tokens scheduled, only 1 accepted => 2 rejected
+        self.assertEqual(request.num_computed_tokens, 18)
+        self.assertEqual(request.num_output_placeholders, 1)

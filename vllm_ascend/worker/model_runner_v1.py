@@ -165,6 +165,10 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.sample.spec_sampling_executor import (
+    SpecSamplingNPUExecutor,
+)
+from vllm_ascend.sample.spec_sampling_poc import dump_spec_sampling_case
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -521,6 +525,7 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
+        self.valid_sampled_token_count_gpu: torch.Tensor | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -579,6 +584,10 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
                     self.use_aux_hidden_state_outputs = True
                 self.rejection_sampler = AscendRejectionSampler(self.sampler)
+                self.spec_sampling_executor = SpecSamplingNPUExecutor(
+                    self.sampler,
+                    self.rejection_sampler,
+                )
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
@@ -719,6 +728,7 @@ class NPUModelRunner(GPUModelRunner):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+        use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -969,9 +979,13 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
 
-        # Sync num_accepted_tokens from CPU (set by
-        # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
+        # Sync num_accepted_tokens from CPU only when the current step is
+        # actually running a spec path that consumes accepted-token semantics.
+        if (
+            self._step_needs_accepted_tokens(use_spec_decode)
+            and self.use_async_scheduling
+            and self.num_accepted_tokens_event is not None
+        ):
             self.num_accepted_tokens_event.synchronize()
             # Async mode: condense() reordered indices, use prev_positions mapping
             if self.use_async_scheduling and prev_req_id_to_index:
@@ -1001,9 +1015,10 @@ class NPUModelRunner(GPUModelRunner):
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
+        valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
         if (
             self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
+            and valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         ):
             self.prev_positions.copy_to_gpu(num_reqs)
@@ -1015,7 +1030,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_computed_tokens,
                 self.num_accepted_tokens.gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
-                self.valid_sampled_token_count_gpu,
+                valid_sampled_token_count_gpu,
                 self.prev_num_draft_tokens.gpu,
                 cpu_values,
             )
@@ -1062,12 +1077,7 @@ class NPUModelRunner(GPUModelRunner):
         # attention backends (which use _seq_lens_cpu) get the right values.
         # Use non_blocking copy to pinned memory and record an event;
         # _build_attention_metadata will synchronize before reading.
-        if (
-            self._needs_seq_lens_cpu_sync
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
-            and prev_req_id_to_index
-        ):
+        if self._step_needs_seq_lens_cpu_sync(use_spec_decode, prev_req_id_to_index):
             self.optimistic_seq_lens_cpu[:num_reqs].copy_(
                 self.seq_lens[:num_reqs], non_blocking=True
             )
@@ -1081,12 +1091,7 @@ class NPUModelRunner(GPUModelRunner):
         num_computed_tokens_for_compress = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs]
         )
-        if (
-            self.use_compress
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
-            and prev_req_id_to_index
-        ):
+        if self.use_compress and self._step_needs_seq_lens_cpu_sync(use_spec_decode, prev_req_id_to_index):
             # Async spec decode keeps the CPU counter optimistic until after
             # target forward is launched. DSV4 compressed KV slot mapping is
             # CPU-built today, so use the GPU-corrected counter before
@@ -1132,7 +1137,6 @@ class NPUModelRunner(GPUModelRunner):
             target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
             target.gpu[:, :total_num_scheduled_tokens] += drift
 
-        use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
             # partial requests. While we should not sample any token
@@ -1437,12 +1441,54 @@ class NPUModelRunner(GPUModelRunner):
             counts_cpu = self.valid_sampled_token_count_cpu
             assert counts_cpu is not None
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
+            # Keep the CPU-side accepted-token view aligned with the same
+            # authoritative counts that drive the drafter path.
+            self.input_batch.num_accepted_tokens_cpu_tensor[: counts.shape[0]].copy_(
+                counts, non_blocking=True
+            )
             self.valid_sampled_token_count_event.record()
 
         if self.use_async_spec_decode:
             # Stash for GPU-side correction in _prepare_inputs.
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
+    def _sync_mtp_output_counts_across_tp(
+        self,
+        spec_num_output_tokens_per_req: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if spec_num_output_tokens_per_req is None:
+            return None
+        if not self.speculative_config or self.speculative_config.method != "mtp":
+            return spec_num_output_tokens_per_req
+        tp_group = get_tp_group()
+        if tp_group.world_size <= 1:
+            return spec_num_output_tokens_per_req
+        # In-place broadcast is sufficient here: the synchronized tensor is
+        # only consumed after this point, so we can avoid an extra device-side
+        # clone on every MTP step.
+        torch.distributed.broadcast(
+            spec_num_output_tokens_per_req,
+            src=0,
+            group=tp_group.device_group,
+        )
+        return spec_num_output_tokens_per_req
+
+    def _step_needs_accepted_tokens(self, use_spec_decode: bool) -> bool:
+        return bool(use_spec_decode and self.need_accepted_tokens)
+
+    def _step_needs_seq_lens_cpu_sync(
+        self,
+        use_spec_decode: bool,
+        prev_req_id_to_index,
+    ) -> bool:
+        return bool(
+            use_spec_decode
+            and self._needs_seq_lens_cpu_sync
+            and self.use_async_spec_decode
+            and self.valid_sampled_token_count_gpu is not None
+            and prev_req_id_to_index
+        )
 
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
@@ -1458,6 +1504,7 @@ class NPUModelRunner(GPUModelRunner):
         aux_hidden_states: torch.Tensor = None,
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
+        valid_sampled_tokens_count_override: torch.Tensor | None = None,
     ) -> list[list[int]] | None:
         if not self.drafter:
             # Speculative decoding is not enabled.
@@ -1541,6 +1588,8 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_discarded_requests,
                 )
             )
+            if valid_sampled_tokens_count_override is not None:
+                valid_sampled_tokens_count = valid_sampled_tokens_count_override
             self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
         elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
@@ -1573,6 +1622,8 @@ class NPUModelRunner(GPUModelRunner):
                     self.discard_request_indices.gpu,
                     self.num_discarded_requests,
                 )
+                if valid_sampled_tokens_count_override is not None:
+                    valid_sampled_tokens_count = valid_sampled_tokens_count_override
 
             req_scheduled_tokens = scheduler_output.num_scheduled_tokens
             if self.use_cp:
@@ -2188,16 +2239,27 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits.to(self.device).to(logits_dtype)
 
         with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampler_output, spec_num_output_tokens_per_req = self._sample(
+                logits, spec_decode_metadata
+            )
+            spec_num_output_tokens_per_req = self._sync_mtp_output_counts_across_tp(
+                spec_num_output_tokens_per_req
+            )
+            self._maybe_dump_mtp_spec_sampling_case(
+                logits=logits,
+                sampler_output=sampler_output,
+                spec_decode_metadata=spec_decode_metadata,
+                spec_decode_common_attn_metadata=spec_decode_common_attn_metadata,
+                positions=positions,
+            )
 
-        if self.need_accepted_tokens:
+        step_needs_accepted_tokens = self._step_needs_accepted_tokens(spec_decode_metadata is not None)
+        if step_needs_accepted_tokens and self.use_async_scheduling:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
 
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
-
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -2213,6 +2275,7 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states,
                 sample_hidden_states,
                 batch_desc,
+                spec_num_output_tokens_per_req,
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
@@ -2264,6 +2327,12 @@ class NPUModelRunner(GPUModelRunner):
                                     self.discard_request_indices.gpu,
                                     self.num_discarded_requests,
                                 )
+                            if (
+                                self.speculative_config
+                                and self.speculative_config.method == "mtp"
+                                and spec_num_output_tokens_per_req is not None
+                            ):
+                                valid_sampled_tokens_count = spec_num_output_tokens_per_req
                             self._copy_valid_sampled_token_count(
                                 next_token_ids, valid_sampled_tokens_count
                             )
@@ -2325,7 +2394,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self._finalize_dump_data()
 
-        if self.need_accepted_tokens:
+        if step_needs_accepted_tokens and self.use_async_scheduling:
             assert self.sampling_done_event is not None
             with (
                 record_function_or_nullcontext("async_state_update"),
@@ -2369,23 +2438,89 @@ class NPUModelRunner(GPUModelRunner):
             if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
                 max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
                 self.sampler.prepare_sampling(max_topk)
-            return self.sampler(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
+            return (
+                self.sampler(
+                    logits=logits,
+                    sampling_metadata=sampling_metadata,
+                ),
+                None,
             )
 
-        if lmhead_tp_enable() and logits is not None:
-            logits = logits[: len(spec_decode_metadata.logits_indices)]
-        if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
-            max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-            self.rejection_sampler.prepare_sampling(max_topk)
-        sampler_output = self.rejection_sampler(
-            spec_decode_metadata,
-            None,  # draft_probs
-            logits,
-            sampling_metadata,
+        if self.speculative_config and self.speculative_config.method == "mtp":
+            spec_sampling_result = self.spec_sampling_executor.execute_from_runtime(
+                metadata=spec_decode_metadata,
+                sampling_metadata=sampling_metadata,
+                logits=logits,
+                top_k_cpu=self.input_batch.top_k_cpu
+                if self.input_batch.sampling_metadata.top_k is not None
+                else None,
+                enable_reduce_sample=get_ascend_config().enable_reduce_sample,
+                trim_logits_to_indices=lmhead_tp_enable() and logits is not None,
+                draft_probs=None,
+                write_markers=True,
+                num_reqs=self.input_batch.num_reqs,
+                num_spec_tokens=self.num_spec_tokens,
+            )
+            return (
+                spec_sampling_result.sampler_output,
+                spec_sampling_result.num_output_tokens_per_req,
+            )
+        else:
+            prepared_top_k = None
+            if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+                prepared_top_k = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+            if prepared_top_k is not None:
+                self.rejection_sampler.prepare_sampling(prepared_top_k)
+            sampler_output = self.rejection_sampler(
+                spec_decode_metadata,
+                None,  # draft_probs
+                logits,
+                sampling_metadata,
+            )
+        return sampler_output, None
+
+    def _maybe_dump_mtp_spec_sampling_case(
+        self,
+        *,
+        logits: torch.Tensor,
+        sampler_output: SamplerOutput,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
+        positions: torch.Tensor,
+    ) -> None:
+        if not self.speculative_config or self.speculative_config.method != "mtp":
+            return
+        if spec_decode_metadata is None:
+            return
+
+        sampling_metadata = self.input_batch.sampling_metadata
+        prepared_top_k = None
+        if sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
+            valid_top_k = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]]
+            if len(valid_top_k) > 0:
+                prepared_top_k = int(valid_top_k.max())
+
+        num_reqs = self.input_batch.num_reqs
+        max_tokens = int(self.input_batch.num_tokens[:num_reqs].max()) if num_reqs > 0 else 0
+        input_token_ids = None
+        if max_tokens > 0:
+            input_token_ids = self.input_batch.token_ids_cpu[:num_reqs, :max_tokens].copy()
+
+        slot_mapping = None
+        if spec_decode_common_attn_metadata is not None:
+            slot_mapping = spec_decode_common_attn_metadata.slot_mapping
+
+        dump_spec_sampling_case(
+            logits=logits,
+            sampling_metadata=sampling_metadata,
+            spec_decode_metadata=spec_decode_metadata,
+            sampler_output=sampler_output,
+            draft_probs=None,
+            prepared_top_k=prepared_top_k,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            input_token_ids=input_token_ids,
         )
-        return sampler_output
 
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids
@@ -2444,8 +2579,21 @@ class NPUModelRunner(GPUModelRunner):
                 )
         else:
             valid_sampled_token_ids = []
-            invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
-            invalid_req_indices_set = set(invalid_req_indices)
+            num_invalid_req_indices = (
+                discard_sampled_tokens_req_indices.numel()
+                if hasattr(discard_sampled_tokens_req_indices, "numel")
+                else len(discard_sampled_tokens_req_indices)
+            )
+            if num_invalid_req_indices > 0:
+                invalid_req_indices = (
+                    discard_sampled_tokens_req_indices.tolist()
+                    if hasattr(discard_sampled_tokens_req_indices, "tolist")
+                    else list(discard_sampled_tokens_req_indices)
+                )
+                invalid_req_indices_set = set(invalid_req_indices)
+            else:
+                invalid_req_indices = []
+                invalid_req_indices_set = set()
 
             if self.num_spec_tokens <= 0:
                 assert sampled_token_ids.shape[-1] == 1
@@ -3514,9 +3662,13 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
-        # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
+        # accepted-token semantics are consumed by Mamba paths and by GDN
+        # speculative attention metadata. Keep this conservative, but avoid
+        # enabling it for unrelated backends.
         self.need_accepted_tokens = any(
-            [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
+            isinstance(attn_group[0].kv_cache_spec, MambaSpec)
+            or isinstance(attn_group[0].get_metadata_builder(0), GDNAttentionMetadataBuilder)
+            for attn_group in self.attn_groups
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
