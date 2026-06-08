@@ -111,11 +111,10 @@ def test_collect_paths_and_basic_path_helpers():
     assert select_tests._matches_path_dependency("pkg/a.py", "pkg")
     assert select_tests._matches_path_dependency("pkg/a.py", "pkg/")
     assert not select_tests._matches_path_dependency("pkg_extra/a.py", "pkg")
-    assert select_tests._collect_test_dirs(["a", "b"], config) == [
-        "tests/e2e/x",
-        "tests/ut/a",
-        "tests/ut/b/test_y.py",
-    ]
+    assert select_tests._collect_test_dirs(["a", "b"], config) == (
+        ["tests/e2e/x", "tests/ut/a", "tests/ut/b/test_y.py"],
+        [],
+    )
     assert select_tests._is_ut_path("tests/ut")
     assert select_tests._is_ut_path("tests/ut/a.py")
     assert select_tests._is_e2e_path("tests/e2e")
@@ -435,3 +434,85 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
     test_groups = json.loads(groups_line.removeprefix("test_groups="))
     selected_tests = set(test_groups[0]["tests"].split())
     assert selected_tests == {"tests/e2e/pull_request/two_card/test_two_card.py::test_specific_case"}
+
+
+def test_default_cpu_ut_always_runs(tmp_path, monkeypatch, capsys):
+    test_root = tmp_path / "tests"
+    cpu_dir = test_root / "ut" / "cpu"
+    a2_dir = test_root / "ut" / "npu" / "a2"
+    for path in (cpu_dir, a2_dir):
+        path.mkdir(parents=True)
+    cpu_test = cpu_dir / "test_cpu.py"
+    a2_test = a2_dir / "test_a2.py"
+    cpu_test.write_text("")
+    a2_test.write_text("")
+
+    config = [
+        {
+            "name": "default_cpu_ut",
+            "optional": False,
+            "cpu_only": True,
+            "tests": ["tests/ut"],
+        },
+        {
+            "name": "specific",
+            "optional": True,
+            "source_file_dependencies": ["src/specific.py"],
+            "tests": ["tests/ut/npu/a2"],
+        },
+    ]
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    runner_file = tmp_path / "runner_label.json"
+    runner_file.write_text(
+        json.dumps(
+            {
+                "cpu-runner": {"chip": "cpu", "npu_num": 0},
+                "a2-runner": {"chip": "a2", "npu_num": 1},
+            }
+        )
+    )
+    monkeypatch.setattr(select_tests, "_RUNNER_LABEL_PATH", runner_file)
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "select_tests.py",
+            "--config",
+            str(config_path),
+            "--changed-files",
+            "README.md",
+        ],
+    )
+    select_tests.main()
+    out = capsys.readouterr().out
+    assert "matched_modules=default_cpu_ut" in out
+    groups_line = next(line for line in out.splitlines() if line.startswith("test_groups="))
+    test_groups = json.loads(groups_line.removeprefix("test_groups="))
+    cpu_tests = {g["tests"] for g in test_groups if g["npu_type"] == "cpu"}
+    assert any("test_cpu.py" in t for t in cpu_tests)
+    a2_tests = [g for g in test_groups if g["npu_type"] == "a2"]
+    assert not a2_tests
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "select_tests.py",
+            "--config",
+            str(config_path),
+            "--changed-files",
+            "src/specific.py",
+        ],
+    )
+    select_tests.main()
+    out = capsys.readouterr().out
+    assert "matched_modules=default_cpu_ut,specific" in out
+    groups_line = next(line for line in out.splitlines() if line.startswith("test_groups="))
+    test_groups = json.loads(groups_line.removeprefix("test_groups="))
+    cpu_tests = {g["tests"] for g in test_groups if g["npu_type"] == "cpu"}
+    assert any("test_cpu.py" in t for t in cpu_tests)
+    a2_tests = {g["tests"] for g in test_groups if g["npu_type"] == "a2"}
+    assert any("test_a2.py" in t for t in a2_tests)

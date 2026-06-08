@@ -220,3 +220,5 @@ csrc/third_party/
 .claude/skills/*
 
 .codegraph/
+
+.vllm_ascend/

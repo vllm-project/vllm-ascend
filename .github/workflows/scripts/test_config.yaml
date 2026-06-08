@@ -33,6 +33,13 @@
 #                paths after directory scanning)
 
 # === Modules ===
+# Default CPU UT module - always runs all CPU UTs in every PR
+- name: default_cpu_ut
+  optional: false
+  cpu_only: true
+  tests:
+    - tests/ut
+
 # 310P
 - name: 310p
   optional: true
