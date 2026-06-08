@@ -18,7 +18,7 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/test_offline_inference.py`.
+Run `pytest tests/e2e/pull_request/one_card/test_vlm.py`.
 """
 
 import os
