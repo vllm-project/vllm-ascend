@@ -168,6 +168,7 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
                     decode_query_lens,
                 )
             # prefill slot mapping
+            self.prefill_slot_mapping = None
             if num_prefills > 0:
                 restore_idx = long_seq_metadata.pcp_allgather_restore_idx
                 num_tokens_pcp_padded = len(restore_idx)
@@ -679,9 +680,8 @@ class AscendSFACPImpl(AscendSFAImpl):
             self.o_proj.aclnn_input_scale_reciprocal.set_(self.o_proj_pcp_full_aclnn_input_scale_reciprocal)
             self.o_proj.aclnn_input_offset.set_(self.o_proj_pcp_full_aclnn_input_offset)
 
-            outputb = self.o_proj.quant_method.quant_method.apply(self.o_proj, attn_output)
-            output[...] = outputb
-            # debug_data(outputb[:2], prefix="after o_proj prefill outputb[:2]",rank=0)
+            # Apply quantization method and execute forward computation
+            output[...] = self.o_proj.quant_method.quant_method.apply(self.o_proj, attn_output)
 
             # Switch o_proj back to shard-mode
             self.o_proj.weight.set_(self.o_proj_pcp_shard_weight)
@@ -913,7 +913,8 @@ class AscendSFACPImpl(AscendSFAImpl):
             attn_output = result
 
         if self.enable_dsa_cp_with_pcp_shard:
-            outputo = self.o_proj.quant_method.quant_method.apply(self.o_proj, attn_output, tp_rank=self.pcp_rank)
+            quant_method = getattr(self.o_proj.quant_method, "quant_method", self.o_proj.quant_method)
+            outputo = quant_method.apply(self.o_proj, attn_output, tp_rank=self.pcp_rank)
             outputo = get_pcp_group().all_reduce(outputo)
         else:
             outputo = self.o_proj(attn_output)[0]

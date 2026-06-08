@@ -56,7 +56,6 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     _round_up,
     dispose_layer,
-    enable_sp,
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,

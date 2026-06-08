@@ -517,7 +517,8 @@ class PCPShardedRowParallelOp(CustomRowParallelOp):
         # so we just do local matmul with whatever weight is currently set.
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         assert self.quant_method is not None
-        output = self.layer.quant_method.quant_method.apply(self.layer, input_, bias_, tp_rank=self.tp_rank)
+        quant_method = getattr(self.layer.quant_method, "quant_method", self.layer.quant_method)
+        output = quant_method.apply(self.layer, input_, bias_, tp_rank=self.tp_rank)
         output = self.comm_group.reduce_scatter(output, 0)
         output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:
