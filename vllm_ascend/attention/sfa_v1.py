@@ -1151,6 +1151,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_query = attn_metadata.cum_query_lens
             actual_seq_lengths_key = attn_metadata.seq_lens
             if self.enable_sp:
+                assert attn_metadata.dsa_cp_context is not None
                 cos = attn_metadata.dsa_cp_context.cos_cp
                 sin = attn_metadata.dsa_cp_context.sin_cp
 

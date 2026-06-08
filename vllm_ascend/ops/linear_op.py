@@ -445,6 +445,7 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+
 class PCPShardedColumnParallelOp(CustomColumnParallelOp):
     def __init__(self, layer):
         super().__init__(layer)
@@ -479,7 +480,7 @@ class PCPShardedColumnParallelOp(CustomColumnParallelOp):
 
         if need_all_gather:
             input_ = self._pcp_group.all_gather(input_, dim=0)
-        
+
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
@@ -489,6 +490,7 @@ class PCPShardedColumnParallelOp(CustomColumnParallelOp):
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
+
 
 class PCPShardedRowParallelOp(CustomRowParallelOp):
     def __init__(self, layer):
@@ -713,7 +715,14 @@ class ShardedCPColumnParallelOp(CustomColumnParallelOp):
 
 def _get_column_parallel_op(
     prefix, layer
-) -> MLPColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | Flashcomm2OshardQKVParallelOp | None:
+) -> (
+    MLPColumnParallelOp
+    | SequenceColumnParallelOp
+    | ShardedCPColumnParallelOp
+    | Flashcomm2OshardQKVParallelOp
+    | PCPShardedColumnParallelOp
+    | None
+):
     if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
         return ShardedCPColumnParallelOp(layer)
     if "gate_up_proj" in prefix and enable_dsa_cp_with_pcp_shard() and not is_moe_layer(prefix):
@@ -800,6 +809,7 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         | SequenceRowParallelOp
         | ShardedCPRowParallelOp
         | ShardedCPColumnParallelOp
+        | PCPShardedColumnParallelOp
         | PCPShardedRowParallelOp
         | None
     ) = None

@@ -1205,7 +1205,9 @@ class PCPManager:
 
                 attn_chunk_seqlens = torch.tensor(chunk_seqlens, dtype=torch.int32)
                 attn_mask_seqlens = torch.cumsum(torch.tensor(chunk_seqlens, dtype=torch.int32), dim=0).tolist()
-                attn_mask_full_seqlens = torch.cumsum(torch.tensor(chunk_full_seqlens, dtype=torch.int32), dim=0).tolist()
+                attn_mask_full_seqlens = torch.cumsum(
+                    torch.tensor(chunk_full_seqlens, dtype=torch.int32), dim=0
+                ).tolist()
                 head_attn_nomask_seqlens = torch.cumsum(
                     torch.tensor(kv_with_q_head_nomask_seqlens, dtype=torch.int32), dim=0
                 ).tolist()
