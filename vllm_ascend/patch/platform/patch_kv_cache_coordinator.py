@@ -28,6 +28,9 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.patch.platform.patch_prefix_cache_retention import (
+    get_prefix_cache_retention_interval,
+)
 from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
@@ -208,6 +211,17 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # NOTE: use 16k as the alignment tokens for model with compress ratio
         block_sizes = [self._get_effective_block_size(spec) for spec, _, _ in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
+        self.retention_interval = get_prefix_cache_retention_interval(self.kv_cache_config, self.lcm_block_size)
+
+    def cache_blocks(self, request, num_computed_tokens: int) -> None:
+        for manager in self.single_type_managers:
+            manager.cache_blocks(
+                request,
+                num_computed_tokens,
+                retention_interval=self.retention_interval,
+                alignment_tokens=self.lcm_block_size,
+                use_eagle=manager.kv_cache_group_id in self.eagle_group_ids,
+            )
 
     def find_longest_cache_hit(
         self,

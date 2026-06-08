@@ -161,6 +161,7 @@ class CompressAttentionManager(FullAttentionManager):
         retention_interval: int | None = None,
         *,
         alignment_tokens: int | None = None,
+        use_eagle: bool = False,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -173,6 +174,8 @@ class CompressAttentionManager(FullAttentionManager):
             alignment_tokens: Cache-hit alignment passed by hybrid KV cache
                 coordinators. Compressed attention caches logical blocks, so no
                 extra block mask is needed here.
+            use_eagle: Whether the group is used for EAGLE/MTP lookup. Compressed
+                MLA groups ignore this value.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // (self.block_size * self.compress_ratio)
