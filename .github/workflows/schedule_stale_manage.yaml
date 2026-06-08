@@ -1,10 +1,23 @@
 name: "Close stale resolved/wait-feedback issues"
 on:
   schedule:
-    - cron: '0 2 * * *' 
+    - cron: '0 2 * * *'
+  issue_comment:
+    types: [created]
 
 jobs:
+  remove-wait-feedback-on-comment:
+    if: ${{ github.event_name == 'issue_comment' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      # When an issue tagged with "wait-feedback" receives a new response, the "wait-feedback" tag will be removed.
+      - run: gh issue edit "${{ github.event.issue.number }}" --remove-label "wait-feedback"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   stale:
+    if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
       actions: write

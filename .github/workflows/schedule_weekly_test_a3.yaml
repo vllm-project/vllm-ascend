@@ -206,14 +206,13 @@ jobs:
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
+      config_base_path: tests/e2e/weekly/single_node/configs/
       name: ${{ matrix.test_config.name }}
       should_run: >-
         ${{
           needs.setup-vars.outputs.filter == 'all' ||
           contains(needs.setup-vars.outputs.filter, format(',{0},', matrix.test_config.name))
         }}
-
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0

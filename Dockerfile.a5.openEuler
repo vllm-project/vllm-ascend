@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:9.0.0-950-openeuler24.03-py3.11
+FROM quay.io/ascend/cann:9.0.0-950-openeuler24.03-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG MOONCAKE_TAG="v0.3.8.post1"
@@ -33,8 +33,6 @@ RUN yum update -y && \
     mv /vllm-workspace/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     ARCH=$(uname -m) && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64:$LD_LIBRARY_PATH && \
-    export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${ARCH}-openEuler-linux && \
     cd /vllm-workspace/Mooncake && \
     bash mooncake_installer.sh -y && \
     mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \

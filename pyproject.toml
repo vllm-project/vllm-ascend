@@ -17,7 +17,7 @@ requires = [
     "psutil",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "transformers==5.5.3",
+    "transformers==5.5.4",
     "torch-npu==2.10.0",
     "torch==2.10.0",
     "torchvision",
@@ -32,6 +32,9 @@ requires = [
     "triton-ascend==3.2.1"
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.uv.extra-build-dependencies]
+pandas = ["setuptools<72"]
 
 [tool.pymarkdown]
 plugins.md004.style = "sublist" # ul-style
