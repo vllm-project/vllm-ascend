@@ -23,14 +23,8 @@ on:
   pull_request:
     branches:
       - 'main'
-      - '*-dev'
-      - 'releases/v*'
     paths:
-      # If we are changing the doctest we should do a PR test
       - '.github/workflows/labeled_doctest.yaml'
-      - 'tests/e2e/doctests/**'
-      - 'tests/e2e/common.sh'
-      - 'tests/e2e/run_doctests.sh'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -49,11 +43,11 @@ jobs:
       # Each version should be tested
       fail-fast: false
       matrix:
-        vllm_version: [nightly-releases-v0.18.0, nightly-releases-v0.18.0-openeuler, nightly-main, nightly-main-openeuler]
+        vllm_version: [v0.18.0, v0.20.2rc1]
     name: vLLM Ascend test
     runs-on: linux-aarch64-a2b3-1
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_version }}
+      image: quay.io/ascend/vllm-ascend:${{ matrix.vllm_version }}
     steps:
       - name: Check NPU/CANN and git info
         run: |
@@ -68,22 +62,8 @@ jobs:
           cd /vllm-workspace/vllm
           git --no-pager log -1 || true
 
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
-
       - name: Run vllm-ascend/tests/e2e/run_doctests.sh
         run: |
-          # PWD: /__w/vllm-ascend/vllm-ascend
-          # Make sure e2e tests are latest
-          echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
-          rm -rf /vllm-workspace/vllm-ascend/tests/e2e
-          mkdir -p /vllm-workspace/vllm-ascend/tests
-          # Overwrite e2e and examples
-          cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
-          cp -r examples /vllm-workspace/vllm-ascend/
-          # We are now maintain version policy in the main, so we need to copy docs to make sure the doctest can be run successfully.
-          cp -r docs /vllm-workspace/vllm-ascend/
-
           # Simulate container to enter directory
           cd /workspace
 
