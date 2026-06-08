@@ -271,6 +271,9 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream: torch.npu.Stream = torch.npu.Stream()
+
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
         self.query_start_loc = self._make_buffer(
@@ -4502,7 +4505,13 @@ class NPUModelRunner(GPUModelRunner):
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            return GPUModelRunner.capture_model(self)
+            cuda_graph_size = GPUModelRunner.capture_model(self)
+
+            mgr = self.encoder_cudagraph_manager
+            if mgr is not None and hasattr(self, "update_stream"):
+                mgr.update_stream = self.update_stream
+
+            return cuda_graph_size
 
     def _prepare_multimodal_fields(self):
         """
@@ -4576,6 +4585,11 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.graph_pool_handle = torch.npu.graph_pool_handle
+        torch.cuda.CUDAGraph = torch.npu.NPUGraph
+        torch.cuda.graph = torch.npu.graph
+        torch.cuda.set_stream = torch.npu.set_stream
+        torch.cuda.current_device = torch.npu.current_device
         yield
     except Exception as e:
         torch.cuda.Event = _EventPlaceholder
@@ -4595,11 +4609,23 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.graph_pool_handle = torch.npu.graph_pool_handle
+        torch.cuda.CUDAGraph = torch.npu.NPUGraph
+        torch.cuda.graph = torch.npu.graph
+        torch.cuda.set_stream = torch.npu.set_stream
+        torch.cuda.current_device = torch.npu.current_device
 
 
 # TODO: This method will be removed subsequently and implemented in platform.
 @contextmanager
 def _replace_gpu_model_runner_function_wrapper(target_module_name):
+    import vllm.v1.worker.encoder_cudagraph as _vllm_encoder_cudagraph
+
+    from vllm_ascend.worker.encoder_acl_graph import EncoderAclGraphManager
+
+    _encoder_mgr_orig = _vllm_encoder_cudagraph.EncoderCudaGraphManager
+    _vllm_encoder_cudagraph.EncoderCudaGraphManager = EncoderAclGraphManager
+    target_module = None
     try:
         target_module = sys.modules[target_module_name]
         setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
@@ -4607,7 +4633,9 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
     except Exception as e:
         raise RuntimeError(f"NPUModelRunner failed, error is {e}")
     finally:
-        setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
+        _vllm_encoder_cudagraph.EncoderCudaGraphManager = _encoder_mgr_orig
+        if target_module is not None:
+            setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
 
 
 # TODO: remove it when flash_comm1 is removed
