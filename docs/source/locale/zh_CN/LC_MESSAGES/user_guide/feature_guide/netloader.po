@@ -1,14 +1,8 @@
-# SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
-#
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-06-07 05:04+0000\n"
 "PO-Revision-Date: 2026-01-22 16:18+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -21,7 +15,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/netloader.md:1
 msgid "Netloader Guide"
-msgstr "网络加载器指南"
+msgstr "Netloader 指南"
 
 #: ../../source/user_guide/feature_guide/netloader.md:3
 msgid ""
@@ -342,9 +336,9 @@ msgstr "如果使用 Netloader，**每个工作进程**都必须绑定一个监�
 
 #: ../../source/user_guide/feature_guide/netloader.md:96
 msgid ""
-"Netloader requires extra on-chip memory memory to establish HCCL "
-"connections (i.e. `HCCL_BUFFERSIZE`, default ~200 MB). Users should "
-"reserve sufficient capacity (e.g. via `--gpu-memory-utilization`)."
+"Netloader requires extra on-chip memory to establish HCCL connections "
+"(i.e. `HCCL_BUFFERSIZE`, default ~200 MB). Users should reserve "
+"sufficient capacity (e.g. via `--gpu-memory-utilization`)."
 msgstr ""
 "Netloader 需要额外的片上内存来建立 HCCL 连接（即 `HCCL_BUFFERSIZE`，默认约为 200 "
 "MB）。用户应预留足够的容量（例如通过 `--gpu-memory-utilization`）。"

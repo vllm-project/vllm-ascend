@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-06-07 05:04+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -84,18 +84,16 @@ msgid ""
 "invariance with HCCL communication for now. We will support other NPUs in"
 " the future."
 msgstr ""
-"批次不变性目前需要 Ascend Atlas A2 推理产品 NPU，因为目前只有 Atlas A2 推理产品支持带有 HCCL 通信的批次不变性。未来我们将支持其他 NPU。"
+"批次不变性目前需要 Ascend Atlas A2 推理产品 NPU，因为目前只有 Atlas A2 推理产品支持带有 HCCL "
+"通信的批次不变性。未来我们将支持其他 NPU。"
 
 #: ../../source/user_guide/feature_guide/batch_invariance.md:24
-msgid "Software Requirements"
-msgstr "软件要求"
-
-#: ../../source/user_guide/feature_guide/batch_invariance.md:26
 msgid ""
 "Batch invariance requires a custom operator library for Atlas A2 "
-"inference products. We will release the customed operator library in "
+"inference products. We will release the customized operator library in "
 "future versions."
-msgstr "批次不变性需要 Atlas A2 推理产品的自定义算子库。我们将在未来版本中发布该自定义算子库。"
+msgstr ""
+"批次不变性需要 Atlas A2 推理产品的自定义算子库。我们将在未来版本中发布该自定义算子库。"
 
 #: ../../source/user_guide/feature_guide/batch_invariance.md:29
 msgid "Enabling Batch Invariance"

@@ -1,0 +1,287 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-07 05:04+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/community/slash-commands.md:1
+msgid "Slash Commands"
+msgstr "斜杠命令"
+
+#: ../../source/community/slash-commands.md:3
+msgid ""
+"vLLM Ascend supports slash commands in pull request comments to trigger "
+"CI workflows. See the [Permission](#permission) section for who can "
+"trigger each command."
+msgstr ""
+"vLLM Ascend 支持在拉取请求评论中使用斜杠命令来触发 CI 工作流。有关谁可以触发每个命令，请参阅[权限](#permission)部分。"
+
+#: ../../source/community/slash-commands.md:5
+msgid "Available Commands"
+msgstr "可用命令"
+
+#: ../../source/community/slash-commands.md
+#: ../../source/community/slash-commands.md:7
+msgid "`/e2e`"
+msgstr "`/e2e`"
+
+#: ../../source/community/slash-commands.md:9
+msgid ""
+"Run specific E2E tests under `tests/e2e/pull_request/`. Tests are "
+"automatically routed to the appropriate NPU runner based on the test "
+"path."
+msgstr ""
+"运行 `tests/e2e/pull_request/` 下的特定 E2E 测试。测试会根据路径自动路由到相应的 NPU 运行器。"
+
+#: ../../source/community/slash-commands.md:11
+#: ../../source/community/slash-commands.md:61
+#: ../../source/community/slash-commands.md:89
+msgid "**Examples:**"
+msgstr "**示例：**"
+
+#: ../../source/community/slash-commands.md:24
+msgid "**Routing rules** (matched in order):"
+msgstr "**路由规则**（按顺序匹配）："
+
+#: ../../source/community/slash-commands.md
+msgid "Test path contains"
+msgstr "测试路径包含"
+
+#: ../../source/community/slash-commands.md
+msgid "Runner"
+msgstr "运行器"
+
+#: ../../source/community/slash-commands.md
+msgid "`four_card/_310p`"
+msgstr "`four_card/_310p`"
+
+#: ../../source/community/slash-commands.md
+msgid "310P 4-card"
+msgstr "310P 4卡"
+
+#: ../../source/community/slash-commands.md
+msgid "`_310p` (under `one_card`/`two_card`)"
+msgstr "`_310p`（位于 `one_card`/`two_card` 下）"
+
+#: ../../source/community/slash-commands.md
+msgid "310P single card"
+msgstr "310P 单卡"
+
+#: ../../source/community/slash-commands.md
+msgid "`four_card`"
+msgstr "`four_card`"
+
+#: ../../source/community/slash-commands.md
+msgid "A3 4-card"
+msgstr "A3 4卡"
+
+#: ../../source/community/slash-commands.md
+msgid "`two_card`"
+msgstr "`two_card`"
+
+#: ../../source/community/slash-commands.md
+msgid "A3 2-card"
+msgstr "A3 2卡"
+
+#: ../../source/community/slash-commands.md
+msgid "Others (e.g. `one_card`)"
+msgstr "其他（例如 `one_card`）"
+
+#: ../../source/community/slash-commands.md
+msgid "A2 single card"
+msgstr "A2 单卡"
+
+#: ../../source/community/slash-commands.md:34
+msgid ""
+"Only test paths under `tests/e2e/pull_request/` are supported. Tests in "
+"`tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are "
+"not accepted by `/e2e`. Use `/nightly` for nightly tests."
+msgstr ""
+"仅支持 `tests/e2e/pull_request/` 下的测试路径。`/e2e` 不接受 `tests/e2e/nightly/`、`tests/e2e/models/` 或 `tests/e2e/doctests/` 中的测试。夜间测试请使用 `/nightly`。"
+
+#: ../../source/community/slash-commands.md:36
+msgid ""
+"Tests are run against both the community vLLM version and the latest "
+"release."
+msgstr ""
+"测试会针对社区 vLLM 版本和最新发布版本同时运行。"
+
+#: ../../source/community/slash-commands.md
+#: ../../source/community/slash-commands.md:38
+msgid "`/nightly`"
+msgstr "`/nightly`"
+
+#: ../../source/community/slash-commands.md:40
+msgid ""
+"Trigger specific nightly test cases on A2 and A3. Supports both PR and "
+"issue comments. Test case names correspond to the `test_config.name` "
+"entries defined in `schedule_nightly_test_a2.yaml` and "
+"`schedule_nightly_test_a3.yaml`."
+msgstr ""
+"在 A2 和 A3 上触发特定的夜间测试用例。支持 PR 和 issue 评论。测试用例名称对应于 `schedule_nightly_test_a2.yaml` 和 `schedule_nightly_test_a3.yaml` 中定义的 `test_config.name` 条目。"
+
+#: ../../source/community/slash-commands.md:42
+msgid "**Usage:**"
+msgstr "**用法：**"
+
+#: ../../source/community/slash-commands.md
+msgid "Syntax"
+msgstr "语法"
+
+#: ../../source/community/slash-commands.md
+#: ../../source/community/slash-commands.md:102
+msgid "Scope"
+msgstr "范围"
+
+#: ../../source/community/slash-commands.md
+msgid "`/nightly <test_cases>`"
+msgstr "`/nightly <test_cases>`"
+
+#: ../../source/community/slash-commands.md
+msgid "Runs on `main` branch"
+msgstr "在 `main` 分支上运行"
+
+#: ../../source/community/slash-commands.md
+msgid "`/nightly <test_cases> --branch <branch>`"
+msgstr "`/nightly <test_cases> --branch <branch>`"
+
+#: ../../source/community/slash-commands.md
+msgid "Runs on the specified branch"
+msgstr "在指定分支上运行"
+
+#: ../../source/community/slash-commands.md:49
+msgid ""
+"Use `--branch <name>` to specify a target branch. Without `--branch`, all"
+" arguments are treated as test cases (separated by commas or spaces) and "
+"the branch defaults to `main`."
+msgstr ""
+"使用 `--branch <name>` 指定目标分支。如果不使用 `--branch`，所有参数都被视为测试用例（用逗号或空格分隔），分支默认为 `main`。"
+
+#: ../../source/community/slash-commands.md:51
+msgid ""
+"**Note**: When commenting on a PR, the tests run on the PR branch "
+"automatically in the triggered workflow; the `--branch` flag is primarily"
+" used in issue comments."
+msgstr ""
+"**注意**：在 PR 上评论时，测试会在触发的工作流中自动在 PR 分支上运行；`--branch` 标志主要用于 issue 评论。"
+
+#: ../../source/community/slash-commands.md:53
+msgid "**Common test case names (A2):**"
+msgstr "**常见测试用例名称（A2）：**"
+
+#: ../../source/community/slash-commands.md:55
+msgid ""
+"`test_custom_op`, `test_custom_op_multi_card`, `qwen3-vl-32b-instruct-"
+"w8a8`, `qwen3-32b-int8`, `MiniMax-M2.5-w8a8-QuaRot-A2`, `Qwen3.5-27B-"
+"w8a8-A2`, `Qwen3.5-397B-A17B-w4a8-mtp`, `accuracy-group`"
+msgstr ""
+"`test_custom_op`, `test_custom_op_multi_card`, `qwen3-vl-32b-instruct-w8a8`, `qwen3-32b-int8`, `MiniMax-M2.5-w8a8-QuaRot-A2`, `Qwen3.5-27B-w8a8-A2`, `Qwen3.5-397B-A17B-w4a8-mtp`, `accuracy-group`"
+
+#: ../../source/community/slash-commands.md:57
+msgid "**Common test case names (A3):**"
+msgstr "**常见测试用例名称（A3）：**"
+
+#: ../../source/community/slash-commands.md:59
+msgid ""
+"`multi-node-deepseek-v3.2-W8A8-EP`, `mtpx-deepseek-r1-0528-w8a8`, "
+"`deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, `qwen3-vl-235b-a22b-"
+"instruct-w8a8`, `custom-multi-ops`, ..."
+msgstr ""
+"`multi-node-deepseek-v3.2-W8A8-EP`, `mtpx-deepseek-r1-0528-w8a8`, `deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, `qwen3-vl-235b-a22b-instruct-w8a8`, `custom-multi-ops`, ..."
+
+#: ../../source/community/slash-commands.md:83
+msgid ""
+"This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml`"
+" and `schedule_nightly_test_a3.yaml`."
+msgstr ""
+"这会在 `schedule_nightly_test_a2.yaml` 和 `schedule_nightly_test_a3.yaml` 上触发 `workflow_dispatch`。"
+
+#: ../../source/community/slash-commands.md
+#: ../../source/community/slash-commands.md:85
+msgid "`/rerun`"
+msgstr "`/rerun`"
+
+#: ../../source/community/slash-commands.md:87
+msgid ""
+"Re-run all failed workflow runs on the current PR commit. Useful when CI "
+"jobs failed due to infrastructure issues."
+msgstr ""
+"重新运行当前 PR 提交上所有失败的工作流。当 CI 任务因基础设施问题失败时很有用。"
+
+#: ../../source/community/slash-commands.md:96
+msgid "Behavior"
+msgstr "行为"
+
+#: ../../source/community/slash-commands.md:98
+msgid ""
+"When you comment a slash command, a 👀 reaction is added to your comment "
+"to indicate it has been received"
+msgstr ""
+"当您评论斜杠命令时，您的评论会添加 👀 反应，表示已收到"
+
+#: ../../source/community/slash-commands.md:99
+msgid "The corresponding CI workflow is triggered asynchronously"
+msgstr "相应的 CI 工作流会异步触发"
+
+#: ../../source/community/slash-commands.md:100
+msgid "Upon completion, a 🎉 reaction and a summary comment are added"
+msgstr "完成后，会添加 🎉 反应和摘要评论"
+
+#: ../../source/community/slash-commands.md
+msgid "Command"
+msgstr "命令"
+
+#: ../../source/community/slash-commands.md
+msgid "PR comments"
+msgstr "PR 评论"
+
+#: ../../source/community/slash-commands.md
+msgid "Issue comments"
+msgstr "Issue 评论"
+
+#: ../../source/community/slash-commands.md
+msgid "✅"
+msgstr "✅"
+
+#: ../../source/community/slash-commands.md
+msgid "❌"
+msgstr "❌"
+
+#: ../../source/community/slash-commands.md:110
+msgid "Permission"
+msgstr "权限"
+
+#: ../../source/community/slash-commands.md
+msgid "Who can trigger"
+msgstr "谁可以触发"
+
+#: ../../source/community/slash-commands.md
+msgid "PR author, or users with triage+ permission on the repository"
+msgstr "PR 作者，或具有仓库 triage+ 权限的用户"
+
+#: ../../source/community/slash-commands.md
+msgid "Users with triage+ permission on the repository only"
+msgstr "仅具有仓库 triage+ 权限的用户"
+
+#: ../../source/community/slash-commands.md:118
+#, python-brace-format
+msgid ""
+"Permission is verified via the GitHub API "
+"(`repos/{owner}/{repo}/collaborators/{user}/permission`)."
+msgstr ""
+"权限通过 GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`) 验证。"

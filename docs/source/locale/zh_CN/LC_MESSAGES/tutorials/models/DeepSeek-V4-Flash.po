@@ -1,0 +1,339 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-07 05:04+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:1
+msgid "DeepSeek-V4-Flash"
+msgstr "DeepSeek-V4-Flash"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:5
+msgid "DeepSeek-V4 is introducing several key upgrades over DeepSeek-V3."
+msgstr "DeepSeek-V4在DeepSeek-V3基础上引入了多项关键升级。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:7
+msgid ""
+"The Manifold-Constrained Hyper-Connections (mHC) to strengthen "
+"conventional residual connections;"
+msgstr "流形约束超连接(mHC)增强传统残差连接；"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:8
+msgid ""
+"A hybrid attention architecture, which greatly improves long-context "
+"efficiency through Compress-4-Attention and Compress-128-Attention. For "
+"the Mixture-of Experts (MoE) components, it still adopt the DeepSeekMoE "
+"architecture, with only minor adjustments."
+msgstr "混合注意力架构，通过Compress-4-Attention和Compress-128-Attention大幅提升长上下文效率。对于混合专家(MoE)组件，仍采用DeepSeekMoE架构，仅做少量调整。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:10
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node and multi-node deployment, accuracy and "
+"performance evaluation."
+msgstr "本文档将展示模型的主要验证步骤，包括支持特性、特性配置、环境准备、单节点和多节点部署、精度及性能评估。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:12
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:14
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:16
+msgid ""
+"`DeepSeek-V4-Flash-w8a8-mtp`(Quantized version): require 1 Atlas 800 A3 "
+"(128G × 8) node or 1 Atlas 800 A2 (64G × 8) node. [Download model "
+"weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-"
+"w8a8-mtp)"
+msgstr "`DeepSeek-V4-Flash-w8a8-mtp`(量化版本)：需要1个Atlas 800 A3 (128G × 8)节点或1个Atlas 800 A2 (64G × 8)节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:18
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多节点共享目录，例如`/root/.cache/`"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:20
+msgid "Verify Multi-node Communication(Optional)"
+msgstr "验证多节点通信(可选)"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:22
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../../installation.md#verify-multi-node-communication)."
+msgstr "如需部署多节点环境，需按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:24
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:26
+msgid "You can using our official docker image to run `DeepSeek-V4` directly."
+msgstr "您可以直接使用官方docker镜像运行`DeepSeek-V4`。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md
+msgid "A2 series"
+msgstr "A2系列"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:36
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:74
+msgid "Start the docker image on your each node."
+msgstr "在每个节点上启动docker镜像。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md
+msgid "A3 series"
+msgstr "A3系列"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:117
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:120
+msgid ""
+"In this tutorial, we suppose you downloaded the model weight to "
+"`/root/.cache/`. Feel free to change it to your own path."
+msgstr "在本教程中，我们假设您已将模型权重下载到`/root/.cache/`。您可以根据需要更改为自己的路径。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:123
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:125
+msgid ""
+"`DeepSeek-V4-Flash-w8a8-mtp`: can be deployed on 1 Atlas 800 A3 (128G × "
+"8) or 1 Atlas 800 A2 (64G × 8)."
+msgstr "`DeepSeek-V4-Flash-w8a8-mtp`：可部署在1个Atlas 800 A3 (128G × 8)或1个Atlas 800 A2 (64G × 8)上。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:127
+msgid "Run the following scripts on each node respectively."
+msgstr "分别在每个节点上运行以下脚本。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:136
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:186
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:232
+msgid "Prefill-Decode Disaggregation"
+msgstr "Prefill-Decode分离式部署"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:234
+msgid ""
+"We'd like to show the deployment guide of DeepSeek-V4 on Atlas 800 A3 "
+"(128G × 8) multi-node environment with 1P1D for better performance."
+msgstr "我们将展示DeepSeek-V4在Atlas 800 A3 (128G × 8)多节点环境下的部署指南，采用1P1D配置以获得更优性能。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:236
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:515
+msgid "Before you start, please"
+msgstr "开始之前，请"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:238
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:517
+msgid "prepare the script `launch_online_dp.py` on each node."
+msgstr "在每个节点上准备脚本`launch_online_dp.py`。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:341
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:587
+msgid "prepare the script `run_dp_template.sh` on each node."
+msgstr "在每个节点上准备脚本`run_dp_template.sh`。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:343
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:497
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:589
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:762
+msgid "Prefill node"
+msgstr "Prefill节点"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:415
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:771
+msgid "Decode node"
+msgstr "Decode节点"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:495
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:760
+msgid ""
+"Once the preparation is done, you can start the server with the following"
+" command on each node:"
+msgstr "准备工作完成后，您可以在每个节点上使用以下命令启动服务器："
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:504
+msgid "Decode node 0"
+msgstr "Decode节点0"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:511
+msgid ""
+"Finally, Refer to [Prefill-Decode Disaggregation "
+"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to "
+"deploy the P-D disaggregation proxy."
+msgstr "最后，参考[Prefill-Decode分离式部署(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)部署P-D分离代理。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:513
+msgid ""
+"For Atlas 800 A2 series machines, we can configure the deployment(4\\*1P "
+"1\\*4D) as follows:."
+msgstr "对于Atlas 800 A2系列机器，可以按如下方式配置部署(4\\*1P 1\\*4D)："
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:670
+msgid ""
+"For each P instance, only these two configuration values need to be "
+"modified: “kv_port” and “engine_id”. The “engine_id” should start from 0 "
+"and increment sequentially, while the “kv_port” (e.g., “30100”) must be "
+"unique for each P instance, such as 30000, 30100, etc."
+msgstr "对于每个P实例，只需修改两个配置值：“kv_port”和“engine_id”。“engine_id”应从0开始依次递增，而“kv_port”(例如“30100”)必须对每个P实例唯一，如30000、30100等。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:672
+msgid "Decode node(Same as another D node)"
+msgstr "Decode节点(与另一个D节点相同)"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:769
+msgid ""
+"For each P instance, only the --dp-address parameter differs and must be "
+"configured as the IP address of the service within the same subnet as the"
+" other instances."
+msgstr "对于每个P实例，仅--dp-address参数不同，必须配置为与其他实例在同一子网内的服务IP地址。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:778
+msgid ""
+"For each D instance, only the --dp-rank-start parameter differs, which "
+"should be configured as 0, 8, 16, and 24 respectively.Each instance’s "
+"--dp-address must be set to the IP address of the main D node, which is "
+"the IP of the Decode instance with --dp-rank-start set to 0."
+msgstr "对于每个D实例，仅--dp-rank-start参数不同，应分别配置为0、8、16和24。每个实例的--dp-address必须设置为主D节点的IP地址，即--dp-rank-start设置为0的Decode实例的IP。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:780
+msgid ""
+"The proxy is also implemented by referring [Prefill-Decode Disaggregation"
+" (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)."
+msgstr "代理也通过参考[Prefill-Decode分离式部署(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)实现。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:782
+msgid ""
+"For ultra-long sequence scenarios, support can be achieved by adjusting "
+"the PD (Prefill/Decode) ratio and the model parallelism strategy. For "
+"example, in a 1M sequence scenario, a 1\\*4P-1\\*4D ratio can be used, "
+"with the model parallelism set to DP4TP8 mode."
+msgstr "对于超长序列场景，可通过调整PD(Prefill/Decode)比例和模型并行策略实现支持。例如，在1M序列场景中，可使用1\\*4P-1\\*4D比例，模型并行设置为DP4TP8模式。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:784
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:786
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示查询模型："
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:804
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:806
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:808
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:834
+msgid "Using AISBench"
+msgstr "使用AISBench"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:810
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details."
+msgstr "详情请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:812
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:830
+msgid "After execution, you can get the result."
+msgstr "执行后即可获取结果。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:814
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用Language Model Evaluation Harness"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:816
+msgid ""
+"As an example, take the `gsm8k` dataset as a test dataset, and run "
+"accuracy evaluation of `DeepSeek-V4` in online mode."
+msgstr "以`gsm8k`数据集作为测试数据集为例，在线模式下运行`DeepSeek-V4`的精度评估。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:818
+msgid ""
+"Refer to [Using "
+"lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for `lm_eval`"
+" installation."
+msgstr "`lm_eval`安装请参考[使用lm_eval](../../developer_guide/evaluation/using_lm_eval.md)。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:820
+msgid "Run `lm_eval` to execute the accuracy evaluation."
+msgstr "运行`lm_eval`执行精度评估。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:832
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:836
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr "详情请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:838
+msgid "Using vLLM Benchmark"
+msgstr "使用vLLM Benchmark"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:840
+msgid "Run performance evaluation of `DeepSeek-V4-Flash-w8a8-mtp` as an example."
+msgstr "以`DeepSeek-V4-Flash-w8a8-mtp`为例运行性能评估。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:842
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr "更多详情请参考[vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:844
+msgid "There are three `vllm bench` subcommand:"
+msgstr "`vllm bench`有三个子命令："
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:846
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`：基准测试单批请求的延迟。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:847
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`：基准测试在线服务吞吐量。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:848
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`：基准测试离线推理吞吐量。"
+
+#: ../../source/tutorials/models/DeepSeek-V4-Flash.md:850
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以`serve`为例，运行代码如下。"
