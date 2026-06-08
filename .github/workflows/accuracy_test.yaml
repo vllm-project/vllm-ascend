@@ -66,7 +66,7 @@ jobs:
       }}
     uses: ./.github/workflows/_accuracy_test.yaml
     with:
-      vllm: main
+      vllm: v0.11.0
       runner:  linux-aarch64-${{ matrix.runner }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
       model_name: ${{ matrix.model_name }}
