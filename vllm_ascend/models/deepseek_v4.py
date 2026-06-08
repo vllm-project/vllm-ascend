@@ -82,11 +82,13 @@ from vllm_ascend.utils import (
 )
 
 if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # type:ignore
-    from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache  # type:ignore
+    from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # type: ignore[import-not-found]
+    from vllm.model_executor.layers.deepseek_v4_attention import (  # type: ignore[import-not-found]
+        DeepseekV4IndexerCache,  # type: ignore[import-not-found]
+    )
 else:
-    from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
-    from vllm.models.deepseek_v4.compressor import CompressorStateCache
+    from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache  # type: ignore[import-not-found]
+    from vllm.models.deepseek_v4.compressor import CompressorStateCache  # type: ignore[import-not-found]
 
 
 def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
