@@ -968,6 +968,9 @@ class NPUModelRunner(GPUModelRunner):
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
+        
+        self.discard_request_mask.np[:num_reqs] = discard_requests_mask
+        self.discard_request_mask.copy_to_gpu(num_reqs)
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
