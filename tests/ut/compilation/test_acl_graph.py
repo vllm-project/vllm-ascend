@@ -213,6 +213,33 @@ class TestACLGraphWrapper(TestBase):
         self.mock_runnable.assert_called_once_with("arg1", "arg2")
         self.assertEqual(result, "test_output")
 
+    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.compilation.acl_graph.current_platform')
+    @patch('vllm_ascend.compilation.acl_graph.envs')
+    def test_call_asserts_invalid_dycp_graph_key(
+            self, mock_envs, mock_current_platform, mock_get_forward_context):
+        """Test __call__ rejects aclgraph keys with more DYCP requests than bs"""
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        self.mock_forward_context.batch_descriptor = BatchDescriptor(
+            num_tokens=4,
+            num_dycp_reqs=5,
+        )
+        self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        mock_get_forward_context.return_value = self.mock_forward_context
+
+        wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            cudagraph_options=self.mock_cudagraph_options)
+
+        with self.assertRaises(AssertionError) as context:
+            wrapper("arg1", "arg2")
+
+        self.assertIn("num_dycp_reqs=5", str(context.exception))
+        self.mock_runnable.assert_not_called()
+
     @patch('vllm_ascend.compilation.acl_graph.torch')
     @patch(
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'

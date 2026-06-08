@@ -116,6 +116,10 @@ class ACLGraphWrapper:
             # runtime modes.
             return self.runnable(*args, **kwargs)
 
+        _assert_valid_dycp_graph_key(
+            batch_descriptor.num_tokens, batch_descriptor.num_dycp_reqs
+        )
+
         if batch_descriptor not in self.concrete_aclgraph_entries:
             # create a new entry for this batch descriptor
             self.concrete_aclgraph_entries[batch_descriptor] = ACLGraphEntry(batch_descriptor=batch_descriptor)
@@ -211,7 +215,15 @@ class ACLGraphWrapper:
 GraphKey = int | tuple[int, int]
 
 
+def _assert_valid_dycp_graph_key(bs: int, num_dycp_reqs: int) -> None:
+    assert num_dycp_reqs <= bs, (
+        f"Invalid aclgraph key: num_dycp_reqs={num_dycp_reqs} "
+        f"must be <= bs={bs}."
+    )
+
+
 def _get_graph_key(num_tokens: int, num_dycp_reqs: int = 0) -> GraphKey:
+    _assert_valid_dycp_graph_key(num_tokens, num_dycp_reqs)
     return (num_tokens, num_dycp_reqs) if num_dycp_reqs > 0 else num_tokens
 
 
