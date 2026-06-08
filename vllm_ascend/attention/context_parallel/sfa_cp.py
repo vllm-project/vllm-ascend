@@ -169,6 +169,7 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             )
             self.decode_actual_seq_lengths_key_buf.zero_()
             self.decode_actual_seq_lengths_key_buf[:num_decodes].copy_(decode_actual_seq_lengths_key)
+            assert sfa_cp_metadata is not None
             sfa_cp_metadata.decode_actual_seq_lengths_key = self.decode_actual_seq_lengths_key_buf[:num_decodes]
         if self.pcp_size > 1:
             long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
