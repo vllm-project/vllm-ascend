@@ -130,17 +130,38 @@ If deploying a multi-node environment, set up the environment on each node.
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-Coder-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
 
 ```bash
+export VLLM_USE_V1=1
 export VLLM_USE_MODELSCOPE=True
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_NZ=2
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
+vllm serve your_model_path \
     --served-model-name qwen3-coder \
     --trust-remote-code \
+    --tensor-parallel-size 4 \
     --enable-expert-parallel \
-    --max-model-len 32768
+    --max-model-len 32768 \
+    --quantization ascend \
+    --distributed_executor_backend "mp" \
+    --no-enable-prefix-caching \
+    --async-scheduling True \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --gpu-memory-utilization 0.95
 ```
 
 :::{note}
-For an Atlas A2 with 64 GB NPU memory, `--tensor-parallel-size` should be at least 2; for 32 GB memory, at least 4. `--enable-expert-parallel` enables Expert Parallelism, which is required for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP. Qwen3-Coder supports up to 1M token context length. Adjust `--max-model-len` based on your use case and available memory. Replace `Qwen/Qwen3-Coder-30B-A3B-Instruct` with your local model path.
+
+- Replace `your_model_path` with the actual model path (e.g., Modelscope ID or local path).
+- For an Atlas A2 with 64 GB NPU memory, `--tensor-parallel-size` should be at least 2.
+- `--enable-expert-parallel` enables Expert Parallelism, which is required for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP.
+- Qwen3-Coder-30B-A3B natively supports 256K token context length. Adjust `--max-model-len` based on your use case and available memory.
+- If the model is not a quantized model, remove the `--quantization ascend` parameter.
+
 :::
 
 **Service Verification:**
@@ -160,34 +181,6 @@ curl http://localhost:8000/v1/chat/completions \
 ```
 
 Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
-
-### 5.2 Offline Inference (Optional)
-
-The model can also be used for offline batch inference via the Python API:
-
-:::{note}
-Replace `Qwen/Qwen3-Coder-30B-A3B-Instruct` with your local model path.
-:::
-
-```python
-from vllm import LLM, SamplingParams
-
-prompts = [
-    "def fibonacci(n):",
-    "Write a function to reverse a linked list.",
-]
-sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
-
-llm = LLM(model="Qwen/Qwen3-Coder-30B-A3B-Instruct",
-          tensor_parallel_size=4,
-          enable_expert_parallel=True)
-
-outputs = llm.generate(prompts, sampling_params)
-for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-```
 
 ## 6 Functional Verification
 
@@ -280,11 +273,11 @@ vllm bench serve \
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | EP | max-num-seqs | max-model-len | max-num-batched-tokens | Async Scheduling | Spec Decode |
-|----------|---------------|-------|----|----|-------------|---------------|----------------------|------------------|-------------|
-| Low Latency | Single-Node | 4 | 4 | On | 100 | 37364 | 16384 | On | eagle3 |
-| High Throughput | Single-Node | 1 | 1 | Off | 100 | 37364 | 16384 | On | eagle3 |
-| Long Context | Single-Node | 4 | 4 | On | 14 | 135000 | 16384 | On | eagle3 |
+| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
+| High Throughput | Single-Node | 1 | 1 | 1 | 32 | 100 | 37364 | Off | Off | Off | On |
+| Low Latency | Single-Node | 4 | 4 | 1 | 32 | 100 | 37364 | Off | On | On | On |
+| Long Context | Single-Node | 4 | 4 | 1 | 32 | 14 | 135000 | Off | On | On | On |
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples below.
 
@@ -378,37 +371,8 @@ vllm serve your_model_path \
 
 ### 9.2 Tuning Guidelines
 
-#### 9.2.1 General Tuning Reference
-
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
-
-#### 9.2.2 Model-Specific Optimizations
-
-The following optimizations are specifically applicable to Qwen3-Coder-30B-A3B.
-
-**Optimizations Enabled by Default:**
-
-| Optimization Technique | Technical Principle | Performance Benefit |
-|------------------------|--------------------|---------------------|
-| Rope Optimization | The cos_sin_cache and indexing operations of positional encoding are executed only in the first layer, and subsequent layers reuse them directly | Reduces redundant computation during the decoding phase, accelerating inference |
-| AddRMSNormQuant Fusion | Merges address-wise multi-scale normalization and quantization operations into a single operator | Optimizes memory access patterns, improving computational efficiency |
-| FullGraph Optimization | Captures and replays the entire decoding graph at once using `compilation_config={"cudagraph_mode":"FULL_DECODE_ONLY"}` | Significantly reduces scheduling latency, stabilizes multi-device performance |
-
-**Optimizations Requiring Explicit Enablement:**
-
-| Optimization Technique | Technical Principle | Enablement Method | Applicable Scenarios | Precautions |
-|------------------------|--------------------|-------------------|----------------------|-------------|
-| FlashComm_v1 | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | High-concurrency, TP > 1 scenarios with MoE models | Threshold-protected; will not activate in low-concurrency scenarios |
-| NZ Weight Format | Converts weight tensors to FRACTAL_NZ format for improved compute efficiency | `export VLLM_ASCEND_ENABLE_NZ=2` | All scenarios with fp16/bf16 or quantized weights | Default is `1` (quantized only). Set to `2` for maximum performance; set to `0` for RL scenarios |
-| Asynchronous Scheduling | Non-blocking task scheduling to improve concurrent processing capability | `--async-scheduling` | Large-scale models, high-concurrency scenarios | Should be used in coordination with FullGraph optimization |
-| Speculative Decoding | Uses a lightweight draft model to predict future tokens, reducing decode latency | `--speculative-config '{"method": "eagle3", ...}'` | Low-latency scenarios | Requires a compatible eagle3 draft model |
-
-**Key Parameter Tuning:**
-
-- `--max-num-batched-tokens`: Determines the maximum number of tokens processed in a single batch. For MoE models like Qwen3-Coder-30B-A3B, a moderate value (e.g., 16384) helps balance prefill chunking with memory usage.
-- `--max-num-seqs`: Maximum number of concurrent requests. Ensure `max-num-seqs` × `data-parallel-size` >= target concurrency to avoid artificial queuing delays.
-- `--gpu-memory-utilization`: Controls the proportion of HBM used for KV cache. For MoE models, a value of 0.95 is typically safe on well-balanced EP configurations.
 
 ## 10 FAQ
 
@@ -416,15 +380,23 @@ For common environment, installation, and general parameter issues, please refer
 
 ### Q: What hardware is required for Qwen3-Coder-30B-A3B?
 
-The model requires 1 Atlas 800I A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node for BF16 inference.
+The model can run on Atlas 800I A2 or A3 with 64G NPUs, typically using 1 to 4 cards.
 
 ### Q: How do I enable long context (beyond 32K)?
 
-Qwen3-Coder supports up to 1M tokens context length natively. For contexts beyond the default 32K, you can use YaRN rope scaling via `--hf-overrides` (for vLLM >= v0.12.0):
+Qwen3-Coder-30B-A3B natively supports 256K token context length, extendable up to 1M with YaRN rope scaling. For contexts beyond the default 32K, use YaRN rope scaling via `--hf-overrides` (for vLLM >= v0.12.0):
 
 ```bash
 --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}'
 ```
+
+### Q: Why is `--enable-expert-parallel` required?
+
+Qwen3-Coder-30B-A3B is a Mixture-of-Experts model where different experts reside on different NPUs. Expert Parallelism (EP) distributes these experts across devices, which is required for the model to fit in memory and run efficiently. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP.
+
+### Q: When should I use `VLLM_ASCEND_ENABLE_NZ=2`?
+
+Set `VLLM_ASCEND_ENABLE_NZ=2` when you want maximum throughput and your model uses fp16/bf16 weights. This forces FRACTAL_NZ weight format conversion for all weight types, improving compute efficiency. The default value `1` only converts quantized weights. Set to `0` for RL scenarios where NZ format may cause precision issues.
 
 ### Q: What makes Qwen3-Coder different from Qwen3-30B-A3B?
 
