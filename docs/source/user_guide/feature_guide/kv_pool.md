@@ -1,8 +1,27 @@
 # Ascend Store Deployment Guide
 
-## KV Pool Parameter Description
+## Environmental Dependencies
 
-### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
+* Software:
+    * CANN >= 8.5.0
+    * vLLM：main branch
+    * vLLM-Ascend：main branch
+    * mooncake：>= 0.3.9
+
+### KV Pool Parameter Description
+
+#### `kv_load_failure_policy`: KV Load Failure Handling Policy
+
+`kv_load_failure_policy` is a top-level field in `kv-transfer-config`.
+
+* `recompute`: When KV loading fails, vLLM rolls the request back to the last valid prefix and reschedules it to recompute the failed KV blocks.
+* `fail`: When KV loading fails, the affected request is terminated directly with an error.
+
+The default value in vLLM is `fail`. If you want the request to fall back to recomputation after a KV load failure, set it to `recompute`.
+
+When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiConnector` top-level `kv-transfer-config` instead of the child connectors.
+
+#### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
 
 | Parameter | Description |
 | :--- | :--- |
@@ -80,7 +99,7 @@ export PYTHONHASHSEED=0
         * Ensure `/usr/local/lib` and `/usr/local/lib64` are in your `LD_LIBRARY_PATH`
 
         ```shell
-        export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
+        export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LIBRARY_PATH
         ```
 
 ### Environment Variables Description
@@ -91,6 +110,70 @@ export PYTHONHASHSEED=0
 | 800 I/T A3 series | 25.5.0<=HDK<26.0.0 | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
 | 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
+### Embedded Real Client Mode（Mooncake ssd-offload.md Step 3A）
+
+* Software:
+    * mooncake >= v0.3.11
+
+#### Start the master
+
+```bash
+mooncake_master --rpc_port=50051 --enable_offload=true
+```
+
+| Field | Description |
+| :--- | :--- |
+| `enable_offload` | Set `true` to enable SSD offload. |
+
+#### Configuration
+
+Add the following fields to your `mooncake.json`:
+
+```json
+{
+    "local_hostname": "xx.xx.xx.xx",
+    "metadata_server": "P2PHANDSHAKE",
+    "protocol": "ascend",
+    "use_ascend_direct": true,
+    "device_name": "",
+    "master_server_address": "xx.xx.xx.xx:50088",
+    "global_segment_size": "1GB",
+    "enable_ssd_offload": true,
+    "ssd_offload_path": "/nvme/mooncake_offload"
+}
+```
+
+| Field | Description |
+| :--- | :--- |
+| `enable_ssd_offload` | Set to `true` to enable SSD offload. Environment variables are not supported. |
+| `ssd_offload_path` | **Required when `enable_ssd_offload` is `true`.** Absolute path to a local directory where Mooncake stores offloaded KV data (for example, `/nvme/mooncake_offload`). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symbolic links, and paths containing `..` are rejected by Mooncake. Passed to `MooncakeDistributedStore.setup()` as the SSD storage root (equivalent to `MOONCAKE_OFFLOAD_FILE_STORAGE_PATH` in standalone clients). Configure this field in `mooncake.json` only; environment variables are not supported. |
+
+#### Running the Embedded Real Client
+
+With Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When the vLLM service starts, `AscendStoreConnector` / `MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json` (including `enable_ssd_offload` and `ssd_offload_path` when SSD offload is enabled). No separate `mooncake_client` process is required.
+
+#### SSD Disk Usage Control
+
+The following environment variables control disk space usage for SSD offload (bucket backend):
+
+| Environment Variable | Default | Description |
+| :--- | :--- | :--- |
+| `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` | `0` | Eviction threshold in bytes. When set to `0`, the backend uses **90% of the physical disk capacity** as the quota. Set an explicit value to control disk usage precisely. |
+| `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY` | `none` | Eviction policy: `none` (writes fail when full), `fifo`, or `lru`. |
+| `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | `2199023255552` (2 TB) | Global maximum disk usage limit. |
+
+Since each TP rank uses an independent SSD subdirectory (`rank_0/`, `rank_1/`, ...) under `ssd_offload_path`, all ranks share the same physical disk. To prevent a single rank from consuming excessive space, set an explicit per-rank quota. For example, with an 800 GB disk and 8 TP ranks:
+
+```bash
+# 800 GB total disk, 8 ranks, ~100 GB per rank
+export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((100 * 1024 * 1024 * 1024))
+export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
+```
+
+#### Notes
+
+* This feature requires mooncake >= v0.3.11.
+
 ### FAQ for HIXL (ascend_direct) backend
 
 For common troubleshooting and issue localization guidance for HIXL (ascend_direct), see:
@@ -98,7 +181,7 @@ For common troubleshooting and issue localization guidance for HIXL (ascend_dire
 
 ### Run Mooncake Master
 
-#### 1.Configure mooncake.json
+#### 1. Configure mooncake.json
 
 The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path where mooncake.json is located.
 
@@ -108,17 +191,21 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "protocol": "ascend",
     "device_name": "",
     "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
+    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824),
+    "preferred_segment": false,
+    "prefer_alloc_in_same_node": true
 }
 ```
 
 **metadata_server**: Configured as **P2PHANDSHAKE**.  
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
-**master_server_address**: Configured with the IP and port of the master service.  
-**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.**
+**master_server_address**: Configured with the IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).  
+**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.  
+**preferred_segment**: Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**.  
+**prefer_alloc_in_same_node**: Whether to prefer allocating KV on the same node. Defaults to **true**.
 
-#### 2.Start mooncake_master
+#### 2. Start mooncake_master
 
 Under the mooncake folder:
 
@@ -131,7 +218,7 @@ mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_rati
 
 ### PD Disaggregation Scenario
 
-#### 1.Run `prefill` Node and `decode` Node
+#### 1. Run `prefill` Node and `decode` Node
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` serves as the prefix-cache node.
 
@@ -183,6 +270,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "connectors": [
             {
@@ -251,6 +339,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "connectors": [
         {
@@ -287,6 +376,7 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
 {
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port": "0",
         "backend": "mooncake",
@@ -297,7 +387,7 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
 }
 ```
 
-#### 2、Start proxy_server
+#### 2. Start proxy_server
 
 ```shell
 python vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
@@ -328,7 +418,7 @@ curl -s http://localhost:8000/v1/completions -H "Content-Type: application/json"
 
 ### PD-Mixed Inference
 
-#### 1.Run Mixed Department Script
+#### 1. Run Mixed Deployment Script
 
 ```shell
 bash pd_mix.sh
@@ -366,6 +456,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port":"1",
         "backend": "mooncake"
@@ -373,7 +464,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 }' > mix.log 2>&1
 ```
 
-#### 2.Run Inference
+#### 2. Run Inference
 
 Configure the localhost, port, and model weight path in the command to your own settings. The requests sent will only go to the port where the mixed deployment script is located, and there is no need to start a separate proxy.
 
@@ -449,7 +540,7 @@ python -c "from memcache_hybrid import MetaService; MetaService.main()"
 
 ### PD Disaggregation Scenario
 
-#### 1.Run `prefill` Node and `decode` Node
+#### 1. Run `prefill` Node and `decode` Node
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` enables KV Cache Pool
 
@@ -515,7 +606,6 @@ export VLLM_USE_V1=1
 KV_CONFIG='{
   "kv_connector": "MultiConnector",
   "kv_role": "'$KV_ROLE'",
-  "engine_id": "2",
   "kv_connector_extra_config": {
     "connectors": [
       {
@@ -571,7 +661,7 @@ echo "vLLM started. Log file: log_${ROLE}.log"
 
 ### PD-Mixed Scenario
 
-#### 1.Run Mixed Department Script
+#### 1. Run Mixed Deployment Script
 
 #### 800I A2/800T A2/800I A3/800T A3 Series
 
@@ -651,7 +741,7 @@ echo "vLLM started. Log file: log_mix.log"
 
 ```
 
-#### [2.Run Inference](#2run-inference)
+#### [2. Run Inference](#2-run-inference)
 
 ## Example of using Yuanrong as a KV Pool backend
 
@@ -826,6 +916,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port": "1",
         "backend": "yuanrong"
@@ -844,4 +935,4 @@ and the worker process. Each instance must use a unique port value.
 * No extra buffer pre-registration step is required for Yuanrong. The backend
   uses device pointers directly when building blob lists.
 
-#### [2.Run Inference](#2run-inference)
+#### [2. Run Inference](#2-run-inference)

@@ -66,6 +66,30 @@ class TestAscendModelSlimConfig310(TestBase):
             self.assertIs(method, mock_ascend_linear.return_value)
             mock_ascend_linear.assert_called_once_with(mock_scheme)
 
+    def test_get_quant_method_maps_lm_head_prefix_310(self):
+        config = AscendModelSlimConfig310({"language_model.lm_head.weight": "INT8"})
+        linear_layer = MagicMock(spec=LinearBase)
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "qwen3_5_moe"
+        mock_scheme = MagicMock()
+
+        with (
+            patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch(
+                "vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer",
+                return_value=mock_scheme,
+            ) as mock_create_scheme,
+            patch("vllm_ascend._310p.quantization.modelslim_config.AscendLinearMethod", return_value=MagicMock()),
+        ):
+            config.get_quant_method(linear_layer, "lm_head")
+
+        mock_create_scheme.assert_called_once_with(
+            quant_description=config.quant_description,
+            prefix="language_model.lm_head",
+            layer_type="linear",
+            packed_modules_mapping=config.packed_modules_mapping,
+        )
+
     def test_get_quant_method_for_fused_moe_310(self):
         fused_moe_layer = MagicMock(spec=FusedMoE)
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)

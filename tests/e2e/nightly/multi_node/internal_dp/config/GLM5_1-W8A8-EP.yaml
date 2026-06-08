@@ -15,9 +15,9 @@ env_common: &env_common
   ASCEND_TRANSPORT_PRINT: 1
   ACL_OP_INIT_MODE: 1
   ASCEND_A3_ENABLE: 1
-  VLLM_NIXL_ABORT_REQUEST_TIMEOUT: 300000
-  VLLM_ENGINE_READY_TIMEOUT_S: 7200
-  HCCL_CONNECT_TIMEOUT: 1200
+  VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
+  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+  HCCL_CONNECT_TIMEOUT: "1200"
   HCCL_INTRA_PCIE_ENABLE: 1
   HCCL_INTRA_ROCE_ENABLE: 0
   VLLM_ASCEND_ENABLE_FUSED_MC2: 1
@@ -44,7 +44,6 @@ deployment:
           --data-parallel-size-local 2
           --data-parallel-start-rank 0
           --data-parallel-address $LOCAL_IP
-          --data-parallel-rpc-port 10521
           --tensor-parallel-size 8
           --enable-expert-parallel
           --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
@@ -68,7 +67,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
-          "engine_id": "0",
           "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -94,7 +92,6 @@ deployment:
           --data-parallel-size-local 2
           --data-parallel-start-rank 2
           --data-parallel-address $MASTER_IP
-          --data-parallel-rpc-port 10521
           --tensor-parallel-size 8
           --enable-expert-parallel
           --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
@@ -118,7 +115,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
-          "engine_id": "0",
           "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -168,7 +164,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30100",
-          "engine_id": "1",
           "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -219,7 +214,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30100",
-          "engine_id": "1",
           "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {

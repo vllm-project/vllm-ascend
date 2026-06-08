@@ -126,7 +126,12 @@ class TestAscendModelSlimConfig(TestBase):
             self.assertIs(method, mock_ascend_kvcache.return_value)
 
     def test_get_quant_method_for_c8_kv_cache_attention(self):
-        c8_config = AscendModelSlimConfig({"kv_cache_type": "C8"})
+        c8_config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "model.layers.0.k_proj.kv_cache_scale": "C8",
+            }
+        )
         attention_layer = MagicMock(spec=AttentionLayerBase)
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.hf_config.model_type = None
@@ -288,6 +293,27 @@ class TestApplyVllmMapper(TestBase):
 
         self.assertEqual(config.quant_description, {"new_key.weight": "INT8"})
         mock_mapper.apply_dict.assert_called_once_with({"old_key.weight": "INT8"})
+
+
+class TestQuantPrefixMapper(TestBase):
+    def test_lm_head_maps_to_language_model_lm_head_when_quant_key_exists(self):
+        config = AscendModelSlimConfig({"language_model.lm_head.weight": "FLOAT"})
+
+        prefix = config.quant_prefix_mapper("qwen3_5_moe", "lm_head")
+
+        self.assertEqual(prefix, "language_model.lm_head")
+
+    def test_lm_head_keeps_original_prefix_when_quant_key_exists(self):
+        config = AscendModelSlimConfig(
+            {
+                "lm_head.weight": "FLOAT",
+                "language_model.lm_head.weight": "FLOAT",
+            }
+        )
+
+        prefix = config.quant_prefix_mapper("qwen3_5_moe", "lm_head")
+
+        self.assertEqual(prefix, "lm_head")
 
 
 class TestGetCacheScale(TestBase):

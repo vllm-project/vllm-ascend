@@ -37,12 +37,10 @@
 #endif
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
 #include "mc2/dispatch_gmm_combine_decode/dispatch_gmm_combine_decode_torch_adpt.h"
-#include "mc2/dispatch_layout/dispatch_layout_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
-#include "attention/lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h"
+#include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "mc2/matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
-#include "mc2/moe_combine_normal/moe_combine_normal_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
@@ -51,6 +49,7 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+#include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -62,6 +61,7 @@
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <vector>
 
 namespace vllm_ascend {
 
@@ -589,167 +589,6 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     return y_out;
 }
 #endif
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> dispatch_prefill(
-    const at::Tensor& x, const at::Tensor& topk_idx, const at::Tensor& topk_weights,
-    const at::Tensor& num_tokens_per_rank, const at::Tensor& is_token_in_rank, at::Tensor& num_tokens_per_expert,
-    int64_t num_worst_tokens, c10::string_view groupEp, int64_t rank, int64_t num_ranks) {
-    std::vector<char> group_ep_chrs(groupEp.begin(), groupEp.end());
-    group_ep_chrs.push_back('\0');
-    char* group_ep_ptr = &group_ep_chrs[0];
-    at::Tensor new_x = x;
-
-    // Type checks
-    TORCH_BIND_ASSERT(is_token_in_rank.scalar_type() == at::kBool);
-    TORCH_BIND_ASSERT(num_tokens_per_expert.scalar_type() == at::kInt);
-    TORCH_BIND_ASSERT(num_tokens_per_rank.scalar_type() == at::kInt);
-
-    // Shape and contiguous checks
-    TORCH_BIND_ASSERT(new_x.dim() == 2 and new_x.is_contiguous());
-    // TORCH_BIND_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0);
-    TORCH_BIND_ASSERT(is_token_in_rank.dim() == 2 and is_token_in_rank.is_contiguous());
-    TORCH_BIND_ASSERT(is_token_in_rank.size(0) == new_x.size(0) and is_token_in_rank.size(1) == num_ranks);
-    TORCH_BIND_ASSERT(num_tokens_per_expert.dim() == 1 and num_tokens_per_expert.is_contiguous());
-    TORCH_BIND_ASSERT(num_tokens_per_expert.size(0) % num_ranks == 0);
-    TORCH_BIND_ASSERT(num_tokens_per_rank.dim() == 1 and num_tokens_per_rank.is_contiguous());
-    TORCH_BIND_ASSERT(num_tokens_per_rank.size(0) == num_ranks);
-
-    auto num_tokens = static_cast<int>(new_x.size(0));
-    auto hidden = static_cast<int>(new_x.size(1));
-    auto num_experts = static_cast<int64_t>(num_tokens_per_expert.size(0));
-    auto num_local_experts = static_cast<int>(num_experts / num_ranks);
-
-    // Top-k checks
-    int num_topk = 0;
-    num_topk = static_cast<int>(topk_idx.size(1));
-    TORCH_BIND_ASSERT(num_experts > 0);
-    TORCH_BIND_ASSERT(topk_idx.dim() == 2 and topk_idx.is_contiguous());
-    TORCH_BIND_ASSERT(topk_weights.dim() == 2 and topk_weights.is_contiguous());
-    TORCH_BIND_ASSERT(num_tokens == topk_idx.size(0));
-    TORCH_BIND_ASSERT(num_topk == topk_weights.size(1));
-    TORCH_BIND_ASSERT(topk_weights.scalar_type() == at::kFloat);
-
-    int send_per_group = 3;  // (send_to_expert_num, send_to_expert_offset, send_rank_tokens)
-
-    auto send_data = at::empty({num_experts * send_per_group}, at::dtype(at::kInt).device(x.device()));
-    int64_t send_count = send_per_group * num_local_experts * num_ranks;
-
-    auto send_data_offset = at::empty({num_experts}, at::dtype(at::kInt).device(x.device()));
-    at::Tensor recv_data = at::empty({num_experts * send_per_group}, at::dtype(at::kInt).device(x.device()));
-
-    int64_t local_rank_size = num_ranks;
-    int64_t local_rank_id = rank % local_rank_size;
-
-    EXEC_NPU_CMD(aclnnNotifyDispatch,
-        send_data,
-        num_tokens_per_expert,
-        send_count,
-        num_tokens,
-        group_ep_ptr,  // commGroup
-        num_ranks,     // rankSize
-        rank,          // rankId
-        local_rank_size,
-        local_rank_id,
-        send_data_offset,
-        recv_data);
-
-    auto options_cpu = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
-    std::vector<int32_t> local_expert_acc(num_experts, 0);
-    auto send_token_idx_cpu = at::empty({num_tokens, num_topk}, options_cpu);
-    auto send_token_idx_ptr = send_token_idx_cpu.data_ptr<int>();
-
-    auto topk_idx_cpu = topk_idx.to(at::kCPU);
-    auto topk_idx_ptr = topk_idx_cpu.data_ptr<int64_t>();
-    for (int i = 0; i < num_tokens; ++i) {
-        for (int j = 0; j < num_topk; ++j) {
-            int64_t expert_idx = topk_idx_ptr[i * num_topk + j];
-            if (expert_idx >= 0) {
-                int32_t cnt = local_expert_acc[expert_idx];
-                send_token_idx_ptr[i * num_topk + j] = cnt;
-                local_expert_acc[expert_idx]++;
-            }
-        }
-    }
-
-    TORCH_BIND_ASSERT(recv_data.dim() == 1 and recv_data.is_contiguous());
-    TORCH_BIND_ASSERT(recv_data.size(0) % num_experts == 0);
-    at::Tensor recv_offset_cpu = at::empty({num_experts}, options_cpu);
-    at::Tensor recv_count_cpu = at::empty({num_experts}, options_cpu);
-    auto recv_data_cpu = recv_data.to(at::kCPU);
-    auto recv_data_ptr = recv_data_cpu.data_ptr<int>();
-    auto recv_count_ptr = recv_count_cpu.data_ptr<int>();
-    auto recv_offset_ptr = recv_offset_cpu.data_ptr<int>();
-    int64_t total_recv_tokens = 0;
-    int64_t num_max_dispatch_tokens_per_rank = 0;
-    std::vector<int64_t> num_recv_tokens_per_expert_list;
-
-    for (int64_t local_e = 0; local_e < num_local_experts; ++local_e) {
-        int64_t local_expert_recv_tokens = 0;
-        for (int64_t src_rank = 0; src_rank < num_ranks; ++src_rank) {
-            int64_t index = local_e * num_ranks + src_rank;
-            int64_t pair_idx = send_per_group * (src_rank * num_local_experts + local_e);
-
-            int recv_cnt = recv_data_ptr[pair_idx];                 // count from this src_rank for
-                                                                    // this global_expert
-            int recv_off = recv_data_ptr[pair_idx + 1];             // offset in that src_rank's window
-            int64_t send_num_tokens = recv_data_ptr[pair_idx + 2];  // all bs from rank
-
-            total_recv_tokens += recv_cnt;
-            recv_count_ptr[index] = total_recv_tokens;
-            recv_offset_ptr[index] = recv_off;
-            num_max_dispatch_tokens_per_rank = std::max(num_max_dispatch_tokens_per_rank, send_num_tokens);
-
-            local_expert_recv_tokens += recv_cnt;
-        }
-        num_recv_tokens_per_expert_list.push_back(local_expert_recv_tokens);
-    }
-    auto option = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
-    at::Tensor num_recv_tokens_per_expert = torch::from_blob(
-        num_recv_tokens_per_expert_list.data(), {static_cast<int64_t>(num_recv_tokens_per_expert_list.size())}, option)
-        .clone();
-
-    at::Tensor expert_ids = topk_idx.to(at::kInt);
-    int64_t tp_size = 1;
-    int64_t tp_rank = 0;
-    int64_t quant_mode = 0;
-    int64_t global_bs = static_cast<int64_t>(
-        std::max(num_max_dispatch_tokens_per_rank * num_ranks, static_cast<int64_t>(num_worst_tokens)));
-
-    auto send_token_idx = send_token_idx_cpu.to(x.device());
-    auto recv_offset = recv_offset_cpu.to(x.device());
-    auto recv_count = recv_count_cpu.to(x.device());
-
-    int total_cnt = total_recv_tokens;
-    if (total_cnt == 0) {
-        total_cnt = 1;
-    }
-    auto expandx_out = at::empty({total_cnt, hidden}, x.options());
-    auto dynamic_scales_out = at::empty({total_cnt}, at::dtype(at::kFloat).device(x.device()));
-    auto expand_idx_out = at::empty({total_cnt * 3}, at::dtype(at::kInt).device(x.device()));
-
-    EXEC_NPU_CMD(aclnnMoeDispatchNormal,
-        new_x,
-        expert_ids,
-        send_data_offset,
-        send_token_idx,
-        recv_offset,
-        recv_count,
-        group_ep_ptr,  // commGroup
-        num_ranks,     // rankSize
-        rank,          // rankId
-        group_ep_ptr,
-        tp_size,
-        tp_rank,
-        num_experts,
-        quant_mode,
-        global_bs,
-        expandx_out,
-        dynamic_scales_out,
-        expand_idx_out);
-
-    // Return values
-    return {expandx_out, expand_idx_out, recv_count, num_recv_tokens_per_expert};
-}
 
 at::Tensor convert_hamming_dist_top_k_output(const at::Tensor &hashq,
                                              const at::Tensor &hashkCache,
@@ -2270,6 +2109,17 @@ at::Tensor chunk_fwd_o(
     return o;
 }
 
+std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
+{
+    TORCH_CHECK(
+        tensor.is_privateuseone(),
+        "get_npu_storage_shape only supports NPU tensors, but got device ",
+        tensor.device());
+    const auto& desc = NPUBridge::GetNpuStorageImplDesc(tensor);
+    return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
+}
+
+
 } // namespace vllm_ascend
 
 #ifdef ASCEND_PLATFORM_310P
@@ -2396,6 +2246,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
 
+    ops.def("get_npu_storage_shape(Tensor tensor) -> int[]");
+    ops.impl("get_npu_storage_shape", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_npu_storage_shape);
+
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
         "                            Tensor group_list, *, Tensor? bias=None,"
@@ -2441,20 +2295,31 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("grouped_matmul_swiglu_quant_v2", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_v2);
 
     ops.def(
-        "npu_lightning_indexer(Tensor query, Tensor key, Tensor weights, *,"
-        "                      Tensor? actual_seq_lengths_query=None, Tensor? actual_seq_lengths_key=None,"
-        "                      Tensor? block_table=None, str layout_query='BSND', str layout_key='BSND',"
-        "                      int sparse_count=2048, int sparse_mode=3) -> Tensor"
+        "npu_lightning_indexer("
+            "Tensor query, Tensor key, Tensor weights, "
+            "*, "
+            "Tensor? actual_seq_lengths_query=None, "
+            "Tensor? actual_seq_lengths_key=None, "
+            "Tensor? block_table=None, "
+            "str layout_query=\"BSND\", str layout_key=\"BSND\", "
+            "int sparse_count=2048, int sparse_mode=3, "
+            "int pre_tokens=9223372036854775807, "
+            "int next_tokens=9223372036854775807, "
+            "bool return_value=False"
+        ") -> (Tensor sparse_indices, Tensor sparse_values)"
     );
     ops.impl("npu_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer);
 
     ops.def(
         "npu_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"
-        "                           Tensor sparse_indices, float scale_value, int sparse_block_size, *,"
+        "                           Tensor sparse_indices, float scale_value, *,"
         "                           Tensor? block_table=None, Tensor? actual_seq_lengths_query=None,"
         "                           Tensor? actual_seq_lengths_kv=None, Tensor? query_rope=None,"
-        "                           Tensor? key_rope=None, str layout_query='BSND', str layout_kv='BSND',"
-        "                           int sparse_mode=3) -> Tensor"
+        "                           Tensor? key_rope=None, int sparse_block_size=1,"
+        "                           str layout_query='BSND', str layout_kv='BSND',"
+        "                           int sparse_mode=3, int pre_tokens=9223372036854775807,"
+        "                           int next_tokens=9223372036854775807, int attention_mode=2,"
+        "                           bool return_softmax_lse=False) -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
 
@@ -2468,27 +2333,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("matmul_allreduce_add_rmsnorm(Tensor x1, Tensor x2, Tensor residual, Tensor gamma, \
         str groupTp, int tpRankSize, int tpRankId, float epsilon, bool isTransB, bool isGatherAddOut) -> (Tensor output, Tensor add_out)");
     ops.impl("matmul_allreduce_add_rmsnorm", torch::kPrivateUse1, &vllm_ascend::matmul_allreduce_add_rmsnorm);
-
-    ops.def("get_dispatch_layout(Tensor topk_idx, int num_experts, int "
-            "num_ranks) -> (Tensor num_tokens_per_rank, Tensor "
-            "num_tokens_per_expert, Tensor is_token_in_rank_bool)");
-    ops.impl("get_dispatch_layout", torch::kPrivateUse1,
-             &vllm_ascend::get_dispatch_layout);
-
-    ops.def(
-        "dispatch_prefill(Tensor x, Tensor topk_idx, Tensor topk_weights, "
-        "Tensor num_tokens_per_rank, Tensor is_token_in_rank, Tensor "
-        "num_tokens_per_expert, int num_worst_tokens, str groupEp, int rank, "
-        "int num_ranks) -> (Tensor expandx_out, Tensor expand_idx_out, Tensor "
-        "recv_count, Tensor num_recv_tokens_per_expert)");
-    ops.impl("dispatch_prefill", torch::kPrivateUse1,
-             &vllm_ascend::dispatch_prefill);
-
-    ops.def("combine_prefill(Tensor x, Tensor topk_idx, Tensor topk_weights, "
-            "Tensor src_idx, Tensor send_head, str grouEp, int rank, int "
-            "num_ranks) -> Tensor");
-    ops.impl("combine_prefill", torch::kPrivateUse1,
-             &vllm_ascend::combine_prefill);
 
     ops.def(
         "npu_moe_init_routing_custom(Tensor x, Tensor expert_idx, *, Tensor? scale=None, Tensor? offset=None, int active_num=-1, "
@@ -2953,5 +2797,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
     );
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
+
+    // Fused GDN gating.
+    ops.def(
+        "npu_fused_gdn_gating(Tensor A_log, "
+        "                     Tensor a, "
+        "                     Tensor b, "
+        "                     Tensor dt_bias, "
+        "                     float beta=1.0) -> (Tensor g, Tensor beta_output)");
+    ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
 }
 #endif
