@@ -2,6 +2,7 @@
 
 ROOT_DIR=$1
 SOC_VERSION=$2
+: "${ROOT_DIR:?ROOT_DIR is not set}"
 
 log() {
     echo "[build_aclnn] $*"
