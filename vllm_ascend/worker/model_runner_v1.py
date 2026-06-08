@@ -2392,17 +2392,10 @@ class NPUModelRunner(GPUModelRunner):
         # reduce_sample off for the model forward pass so that the
         # LogitsProcessor all-gathers the full [B, V_global] logits.
         sampling_metadata = self.input_batch.sampling_metadata
-        needs_reduce_sample_override = (
-            is_reduce_sample_enabled()
-            and (
-                sampling_metadata.max_num_logprobs is not None
-                or sampling_metadata.logprob_token_ids is not None
-            )
+        needs_reduce_sample_override = is_reduce_sample_enabled() and (
+            sampling_metadata.max_num_logprobs is not None or sampling_metadata.logprob_token_ids is not None
         )
-
-        if needs_reduce_sample_override:
-            reduce_sample_ctx = override_reduce_sample(False)
-            reduce_sample_ctx.__enter__()
+        reduce_sample_ctx = override_reduce_sample(False) if needs_reduce_sample_override else nullcontext()
 
         with (
             record_function_or_nullcontext("forward"),
@@ -2433,7 +2426,10 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
-        with record_function_or_nullcontext("post process"):
+        with (
+            reduce_sample_ctx,
+            record_function_or_nullcontext("post process"),
+        ):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states

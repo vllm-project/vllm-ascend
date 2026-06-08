@@ -7,9 +7,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.outputs import SamplerOutput
-from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.rejection_sampler import (
     GREEDY_TEMPERATURE,
     MAX_SPEC_LEN,

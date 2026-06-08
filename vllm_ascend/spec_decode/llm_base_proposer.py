@@ -1046,9 +1046,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # the standard (non-reduce) path.
         needs_reduce_sample_override = is_reduce_sample_enabled() and (
             sampling_metadata.max_num_logprobs is not None or sampling_metadata.logprob_token_ids is not None
-         )
+        )
         reduce_sample_ctx = override_reduce_sample(False) if needs_reduce_sample_override else nullcontext()
-
         with (
             reduce_sample_ctx,
             set_ascend_forward_context(
