@@ -488,9 +488,7 @@ class KVCacheRecvingThread(threading.Thread):
         if local_block_ids and isinstance(local_block_ids[0], (list, tuple)):
             grouped_block_ids = cast(NestedBlockIds, local_block_ids)
             flattened_block_ids: set[int] = {
-                block_id
-                for group_block_ids in grouped_block_ids
-                for block_id in group_block_ids
+                block_id for group_block_ids in grouped_block_ids for block_id in group_block_ids
             }
         else:
             flat_block_ids = cast(FlatBlockIds, local_block_ids)
