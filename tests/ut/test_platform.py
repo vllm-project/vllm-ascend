@@ -377,7 +377,10 @@ class TestNPUPlatform(TestBase):
         ):
             self.platform.check_and_update_config(vllm_config)
 
-        self.assertTrue(any("Compilation disabled, using eager mode by default" in output for output in cm.output))
+        self.assertTrue(
+            any("Compilation disabled, using eager mode by default" in log for log in cm.output),
+            cm.output,
+        )
 
         self.assertEqual(
             vllm_config.compilation_config.mode,
