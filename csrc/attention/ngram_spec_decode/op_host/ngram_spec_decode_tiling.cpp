@@ -63,7 +63,7 @@ static ge::graphStatus NgramSpecDecodeTilingFunc(gert::TilingContext *context)
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
     int64_t block_dim = std::min(batch_size, static_cast<int64_t>(aivNum));
     int64_t rows_per_core = (block_dim > 0) ? (batch_size / block_dim) : 0;
-    int64_t former_num = batch_size % block_dim;
+    int64_t former_num = (block_dim > 0) ? batch_size % block_dim : 0;
 
     tilingData->ngramInfo.batchSize = static_cast<uint32_t>(batch_size);
     tilingData->ngramInfo.maxSeqLen = static_cast<uint32_t>(max_seq_len);
