@@ -14,6 +14,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.utils import (
     get_weight_prefetch_method,
+    enable_dsa_cp_with_pcp_shard,
 )
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.attention.utils import (
@@ -241,6 +242,9 @@ class AscendSFACPImpl(AscendSFAImpl):
     understand this class
     """
 
+    # Supports forward using the all-gather o_proj weight when PCP shard is enabled.
+    o_proj_pcp_full_pool: torch.Tensor | None = None
+        
     def __init__(
         self,
         num_heads: int,
@@ -278,6 +282,50 @@ class AscendSFACPImpl(AscendSFAImpl):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
         self.local_num_heads = self.num_heads
+
+        # use original PCP o_proj weight in PD mix stage, and full gather
+        # for o_proj weight for prefill stage.
+        self.enable_dsa_cp_with_pcp_shard = enable_dsa_cp_with_pcp_shard()
+        if self.enable_dsa_cp_with_pcp_shard:
+            self.pcp_shard_size = get_pcp_group().world_size
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
+        if self.enable_dsa_cp_with_pcp_shard:
+            self._init_o_proj_pcp_shard_params()
+
+    def _init_o_proj_pcp_shard_params(self):
+        """Initialize shard-mode and Full-mode parameters for o_proj weight in PCP shard mode.
+
+        Each PCP rank holds 1/pcp_shard_size of o_proj weight (sharded along input_dim).
+        At compute time, all-gather across PCP ranks to reconstruct full weight.
+        """
+        if AscendSFAImpl.o_proj_pcp_full_pool is None:
+            sample = self.o_proj.weight
+            AscendSFAImpl.o_proj_pcp_full_pool = torch.empty(
+                (sample.shape[0] * self.pcp_shard_size, sample.shape[1]),
+                dtype=sample.dtype,
+                device=sample.device,
+            )
+
+        # Save shard-mode parameters (PCP-sharded weights)
+        self.o_proj_pcp_shard_weight = self.o_proj.weight.clone().detach()
+        self.o_proj_pcp_shard_aclnn_input_scale = self.o_proj.aclnn_input_scale.clone().detach()
+        self.o_proj_pcp_shard_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.clone().detach()
+        self.o_proj_pcp_shard_aclnn_input_offset = self.o_proj.aclnn_input_offset.clone().detach()
+
+        # Initially switch to PCP mode for graph capture
+        self.o_proj.weight.set_(self.o_proj_pcp_shard_weight)
+        self.o_proj.aclnn_input_scale.set_(self.o_proj_pcp_shard_aclnn_input_scale)
+        self.o_proj.aclnn_input_scale_reciprocal.set_(self.o_proj_pcp_shard_aclnn_input_scale_reciprocal)
+        self.o_proj.aclnn_input_offset.set_(self.o_proj_pcp_shard_aclnn_input_offset)
+
+        # Precompute Full-mode quantization parameters by repeating shard parameters across all PCP ranks
+        self.o_proj_pcp_full_aclnn_input_scale = self.o_proj.aclnn_input_scale.repeat(self.pcp_shard_size)
+        self.o_proj_pcp_full_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.repeat(
+            self.pcp_shard_size
+        )
+        self.o_proj_pcp_full_aclnn_input_offset = self.o_proj.aclnn_input_offset.repeat(self.pcp_shard_size)
 
     def _execute_sparse_flash_attention_process(
         self, ql_nope, q_pe, decode_kv, prefill_kv, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
