@@ -904,18 +904,13 @@ async def handle_chat_completions(request: Request):
 @app.post("/reset_prefix_cache")
 async def reset_prefix_cache(request: Request):
     params = dict(request.query_params)
-    all_servers = [(s.client, f"http://{s.host}:{s.port}") for s in proxy_state.prefillers + proxy_state.decoders]
-    results = await asyncio.gather(
-        *[client.post(f"{base_url}/reset_prefix_cache", params=params) for client, base_url in all_servers],
-        return_exceptions=True,
-    )
     failures = []
-    for (_, base_url), result in zip(all_servers, results):
-        if isinstance(result, Exception):
-            logger.error("reset_prefix_cache failed for %s: %s", base_url, result)
-            failures.append(base_url)
-        elif result.status_code != 200:
-            logger.error("reset_prefix_cache failed for %s: status %s", base_url, result.status_code)
+    for client, base_url in [(s.client, f"http://{s.host}:{s.port}") for s in proxy_state.prefillers + proxy_state.decoders]:
+        try:
+            resp = await client.post(f"{base_url}/reset_prefix_cache", params=params)
+            resp.raise_for_status()
+        except Exception as e:
+            logger.error("reset_prefix_cache failed for %s: %s", base_url, e)
             failures.append(base_url)
     if failures:
         from fastapi.responses import JSONResponse
