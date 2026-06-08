@@ -24,12 +24,13 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 class XliteModelRunner(NPUModelRunner):
     def get_model(self) -> nn.Module:
+        """See :meth:`NPUModelRunner.get_model` and :meth:`XliteWrapper.unwrap` for details."""
         return self.model.unwrap()
 
     def load_model(self) -> None:
-        super().load_model()
         from vllm_ascend.xlite.xlite import XliteWrapper
 
+        super().load_model()
         self.model = XliteWrapper(self.model, self.vllm_config)
 
     def initialize_kv_cache(
