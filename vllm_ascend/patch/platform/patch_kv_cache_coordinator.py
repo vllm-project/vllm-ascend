@@ -17,7 +17,12 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+)
 
 from vllm_ascend import envs
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
@@ -110,6 +115,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             return block_size
         if self.dcp_world_size * self.pcp_world_size > 1:
             block_size *= self.dcp_world_size * self.pcp_world_size
+        if hasattr(kv_cache_spec, "compress_ratio"):
+            compress_ratio = kv_cache_spec.compress_ratio if kv_cache_spec.compress_ratio >= 1 else 1
+            block_size *= compress_ratio
         return block_size
 
     def verify_and_split_kv_cache_groups(self) -> None:
@@ -155,10 +163,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # each attention type. Requiring this because we don't support partial
         # block cache hit yet.
         # NOTE: use 16k as the alignment tokens for model with compress ratio
-        block_sizes = [
-            self._get_effective_block_size(spec) * getattr(spec, "compress_ratio", 1)
-            for spec, _, _ in self.attention_groups
-        ]
+        block_sizes = [self._get_effective_block_size(spec) for spec, _, _ in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
     def find_longest_cache_hit(
@@ -186,7 +191,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             effective_block_size = self._get_effective_block_size(kv_cache_spec)
-            if effective_block_size == self.hash_block_size:
+            if kv_cache_spec.block_size == self.hash_block_size:
                 return block_hashes
             return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, effective_block_size)
 
@@ -242,8 +247,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     # length shrunk; invalidate previous eagle verifications
                     eagle_verified.clear()
                 curr_hit_length = _new_hit_length
-                compress_ratio = getattr(spec, "compress_ratio", 1)
-                curr_hit_length = len(hit_blocks[0]) * effective_block_size * max(compress_ratio, 1)
+                curr_hit_length = len(hit_blocks[0]) * effective_block_size
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks
 
@@ -254,6 +258,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 break
 
         # Truncate full attention blocks to final hit_length (if present)
+        # NOTE(zxr): for deepseek-v4, there is two fullattn groups, but
+        # in this function, only the first fullattn group is truncate by
+        # the belowing codes(c4), c128 layer does not truncate, which may
+        # have prefix cache block hit.
+        # Due to slidingwindow attn, deepseek-v4 decode node can't have
+        # any prefix cache hit, because `hit_length` of SWA is 0.
         spec, group_ids, _ = self.attention_groups[0]
         if isinstance(spec, FullAttentionSpec):
             num_blocks = hit_length // self._get_effective_block_size(spec)
