@@ -23,6 +23,31 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
 
+_STREAM_RESOURCE_ERROR_CODE = "207008"
+_STREAM_RESOURCE_ERROR_MARKERS = (
+    "insufficient_stream_resources",
+    "stream resources are insufficient",
+)
+_STREAM_RESOURCE_GUIDANCE = (
+    "ACL graph capture failed with a known stream-resource exhaustion "
+    "signature. Consider upgrading to a newer HDK/CANN stack, reducing "
+    "cudagraph_capture_sizes, lowering max_cudagraph_capture_size, preferring "
+    "FULL or FULL_DECODE_ONLY for mostly uniform decode workloads, or "
+    "temporarily disabling graph mode to confirm the failure is capture-related."
+)
+
+
+def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
+    message = str(exc)
+    lowered_message = message.lower()
+    has_error_code = _STREAM_RESOURCE_ERROR_CODE in message
+    has_stream_resource_marker = any(marker in lowered_message for marker in _STREAM_RESOURCE_ERROR_MARKERS)
+    return has_stream_resource_marker or (has_error_code and "stream resource" in lowered_message)
+
+
+def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
+    raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}\nOriginal error:\n{exc}") from exc
+
 
 @dataclasses.dataclass
 class ACLGraphEntry:
@@ -154,17 +179,22 @@ class ACLGraphWrapper:
 
                 # mind-exploding: carefully manage the reference and memory.
                 forward_context.capturing = True
-                with torch.npu.graph(aclgraph, pool=self.graph_pool):
-                    # `output` is managed by pytorch's aclgraph pool
-                    output = self.runnable(*args, **kwargs)
-                    if self.aclgraph_options.weak_ref_output:
-                        # by converting it to weak ref,
-                        # the original `output` will immediately be released
-                        # to save memory. It is only safe to do this for
-                        # the last graph in piecewise aclgraph mode, because
-                        # the output of the last graph will not be used by
-                        # any other acl graph.
-                        output = weak_ref_tensors(output)
+                try:
+                    with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                        # `output` is managed by pytorch's aclgraph pool
+                        output = self.runnable(*args, **kwargs)
+                        if self.aclgraph_options.weak_ref_output:
+                            # by converting it to weak ref,
+                            # the original `output` will immediately be released
+                            # to save memory. It is only safe to do this for
+                            # the last graph in piecewise aclgraph mode, because
+                            # the output of the last graph will not be used by
+                            # any other acl graph.
+                            output = weak_ref_tensors(output)
+                except RuntimeError as exc:
+                    if _is_stream_resource_capture_error(exc):
+                        _raise_stream_resource_capture_error(exc)
+                    raise
 
             # here we always use weak ref for the workspaces
             # to save memory

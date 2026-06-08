@@ -48,7 +48,6 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     is_moe_model,
     refresh_block_size,
-    update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
     is_310p,
     enable_sp,
@@ -525,7 +524,6 @@ class NPUPlatform(Platform):
                     "vllm::dsa_forward",
                 ]
             )
-            update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,
