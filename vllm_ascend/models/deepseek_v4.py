@@ -723,6 +723,7 @@ class DeepseekV4Attention(nn.Module):
         dsa_modules = DSAModules(
             wq_a=self.wq_a,
             q_norm=self.q_norm,
+            q_norm_without_weight=self.q_norm,
             wq_b=self.wq_b,
             wkv=self.wkv,
             kv_norm=self.kv_norm,
