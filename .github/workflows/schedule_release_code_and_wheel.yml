@@ -33,6 +33,7 @@ on:
         type: choice
         options:
           - main
+          - v0.20.2rc1
           - v0.19.1rc1
           - v0.18.0
           - v0.18.0rc1
@@ -89,7 +90,7 @@ jobs:
       - name: Release
         if: ${{ github.event_name == 'push' }}
         run: |
-          python3 -m twine upload dist/* -u __token__ -p ${{ secrets.PYPI_TOKEN }}
+          python3 -m twine upload --skip-existing dist/* -u __token__ -p ${{ secrets.PYPI_TOKEN }}
 
   build_and_release_wheel:
     name: build and release wheel
@@ -172,7 +173,7 @@ jobs:
         if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
         run: |
           python3 -m pip install twine
-          python3 -m twine upload --verbose dist/*.whl -u __token__ -p ${{ secrets.PYPI_TOKEN }}
+          python3 -m twine upload --verbose --skip-existing dist/*.whl -u __token__ -p ${{ secrets.PYPI_TOKEN }}
 
 
   build_and_release_wheel_a3:
@@ -277,6 +278,17 @@ jobs:
         with:
           tool-cache: true
           docker-images: false
+
+      - name: Patch 310p Dockerfile base image to manylinux_2_34
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          FILE=.github/workflows/dockerfiles/Dockerfile.buildwheel.310p
+          if ! grep -q 'quay.io/ascend/manylinux:9\.1\.0-beta\.1-310p-manylinux_2_28' "$FILE"; then
+            echo "ERROR: Expected base image pattern not found in $FILE"
+            exit 1
+          fi
+          sed -i 's|9\.1\.0-beta\.1-310p-manylinux_2_28|9.1.0-beta.1-310p-manylinux_2_34|' "$FILE"
+          grep '^FROM' "$FILE"
 
       - name: Build wheel
         run: |
