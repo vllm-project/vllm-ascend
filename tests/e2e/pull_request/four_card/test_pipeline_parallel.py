@@ -103,7 +103,7 @@ def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_exec
         tensor_parallel_size=tp_size,
         pipeline_parallel_size=pp_size,
         compilation_config={
-            "cudagraph_mode": "PIECEWISE",
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
             "cudagraph_capture_sizes": [1, 2, 4],
         },
         distributed_executor_backend=distributed_executor_backend,
@@ -130,7 +130,7 @@ def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_exec
         data_parallel_size=dp_size,
         pipeline_parallel_size=pp_size,
         compilation_config={
-            "cudagraph_mode": "PIECEWISE",
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
             "cudagraph_capture_sizes": [1, 2, 4],
         },
         distributed_executor_backend=distributed_executor_backend,

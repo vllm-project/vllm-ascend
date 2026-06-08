@@ -27,6 +27,14 @@ from tests.e2e.conftest import VllmRunner
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
+ACLGRAPH_CAPTURE_SIZES = [1, 2, 4]
+
+
+def full_and_piecewise_compilation_config() -> dict[str, object]:
+    return {
+        "cudagraph_mode": "FULL_AND_PIECEWISE",
+        "cudagraph_capture_sizes": ACLGRAPH_CAPTURE_SIZES.copy(),
+    }
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -34,10 +42,11 @@ MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 @patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "0"})
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
 def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
-    del os.environ["VLLM_WORKER_MULTIPROC_METHOD"]
+    original_worker_multiproc_method = os.environ.pop("VLLM_WORKER_MULTIPROC_METHOD", None)
     capture_called = multiprocessing.Value("i", 0)  # int, 0 or 1
     capture_mem_before = multiprocessing.Value("q", -1)  # long long (64-bit)
     capture_mem_after = multiprocessing.Value("q", -1)  # long long
+    captured_graph_mem = multiprocessing.Value("q", -1)  # long long
 
     def capture_model_wrapper(original_method):
         def wrapped(self):
@@ -48,56 +57,67 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
                 capture_called.value = 1
                 capture_mem_before.value = mem_before
                 capture_mem_after.value = mem_after
+                captured_graph_mem.value = int(result or 0)
             return result
 
         return wrapped
 
     original_capture = NPUModelRunner.capture_model
 
-    with patch.object(NPUModelRunner, "capture_model", new=capture_model_wrapper(original_capture)):
-        prompts = [
-            "Hello, my name is",
-            "The president of the United States is",
-            "The capital of France is",
-            "The future of AI is",
-        ]
-        sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-        if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
-            vllm_model = VllmRunner(
-                model,
-                max_model_len=1024,
-                quantization="ascend",
-                compilation_config={"cudagraph_mode": "PIECEWISE"},
-            )
+    try:
+        with patch.object(NPUModelRunner, "capture_model", new=capture_model_wrapper(original_capture)):
+            prompts = [
+                "Hello, my name is",
+                "The president of the United States is",
+                "The capital of France is",
+                "The future of AI is",
+            ]
+            sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+            runner_kwargs = {
+                "compilation_config": full_and_piecewise_compilation_config(),
+                "gpu_memory_utilization": 0.7,
+            }
+            if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
+                runner_kwargs.update(
+                    {
+                        "max_model_len": 1024,
+                        "quantization": "ascend",
+                    }
+                )
+            with VllmRunner(model, **runner_kwargs) as vllm_model:
+                _ = vllm_model.generate(prompts, sampling_params)
+    finally:
+        if original_worker_multiproc_method is None:
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         else:
-            vllm_model = VllmRunner(
-                model,
-                compilation_config={"cudagraph_mode": "PIECEWISE"},
-            )
-        _ = vllm_model.generate(prompts, sampling_params)
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = original_worker_multiproc_method
 
     assert capture_called.value == 1, "capture_model was not called during test"
     assert capture_mem_before.value != -1, "capture_mem_before not set"
     assert capture_mem_after.value != -1, "capture_mem_after not set"
+    assert captured_graph_mem.value != -1, "captured_graph_mem not set"
+    assert captured_graph_mem.value > 0, "capture_model did not report graph pool memory"
 
     print("capture_mem_before =", capture_mem_before.value)
     print("capture_mem_after =", capture_mem_after.value)
+    print("captured_graph_mem =", captured_graph_mem.value)
 
     mem_used_by_capture = capture_mem_before.value - capture_mem_after.value
     # Empirical observation: capturing ACL graphs for Qwen3-0.6B uses ~0.20 GiB of NPU memory.
     # DeepSeek-V2-Lite-W8A8 uses ~0.68 GiB of NPU memory
-    # a 1.3x tolerance is applied to account for runtime variance.
+    # FULL_AND_PIECEWISE captures one FULL decode path and one PIECEWISE mixed-batch path,
+    # so allow up to 2x the historical PIECEWISE-only baseline plus runtime variance.
     if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
         baseline_capture_mem = 0.68
         capture_mem_tolerance = 1.5
     else:
         baseline_capture_mem = 0.20
         capture_mem_tolerance = 1.3
-    max_capture_mem_gib = baseline_capture_mem * capture_mem_tolerance
+    max_capture_mem_gib = baseline_capture_mem * 2 * capture_mem_tolerance
     max_mem_expected = max_capture_mem_gib * (1024**3)
-    assert mem_used_by_capture < max_mem_expected, (
-        f"capture_model used more memory than expected. "
-        f"Used: {mem_used_by_capture / (1024**3):.2f} GiB, "
+    assert captured_graph_mem.value < max_mem_expected, (
+        f"capture_model graph pool used more memory than expected. "
+        f"Used: {captured_graph_mem.value / (1024**3):.2f} GiB, "
+        f"Free memory delta: {mem_used_by_capture / (1024**3):.2f} GiB, "
         f"Expected: < {max_capture_mem_gib:.2f} GiB"
     )
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
