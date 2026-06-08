@@ -342,6 +342,17 @@ def rejection_sample(
     else:
         ori_target_probs = None
 
+    # Precompute entropy thresholds outside the Triton kernel for performance.
+    # This avoids the expensive SUB_BLOCK loop over the entire vocabulary inside
+    # the kernel, replacing it with a single vectorized PyTorch operation.
+    EPSILON = 1e-10
+    if using_entropy_verify:
+        entropy_probs = ori_target_probs if ori_target_probs is not None else None
+        # entropy_thresholds will be computed after target_probs is available
+        entropy_thresholds = None
+    else:
+        entropy_thresholds = None
+
     # Create output buffer.
     output_token_ids = torch.empty(
         (batch_size, max_spec_len + 1),
@@ -425,6 +436,14 @@ def rejection_sample(
         target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
         assert target_probs.is_contiguous()
 
+        # Precompute entropy thresholds for Triton kernel path.
+        # In reduce_sampling mode, entropy must be computed on the full vocabulary
+        # (ori_target_probs), not the reduced target_probs.
+        if using_entropy_verify and entropy_probs is not None:
+            entropy_thresholds = _compute_entropy_thresholds(
+                entropy_probs, posterior_alpha, posterior_threshold, EPSILON
+            )
+
         # Generate uniform probabilities for rejection sampling
         uniform_probs = generate_uniform_probs(
             num_tokens,
@@ -466,16 +485,11 @@ def rejection_sample(
                     selected_vocab_size,
                     global_vocab_size,
                     batch_size,
-                    ori_target_probs,
-                    NO_ORI_TARGET_PROBS=ori_target_probs is None,
+                    entropy_thresholds,
+                    NO_ENTROPY_THRESHOLDS=entropy_thresholds is None,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=True,
-                    ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
-                    POSTERIOR_THRESHOLD=posterior_threshold,
-                    POSTERIOR_ALPHA=posterior_alpha,
-                    SUB_BLOCK=4 * 1024,
-                    EPSILON=1e-10,
                 )
             else:
                 rejection_random_sample_pytorch(
@@ -518,16 +532,11 @@ def rejection_sample(
                     selected_vocab_size,
                     global_vocab_size,
                     batch_size,
-                    ori_target_probs,
-                    NO_ORI_TARGET_PROBS=ori_target_probs is None,
+                    entropy_thresholds,
+                    NO_ENTROPY_THRESHOLDS=entropy_thresholds is None,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=True,
-                    ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
-                    POSTERIOR_THRESHOLD=posterior_threshold,
-                    POSTERIOR_ALPHA=posterior_alpha,
-                    SUB_BLOCK=4 * 1024,
-                    EPSILON=1e-10,
                 )
             else:
                 rejection_random_sample_block_verify_pytorch(
@@ -565,6 +574,12 @@ def rejection_sample(
             ori_target_probs = ori_target_logits.softmax(dim=-1, dtype=torch.float32)
         else:
             ori_target_probs = target_probs
+
+        # Precompute entropy thresholds for Triton kernel path
+        if using_entropy_verify:
+            entropy_thresholds = _compute_entropy_thresholds(
+                ori_target_probs, posterior_alpha, posterior_threshold, EPSILON
+            )
 
         # Generate uniform probabilities for rejection sampling
         uniform_probs = generate_uniform_probs(
@@ -606,16 +621,11 @@ def rejection_sample(
                     vocab_size,
                     global_vocab_size,  # global_vocab_size
                     batch_size,
-                    ori_target_probs,
-                    NO_ORI_TARGET_PROBS=ori_target_probs is None,
+                    entropy_thresholds,
+                    NO_ENTROPY_THRESHOLDS=entropy_thresholds is None,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=False,
-                    ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
-                    POSTERIOR_THRESHOLD=posterior_threshold,
-                    POSTERIOR_ALPHA=posterior_alpha,
-                    SUB_BLOCK=4 * 1024,
-                    EPSILON=1e-10,
                 )
             else:
                 rejection_random_sample_pytorch(
@@ -656,16 +666,11 @@ def rejection_sample(
                     vocab_size,
                     global_vocab_size,  # global_vocab_size
                     batch_size,
-                    ori_target_probs,
-                    NO_ORI_TARGET_PROBS=ori_target_probs is None,
+                    entropy_thresholds,
+                    NO_ENTROPY_THRESHOLDS=entropy_thresholds is None,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=False,
-                    ENTROPY_VERIFY=using_entropy_verify,
                     BLOCK_SIZE=block_size,
-                    POSTERIOR_THRESHOLD=posterior_threshold,
-                    POSTERIOR_ALPHA=posterior_alpha,
-                    SUB_BLOCK=4 * 1024,
-                    EPSILON=1e-10,
                 )
             else:
                 rejection_random_sample_block_verify_pytorch(
@@ -691,6 +696,26 @@ def rejection_sample(
                 )
 
     return output_token_ids
+
+
+def _compute_entropy_thresholds(
+    entropy_probs: torch.Tensor,
+    posterior_alpha: float,
+    posterior_threshold: float,
+    epsilon: float = 1e-10,
+) -> torch.Tensor:
+    """Precompute per-token entropy thresholds for Entropy Verify.
+
+    Computes: threshold = min(exp(-entropy * alpha), posterior_threshold)
+    where entropy = -sum(p * log(p + epsilon)) over the vocabulary dimension.
+
+    This replaces the expensive SUB_BLOCK loop inside the Triton kernel with
+    a single vectorized PyTorch operation, which is significantly faster.
+    """
+    entropy = -(entropy_probs * torch.log(entropy_probs + epsilon)).sum(dim=-1)
+    exp_neg_entropy = torch.exp(-entropy * posterior_alpha)
+    posterior_threshold_device = torch.tensor(posterior_threshold, device=entropy_probs.device, dtype=torch.float32)
+    return torch.minimum(exp_neg_entropy, posterior_threshold_device)
 
 
 def expand_batch_to_tokens(
