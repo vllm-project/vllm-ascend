@@ -379,6 +379,7 @@
   tests:
     - tests/ut/quantization
     - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
+    - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
 # Sample
 - name: sample
@@ -593,6 +594,7 @@
     - vllm_ascend/ops/fused_moe/token_dispatcher.py
   tests:
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
+    - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
 # === Others ===
 - name: _tools
