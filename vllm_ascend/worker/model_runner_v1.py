@@ -525,6 +525,7 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
+        self.valid_sampled_token_count_gpu: torch.Tensor | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -2253,8 +2254,6 @@ class NPUModelRunner(GPUModelRunner):
 
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
-
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
