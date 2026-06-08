@@ -48,7 +48,6 @@ from vllm_ascend.ascend_forward_context import (
     override_reduce_sample,
     set_ascend_forward_context,
 )
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -1045,29 +1044,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # reduce_sample off so that the draft model's LogitsProcessor
         # all-gathers the full [B, V_global] logits and the sampler uses
         # the standard (non-reduce) path.
-        needs_reduce_sample_override = (
-            is_reduce_sample_enabled()
-            and (
-                sampling_metadata.max_num_logprobs is not None
-                or sampling_metadata.logprob_token_ids is not None
-            )
-        )
-        reduce_sample_ctx = (
-            override_reduce_sample(False) if needs_reduce_sample_override else nullcontext()
-        )
+        needs_reduce_sample_override = is_reduce_sample_enabled() and (
+            sampling_metadata.max_num_logprobs is not None or sampling_metadata.logprob_token_ids is not None
+         )
+        reduce_sample_ctx = override_reduce_sample(False) if needs_reduce_sample_override else nullcontext()
 
-        with reduce_sample_ctx, set_ascend_forward_context(
-            multi_steps_attn_metadata[0],
-            self.vllm_config,
-            num_tokens=num_input_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-            num_actual_tokens=num_tokens,
-            batch_descriptor=batch_descriptor,
-            aclgraph_runtime_mode=aclgraph_runtime_mode,
-            is_draft_model=True,
-            draft_attn_metadatas=multi_steps_attn_metadata,
-            eplb_heat_collection_status=(
-                self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
+        with (
+            reduce_sample_ctx,
+            set_ascend_forward_context(
+                multi_steps_attn_metadata[0],
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                num_actual_tokens=num_tokens,
+                batch_descriptor=batch_descriptor,
+                aclgraph_runtime_mode=aclgraph_runtime_mode,
+                is_draft_model=True,
+                draft_attn_metadatas=multi_steps_attn_metadata,
+                eplb_heat_collection_status=(
+                    self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
+                ),
             ),
         ):
             # Reset MOE layer index for forward pass
