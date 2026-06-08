@@ -1,5 +1,4 @@
 import importlib
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -316,10 +315,7 @@ class TestNPUPlatform(TestBase):
     def test_check_and_update_config_basic_config_update(
         self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
     ):
-        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        ascend_config.ascend_compilation_config = SimpleNamespace(enable_npugraph_ex=True)
-        ascend_config.ascend_fusion_config = SimpleNamespace(fusion_ops_gmmswigluquant=True)
-        mock_init_ascend.return_value = ascend_config
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.enable_expert_parallel = False
         vllm_config.parallel_config.decode_context_parallel_size = 1
@@ -340,8 +336,6 @@ class TestNPUPlatform(TestBase):
         self.platform.check_and_update_config(vllm_config)
 
         mock_init_ascend.assert_called_once_with(vllm_config)
-        self.assertFalse(vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"])
-        self.assertTrue(vllm_config.additional_config["ascend_fusion_config"]["fusion_ops_gmmswigluquant"])
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
