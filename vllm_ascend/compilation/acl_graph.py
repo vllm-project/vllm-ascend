@@ -107,6 +107,10 @@ class ACLGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    def is_captured(self, batch_descriptor: BatchDescriptor) -> bool:
+        entry = self.concrete_aclgraph_entries.get(batch_descriptor)
+        return entry is not None and entry.aclgraph is not None
+
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
