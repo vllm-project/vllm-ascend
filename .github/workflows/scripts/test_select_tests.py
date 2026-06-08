@@ -344,7 +344,7 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
     monkeypatch.setattr(
         sys,
         "argv",
-[
+        [
             "select_tests.py",
             "--config",
             str(config_path),
