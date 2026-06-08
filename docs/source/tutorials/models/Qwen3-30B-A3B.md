@@ -31,7 +31,6 @@ These are the recommended numbers of cards, which can be adjusted according to t
 If the W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
 :::
 
-
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
