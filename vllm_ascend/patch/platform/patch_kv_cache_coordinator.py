@@ -71,8 +71,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.max_num_batched_tokens = max_num_batched_tokens
         if scheduler_block_size is None:
             effective_block_sizes = (
-                self._get_effective_block_size(g.kv_cache_spec)
-                for g in kv_cache_config.kv_cache_groups
+                self._get_effective_block_size(g.kv_cache_spec) for g in kv_cache_config.kv_cache_groups
             )
             scheduler_block_size = lcm(*effective_block_sizes)
         self.scheduler_block_size = scheduler_block_size
