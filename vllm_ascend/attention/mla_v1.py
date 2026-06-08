@@ -771,7 +771,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 self.layer_sharding_kwargs.append(kwargs[layer_name])
             else:
                 logger.warning_once(
-                    f"Layer '{layer_name}' not found in kwargs for layer sharding, skipping sharding configuration"
+                    f"Layer '{layer_name}' not found in kwargs, skipping sharding. "
+                    f"Check layer_sharding config and model layer names."
                 )
         register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
@@ -972,9 +973,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             ):
                 self.enable_mlapo = False
                 logger.warning_once(
-                    "Currently mlapo only supports W8A8 quantization in MLA scenario."
-                    "Some layers in your model are not quantized with W8A8,"
-                    "thus mlapo is disabled for these layers."
+                    "mlapo only supports W8A8 quantization in MLA. "
+                    "Some layers not W8A8 quantized, mlapo disabled for these layers."
                 )
         if self.enable_mlapo:
             if get_ascend_device_type() == AscendDeviceType.A5:
