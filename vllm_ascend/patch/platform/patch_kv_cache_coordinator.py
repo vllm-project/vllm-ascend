@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
 import sys
 from math import lcm
+from typing import Any
 
 import vllm
 from vllm.v1.core.block_pool import BlockPool
@@ -55,6 +56,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_num_batched_tokens: int | None = None,
+        scheduler_block_size: int | None = None,
     ):
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
@@ -67,6 +69,13 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if max_num_batched_tokens is None:
             max_num_batched_tokens = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
+        if scheduler_block_size is None:
+            effective_block_sizes = (
+                self._get_effective_block_size(g.kv_cache_spec)
+                for g in kv_cache_config.kv_cache_groups
+            )
+            scheduler_block_size = lcm(*effective_block_sizes)
+        self.scheduler_block_size = scheduler_block_size
 
         self.block_pool = BlockPool(
             kv_cache_config.num_blocks,
@@ -82,16 +91,22 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
+        manager_kwargs: dict[str, Any] = dict(
+            block_pool=self.block_pool,
+            enable_caching=enable_caching,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_model_len=max_model_len,
+        )
+        if not vllm_version_is("0.21.0"):
+            manager_kwargs["scheduler_block_size"] = self.scheduler_block_size
+
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
-                block_pool=self.block_pool,
-                enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size,
-                pcp_world_size=pcp_world_size,
-                max_num_batched_tokens=max_num_batched_tokens,
-                max_model_len=max_model_len,
+                **manager_kwargs,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -304,6 +319,7 @@ def get_kv_cache_coordinator(
             eagle_attn_layer_names=eagle_attn_layer_names,
             metrics_collector=metrics_collector,
             max_num_batched_tokens=max_num_batched_tokens,
+            scheduler_block_size=scheduler_block_size,
         )
 
     cp_enabled = dcp_world_size > 1 or pcp_world_size > 1
@@ -339,6 +355,7 @@ def get_kv_cache_coordinator(
         eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
         max_num_batched_tokens=max_num_batched_tokens,
+        scheduler_block_size=scheduler_block_size,
     )
 
 

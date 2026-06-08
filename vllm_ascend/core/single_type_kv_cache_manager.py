@@ -254,6 +254,9 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
+    if not vllm_version_is("0.21.0") and "scheduler_block_size" not in kwargs:
+        kwargs["scheduler_block_size"] = kv_cache_spec.block_size
+
     if vllm_version_is("0.21.0"):
         from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map  # type: ignore[import-not-found]
 
