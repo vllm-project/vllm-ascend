@@ -23,6 +23,19 @@ from vllm_ascend.quantization.methods.base import QuantType
 
 class TestMoECommMethod(TestBase):
     def setUp(self):
+        self.mock_ascend_config = MagicMock()
+        self.mock_ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant = False
+        self.mock_ascend_config.enable_fused_mc2 = False
+        self._patch_get_ascend_config = patch(
+            "vllm_ascend.ops.fused_moe.moe_comm_method.get_ascend_config",
+            return_value=self.mock_ascend_config,
+        )
+        self._patch_get_ascend_config_module = patch(
+            "vllm_ascend.ascend_config.get_ascend_config",
+            return_value=self.mock_ascend_config,
+        )
+        self._patch_get_ascend_config.start()
+        self._patch_get_ascend_config_module.start()
         # Mock FusedMoEConfig
         self.moe_config = MagicMock(spec=FusedMoEConfig)
         self.moe_config.num_experts = 8
@@ -36,6 +49,10 @@ class TestMoECommMethod(TestBase):
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
         self.moe_config.global_redundant_expert_num = 0
+
+    def tearDown(self):
+        self._patch_get_ascend_config.stop()
+        self._patch_get_ascend_config_module.stop()
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")

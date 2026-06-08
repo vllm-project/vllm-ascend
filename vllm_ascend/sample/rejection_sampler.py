@@ -652,6 +652,7 @@ def rejection_sample(
         # Fallback to original mode
         # This path should not be used in the new distributed flow
         vocab_size = target_logits.shape[-1]
+        global_vocab_size = draft_probs.shape[-1] if draft_probs is not None else vocab_size
 
         # Compute probability distribution from target logits
         target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
@@ -696,7 +697,7 @@ def rejection_sample(
                     is_greedy,
                     max_spec_len,
                     vocab_size,
-                    vocab_size,  # global_vocab_size
+                    global_vocab_size,  # global_vocab_size
                     batch_size,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=False,
@@ -734,7 +735,7 @@ def rejection_sample(
                     is_greedy,
                     max_spec_len,
                     vocab_size,
-                    vocab_size,  # global_vocab_size
+                    global_vocab_size,  # global_vocab_size
                     batch_size,
                     NO_DRAFT_PROBS=draft_probs is None,
                     ENABLE_REDUCE_SAMPLING=False,
