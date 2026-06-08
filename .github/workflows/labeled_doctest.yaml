@@ -19,7 +19,19 @@ name: Doc Test
 
 on:
   workflow_dispatch:
+    inputs:
+      doc_versions:
+        description: 'JSON array of Read the Docs versions to test, e.g. ["v0.18.0","latest"]'
+        required: true
+        type: string
+        default: '["v0.18.0","latest"]'
   workflow_call:
+    inputs:
+      doc_versions:
+        description: 'JSON array of Read the Docs versions to test'
+        required: false
+        type: string
+        default: '["v0.18.0","latest"]'
   pull_request:
     branches:
       - 'main'
@@ -28,9 +40,12 @@ on:
     paths:
       # If we are changing the doctest we should do a PR test
       - '.github/workflows/labeled_doctest.yaml'
+      - 'docs/source/conf.py'
       - 'tests/e2e/doctests/**'
       - 'tests/e2e/common.sh'
       - 'tests/e2e/run_doctests.sh'
+permissions:
+  contents: read
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -44,49 +59,223 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  setup-matrix:
+    name: Setup test matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set_matrix_pr.outputs.matrix || steps.set_matrix_doc.outputs.matrix }}
+    steps:
+      # PR runs should validate the PR content itself. The matrix is generated
+      # from this checkout instead of resolving a Read the Docs version.
+      - name: Checkout current source
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          path: matrix-src
+
+      - name: Set matrix (PR-driven)
+        if: github.event_name == 'pull_request'
+        id: set_matrix_pr
+        run: |
+          set -euo pipefail
+
+          matrix_file="$(mktemp)"
+          trap 'rm -f "${matrix_file}"' EXIT
+          echo '{"include":[]}' > "${matrix_file}"
+
+          doc_repository="${GITHUB_REPOSITORY}"
+          doc_version="pull_request"
+          doc_ref="${GITHUB_REF}"
+          doc_verbose_name="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          documentation_url=""
+          repo_dir="${GITHUB_WORKSPACE}/matrix-src"
+
+          vllm_ascend_version="$(python3 "${repo_dir}/docs/source/conf.py" \
+            | jq -r '.vllm_ascend_version // empty')"
+          if [ -z "${vllm_ascend_version}" ]; then
+            echo "Failed to resolve vllm_ascend_version from ${doc_ref}." >&2
+            exit 1
+          fi
+
+          for os_variant in ubuntu openeuler; do
+            if [ "${os_variant}" = "ubuntu" ]; then
+              image="quay.io/ascend/vllm-ascend:${vllm_ascend_version}"
+            else
+              image="quay.io/ascend/vllm-ascend:${vllm_ascend_version}-${os_variant}"
+            fi
+
+            next_matrix_file="$(mktemp)"
+            jq \
+              --arg doc_repository "${doc_repository}" \
+              --arg doc_version "${doc_version}" \
+              --arg doc_ref "${doc_ref}" \
+              --arg doc_verbose_name "${doc_verbose_name}" \
+              --arg documentation_url "${documentation_url}" \
+              --arg vllm_ascend_version "${vllm_ascend_version}" \
+              --arg os_variant "${os_variant}" \
+              --arg image "${image}" \
+              '.include += [{
+                doc_repository: $doc_repository,
+                doc_version: $doc_version,
+                doc_ref: $doc_ref,
+                doc_verbose_name: $doc_verbose_name,
+                documentation_url: $documentation_url,
+                vllm_ascend_version: $vllm_ascend_version,
+                os_variant: $os_variant,
+                image: $image
+              }]' "${matrix_file}" > "${next_matrix_file}"
+            mv "${next_matrix_file}" "${matrix_file}"
+          done
+
+          echo "Resolved PR-driven doctest matrix:"
+          jq . "${matrix_file}"
+
+          {
+            echo "matrix<<EOF"
+            jq -c . "${matrix_file}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set matrix (doc-driven)
+        if: github.event_name != 'pull_request'
+        id: set_matrix_doc
+        env:
+          INPUT_DOC_VERSIONS: ${{ inputs.doc_versions || '["v0.18.0","latest"]' }}
+        run: |
+          set -euo pipefail
+
+          matrix_file="$(mktemp)"
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${matrix_file}" "${workdir}"' EXIT
+          echo '{"include":[]}' > "${matrix_file}"
+
+          # Manual and scheduled runs are version-driven. Resolve each RTD
+          # version to the Git ref that owns the published documentation.
+          echo "${INPUT_DOC_VERSIONS}" | jq -e 'type == "array" and all(.[]; type == "string")' >/dev/null
+
+          while IFS= read -r doc_version; do
+            version_url="https://readthedocs.org/api/v3/projects/vllm-ascend/versions/${doc_version}/"
+            metadata_file="${workdir}/${doc_version}.json"
+            repo_dir="${workdir}/repo-${doc_version//[^A-Za-z0-9._-]/-}"
+
+            echo "Resolving Read the Docs version: ${doc_version}"
+            curl --fail --show-error --location \
+              --retry 3 \
+              --retry-delay 5 \
+              "${version_url}" \
+              -o "${metadata_file}"
+
+            doc_ref="$(jq -r '.identifier // empty' "${metadata_file}")"
+            doc_verbose_name="$(jq -r '.verbose_name // empty' "${metadata_file}")"
+            documentation_url="$(jq -r '.urls.documentation // empty' "${metadata_file}")"
+
+            if [ -z "${doc_ref}" ]; then
+              echo "Read the Docs version ${doc_version} does not have an identifier." >&2
+              exit 1
+            fi
+
+            git clone --depth 1 --branch "${doc_ref}" \
+              https://github.com/vllm-project/vllm-ascend.git "${repo_dir}"
+
+            doc_repository="vllm-project/vllm-ascend"
+            vllm_ascend_version="$(python3 "${repo_dir}/docs/source/conf.py" \
+              | jq -r '.vllm_ascend_version // empty')"
+            if [ -z "${vllm_ascend_version}" ]; then
+              echo "Failed to resolve vllm_ascend_version from ${doc_ref}." >&2
+              exit 1
+            fi
+
+            for os_variant in ubuntu openeuler; do
+              if [ "${os_variant}" = "ubuntu" ]; then
+                image="quay.io/ascend/vllm-ascend:${vllm_ascend_version}"
+              else
+                image="quay.io/ascend/vllm-ascend:${vllm_ascend_version}-${os_variant}"
+              fi
+
+              next_matrix_file="$(mktemp)"
+              jq \
+                --arg doc_repository "${doc_repository}" \
+                --arg doc_version "${doc_version}" \
+                --arg doc_ref "${doc_ref}" \
+                --arg doc_verbose_name "${doc_verbose_name}" \
+                --arg documentation_url "${documentation_url}" \
+                --arg vllm_ascend_version "${vllm_ascend_version}" \
+                --arg os_variant "${os_variant}" \
+                --arg image "${image}" \
+                '.include += [{
+                  doc_repository: $doc_repository,
+                  doc_version: $doc_version,
+                  doc_ref: $doc_ref,
+                  doc_verbose_name: $doc_verbose_name,
+                  documentation_url: $documentation_url,
+                  vllm_ascend_version: $vllm_ascend_version,
+                  os_variant: $os_variant,
+                  image: $image
+                }]' "${matrix_file}" > "${next_matrix_file}"
+              mv "${next_matrix_file}" "${matrix_file}"
+            done
+          done < <(echo "${INPUT_DOC_VERSIONS}" | jq -r '.[]')
+
+          echo "Resolved doc-driven doctest matrix:"
+          jq . "${matrix_file}"
+
+          {
+            echo "matrix<<EOF"
+            jq -c . "${matrix_file}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
   test:
+    needs: setup-matrix
     strategy:
       # Each version should be tested
       fail-fast: false
-      matrix:
-        vllm_version: [nightly-releases-v0.18.0, nightly-releases-v0.18.0-openeuler, nightly-main, nightly-main-openeuler]
-    name: vLLM Ascend test
+      matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
+    name: vLLM Ascend test (${{ matrix.doc_version }}, ${{ matrix.os_variant }})
     runs-on: linux-aarch64-a2b3-1
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_version }}
+      image: ${{ matrix.image }}
     steps:
+      # setup-matrix decides whether this is a PR ref or an RTD identifier, so
+      # the test job can use the same checkout step for both trigger types.
+      - name: Checkout doctest source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.doc_repository }}
+          ref: ${{ matrix.doc_ref }}
+          path: doctest-src
+
       - name: Check NPU/CANN and git info
         run: |
+          echo "====> Print doctest source info"
+          echo "Doc repository: ${{ matrix.doc_repository }}"
+          echo "Doc version: ${{ matrix.doc_version }}"
+          echo "Doc ref: ${{ matrix.doc_ref }}"
+          echo "Doc verbose name: ${{ matrix.doc_verbose_name }}"
+          echo "Documentation URL: ${{ matrix.documentation_url }}"
+          echo "vllm-ascend version: ${{ matrix.vllm_ascend_version }}"
+          echo "Container image: ${{ matrix.image }}"
+
           echo "====> Print NPU/CANN info"
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-          echo "====> Print vllm-ascend git info"
-          cd /vllm-workspace/vllm-ascend
-          git --no-pager log -1 || true
-          echo "====> Print vllm git info"
-          cd /vllm-workspace/vllm
-          git --no-pager log -1 || true
+          echo "====> Print doctest source git info"
+          git -C "${GITHUB_WORKSPACE}/doctest-src" --no-pager log -1
+          echo "====> Print doctest source version info"
+          python3 "${GITHUB_WORKSPACE}/doctest-src/docs/source/conf.py" | jq .
 
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
+          echo "====> Print container vllm-ascend git info"
+          git -C /vllm-workspace/vllm-ascend --no-pager log -1 || true
+          echo "====> Print container vllm git info"
+          git -C /vllm-workspace/vllm --no-pager log -1 || true
 
-      - name: Run vllm-ascend/tests/e2e/run_doctests.sh
+      - name: Run doctest source tests/e2e/run_doctests.sh
         run: |
-          # PWD: /__w/vllm-ascend/vllm-ascend
-          # Make sure e2e tests are latest
-          echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
-          rm -rf /vllm-workspace/vllm-ascend/tests/e2e
-          mkdir -p /vllm-workspace/vllm-ascend/tests
-          # Overwrite e2e and examples
-          cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
-          cp -r examples /vllm-workspace/vllm-ascend/
-          # We are now maintain version policy in the main, so we need to copy docs to make sure the doctest can be run successfully.
-          cp -r docs /vllm-workspace/vllm-ascend/
-
-          # Simulate container to enter directory
+          # Avoid putting the checkout root on Python's import path. The test
+          # should use doctest scripts from the checkout and packages installed
+          # in the container image.
           cd /workspace
 
-          # Run real test
           echo "Test:"
-          /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
+          bash "${GITHUB_WORKSPACE}/doctest-src/tests/e2e/run_doctests.sh"

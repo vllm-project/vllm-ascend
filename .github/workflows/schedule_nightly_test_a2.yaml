@@ -323,11 +323,6 @@ jobs:
         }}
       upload: false
 
-  doc-test:
-    name: doc-test
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    uses: ./.github/workflows/labeled_doctest.yaml
-
   clear-pre-logs:
     needs: [parse-trigger, multi-node-tests]
     runs-on: linux-aarch64-a2b3-0
