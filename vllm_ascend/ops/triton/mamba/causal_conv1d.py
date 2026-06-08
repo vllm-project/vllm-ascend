@@ -16,6 +16,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 if not HAS_TRITON:
