@@ -14,7 +14,7 @@ from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypeAlias, TypedDict, cast
 
 import msgspec
 import numpy as np
@@ -70,6 +70,9 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+
+FlatBlockIds: TypeAlias = list[int]
+NestedBlockIds: TypeAlias = list[list[int]] | list[tuple[int, ...]]
 
 
 class RemotePortInfo(TypedDict):
@@ -481,13 +484,17 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
-    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds | list[int]) -> None:
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds | FlatBlockIds) -> None:
         if local_block_ids and isinstance(local_block_ids[0], (list, tuple)):
+            grouped_block_ids = cast(NestedBlockIds, local_block_ids)
             flattened_block_ids: set[int] = {
-                block_id for group_block_ids in local_block_ids for block_id in group_block_ids
+                block_id
+                for group_block_ids in grouped_block_ids
+                for block_id in group_block_ids
             }
         else:
-            flattened_block_ids = set(local_block_ids) if local_block_ids else set()
+            flat_block_ids = cast(FlatBlockIds, local_block_ids)
+            flattened_block_ids = set(flat_block_ids) if flat_block_ids else set()
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
             self.invalid_block_ids.update(flattened_block_ids)

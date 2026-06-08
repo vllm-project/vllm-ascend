@@ -1008,9 +1008,10 @@ class NPUModelRunner(GPUModelRunner):
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
+        valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
         if (
             self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
+            and valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         ):
             self.prev_positions.copy_to_gpu(num_reqs)
@@ -1022,7 +1023,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_computed_tokens,
                 self.num_accepted_tokens.gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
-                self.valid_sampled_token_count_gpu,
+                valid_sampled_token_count_gpu,
                 self.prev_num_draft_tokens.gpu,
                 cpu_values,
             )
