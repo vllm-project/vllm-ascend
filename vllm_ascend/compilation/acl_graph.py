@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import torch
@@ -85,6 +86,13 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
+    _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
+
+    @classmethod
+    def clear_all_graphs(cls) -> None:
+        for instance in list(cls._all_instances):
+            instance.clear_graphs()
+
     def __init__(
         self,
         runnable: Callable,
@@ -118,6 +126,8 @@ class ACLGraphWrapper:
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
 
+        ACLGraphWrapper._all_instances.add(self)
+
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
@@ -131,6 +141,13 @@ class ACLGraphWrapper:
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
         return self.runnable
+
+    @property
+    def cudagraph_wrapper(self) -> "ACLGraphWrapper":
+        return self
+
+    def clear_graphs(self) -> None:
+        self.concrete_aclgraph_entries.clear()
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -300,6 +317,13 @@ class GraphParams:
 
 
 _graph_params: GraphParams | None = None
+
+
+def reset_graph_params():
+    global _graph_params, _draft_graph_params, _draft_graph_prefill_params
+    _graph_params = None
+    _draft_graph_params = None
+    _draft_graph_prefill_params = None
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):
