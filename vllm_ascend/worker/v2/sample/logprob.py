@@ -17,11 +17,16 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 
 
 @triton.jit
@@ -161,7 +166,7 @@ def compute_topk_logprobs(
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
     cu_num_logits: list[int] | None = None,
-    logprob_token_ids_state: object | None = None,
+    logprob_token_ids_state: "LogprobTokenIdsState | None" = None,
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
 ) -> LogprobsTensors:
