@@ -594,6 +594,7 @@ class NPUModelRunner310(NPUModelRunner):
         self,
         attention_backends,
         kv_cache_groups,
+        is_profiling=False,
     ) -> None:
         # 910B does not need this branch because runner/dispatcher query_len are
         # naturally consistent there. 310P ngram needs temporary alignment.
