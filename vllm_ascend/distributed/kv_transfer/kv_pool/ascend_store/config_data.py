@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -9,8 +10,10 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, BlockHashListWithBlockSize, KVCacheBlock
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
@@ -137,6 +140,28 @@ def get_cache_family_granularity(block_size: int, cache_family: str | None) -> i
     return block_size * infer_cache_family_ratio(cache_family)
 
 
+def _unwrap_spec(kv_cache_spec: Any) -> Any:
+    kv_cache_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
+    if kv_cache_specs is None:
+        return kv_cache_spec
+    return next(iter(kv_cache_specs.values()))
+
+
+class ExternalCachedBlockPool:
+    """Tiny BlockPool stand-in used for connector-side load masks."""
+
+    def __init__(self) -> None:
+        self.null_block = KVCacheBlock(block_id=0)
+        self._present_block = KVCacheBlock(block_id=1)
+
+    def get_cached_block(
+        self,
+        block_hash: BlockHash,
+        group_ids: list[int],
+    ) -> list[KVCacheBlock]:
+        return [self._present_block] * len(group_ids)
+
+
 def _get_layer_compress_ratio(
     layer_name: str,
     compress_ratios: Sequence[int] | None,
@@ -207,9 +232,14 @@ class ChunkedTokenDatabase:
         partitions: list[int] | None,
         use_hybrid: bool = False,
         hash_block_size: int | None = None,
+        kv_cache_groups: Sequence[Any] | None = None,
+        alignment_tokens: int | None = None,
+        retention_interval: int | None = None,
+        use_eagle: bool = False,
     ):
         self.metadata = metadata
         self.block_size = block_size if isinstance(block_size, list) else [block_size]
+        self.kv_cache_groups = list(kv_cache_groups or [])
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
         self.block_stride: list[int] = []
@@ -227,6 +257,13 @@ class ChunkedTokenDatabase:
         self.partitions = partitions
         self.use_hybrid = use_hybrid
         self.hash_block_size = self.block_size[0] if hash_block_size is None else hash_block_size
+        self.alignment_tokens = alignment_tokens if alignment_tokens is not None else max(self.block_size)
+        self.retention_interval = retention_interval
+        self.eagle_group_ids = {
+            idx for idx, group in enumerate(self.kv_cache_groups) if getattr(group, "is_eagle_group", False)
+        }
+        if use_eagle and not self.eagle_group_ids:
+            self.eagle_group_ids = set(range(len(self.kv_cache_groups)))
 
     def _make_key_by_hash(
         self,
@@ -289,7 +326,109 @@ class ChunkedTokenDatabase:
         if group_num_layers is not None:
             self.group_num_layers[cache_role] = group_num_layers.copy()
 
-    def _get_group_buffers(self, kv_cache_group_id: int, cache_role: str) -> tuple[list[int], list[int], list[int]]:
+    def _get_group_cache_family(self, kv_cache_group_id: int, cache_role: str = "kv") -> str:
+        return self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
+
+    def _get_store_granularity(self, kv_cache_group_id: int, cache_role: str = "kv") -> int:
+        return get_cache_family_granularity(
+            self.get_block_size(kv_cache_group_id),
+            self._get_group_cache_family(kv_cache_group_id, cache_role),
+        )
+
+    def _get_effective_group_spec(self, kv_cache_group_id: int, cache_role: str = "kv") -> Any | None:
+        if cache_role != "kv" or kv_cache_group_id >= len(self.kv_cache_groups):
+            return None
+        spec = _unwrap_spec(self.kv_cache_groups[kv_cache_group_id].kv_cache_spec)
+        store_granularity = self._get_store_granularity(kv_cache_group_id, cache_role)
+        if getattr(spec, "block_size", None) == store_granularity:
+            return spec
+        try:
+            return dataclasses.replace(spec, block_size=store_granularity)
+        except TypeError:
+            return spec
+
+    def _block_hashes_for_spec(
+        self,
+        block_hashes: BlockHashList | list[str],
+        spec: Any,
+    ) -> BlockHashList | list[str]:
+        block_size = getattr(spec, "block_size", self.hash_block_size)
+        if block_size == self.hash_block_size:
+            return block_hashes
+        if isinstance(block_hashes[0], str):
+            return get_block_hashes(block_hashes, block_size, self.hash_block_size)
+        return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, block_size)
+
+    def store_mask(
+        self,
+        aligned_token_len: int,
+        kv_cache_group_id: int,
+        num_prompt_tokens: int | None = None,
+        cache_role: str = "kv",
+    ) -> list[bool] | None:
+        """Return per-store-chunk retention mask for a KV cache group.
+
+        None means every chunk is reachable and should be stored. The block
+        size used here is AscendStore's key granularity, including DSV4 cache
+        family ratios such as c4/c128.
+        """
+        spec = self._get_effective_group_spec(kv_cache_group_id, cache_role)
+        if spec is None:
+            return None
+        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+        reachable_block_mask = getattr(manager_cls, "reachable_block_mask", None)
+        if reachable_block_mask is None:
+            return None
+        store_granularity = self._get_store_granularity(kv_cache_group_id, cache_role)
+        if aligned_token_len == 0:
+            return []
+        num_chunks = cdiv(aligned_token_len, store_granularity)
+        return reachable_block_mask(
+            start_block=0,
+            end_block=num_chunks,
+            alignment_tokens=self.alignment_tokens,
+            kv_cache_spec=spec,
+            use_eagle=kv_cache_group_id in self.eagle_group_ids,
+            retention_interval=self.retention_interval,
+            num_prompt_tokens=num_prompt_tokens,
+        )
+
+    def load_mask(
+        self,
+        block_hashes: BlockHashList | list[str],
+        token_len: int,
+        kv_cache_group_id: int,
+        cache_role: str = "kv",
+    ) -> list[bool] | None:
+        """Return per-store-chunk load mask for a KV cache group.
+
+        This mirrors MooncakeStore's load mask: only chunks a local manager
+        would populate at the external hit length are loaded.
+        """
+        if not block_hashes:
+            return []
+        spec = self._get_effective_group_spec(kv_cache_group_id, cache_role)
+        if spec is None:
+            return None
+        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+        if manager_cls is None:
+            return None
+        hashes = self._block_hashes_for_spec(block_hashes, spec)
+        cached_block_pool = ExternalCachedBlockPool()
+        hit_blocks = manager_cls.find_longest_cache_hit(
+            block_hashes=hashes,
+            max_length=token_len,
+            kv_cache_group_ids=[kv_cache_group_id],
+            block_pool=cast(BlockPool, cached_block_pool),
+            kv_cache_spec=spec,
+            drop_eagle_block=False,
+            alignment_tokens=self.alignment_tokens,
+        )
+        return [block is not cached_block_pool.null_block for block in hit_blocks[0]]
+
+    def _get_group_buffers(
+        self, kv_cache_group_id: int, cache_role: str = "kv"
+    ) -> tuple[list[int], list[int], list[int] | None]:
         if cache_role == "state":
             return [], [], []
         return (
@@ -523,6 +662,9 @@ class RequestTracker:
     # NOTE: This field will only be used when you enable kv-event
     token_ids: list[int] | None = None
 
+    # Full prompt length used by retention-aware external store masks.
+    num_prompt_tokens: int | None = None
+
     def __init__(
         self,
         req_id: str,
@@ -531,6 +673,7 @@ class RequestTracker:
         allocated_block_ids: list[int] | list[list[int]] | None = None,
         num_saved_tokens: int = 0,
         token_ids: list[int] | None = None,
+        num_prompt_tokens: int | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -540,6 +683,7 @@ class RequestTracker:
         self.allocated_block_ids_by_group = block_ids
         self.num_saved_tokens = num_saved_tokens
         self.token_ids = token_ids
+        self.num_prompt_tokens = num_prompt_tokens
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -561,6 +705,7 @@ class RequestTracker:
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=normalize_block_ids_by_group(new_request.block_ids),
             num_saved_tokens=0,
+            num_prompt_tokens=len(new_request.prompt_token_ids),
         )
 
     def update(
@@ -604,6 +749,7 @@ class ReqMeta:
     # TODO: add lora_request which used for gen lora_id/lora_name in kv event
     token_ids: list[int] | None = None
     original_block_size: list[int] | int | None = None
+    num_prompt_tokens: int | None = None
 
     def __init__(
         self,
@@ -621,6 +767,7 @@ class ReqMeta:
         disable_tp_key_sharding: bool = False,
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
+        num_prompt_tokens: int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
     ) -> None:
         self.req_id = req_id
@@ -639,6 +786,7 @@ class ReqMeta:
         self.disable_tp_key_sharding = disable_tp_key_sharding
         self.token_ids = token_ids
         self.original_block_size = original_block_size
+        self.num_prompt_tokens = num_prompt_tokens
 
     @property
     def block_ids(self) -> list[int]:
@@ -701,6 +849,7 @@ class ReqMeta:
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
             original_block_size=original_block_size,
+            num_prompt_tokens=tracker.num_prompt_tokens,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
             kv_cache_families_by_group=kv_cache_group_families,
         )

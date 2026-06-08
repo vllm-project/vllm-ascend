@@ -6,6 +6,7 @@ import threading
 from collections.abc import Generator
 
 import torch
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_decode_context_model_parallel_rank,
@@ -167,12 +168,23 @@ class KVPoolWorker:
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
 
+        spec_cfg = getattr(vllm_config, "speculative_config", None)
+        use_eagle = bool(
+            spec_cfg.use_eagle() if spec_cfg is not None and callable(getattr(spec_cfg, "use_eagle", None)) else False
+        )
+        kv_cache_groups = (
+            list(kv_cache_config.kv_cache_groups) if kv_cache_config is not None and self.use_hybrid else None
+        )
         self.token_database = ChunkedTokenDatabase(
             self.metadata,
             self.grouped_block_size,
             partitions,
             use_hybrid=self.use_hybrid,
             hash_block_size=self.hash_block_size,
+            kv_cache_groups=kv_cache_groups,
+            alignment_tokens=self.cache_transfer_granularity,
+            retention_interval=getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None),
+            use_eagle=use_eagle,
         )
 
         backend = backend_map.get(self.backend.lower())

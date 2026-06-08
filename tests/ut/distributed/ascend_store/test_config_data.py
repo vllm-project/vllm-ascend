@@ -17,6 +17,7 @@
 
 import hashlib
 import unittest
+from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -35,6 +36,35 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
+
+
+@dataclass
+class _FakeSpec:
+    block_size: int
+    manager_cls: type
+
+
+@dataclass
+class _FakeGroup:
+    kv_cache_spec: _FakeSpec
+    is_eagle_group: bool = False
+
+
+class _FakeMaskManager:
+    last_reachable_call = None
+    last_hit_call = None
+
+    @classmethod
+    def reachable_block_mask(cls, **kwargs):
+        cls.last_reachable_call = kwargs
+        return [idx % 2 == 1 for idx in range(kwargs["end_block"] - kwargs["start_block"])]
+
+    @classmethod
+    def find_longest_cache_hit(cls, **kwargs):
+        cls.last_hit_call = kwargs
+        block_pool = kwargs["block_pool"]
+        present = block_pool.get_cached_block(kwargs["block_hashes"][0], kwargs["kv_cache_group_ids"])[0]
+        return ([block_pool.null_block, present],)
 
 
 def _expected_grouped_hash(*block_hashes):
@@ -174,6 +204,50 @@ class TestChunkedTokenDatabase(unittest.TestCase):
 
         self.assertEqual(raw_keys, hex_keys)
 
+    def test_store_mask_uses_cache_family_store_granularity(self):
+        spec = _FakeSpec(block_size=8, manager_cls=_FakeMaskManager)
+        db = ChunkedTokenDatabase(
+            self.meta,
+            block_size=8,
+            partitions=None,
+            hash_block_size=8,
+            kv_cache_groups=[_FakeGroup(spec)],
+            alignment_tokens=32,
+            retention_interval=64,
+        )
+        db.set_group_buffers(
+            {0: [1000]},
+            {0: [80]},
+            group_cache_families={0: "c4"},
+        )
+
+        mask = db.store_mask(128, kv_cache_group_id=0, num_prompt_tokens=100)
+
+        self.assertEqual(mask, [False, True, False, True])
+        self.assertEqual(_FakeMaskManager.last_reachable_call["end_block"], 4)
+        self.assertEqual(_FakeMaskManager.last_reachable_call["kv_cache_spec"].block_size, 32)
+        self.assertEqual(_FakeMaskManager.last_reachable_call["alignment_tokens"], 32)
+        self.assertEqual(_FakeMaskManager.last_reachable_call["retention_interval"], 64)
+        self.assertEqual(_FakeMaskManager.last_reachable_call["num_prompt_tokens"], 100)
+
+    def test_load_mask_uses_manager_hit_semantics(self):
+        spec = _FakeSpec(block_size=16, manager_cls=_FakeMaskManager)
+        db = ChunkedTokenDatabase(
+            self.meta,
+            block_size=16,
+            partitions=None,
+            hash_block_size=16,
+            kv_cache_groups=[_FakeGroup(spec)],
+            alignment_tokens=64,
+        )
+        db.set_group_buffers({0: [1000]}, {0: [160]})
+
+        mask = db.load_mask([b"h0", b"h1"], token_len=32, kv_cache_group_id=0)
+
+        self.assertEqual(mask, [False, True])
+        self.assertEqual(_FakeMaskManager.last_hit_call["max_length"], 32)
+        self.assertEqual(_FakeMaskManager.last_hit_call["alignment_tokens"], 64)
+
     def test_get_block_hashes_rehashes_grouped_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
         self.assertEqual(
@@ -273,6 +347,7 @@ class TestRequestTracker(unittest.TestCase):
         self.assertEqual(tracker.allocated_block_ids, [10, 20, 30])
         self.assertEqual(len(tracker.token_ids), 48)
         self.assertEqual(tracker.num_saved_tokens, 0)
+        self.assertEqual(tracker.num_prompt_tokens, 100)
 
     def test_from_new_request_nested_block_ids(self):
         new_req = MagicMock()
@@ -312,6 +387,7 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
             token_ids=list(range(32)),
+            num_prompt_tokens=40,
         )
         meta = ReqMeta.from_request_tracker(tracker, block_size=16, block_hashes=[b"h1", b"h2"])
         self.assertIsNotNone(meta)
@@ -319,6 +395,7 @@ class TestReqMeta(unittest.TestCase):
         self.assertTrue(meta.can_save)
         self.assertEqual(meta.token_len_chunk, 32)
         self.assertIsNone(meta.load_spec)
+        self.assertEqual(meta.num_prompt_tokens, 40)
 
     def test_from_request_tracker_skip_save(self):
         tracker = RequestTracker(

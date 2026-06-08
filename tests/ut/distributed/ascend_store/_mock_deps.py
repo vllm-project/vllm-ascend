@@ -82,11 +82,13 @@ _vllm_mock_modules = [
     "vllm.v1.attention",
     "vllm.v1.attention.backend",
     "vllm.v1.core",
+    "vllm.v1.core.block_pool",
     "vllm.v1.core.kv_cache_manager",
     "vllm.v1.core.kv_cache_utils",
     "vllm.v1.core.sched",
     "vllm.v1.core.sched.output",
     "vllm.v1.kv_cache_interface",
+    "vllm.v1.kv_cache_spec_registry",
     "vllm.v1.outputs",
     "vllm.v1.request",
     "vllm.v1.serial_utils",
@@ -126,7 +128,39 @@ _events_mod.BlockStored = type(  # type: ignore[attr-defined]
 
 _kv_cache_utils_mod = sys.modules["vllm.v1.core.kv_cache_utils"]
 _kv_cache_utils_mod.BlockHash = bytes  # type: ignore[attr-defined]
+_kv_cache_utils_mod.BlockHashList = list  # type: ignore[attr-defined]
 _kv_cache_utils_mod.maybe_convert_block_hash = lambda x: x  # type: ignore[attr-defined]
+
+
+class _BlockHashListWithBlockSize(list):
+    def __init__(self, block_hashes, hash_block_size, block_size):
+        super().__init__(block_hashes)
+        self.hash_block_size = hash_block_size
+        self.block_size = block_size
+
+
+_kv_cache_utils_mod.BlockHashListWithBlockSize = _BlockHashListWithBlockSize  # type: ignore[attr-defined]
+
+_block_pool_mod = sys.modules["vllm.v1.core.block_pool"]
+_block_pool_mod.BlockPool = type("BlockPool", (), {})  # type: ignore[attr-defined]
+
+
+class _KVCacheBlock:
+    def __init__(self, block_id=0, **kwargs):
+        self.block_id = block_id
+        self.__dict__.update(kwargs)
+
+
+_kv_cache_utils_mod.KVCacheBlock = _KVCacheBlock  # type: ignore[attr-defined]
+
+
+class _KVCacheSpecRegistry:
+    @staticmethod
+    def get_manager_class(spec):
+        return getattr(spec, "manager_cls", None)
+
+
+sys.modules["vllm.v1.kv_cache_spec_registry"].KVCacheSpecRegistry = _KVCacheSpecRegistry  # type: ignore[attr-defined]
 
 _sched_output_mod = sys.modules["vllm.v1.core.sched.output"]
 _sched_output_mod.NewRequestData = MagicMock  # type: ignore[attr-defined]
