@@ -561,11 +561,6 @@ def rejection_sample(
         target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
         assert target_probs.is_contiguous()
 
-        if using_entropy_verify and ori_target_logits is not None:
-            ori_target_probs = ori_target_logits.softmax(dim=-1, dtype=torch.float32)
-        else:
-            ori_target_probs = target_probs
-
         # Generate uniform probabilities for rejection sampling
         uniform_probs = generate_uniform_probs(
             num_tokens,
