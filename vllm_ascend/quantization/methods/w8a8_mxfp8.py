@@ -76,9 +76,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
         if isinstance(x, tuple):
-           quantized_x, pertoken_scale = x
-           original_shape = quantized_x.shape
-           output_dtype = torch.bfloat16
+            quantized_x, pertoken_scale = x
+            original_shape = quantized_x.shape
+            output_dtype = torch.bfloat16
         else:
             # reshape x for Qwen VL models
             original_shape = x.shape
@@ -92,7 +92,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             layer.weight,
             layer.weight_scale,
             scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-            pertoken_scale=dynamic_scale,
+            pertoken_scale=pertoken_scale,
             pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             bias=bias,
             output_dtype=output_dtype,
