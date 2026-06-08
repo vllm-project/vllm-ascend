@@ -462,7 +462,12 @@ class FinegrainedTPConfig:
             self.olora_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
-            if not vllm_config.model_config.is_moe:
+            # If it is a dense model, then expert parallel is not needed,
+            # and data parallel is also not needed. If the data parallel size is set
+            # to greater than 1 in the model launch configuration, its value will be changed to 1 later. 
+            # This will cause an issue when lmhead parallel is enabled, as the lmhead
+            # cannot be split into the data parallel communication group, leading to an error.
+            if module_tp_size > 0 and not vllm_config.model_config.is_moe:
                 raise AssertionError("The lmhead parallel feature can be enabled only for MOE models.")
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
                 raise AssertionError("lmhead_tensor_parallel_size must divide by data_parallel_size.")
