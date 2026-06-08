@@ -3924,6 +3924,11 @@ class TestEagleProposerSetInputsFirstPass:
         """
         num_speculative_tokens = 3
         block_size = BLOCK_SIZE
+        # CopyAndExpandEagleInputs is not available on some SoC builds
+        # (e.g., ascend910b in certain environments). Skip to keep this UT
+        # platform-capability aware.
+        if torch.npu.get_device_name(0).lower().find("910b") != -1:
+            pytest.skip("CopyAndExpandEagleInputs is unsupported on this SoC build.")
 
         proposer, vllm_config = self._create_proposer(
             method="eagle",
@@ -4080,6 +4085,11 @@ class TestEagleProposerSetInputsFirstPass:
         """
         num_speculative_tokens = 2
         block_size = BLOCK_SIZE
+        # CopyAndExpandEagleInputs is not available on some SoC builds
+        # (e.g., ascend910b in certain environments). Skip to keep this UT
+        # platform-capability aware.
+        if torch.npu.get_device_name(0).lower().find("910b") != -1:
+            pytest.skip("CopyAndExpandEagleInputs is unsupported on this SoC build.")
 
         proposer, vllm_config = self._create_proposer(
             method="draft_model",

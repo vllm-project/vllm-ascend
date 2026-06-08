@@ -18,6 +18,7 @@
 #
 
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -27,7 +28,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -84,6 +85,7 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_ver
 if not vllm_version_is("0.20.2"):
     from vllm.v1.outputs import RoutedExpertsLists
 from vllm.v1.sample.logits_processor import build_logitsprocs
+from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -133,6 +135,7 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.llm_base_proposer import _FusedModelWithMTP
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -231,11 +234,12 @@ class ExecuteModelState(NamedTuple):
     sample_tokens(), after execute_model() returns None."""
 
     scheduler_output: "SchedulerOutput"
-    logits: torch.Tensor
+    logits: torch.Tensor | None
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
+    sample_positions: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     attn_metadata: "PerLayerAttnMetadata"
     positions: torch.Tensor
@@ -516,6 +520,9 @@ class NPUModelRunner(GPUModelRunner):
         self.execute_model_state: ExecuteModelState | None = None
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
+        self._fused_mtp_wrapper: _FusedModelWithMTP | None = None
+        self._used_fused_mtp_graph_sampler_output = False
+        self._fused_mtp_graph_outputs_ready = False
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
         self.query_lens: torch.Tensor | None = None
@@ -634,9 +641,606 @@ class NPUModelRunner(GPUModelRunner):
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
-        if isinstance(self.model, ACLGraphWrapper):
-            return self.model.unwrap()
-        return self.model
+        model = self.model
+        if isinstance(model, ACLGraphWrapper):
+            model = model.unwrap()
+        if isinstance(model, _FusedModelWithMTP):
+            model = model.raw_model
+        return model
+
+    @staticmethod
+    def _fused_mtp_full_graph_enabled() -> bool:
+        raw_enabled = os.environ.get(
+            "VLLM_ASCEND_ENABLE_FUSED_MTP_FULL_GRAPH", "0")
+        return raw_enabled.strip().lower() in ("1", "true", "yes", "on")
+
+    def _get_fused_mtp_sampling_block_reason(self,
+                                             sampling_metadata) -> str | None:
+        if sampling_metadata.all_greedy:
+            return None
+        if getattr(sampling_metadata, "seeds", None) is None:
+            return "non_greedy_without_seeds"
+        return None
+
+    def _get_fused_mtp_draft_path_block_reason(
+        self,
+        grammar_output,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> str | None:
+        if self._fused_mtp_wrapper is None or self.drafter is None:
+            return "no_wrapper_or_drafter"
+        if self.speculative_config is None or self.speculative_config.method != "mtp":
+            return f"spec_method={getattr(self.speculative_config, 'method', None)}"
+        if spec_decode_metadata is None:
+            return "no_spec_decode_metadata"
+        if not self._fused_mtp_graph_outputs_ready:
+            return "graph_outputs_not_ready"
+        if grammar_output is not None:
+            return "grammar_output"
+
+        sampling_metadata = self.input_batch.sampling_metadata
+        if sampling_metadata.max_num_logprobs is not None:
+            return f"logprobs={sampling_metadata.max_num_logprobs}"
+        logitsprocs = getattr(sampling_metadata, "logitsprocs", None)
+        if logitsprocs is not None and bool(
+            getattr(logitsprocs, "argmax_invariant", False)
+        ):
+            return "argmax_invariant_logitsproc"
+        sampling_block_reason = self._get_fused_mtp_sampling_block_reason(
+            sampling_metadata)
+        if sampling_block_reason is not None:
+            return sampling_block_reason
+        if not sampling_metadata.no_penalties:
+            return "penalties"
+        if sampling_metadata.allowed_token_ids_mask is not None:
+            return "allowed_token_ids"
+        if sampling_metadata.bad_words_token_ids:
+            return "bad_words"
+        if self._has_active_non_argmax_invariant_logitprocs(sampling_metadata):
+            return "non_argmax_invariant_logitsproc"
+        return None
+
+    def _can_use_fused_mtp_draft_path(
+        self,
+        grammar_output,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> bool:
+        return self._get_fused_mtp_draft_path_block_reason(
+            grammar_output, spec_decode_metadata) is None
+
+    def _should_defer_fused_mtp_logits(
+        self,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> bool:
+        return self._get_fused_mtp_draft_path_block_reason(
+            None, spec_decode_metadata) is None
+
+    def _compute_deferred_logits(
+        self,
+        logits: torch.Tensor | None,
+        sample_hidden_states: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if logits is not None:
+            return logits
+        assert sample_hidden_states is not None
+        return self.model.compute_logits(sample_hidden_states)
+
+    def _build_fused_mtp_sampler_output(self) -> SamplerOutput:
+        wrapper = self._fused_mtp_wrapper
+        assert wrapper is not None
+        num_reqs = self.input_batch.num_reqs
+        sampled_token_ids = wrapper.sampled_token_ids_buf[:num_reqs].clone()
+        if self.num_discarded_requests > 0:
+            discard_indices = self.discard_request_indices.gpu[
+                :self.num_discarded_requests].to(torch.long)
+            sampled_token_ids.index_fill_(0, discard_indices, -1)
+        return SamplerOutput(
+            sampled_token_ids=sampled_token_ids,
+            logprobs_tensors=None,
+        )
+
+    def _is_fused_mtp_uniform_decode_graph_batch(
+        self,
+        batch_descriptor: BatchDescriptor | None,
+    ) -> bool:
+        wrapper = self._fused_mtp_wrapper
+        if wrapper is None or batch_descriptor is None:
+            return False
+        if self.num_spec_tokens <= 0:
+            return False
+        decode_query_len = self.num_spec_tokens + 1
+        num_tokens = batch_descriptor.num_tokens
+        if num_tokens % decode_query_len != 0:
+            return False
+        padded_num_reqs = num_tokens // decode_query_len
+        actual_num_reqs = int(getattr(self.input_batch, "num_reqs", 0))
+        if padded_num_reqs < actual_num_reqs:
+            return False
+        if batch_descriptor.num_reqs is not None and padded_num_reqs < int(
+                batch_descriptor.num_reqs):
+            return False
+        max_graph_reqs = min(
+            wrapper.bonus_row_indices_buf.shape[0],
+            wrapper.next_token_ids_buf.shape[0],
+            wrapper.cu_num_draft_tokens_buf.shape[0],
+            wrapper.sampled_token_ids_buf.shape[0],
+        )
+        return padded_num_reqs <= max_graph_reqs
+
+    def _get_fused_mtp_partial_decode_graph_tokens(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        max_num_scheduled_tokens: int,
+        is_all_decode: bool,
+        force_uniform_decode: bool | None,
+    ) -> int | None:
+        if force_uniform_decode is not None:
+            return None
+        if self._fused_mtp_wrapper is None:
+            return None
+        if not self._fused_mtp_full_graph_enabled():
+            return None
+        if self.speculative_config is None or self.speculative_config.method != "mtp":
+            return None
+        if not is_all_decode:
+            return None
+        decode_query_len = self.num_spec_tokens + 1
+        if decode_query_len <= 1:
+            return None
+        if max_num_scheduled_tokens != decode_query_len:
+            return None
+        graph_tokens = decode_query_len * num_reqs
+        if graph_tokens <= num_tokens:
+            return None
+        max_capture_size = getattr(
+            self.compilation_config, "max_cudagraph_capture_size", None)
+        if max_capture_size is not None and graph_tokens > max_capture_size:
+            return None
+        return graph_tokens
+
+    def _pad_fused_mtp_graph_inputs(
+        self,
+        num_actual_tokens: int,
+        num_tokens_padded: int,
+    ) -> None:
+        if num_tokens_padded <= num_actual_tokens:
+            return
+        start = int(num_actual_tokens)
+        end = int(num_tokens_padded)
+
+        input_ids = getattr(self, "input_ids", None)
+        if input_ids is not None:
+            input_ids_gpu = getattr(input_ids, "gpu", None)
+            if torch.is_tensor(input_ids_gpu):
+                input_ids_gpu_tensor = cast(torch.Tensor, input_ids_gpu)
+                input_ids_gpu_tensor[start:end].fill_(0)
+            input_ids_cpu = getattr(input_ids, "cpu", None)
+            if torch.is_tensor(input_ids_cpu):
+                input_ids_cpu_tensor = cast(torch.Tensor, input_ids_cpu)
+                input_ids_cpu_tensor[start:end].fill_(0)
+
+        pad_position = 127 if self.use_compress else 0
+        if self.uses_mrope:
+            positions = getattr(self, "mrope_positions", None)
+            if positions is not None:
+                positions_gpu = getattr(positions, "gpu", None)
+                if torch.is_tensor(positions_gpu):
+                    positions_gpu_tensor = cast(torch.Tensor, positions_gpu)
+                    positions_gpu_tensor[:, start:end].fill_(0)
+                positions_cpu = getattr(positions, "cpu", None)
+                if torch.is_tensor(positions_cpu):
+                    positions_cpu_tensor = cast(torch.Tensor, positions_cpu)
+                    positions_cpu_tensor[:, start:end].fill_(0)
+            return
+        if self.uses_xdrope_dim > 0:
+            positions = getattr(self, "xdrope_positions", None)
+            if positions is not None:
+                positions_gpu = getattr(positions, "gpu", None)
+                if torch.is_tensor(positions_gpu):
+                    positions_gpu_tensor = cast(torch.Tensor, positions_gpu)
+                    positions_gpu_tensor[:, start:end].fill_(0)
+                positions_cpu = getattr(positions, "cpu", None)
+                if torch.is_tensor(positions_cpu):
+                    positions_cpu_tensor = cast(torch.Tensor, positions_cpu)
+                    positions_cpu_tensor[:, start:end].fill_(0)
+            return
+        positions = getattr(self, "positions", None)
+        if positions is None:
+            return
+        positions_gpu = getattr(positions, "gpu", None)
+        if torch.is_tensor(positions_gpu):
+            positions_gpu_tensor = cast(torch.Tensor, positions_gpu)
+            positions_gpu_tensor[start:end].fill_(pad_position)
+        positions_cpu = getattr(positions, "cpu", None)
+        if torch.is_tensor(positions_cpu):
+            positions_cpu_tensor = cast(torch.Tensor, positions_cpu)
+            positions_cpu_tensor[start:end].fill_(pad_position)
+        positions_np = getattr(positions, "np", None)
+        if positions_np is not None:
+            positions_np[start:end] = pad_position
+        if torch.is_tensor(positions):
+            positions[start:end].fill_(pad_position)
+
+    def _materialize_fused_draft_token_ids(
+        self,
+        scheduler_output: SchedulerOutput,
+        draft_token_ids: torch.Tensor,
+    ) -> None:
+        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+        if not self.use_cp and not self.use_async_scheduling:
+            self._draft_token_ids = draft_token_ids.to("cpu").tolist()
+            return
+        self._draft_token_ids = draft_token_ids
+        self._copy_draft_token_ids_to_cpu(scheduler_output)
+
+    def _has_active_non_argmax_invariant_logitprocs(
+        self,
+        sampling_metadata: SamplingMetadata,
+    ) -> bool:
+        logitsprocs = getattr(sampling_metadata, "logitsprocs", None)
+        processors = getattr(logitsprocs, "non_argmax_invariant", ())
+        for logitsproc in processors:
+            if isinstance(logitsproc, MinTokensLogitsProcessor):
+                if logitsproc.min_toks:
+                    return True
+                continue
+            return True
+        return False
+
+    def _build_sampling_idx_mapping(
+        self,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        num_rows: int,
+    ) -> torch.Tensor:
+        if spec_decode_metadata is None:
+            return torch.arange(num_rows, dtype=torch.int32, device=self.device)
+        repeat_counts = np.asarray(
+            [
+                num_drafts + 1
+                for num_drafts in spec_decode_metadata.num_draft_tokens
+            ],
+            dtype=np.int32,
+        )
+        req_indices: np.ndarray[Any, np.dtype[np.int32]] = np.arange(
+            repeat_counts.shape[0], dtype=np.int32
+        )
+        idx_mapping: np.ndarray[Any, np.dtype[np.int32]] = np.repeat(
+            req_indices, repeat_counts
+        )
+        if idx_mapping.shape[0] > num_rows:
+            idx_mapping = idx_mapping[:num_rows]
+        elif idx_mapping.shape[0] < num_rows:
+            idx_mapping = np.pad(
+                idx_mapping,
+                (0, num_rows - idx_mapping.shape[0]),
+                mode="constant",
+            )
+        idx_mapping_tensor = torch.from_numpy(idx_mapping)
+        if self.device.type == "cpu":
+            return idx_mapping_tensor
+        return idx_mapping_tensor.pin_memory().to(
+            self.device, non_blocking=True)
+
+    def _attach_sampling_runtime_metadata(
+        self,
+        sampling_metadata: SamplingMetadata,
+        sample_positions: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> None:
+        sampling_metadata._ascend_positions = sample_positions.to(torch.int32)
+        sampling_metadata._ascend_idx_mapping = self._build_sampling_idx_mapping(
+            spec_decode_metadata, sample_positions.shape[0]
+        )
+
+    def _get_seq_lens_device_view(self,
+                                  num_reqs: int | None = None) -> torch.Tensor:
+        seq_lens = self.seq_lens
+        seq_lens_gpu = getattr(seq_lens, "gpu", None)
+        if torch.is_tensor(seq_lens_gpu):
+            tensor = seq_lens_gpu
+        elif torch.is_tensor(seq_lens):
+            tensor = seq_lens
+        else:
+            raise TypeError(f"Unsupported seq_lens type: {type(seq_lens)!r}")
+        if num_reqs is None:
+            return tensor
+        tensor_view = cast(torch.Tensor, tensor)
+        return tensor_view[:num_reqs]
+
+    def _get_seq_lens_cpu_view(self,
+                               num_reqs: int | None = None) -> torch.Tensor:
+        seq_lens = self.seq_lens
+        seq_lens_cpu = getattr(seq_lens, "cpu", None)
+        if torch.is_tensor(seq_lens_cpu):
+            tensor = seq_lens_cpu
+        else:
+            tensor = None
+
+        if tensor is None and self._seq_lens_cpu_event_pending:
+            if self._seq_lens_cpu_event is not None:
+                self._seq_lens_cpu_event.synchronize()
+            self._seq_lens_cpu_event_pending = False
+            optimistic_seq_lens_cpu = getattr(self, "optimistic_seq_lens_cpu",
+                                              None)
+            if torch.is_tensor(optimistic_seq_lens_cpu):
+                tensor = optimistic_seq_lens_cpu
+
+        if tensor is None and not self.use_async_spec_decode:
+            optimistic_seq_lens_cpu = getattr(self, "optimistic_seq_lens_cpu",
+                                              None)
+            if torch.is_tensor(optimistic_seq_lens_cpu):
+                tensor = optimistic_seq_lens_cpu
+
+        if tensor is None and torch.is_tensor(seq_lens):
+            tensor = seq_lens if num_reqs is None else seq_lens[:num_reqs]
+            return tensor.detach().cpu()
+
+        if tensor is None and callable(seq_lens_cpu):
+            maybe_tensor = seq_lens_cpu()
+            if torch.is_tensor(maybe_tensor):
+                tensor = maybe_tensor
+
+        if tensor is None:
+            raise TypeError(f"Unsupported seq_lens type: {type(seq_lens)!r}")
+        if num_reqs is None:
+            return tensor
+        return tensor[:num_reqs]
+
+    def _prepare_fused_mtp_runtime_buffers(
+        self,
+        logits_indices: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
+        num_tokens_padded: int | None = None,
+    ) -> None:
+        wrapper = self._fused_mtp_wrapper
+        assert wrapper is not None
+        wrapper_ref: _FusedModelWithMTP = wrapper
+
+        num_reqs = self.input_batch.num_reqs
+        active_num_tokens = int(logits_indices.shape[0])
+        if spec_decode_common_attn_metadata is not None:
+            active_num_tokens = min(
+                active_num_tokens,
+                int(getattr(spec_decode_common_attn_metadata,
+                            "num_actual_tokens", active_num_tokens)),
+            )
+        if num_tokens_padded is not None:
+            active_num_tokens = min(active_num_tokens, int(num_tokens_padded))
+
+        wrapper.num_reqs_buf[0] = num_reqs
+        wrapper.num_actual_tokens_buf[0] = active_num_tokens
+        wrapper.target_logits_indices_buf[:num_reqs].fill_(-1)
+        wrapper.spec_decode_token_ids_buf[:num_reqs].zero_()
+        wrapper.discarded_req_mask_buf[:num_reqs].zero_()
+        wrapper.cu_num_draft_tokens_buf[:num_reqs].zero_()
+        wrapper.bonus_row_indices_buf.zero_()
+        wrapper.num_sample_rows_buf.zero_()
+        wrapper.num_target_rows_buf.zero_()
+        wrapper.sample_logits_indices_buf.zero_()
+        wrapper.sample_idx_mapping_buf.zero_()
+        wrapper.target_row_indices_buf.zero_()
+        wrapper.draft_token_ids_flat_buf.zero_()
+        wrapper.draft_token_ids_buf.zero_()
+        wrapper.next_token_ids_buf.zero_()
+        wrapper.valid_sampled_tokens_count_buf.zero_()
+        wrapper.sampled_token_ids_buf.fill_(-1)
+
+        if (
+            spec_decode_common_attn_metadata is not None
+            and self.drafter is not None
+            and hasattr(self.drafter, "slot_mapping_group")
+            and self.drafter.slot_mapping_group
+        ):
+            slot_mapping = getattr(
+                spec_decode_common_attn_metadata, "slot_mapping", None)
+            if torch.is_tensor(slot_mapping):
+                slot_mapping_tensor = cast(torch.Tensor, slot_mapping)
+                mtp_slot_mapping = self.drafter.slot_mapping_group[0]
+                slot_mapping_len = min(
+                    active_num_tokens,
+                    slot_mapping_tensor.shape[0],
+                    mtp_slot_mapping.shape[0],
+                )
+                mtp_slot_mapping[:slot_mapping_len].copy_(
+                    slot_mapping_tensor[:slot_mapping_len].to(
+                        dtype=mtp_slot_mapping.dtype,
+                        device=mtp_slot_mapping.device,
+                    ))
+                mtp_slot_mapping[slot_mapping_len:].fill_(0)
+
+        seq_lens_cpu = None
+        if spec_decode_common_attn_metadata is not None:
+            seq_lens_cpu = getattr(spec_decode_common_attn_metadata,
+                                   "seq_lens_cpu", None)
+        if seq_lens_cpu is None:
+            seq_lens_cpu = self._get_seq_lens_cpu_view(num_reqs)
+
+        dummy_sample_idx = wrapper.sample_idx_mapping_buf.shape[0] - 1
+
+        def fill_padded_logits_indices() -> None:
+            if num_tokens_padded is None or self.num_spec_tokens <= 0:
+                return
+            decode_query_len = self.num_spec_tokens + 1
+            if num_tokens_padded % decode_query_len != 0:
+                return
+            max_graph_reqs = min(
+                wrapper_ref.bonus_row_indices_buf.shape[0],
+                wrapper_ref.next_token_ids_buf.shape[0],
+                wrapper_ref.cu_num_draft_tokens_buf.shape[0],
+                wrapper_ref.sampled_token_ids_buf.shape[0],
+            )
+            padded_num_reqs = num_tokens_padded // decode_query_len
+            if padded_num_reqs > max_graph_reqs:
+                return
+            padded_num_reqs = max(num_reqs, padded_num_reqs)
+            if padded_num_reqs > num_reqs:
+                wrapper_ref.logits_indices_buf[num_reqs:padded_num_reqs].zero_()
+
+        def fill_padded_sample_rows(num_sample_rows: int) -> None:
+            if num_tokens_padded is None:
+                return
+            pad_end = min(
+                int(num_tokens_padded),
+                wrapper_ref.sample_logits_indices_buf.shape[0],
+                wrapper_ref.sample_idx_mapping_buf.shape[0],
+            )
+            num_sample_rows = min(int(num_sample_rows), pad_end)
+            if pad_end <= num_sample_rows:
+                return
+            wrapper_ref.sample_logits_indices_buf[num_sample_rows:pad_end].zero_()
+            wrapper_ref.sample_idx_mapping_buf[
+                num_sample_rows:pad_end].fill_(dummy_sample_idx)
+
+        backup_next_token_ids = np.array(
+            [
+                self.requests[self.input_batch.req_ids[i]].get_token_id(
+                    seq_lens_cpu[i].item())
+                for i in range(num_reqs)
+            ],
+            dtype=np.int64,
+        )
+        wrapper.backup_next_token_ids_buf[:num_reqs].copy_(
+            torch.from_numpy(backup_next_token_ids).to(self.device))
+
+        if self.num_discarded_requests > 0:
+            discard_indices = self.discard_request_indices.gpu[
+                :self.num_discarded_requests].to(torch.long)
+            wrapper.discarded_req_mask_buf[discard_indices] = True
+
+        if spec_decode_metadata is not None:
+            bonus_positions = logits_indices[
+                spec_decode_metadata.bonus_logits_indices]
+            wrapper.logits_indices_buf[:bonus_positions.shape[0]].copy_(
+                bonus_positions)
+            fill_padded_logits_indices()
+            wrapper.bonus_row_indices_buf[:num_reqs].copy_(
+                spec_decode_metadata.bonus_logits_indices.to(torch.int64))
+            sample_positions = logits_indices[
+                spec_decode_metadata.logits_indices].to(torch.int64)
+            wrapper.sample_logits_indices_buf[:sample_positions.shape[0]].copy_(
+                sample_positions)
+            wrapper.num_sample_rows_buf[0] = sample_positions.shape[0]
+            sample_idx_mapping = self._build_sampling_idx_mapping(
+                spec_decode_metadata, sample_positions.shape[0])
+            wrapper.sample_idx_mapping_buf[:sample_idx_mapping.shape[0]].copy_(
+                sample_idx_mapping)
+            wrapper.cu_num_draft_tokens_buf[:num_reqs].copy_(
+                spec_decode_metadata.cu_num_draft_tokens.to(torch.int32))
+            if num_reqs < wrapper.cu_num_draft_tokens_buf.shape[0]:
+                wrapper.cu_num_draft_tokens_buf[num_reqs:].fill_(
+                    spec_decode_metadata.cu_num_draft_tokens[-1].to(
+                        torch.int32))
+            target_row_indices = (
+                spec_decode_metadata.target_logits_indices.to(torch.int64))
+            wrapper.target_row_indices_buf[:target_row_indices.shape[0]].copy_(
+                target_row_indices)
+            wrapper.num_target_rows_buf[0] = target_row_indices.shape[0]
+            wrapper.draft_token_ids_flat_buf[
+                :spec_decode_metadata.draft_token_ids.shape[0]].copy_(
+                    spec_decode_metadata.draft_token_ids.to(torch.int64))
+            target_positions = logits_indices[
+                spec_decode_metadata.target_logits_indices].to(torch.int64)
+            draft_token_ids = spec_decode_metadata.draft_token_ids.to(
+                torch.int64)
+            fill_padded_sample_rows(sample_positions.shape[0])
+            draft_offset = 0
+            for req_idx, num_drafts in enumerate(
+                    spec_decode_metadata.num_draft_tokens):
+                if num_drafts <= 0:
+                    continue
+                next_offset = draft_offset + num_drafts
+                wrapper.target_logits_indices_buf[
+                    req_idx, :num_drafts] = target_positions[
+                        draft_offset:next_offset]
+                wrapper.spec_decode_token_ids_buf[
+                    req_idx, :num_drafts] = draft_token_ids[
+                        draft_offset:next_offset]
+                draft_offset = next_offset
+            return
+
+        wrapper.logits_indices_buf[:logits_indices.shape[0]].copy_(
+            logits_indices[:logits_indices.shape[0]])
+        fill_padded_logits_indices()
+        wrapper.sample_logits_indices_buf[:logits_indices.shape[0]].copy_(
+            logits_indices[:logits_indices.shape[0]])
+        wrapper.num_sample_rows_buf[0] = logits_indices.shape[0]
+        fill_padded_sample_rows(logits_indices.shape[0])
+        wrapper.bonus_row_indices_buf[:num_reqs].copy_(
+            torch.arange(num_reqs, dtype=torch.int64, device=self.device))
+        wrapper.sample_idx_mapping_buf[:num_reqs].copy_(
+            torch.arange(num_reqs, dtype=torch.int32, device=self.device))
+
+    def _prepare_fused_mtp_capture_buffers(
+        self,
+        num_tokens_padded: int,
+    ) -> None:
+        wrapper = self._fused_mtp_wrapper
+        if wrapper is None or self.num_spec_tokens <= 0:
+            return
+        decode_query_len = self.num_spec_tokens + 1
+        if num_tokens_padded % decode_query_len != 0:
+            return
+        padded_num_reqs = num_tokens_padded // decode_query_len
+        max_graph_reqs = min(
+            wrapper.bonus_row_indices_buf.shape[0],
+            wrapper.next_token_ids_buf.shape[0],
+            wrapper.cu_num_draft_tokens_buf.shape[0],
+            wrapper.sampled_token_ids_buf.shape[0],
+        )
+        if padded_num_reqs <= 0 or padded_num_reqs > max_graph_reqs:
+            return
+
+        device = self.device
+        dummy_sample_idx = wrapper.sample_idx_mapping_buf.shape[0] - 1
+        wrapper.logits_indices_buf.zero_()
+        wrapper.sample_logits_indices_buf.zero_()
+        wrapper.sample_idx_mapping_buf.fill_(dummy_sample_idx)
+        wrapper.bonus_row_indices_buf.zero_()
+        wrapper.target_row_indices_buf.zero_()
+        wrapper.cu_num_draft_tokens_buf.zero_()
+        wrapper.target_logits_indices_buf.fill_(-1)
+        wrapper.spec_decode_token_ids_buf.zero_()
+        wrapper.draft_token_ids_flat_buf.zero_()
+        wrapper.backup_next_token_ids_buf.zero_()
+        wrapper.discarded_req_mask_buf.zero_()
+        wrapper.sampled_token_ids_buf.fill_(-1)
+        wrapper.draft_token_ids_buf.zero_()
+        wrapper.next_token_ids_buf.zero_()
+        wrapper.valid_sampled_tokens_count_buf.zero_()
+
+        req_indices = torch.arange(
+            padded_num_reqs, dtype=torch.int64, device=device)
+        row_offsets = torch.arange(
+            num_tokens_padded, dtype=torch.int64, device=device)
+        bonus_positions = req_indices * decode_query_len + (
+            decode_query_len - 1)
+        target_positions = req_indices * decode_query_len
+        target_position_matrix = (
+            target_positions.unsqueeze(1) + torch.arange(
+                self.num_spec_tokens, dtype=torch.int64,
+                device=device).unsqueeze(0))
+
+        wrapper.num_reqs_buf[0] = padded_num_reqs
+        wrapper.num_actual_tokens_buf[0] = num_tokens_padded
+        wrapper.num_sample_rows_buf[0] = num_tokens_padded
+        wrapper.num_target_rows_buf[0] = padded_num_reqs * self.num_spec_tokens
+        wrapper.logits_indices_buf[:padded_num_reqs].copy_(bonus_positions)
+        wrapper.sample_logits_indices_buf[:num_tokens_padded].copy_(
+            row_offsets)
+        wrapper.bonus_row_indices_buf[:padded_num_reqs].copy_(bonus_positions)
+        wrapper.target_row_indices_buf[
+            :padded_num_reqs * self.num_spec_tokens].copy_(
+                target_position_matrix.reshape(-1))
+        wrapper.sample_idx_mapping_buf[:num_tokens_padded].copy_(
+            torch.repeat_interleave(
+                req_indices.to(torch.int32), decode_query_len))
+        wrapper.cu_num_draft_tokens_buf[:padded_num_reqs].copy_(
+            (req_indices.to(torch.int32) + 1) * self.num_spec_tokens)
+        wrapper.target_logits_indices_buf[
+            :padded_num_reqs, :self.num_spec_tokens].copy_(
+                target_position_matrix.to(torch.int64))
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.
@@ -697,6 +1301,31 @@ class NPUModelRunner(GPUModelRunner):
 
         return num_reqs_padded
 
+    def _prepare_input_ids(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_reqs: int,
+        total_num_scheduled_tokens: int,
+        cu_num_tokens: np.ndarray,
+    ) -> None:
+        prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
+        input_ids_gpu = getattr(self.input_ids, "gpu", None)
+        if (
+            torch.is_tensor(prev_sampled_token_ids)
+            and torch.is_tensor(input_ids_gpu)
+            and cast(torch.Tensor, prev_sampled_token_ids).dtype != cast(torch.Tensor, input_ids_gpu).dtype
+        ):
+            prev_sampled_token_ids_tensor = cast(torch.Tensor, prev_sampled_token_ids)
+            input_ids_gpu_tensor = cast(torch.Tensor, input_ids_gpu)
+            self.input_batch.prev_sampled_token_ids = (
+                prev_sampled_token_ids_tensor.to(dtype=input_ids_gpu_tensor.dtype))
+        return super()._prepare_input_ids(
+            scheduler_output,
+            num_reqs,
+            total_num_scheduled_tokens,
+            cu_num_tokens,
+        )
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -718,7 +1347,9 @@ class NPUModelRunner(GPUModelRunner):
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
 
-        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+        req_indices: np.ndarray[Any, Any] = np.repeat(
+            self.arange_np[:num_reqs], num_scheduled_tokens
+        )
 
         # Get the attention state.
         if not scheduler_output.scheduled_spec_decode_tokens:
@@ -835,7 +1466,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.req_prompt_embeds and (self.is_multimodal_model or self.enable_prompt_embeds):
             output_idx = 0
             for req_idx in range(num_reqs):
-                num_sched = num_scheduled_tokens[req_idx]
+                num_sched = int(num_scheduled_tokens[req_idx])
 
                 # Skip if this request doesn't have embeddings
                 if req_idx not in self.input_batch.req_prompt_embeds:
@@ -1357,7 +1988,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Compute the logits indices.
         # [4, 1, 3, 1, 2]
-        num_sampled_tokens = num_draft_tokens + 1
+        num_sampled_tokens: np.ndarray[Any, Any] = num_draft_tokens + 1
         # Step 1.
         # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
         # _arange_scratch[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
@@ -1365,7 +1996,9 @@ class NPUModelRunner(GPUModelRunner):
             num_sampled_tokens, self._arange_scratch, cumsum_dtype=np.int32
         )
         # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
-        logits_indices = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
+        logits_indices: np.ndarray[Any, Any] = np.repeat(
+            cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens
+        )
         # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
         logits_indices += self._arange_scratch[: cu_num_sampled_tokens[-1]]
 
@@ -1373,7 +2006,9 @@ class NPUModelRunner(GPUModelRunner):
         # update logits_indices after getting draft_token_ids from ori logits_indices
         if self.pcp_size > 1:
             cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
-            logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
+            logits_indices_pcp: np.ndarray[Any, Any] = np.repeat(
+                cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens
+            )
             logits_indices_pcp += self._arange_scratch[: cu_num_sampled_tokens[-1]]
             logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(self.device, non_blocking=True)
 
@@ -1385,11 +2020,15 @@ class NPUModelRunner(GPUModelRunner):
         cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
         total_num_draft_tokens = cu_num_draft_tokens[-1]
         # [0, 0, 0, 3, 3, 5]
-        cumsums_offsets = np.repeat(cu_num_draft_tokens - num_draft_tokens, num_draft_tokens)
+        cumsums_offsets: np.ndarray[Any, Any] = np.repeat(
+            cu_num_draft_tokens - num_draft_tokens, num_draft_tokens
+        )
         # [0, 1, 2, 0, 1, 0]
         arange = self.arange_np[:total_num_draft_tokens] - cumsums_offsets
         # [0, 0, 0, 5, 5, 9]
-        target_logits_indices = np.repeat(cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
+        target_logits_indices: np.ndarray[Any, Any] = np.repeat(
+            cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens
+        )
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
@@ -1877,6 +2516,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens_across_dp,
                 )
 
+                fused_mtp_graph_block_reason = None
+
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
@@ -1941,7 +2582,9 @@ class NPUModelRunner(GPUModelRunner):
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
                     num_reqs = self.input_batch.num_reqs
-                    req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
+                    req_indices: np.ndarray[Any, Any] = np.repeat(
+                        self.arange_np[:num_reqs], num_scheduled_tokens_np
+                    )
                     dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
                     np.add(
                         self.input_batch.num_computed_tokens_cpu[req_indices],
@@ -1995,6 +2638,14 @@ class NPUModelRunner(GPUModelRunner):
                 else total_num_scheduled_tokens,
                 intermediate_tensors,
             )
+            if (
+                self._fused_mtp_wrapper is not None
+                and cudagraph_mode == CUDAGraphMode.FULL
+            ):
+                self._pad_fused_mtp_graph_inputs(
+                    total_num_scheduled_tokens,
+                    num_tokens_padded,
+                )
 
             # update global cos, sin
             update_cos_sin(positions)
@@ -2009,7 +2660,8 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
-        if self.ascend_config.enable_async_exponential:
+        if self.ascend_config.enable_async_exponential and not getattr(
+                self.sampler, "uses_seeded_gumbel", False):
             self.sampler.do_async_exponential(
                 b_s=logits_indices.shape[0],
                 head_dim=self.model_config.get_vocab_size(),
@@ -2046,8 +2698,68 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
+            self._fused_mtp_graph_outputs_ready = False
+            self._fused_mtp_runtime_common_attn_metadata = None
+            if self._fused_mtp_wrapper is not None:
+                sampling_metadata = self.input_batch.sampling_metadata
+                sampling_block_reason = (
+                    self._get_fused_mtp_sampling_block_reason(
+                        sampling_metadata))
+                graph_block_reason = fused_mtp_graph_block_reason
+                fused_mtp_sampling_batch = sampling_block_reason is None
+                fused_mtp_full_graph_enabled = (
+                    self._fused_mtp_full_graph_enabled())
+                if (
+                    graph_block_reason is None
+                    and not fused_mtp_full_graph_enabled
+                ):
+                    graph_block_reason = "fused_mtp_full_graph_disabled"
+                fused_mtp_graph_batch = (
+                    self._is_fused_mtp_uniform_decode_graph_batch(batch_desc)
+                    if cudagraph_mode == CUDAGraphMode.FULL else False
+                ) and fused_mtp_sampling_batch and graph_block_reason is None
+                self._fused_mtp_wrapper.capture_mtp_enabled = (
+                    fused_mtp_graph_batch)
+                if fused_mtp_graph_batch:
+                    self._fused_mtp_runtime_common_attn_metadata = (
+                        spec_decode_common_attn_metadata)
+                self._prepare_fused_mtp_runtime_buffers(
+                    logits_indices,
+                    spec_decode_metadata,
+                    spec_decode_common_attn_metadata,
+                    num_tokens_padded,
+                )
+
+                if (
+                    cudagraph_mode == CUDAGraphMode.FULL
+                    and self.drafter is not None
+                    and hasattr(self.drafter, "draft_attn_groups")
+                    and len(self.drafter.draft_attn_groups) > 0
+                    and fused_mtp_graph_batch
+                ):
+                    needs_capture_metadata = (
+                        self._needs_fused_mtp_capture_metadata(batch_desc))
+                    if needs_capture_metadata:
+                        self._build_and_inject_mtp_attn_metadata(
+                            get_forward_context(),
+                            num_tokens_padded,
+                            num_reqs_padded,
+                            cudagraph_mode,
+                        )
+                    else:
+                        draft_layer_names = getattr(
+                            self.drafter, "attn_layer_names", None)
+                        if draft_layer_names:
+                            self._update_fused_mtp_graph_params_for_replay(
+                                get_forward_context(),
+                                num_tokens_padded,
+                                draft_layer_names,
+                            )
+                    self._fused_mtp_graph_outputs_ready = True
+
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
+
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
@@ -2084,7 +2796,12 @@ class NPUModelRunner(GPUModelRunner):
                     return output
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
+                logits = (
+                    None
+                    if self._should_defer_fused_mtp_logits(
+                        spec_decode_metadata)
+                    else self.model.compute_logits(sample_hidden_states)
+                )
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -2106,6 +2823,10 @@ class NPUModelRunner(GPUModelRunner):
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
+            runtime_positions = positions[0] if positions is not None and positions.ndim > 1 else positions
+            assert runtime_positions is not None
+            sample_positions = runtime_positions[logits_indices]
+
             # Apply structured output bitmasks if present
             self.execute_model_state = ExecuteModelState(
                 scheduler_output,
@@ -2114,6 +2835,7 @@ class NPUModelRunner(GPUModelRunner):
                 spec_decode_common_attn_metadata,
                 hidden_states,
                 sample_hidden_states,
+                sample_positions,
                 aux_hidden_states,
                 attn_metadata,
                 positions,
@@ -2162,6 +2884,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_common_attn_metadata,
             hidden_states,
             sample_hidden_states,
+            sample_positions,
             aux_hidden_states,
             attn_metadata,
             positions,
@@ -2174,6 +2897,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
+            logits = self._compute_deferred_logits(logits, sample_hidden_states)
             # here we are different from gpu_model_runner,
             # the apply_grammar_bitmask uses torch.compile to optimize this,ascend does not support it now
             logits_dtype = logits.dtype
@@ -2181,8 +2905,19 @@ class NPUModelRunner(GPUModelRunner):
             apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
             logits = logits.to(self.device).to(logits_dtype)
 
+        use_fused_mtp_graph_path = self._can_use_fused_mtp_draft_path(
+            grammar_output,
+            spec_decode_metadata,
+        )
+        self._used_fused_mtp_graph_sampler_output = use_fused_mtp_graph_path
         with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            if use_fused_mtp_graph_path:
+                sampler_output = self._build_fused_mtp_sampler_output()
+            else:
+                logits = self._compute_deferred_logits(
+                    logits, sample_hidden_states)
+                sampler_output = self._sample(
+                    logits, spec_decode_metadata, sample_positions)
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -2194,6 +2929,24 @@ class NPUModelRunner(GPUModelRunner):
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
 
         def propose_draft_token_ids(sampled_token_ids):
+            if (
+                use_fused_mtp_graph_path
+                and self._fused_mtp_wrapper is not None
+                and isinstance(sampled_token_ids, torch.Tensor)
+                and spec_decode_common_attn_metadata is not None
+            ):
+                wrapper = self._fused_mtp_wrapper
+                num_reqs = self.input_batch.num_reqs
+                next_token_ids = wrapper.next_token_ids_buf[:num_reqs]
+                valid_sampled_tokens_count = (
+                    wrapper.valid_sampled_tokens_count_buf[:num_reqs])
+                self._copy_valid_sampled_token_count(
+                    next_token_ids, valid_sampled_tokens_count)
+                draft_ids = wrapper.draft_token_ids_buf[:num_reqs]
+                self._materialize_fused_draft_token_ids(
+                    scheduler_output, draft_ids)
+                return
+
             assert spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
                 sampled_token_ids,
@@ -2225,6 +2978,8 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output.total_num_scheduled_tokens,
             spec_decode_metadata,
         )
+        self._used_fused_mtp_graph_sampler_output = False
+        self._fused_mtp_graph_outputs_ready = False
 
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
@@ -2246,7 +3001,7 @@ class NPUModelRunner(GPUModelRunner):
                     # EAGLE speculative decoding can use the GPU sampled tokens
                     # as inputs, and does not need to wait for bookkeeping to finish.
                     sampled_token_ids = sampler_output.sampled_token_ids
-                    if input_fits_in_drafter:
+                    if input_fits_in_drafter or use_fused_mtp_graph_path:
                         propose_draft_token_ids(sampler_output.sampled_token_ids)
                     elif self.valid_sampled_token_count_event is not None:
                         assert spec_decode_common_attn_metadata is not None
@@ -2353,13 +3108,16 @@ class NPUModelRunner(GPUModelRunner):
         return async_output
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
-    def _sample(self, logits, spec_decode_metadata):
+    def _sample(self, logits, spec_decode_metadata, sample_positions):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
+                sample_positions = sample_positions[:self.input_batch.num_reqs]
+            self._attach_sampling_runtime_metadata(
+                sampling_metadata, sample_positions, spec_decode_metadata)
             if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
                 max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
                 self.sampler.prepare_sampling(max_topk)
@@ -2370,6 +3128,9 @@ class NPUModelRunner(GPUModelRunner):
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
+            sample_positions = sample_positions[:len(spec_decode_metadata.logits_indices)]
+        self._attach_sampling_runtime_metadata(
+            sampling_metadata, sample_positions, spec_decode_metadata)
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
@@ -2401,10 +3162,11 @@ class NPUModelRunner(GPUModelRunner):
     ]:
         # TODO: implement PR 28597 from vllm
         discard_sampled_tokens_req_indices = self.discard_request_indices.np[: self.num_discarded_requests]
-        for i in discard_sampled_tokens_req_indices:
-            gen = self.input_batch.generators.get(int(i))
-            if gen is not None:
-                gen.set_offset(gen.get_offset() - 4)
+        if not self._used_fused_mtp_graph_sampler_output:
+            for i in discard_sampled_tokens_req_indices:
+                gen = self.input_batch.generators.get(int(i))
+                if gen is not None:
+                    gen.set_offset(gen.get_offset() - 4)
 
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
@@ -2536,6 +3298,8 @@ class NPUModelRunner(GPUModelRunner):
         forward_context: ForwardContext,
         num_tokens_padded: int,
         positions: torch.Tensor | None,
+        draft_attn_metadatas: list[dict[str, Any]] | None = None,
+        draft_attn_layer_names: list[str] | None = None,
     ) -> None:
         if (
             forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
@@ -2554,6 +3318,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config,
                 self.speculative_config,
                 positions.shape[0],
+                draft_attn_metadatas=draft_attn_metadatas,
+                draft_attn_layer_names=draft_attn_layer_names,
             )
 
     def _model_forward(
@@ -2577,22 +3343,527 @@ class NPUModelRunner(GPUModelRunner):
             **model_kwargs,
         }
         run_model = partial(self.model, **model_inputs)
+        draft_attn_metadatas = None
+        draft_layer_names = None
+        batch_descriptor = getattr(forward_context, "batch_descriptor", None)
+        if (
+            self._fused_mtp_wrapper is not None
+            and self.drafter is not None
+            and self._is_fused_mtp_uniform_decode_graph_batch(batch_descriptor)
+            and not self._needs_fused_mtp_capture_metadata(batch_descriptor)
+        ):
+            draft_layer_names = getattr(self.drafter, "attn_layer_names", None)
+            if draft_layer_names and forward_context.attn_metadata is not None:
+                self._inject_mtp_metadata_stubs(forward_context,
+                                                num_tokens_padded)
+                draft_attn_metadatas = getattr(
+                    forward_context, "draft_attn_metadatas", None)
 
         if self.enable_enpu:
             # The soft segmentation scenario requires event.record first, then event.wait
             self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
+                forward_context,
+                num_tokens_padded,
+                positions,
+                draft_attn_metadatas,
+                draft_layer_names,
             )
             hidden_states = run_model()
         else:
             hidden_states = run_model()
             self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
+                forward_context,
+                num_tokens_padded,
+                positions,
+                draft_attn_metadatas,
+                draft_layer_names,
             )
 
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
+
+    def _build_and_inject_mtp_attn_metadata(
+        self,
+        forward_context,
+        num_tokens: int,
+        num_reqs: int,
+        cudagraph_runtime_mode: CUDAGraphMode,
+    ) -> None:
+        drafter = self.drafter
+        if drafter is None:
+            return
+        saved_metadata = drafter.build_graph_capture_attn_metadata(
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            aclgraph_runtime_mode=cudagraph_runtime_mode,
+        )
+        if saved_metadata and len(saved_metadata) > 0:
+            if isinstance(forward_context.attn_metadata, dict):
+                for layer_name, meta in saved_metadata[0].items():
+                    forward_context.attn_metadata[layer_name] = meta
+            forward_context.draft_attn_metadatas = saved_metadata
+
+    def _needs_fused_mtp_capture_metadata(self, batch_descriptor) -> bool:
+        if not isinstance(self.model, ACLGraphWrapper):
+            return True
+        if batch_descriptor is None:
+            return True
+        return not self.model.is_captured(batch_descriptor)
+
+    def _get_fused_mtp_builder_num_reqs(
+        self,
+        num_tokens: int | None,
+        actual_num_reqs: int,
+    ) -> int:
+        return actual_num_reqs
+
+    @staticmethod
+    def _to_int_list(value) -> list[int] | None:
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            return value.detach().cpu().to(torch.int64).tolist()
+        return list(value)
+
+    def _ensure_mtp_actual_seq_lengths_q(
+        self,
+        draft_attn_metadatas: list[dict],
+        builder_num_reqs: int,
+    ) -> None:
+        fallback_query_start_loc = self.query_start_loc.cpu[
+            :builder_num_reqs + 1]
+        for per_layer_metadata in draft_attn_metadatas:
+            for metadata in per_layer_metadata.values():
+                decode = getattr(metadata, "decode", None)
+                if decode is None:
+                    continue
+                if getattr(decode, "actual_seq_lengths_q", None) is not None:
+                    continue
+                query_start_loc = getattr(decode, "query_start_loc_cpu", None)
+                if query_start_loc is None:
+                    query_start_loc = getattr(decode, "query_start_loc", None)
+                if query_start_loc is None:
+                    query_start_loc = fallback_query_start_loc
+                actual_seq_lengths_q = self._to_int_list(query_start_loc[1:])
+                if actual_seq_lengths_q is not None:
+                    decode.actual_seq_lengths_q = actual_seq_lengths_q
+
+    def _build_fused_mtp_builder_metadata(
+        self,
+        num_tokens: int | None,
+        actual_num_reqs: int,
+    ) -> list[dict]:
+        assert self.drafter is not None
+        if num_tokens is None:
+            return []
+        runtime_metadata = self._build_fused_mtp_runtime_builder_metadata(
+            num_tokens)
+        if runtime_metadata:
+            return runtime_metadata
+        builder_num_reqs = self._get_fused_mtp_builder_num_reqs(
+            num_tokens, actual_num_reqs)
+        draft_attn_metadatas = self.drafter.build_graph_capture_attn_metadata(
+            num_tokens=int(num_tokens),
+            num_reqs=builder_num_reqs,
+            aclgraph_runtime_mode=CUDAGraphMode.FULL,
+        )
+        self._ensure_mtp_actual_seq_lengths_q(
+            draft_attn_metadatas, builder_num_reqs)
+        return draft_attn_metadatas
+
+    @staticmethod
+    def _pad_fused_mtp_metadata_rows(
+        tensor: torch.Tensor,
+        active_rows: int,
+        desired_rows: int,
+    ) -> torch.Tensor:
+        desired_rows = int(desired_rows)
+        active_rows = min(max(int(active_rows), 0), tensor.shape[0],
+                          desired_rows)
+        if desired_rows <= 0:
+            return tensor[:0]
+        if active_rows == desired_rows:
+            return tensor[:desired_rows]
+        padded = torch.empty(
+            (desired_rows, *tensor.shape[1:]),
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        if active_rows > 0:
+            padded[:active_rows].copy_(tensor[:active_rows])
+            dummy_row = tensor[:1].expand(
+                (desired_rows - active_rows, *tensor.shape[1:]))
+            padded[active_rows:].copy_(dummy_row)
+        else:
+            padded.zero_()
+        return padded
+
+    def _pad_mtp_query_start_loc_for_graph(
+        self,
+        num_tokens_padded: int,
+        actual_num_reqs: int,
+    ) -> int:
+        num_tokens_padded = int(num_tokens_padded)
+        actual_num_reqs = int(actual_num_reqs)
+        if actual_num_reqs <= 0:
+            return actual_num_reqs
+
+        actual_end = int(self.query_start_loc.np[actual_num_reqs])
+        decode_query_len = int(getattr(self, "num_spec_tokens", 0)) + 1
+        if decode_query_len <= 1:
+            decode_query_len = int(
+                getattr(self, "uniform_decode_query_len", decode_query_len))
+
+        graph_num_reqs = actual_num_reqs
+        if decode_query_len > 0 and num_tokens_padded % decode_query_len == 0:
+            candidate_num_reqs = num_tokens_padded // decode_query_len
+            if candidate_num_reqs >= actual_num_reqs:
+                graph_num_reqs = candidate_num_reqs
+        elif num_tokens_padded > actual_end:
+            graph_num_reqs = actual_num_reqs + 1
+
+        if graph_num_reqs > actual_num_reqs:
+            remaining_tokens = num_tokens_padded - actual_end
+            remaining_reqs = graph_num_reqs - actual_num_reqs
+            if remaining_tokens < remaining_reqs:
+                graph_num_reqs = actual_num_reqs + 1
+                remaining_reqs = 1
+            for req_idx in range(actual_num_reqs + 1, graph_num_reqs + 1):
+                if req_idx == graph_num_reqs:
+                    next_loc = num_tokens_padded
+                else:
+                    next_loc = actual_end + (
+                        req_idx - actual_num_reqs) * decode_query_len
+                    next_loc = min(next_loc, num_tokens_padded)
+                self.query_start_loc.np[req_idx] = next_loc
+        elif num_tokens_padded > actual_end:
+            self.query_start_loc.np[actual_num_reqs] = num_tokens_padded
+
+        self.query_start_loc.copy_to_gpu()
+        return graph_num_reqs
+
+    def _build_fused_mtp_runtime_builder_metadata(
+        self,
+        num_tokens: int,
+    ) -> list[dict]:
+        drafter = self.drafter
+        assert drafter is not None
+        if getattr(drafter, "num_speculative_tokens", 1) != 1:
+            return []
+        runtime_common = getattr(
+            self, "_fused_mtp_runtime_common_attn_metadata", None)
+        if runtime_common is None:
+            return []
+        if not getattr(drafter, "draft_attn_groups", None):
+            return []
+        if not getattr(drafter, "attn_layer_names", None):
+            return []
+
+        common_attn_metadata = copy(runtime_common)
+        active_num_reqs = int(
+            getattr(self.input_batch, "num_reqs",
+                    getattr(runtime_common, "num_reqs", 0)))
+        if active_num_reqs <= 0:
+            return []
+
+        query_start_loc_cpu = getattr(runtime_common, "query_start_loc_cpu",
+                                      None)
+        if query_start_loc_cpu is not None:
+            copy_len = min(active_num_reqs + 1, query_start_loc_cpu.shape[0])
+            self.query_start_loc.cpu[:copy_len].copy_(
+                query_start_loc_cpu[:copy_len])
+            if hasattr(self.query_start_loc, "np"):
+                self.query_start_loc.np[:copy_len] = (
+                    self.query_start_loc.cpu[:copy_len].cpu().numpy())
+
+        num_reqs_padded = self._pad_mtp_query_start_loc_for_graph(
+            int(num_tokens), active_num_reqs)
+        common_attn_metadata.num_reqs = num_reqs_padded
+        common_attn_metadata.query_start_loc = (
+            self.query_start_loc.gpu[:num_reqs_padded + 1])
+        common_attn_metadata.query_start_loc_cpu = (
+            self.query_start_loc.cpu[:num_reqs_padded + 1])
+        common_attn_metadata.actual_seq_lengths_q = (
+            self.query_start_loc.cpu[1:num_reqs_padded + 1].tolist())
+
+        block_table_tensor = getattr(common_attn_metadata,
+                                     "block_table_tensor", None)
+        if torch.is_tensor(block_table_tensor):
+            common_attn_metadata.block_table_tensor = (
+                self._pad_fused_mtp_metadata_rows(
+                    block_table_tensor,
+                    active_num_reqs,
+                    num_reqs_padded,
+                ))
+
+        common_attn_metadata.seq_lens = self._pad_fused_mtp_metadata_rows(
+            self._get_seq_lens_device_view(),
+            active_num_reqs,
+            num_reqs_padded,
+        )
+        common_attn_metadata.seq_lens_cpu = (
+            self._pad_fused_mtp_metadata_rows(
+                self._get_seq_lens_cpu_view(),
+                active_num_reqs,
+                num_reqs_padded,
+            ))
+        num_computed_tokens_cpu = getattr(
+            runtime_common, "num_computed_tokens_cpu", None)
+        if torch.is_tensor(num_computed_tokens_cpu):
+            common_attn_metadata.num_computed_tokens_cpu = (
+                self._pad_fused_mtp_metadata_rows(
+                    num_computed_tokens_cpu,
+                    active_num_reqs,
+                    num_reqs_padded,
+                ))
+
+        slot_mapping = getattr(runtime_common, "slot_mapping", None)
+        if torch.is_tensor(slot_mapping):
+            slot_mapping_tensor = cast(torch.Tensor, slot_mapping)
+            mtp_slot_mapping = drafter.slot_mapping_group[0]
+            active_slot_mapping_len = int(
+                getattr(runtime_common, "num_actual_tokens",
+                        self.query_start_loc.np[active_num_reqs]))
+            slot_mapping_len = min(
+                active_slot_mapping_len,
+                int(num_tokens),
+                slot_mapping_tensor.shape[0],
+                mtp_slot_mapping.shape[0],
+            )
+            mtp_slot_mapping[:slot_mapping_len].copy_(
+                slot_mapping_tensor[:slot_mapping_len].to(
+                    dtype=mtp_slot_mapping.dtype,
+                    device=mtp_slot_mapping.device,
+                ))
+            mtp_slot_mapping[slot_mapping_len:].fill_(0)
+        common_attn_metadata.slot_mapping = drafter.slot_mapping_group[0]
+        common_attn_metadata.num_input_tokens = int(num_tokens)
+        common_attn_metadata.num_actual_tokens = int(num_tokens)
+
+        builder = drafter.draft_attn_groups[0].get_metadata_builder()
+        extra_attn_metadata_args = dict(
+            prefill_ratio_to_sas_metadata=dict(),
+            decode_ratio_to_sas_metadata=dict(),
+            common_ratio_to_sas_metadata=dict(),
+            block_size=drafter.draft_attn_groups[0].kv_cache_spec.block_size,
+        )
+        attn_metadata = builder.build(
+            0,
+            common_attn_metadata,
+            self.get_model(),
+            **extra_attn_metadata_args,
+        )
+        attn_metadata = drafter._freeze_draft_step_attn_metadata(
+            attn_metadata)
+
+        per_layer_attn_metadata = {}
+        for layer_name in drafter.attn_layer_names:
+            per_layer_attn_metadata[layer_name] = attn_metadata
+        return [per_layer_attn_metadata]
+
+    def _build_fused_mtp_stub_metadata(self) -> list[dict]:
+        assert self.drafter is not None
+        num_reqs = self.input_batch.num_reqs
+        query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
+        actual_seq_lengths_q = query_start_loc_cpu[1:num_reqs + 1].tolist()
+        seq_lens_list = self._get_seq_lens_cpu_view(num_reqs).tolist()
+        block_table = (
+            self.input_batch.block_table[0].get_device_tensor()[:num_reqs])
+
+        @dataclass
+        class _DecodeStub:
+            seq_lens_list: list[int]
+            actual_seq_lengths_q: list[int]
+            block_table: torch.Tensor
+
+        @dataclass
+        class _MetaStub:
+            decode: _DecodeStub
+
+        draft_attn_metadatas = []
+        num_draft_steps = max(
+            getattr(self.drafter, "num_speculative_tokens", 1), 1)
+        for _ in range(num_draft_steps):
+            per_layer_metadata = {}
+            for layer_name in self.drafter.attn_layer_names:
+                decode_stub = _DecodeStub(
+                    seq_lens_list=seq_lens_list,
+                    actual_seq_lengths_q=actual_seq_lengths_q,
+                    block_table=block_table,
+                )
+                meta = _MetaStub(decode=decode_stub)
+                per_layer_metadata[layer_name] = meta
+            draft_attn_metadatas.append(per_layer_metadata)
+        return draft_attn_metadatas
+
+    def _inject_mtp_metadata_stubs(self, forward_context,
+                                   num_tokens: int | None = None):
+        assert self.drafter is not None
+        num_reqs = self.input_batch.num_reqs
+        draft_attn_metadatas = []
+        if num_tokens is not None:
+            try:
+                draft_attn_metadatas = self._build_fused_mtp_builder_metadata(
+                    num_tokens, num_reqs)
+            except Exception:
+                logger.exception(
+                    "Failed to build fused MTP metadata; fallback to stubs. "
+                    "num_tokens=%s num_reqs=%s",
+                    num_tokens, num_reqs)
+        if not draft_attn_metadatas:
+            draft_attn_metadatas = self._build_fused_mtp_stub_metadata()
+        attn_metadata = forward_context.attn_metadata
+        if isinstance(attn_metadata, dict) and draft_attn_metadatas:
+            for layer_name, meta in draft_attn_metadatas[0].items():
+                attn_metadata[layer_name] = meta
+        forward_context.draft_attn_metadatas = draft_attn_metadatas
+
+    def _update_mtp_graph_params_sparse(
+        self,
+        forward_context,
+        num_tokens: int,
+        draft_attn_metadatas: list[dict],
+        draft_layer_names: list[str],
+    ):
+        import torch_npu
+
+        from vllm_ascend.compilation.acl_graph import get_graph_params
+
+        graph_params = get_graph_params()
+        if graph_params is None:
+            return
+        params_list = graph_params.attn_params.get(num_tokens)
+        if not params_list:
+            return
+        handles_list = graph_params.handles.get(num_tokens, [])
+        events_list = graph_params.events.get(num_tokens, [])
+
+        draft_updates = []
+        for per_layer_metadata in draft_attn_metadatas:
+            for key in draft_layer_names:
+                if key in per_layer_metadata:
+                    draft_updates.append(per_layer_metadata[key])
+        if not draft_updates:
+            return
+        offset = len(params_list) - len(draft_updates)
+        if offset < 0:
+            return
+
+        self.update_stream.wait_stream(torch.npu.current_stream())
+        with torch.npu.stream(self.update_stream):
+            for metadata, param, handle, event in zip(
+                draft_updates,
+                params_list[offset:],
+                handles_list[offset:],
+                events_list[offset:],
+            ):
+                (
+                    q_nope, k_nope, q_pe, k_pe,
+                    num_heads, num_kv_heads,
+                    input_layout, attn_mask, sparse_mode, scale,
+                    block_table, block_size,
+                    seq_lens_list, actual_seq_lengths,
+                    attn_output, softmax_lse,
+                    dequant_scale_q_nope, fak_descale_float,
+                ) = param
+                seq_lens_list = getattr(metadata.decode, "seq_lens_list", None)
+                if seq_lens_list is None:
+                    seq_lens_list = self._to_int_list(metadata.decode.seq_lens)
+                actual_seq_lengths = getattr(metadata.decode,
+                                             "actual_seq_lengths_q", None)
+                if actual_seq_lengths is None:
+                    query_start_loc = getattr(metadata.decode,
+                                              "query_start_loc_cpu", None)
+                    if query_start_loc is None:
+                        query_start_loc = getattr(metadata.decode,
+                                                  "query_start_loc", None)
+                    actual_seq_lengths = self._to_int_list(
+                        query_start_loc[1:]
+                        if query_start_loc is not None else None)
+                if actual_seq_lengths is None:
+                    continue
+                block_table = metadata.decode.block_table
+                spec_config = self.speculative_config
+                if spec_config and spec_config.disable_padded_drafter_batch:
+                    block_table = block_table[:len(actual_seq_lengths)]
+                seq_lens_list = seq_lens_list + [0] * (
+                    len(actual_seq_lengths) - len(seq_lens_list))
+
+                torch.npu.graph_task_update_begin(self.update_stream, handle)
+                extra_args = {}
+                if dequant_scale_q_nope is not None:
+                    extra_args = {
+                        "query_quant_mode": 3,
+                        "key_quant_mode": 0,
+                        "value_quant_mode": 0,
+                        "dequant_scale_query": dequant_scale_q_nope,
+                        "dequant_scale_key": fak_descale_float,
+                        "dequant_scale_value": fak_descale_float,
+                    }
+                torch_npu.npu_fused_infer_attention_score_v2.out(
+                    q_nope,
+                    k_nope,
+                    k_nope,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    num_query_heads=num_heads,
+                    num_key_value_heads=num_kv_heads,
+                    input_layout=input_layout,
+                    atten_mask=attn_mask,
+                    sparse_mode=sparse_mode,
+                    softmax_scale=scale,
+                    block_table=block_table,
+                    block_size=block_size,
+                    actual_seq_qlen=actual_seq_lengths,
+                    actual_seq_kvlen=seq_lens_list,
+                    workspace=graph_params.workspaces.get(num_tokens),
+                    out=[attn_output, softmax_lse],
+                    **extra_args,
+                )
+                torch.npu.graph_task_update_end(self.update_stream)
+                event.record(self.update_stream)
+
+    def _update_fused_mtp_draft_graph_params(
+        self,
+        forward_context,
+        num_tokens: int,
+        draft_attn_metadatas: list[dict],
+    ) -> None:
+        if self.drafter is None or not draft_attn_metadatas:
+            return
+        update_fn = getattr(self.drafter, "_update_full_graph_params", None)
+        if update_fn is None:
+            return
+        saved_is_draft_model = getattr(forward_context, "is_draft_model",
+                                       False)
+        forward_context.is_draft_model = True
+        try:
+            update_fn(forward_context, num_tokens, draft_attn_metadatas)
+        finally:
+            forward_context.is_draft_model = saved_is_draft_model
+
+    def _update_fused_mtp_graph_params_for_replay(
+        self,
+        forward_context,
+        num_tokens: int,
+        draft_layer_names: list[str],
+    ) -> None:
+        if self.drafter is None or not draft_layer_names:
+            return
+        if forward_context is None or forward_context.attn_metadata is None:
+            return
+        self._inject_mtp_metadata_stubs(forward_context, num_tokens)
+        draft_attn_metadatas = getattr(
+            forward_context, "draft_attn_metadatas", None)
+        if not draft_attn_metadatas:
+            return
+        if self.use_sparse:
+            self._update_mtp_graph_params_sparse(
+                forward_context, num_tokens, draft_attn_metadatas,
+                draft_layer_names)
+        self._update_fused_mtp_draft_graph_params(
+            forward_context, num_tokens, draft_attn_metadatas)
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
@@ -2664,11 +3935,24 @@ class NPUModelRunner(GPUModelRunner):
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        partial_decode_graph_tokens = (
+            self._get_fused_mtp_partial_decode_graph_tokens(
+                num_tokens,
+                num_reqs,
+                max_num_scheduled_tokens,
+                bool(is_all_decode),
+                force_uniform_decode,
+            ))
+        if partial_decode_graph_tokens is not None:
+            num_tokens_padded = partial_decode_graph_tokens
         uniform_decode = (
             (
-                (is_all_decode if self.speculative_config else True)
-                and (max_num_scheduled_tokens == self.uniform_decode_query_len)
-                and (num_tokens == max_num_scheduled_tokens * num_reqs)
+                partial_decode_graph_tokens is not None
+                or (
+                    (is_all_decode if self.speculative_config else True)
+                    and (max_num_scheduled_tokens == self.uniform_decode_query_len)
+                    and (num_tokens == max_num_scheduled_tokens * num_reqs)
+                )
             )
             if force_uniform_decode is None
             else force_uniform_decode
@@ -3339,6 +4623,32 @@ class NPUModelRunner(GPUModelRunner):
                 has_sinks = self._has_sinks,
                 input_ids=input_ids,
             ):
+                fused_mtp_graph_batch = (
+                    cudagraph_runtime_mode == CUDAGraphMode.FULL
+                    and self._fused_mtp_full_graph_enabled()
+                    and self._is_fused_mtp_uniform_decode_graph_batch(
+                        batch_desc))
+                if self._fused_mtp_wrapper is not None:
+                    self._fused_mtp_wrapper.capture_mtp_enabled = (
+                        fused_mtp_graph_batch)
+                    if fused_mtp_graph_batch:
+                        self._prepare_fused_mtp_capture_buffers(
+                            num_tokens_padded)
+                if (
+                    self._fused_mtp_wrapper is not None
+                    and cudagraph_runtime_mode == CUDAGraphMode.FULL
+                    and self.drafter is not None
+                    and hasattr(self.drafter, "draft_attn_groups")
+                    and len(self.drafter.draft_attn_groups) > 0
+                    and fused_mtp_graph_batch
+                ):
+                    if self._needs_fused_mtp_capture_metadata(batch_desc):
+                        self._build_and_inject_mtp_attn_metadata(
+                            get_forward_context(),
+                            num_tokens_padded,
+                            num_reqs_padded,
+                            cudagraph_runtime_mode,
+                        )
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
@@ -3349,17 +4659,33 @@ class NPUModelRunner(GPUModelRunner):
             dummy_compute_logits(hidden_states)
 
             if self.drafter:
-                self.drafter.dummy_run(
-                    num_tokens=num_tokens_padded,
-                    with_prefill=with_prefill,
-                    num_reqs=num_reqs_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    aclgraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_desc,
-                    dummy_compute_logits=dummy_drafter_compute_logits,
-                    in_graph_capturing=not force_attention,
-                    is_profile=is_profile,
-                )
+                if self._fused_mtp_wrapper is not None:
+                    if not fused_mtp_graph_batch:
+                        self.drafter.dummy_run(
+                            num_tokens=num_tokens_padded,
+                            with_prefill=with_prefill,
+                            num_reqs=num_reqs_padded,
+                            num_tokens_across_dp=num_tokens_across_dp,
+                            aclgraph_runtime_mode=CUDAGraphMode.NONE,
+                            batch_descriptor=batch_desc,
+                            dummy_compute_logits=dummy_drafter_compute_logits,
+                            in_graph_capturing=False,
+                            is_profile=is_profile,
+                        )
+                    else:
+                        dummy_drafter_compute_logits(hidden_states)
+                else:
+                    self.drafter.dummy_run(
+                        num_tokens=num_tokens_padded,
+                        with_prefill=with_prefill,
+                        num_reqs=num_reqs_padded,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        aclgraph_runtime_mode=cudagraph_runtime_mode,
+                        batch_descriptor=batch_desc,
+                        dummy_compute_logits=dummy_drafter_compute_logits,
+                        in_graph_capturing=not force_attention,
+                        is_profile=is_profile,
+                    )
             if is_profile and self.dynamic_eplb:
                 target = self.model.language_model if hasattr(self.model, "language_model") else self.model
                 target.clear_all_moe_loads()
@@ -3444,6 +4770,16 @@ class NPUModelRunner(GPUModelRunner):
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
                     patch_load_weights(self.vllm_config)
+                should_fuse_mtp = (
+                    self.speculative_config is not None
+                    and self.speculative_config.method == "mtp"
+                    and self._fused_mtp_full_graph_enabled()
+                    and isinstance(self.drafter, AscendEagleProposer)
+                    and get_pp_group().is_last_rank
+                    and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                )
+                if should_fuse_mtp:
+                    self.drafter.fused_with_main_graph = True
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
@@ -3466,8 +4802,23 @@ class NPUModelRunner(GPUModelRunner):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
+            runnable = self.model
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method == "mtp"
+                and self._fused_mtp_full_graph_enabled()
+                and self.drafter is not None
+                and isinstance(self.drafter, AscendEagleProposer)
+                and get_pp_group().is_last_rank
+            ):
+                self._fused_mtp_wrapper = _FusedModelWithMTP(
+                    self.model, self.drafter)
+                runnable = self._fused_mtp_wrapper
+                self.drafter.update_stream = self.update_stream
+            else:
+                self._fused_mtp_wrapper = None
             self.model = ACLGraphWrapper(
-                self.model,
+                runnable,
                 self.vllm_config,
                 runtime_mode=CUDAGraphMode.FULL,
                 use_eagle=self.use_eagle,
