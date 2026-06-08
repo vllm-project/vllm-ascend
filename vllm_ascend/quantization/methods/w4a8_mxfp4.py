@@ -65,9 +65,12 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
-
-        output_dtype = x.dtype if not isinstance(x, tuple) else x[0].dtype
+        if isinstance(x, tuple):
+            quantized_x, dynamic_scale = x
+            output_dtype = torch.bfloat16
+        else:
+            quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+            output_dtype = x.dtype
 
         output = torch_npu.npu_quant_matmul(
             quantized_x,
