@@ -115,7 +115,6 @@ jobs:
       - name: Install vllm-project/vllm-ascend
         working-directory: ./vllm-ascend
         env:
-          COMPILE_CUSTOM_KERNELS: "0"
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install -r requirements-dev.txt
