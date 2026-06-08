@@ -87,6 +87,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
             output_dtype = x.dtype
 
+        if bias is not None and bias.dtype != torch.float32:
+            bias = bias.to(torch.float32)
+
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
