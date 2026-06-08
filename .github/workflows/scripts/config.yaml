@@ -10,7 +10,7 @@ e2e-singlecard-light:
 e2e-2card-light:
 - name: tests/e2e/light/two-card/test_qwen3_30b_a3b.py::test_moe_tp_ep_eplb_full_decode_only
   estimated_time: 209
-- name: tests/e2e/light/two-card/test_qwen3_5_moe_quant_tp.py::test_qwen3_5_35b_a3b_w8a8_tp2_without_ep
+- name: tests/e2e/light/two-card/test_qwen3_5_35b_a3b_w8a8.py::test_qwen3_5_35b_a3b_w8a8_tp2_without_ep
   estimated_time: 300
 - name: tests/e2e/light/two-card/test_qwen3_vl_30b_a3b_instruct.py::test_multimodal_reasoning_pp_full_decode_only
   estimated_time: 268
