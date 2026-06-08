@@ -57,8 +57,8 @@ class AscendConfig:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens
             if max_batched < self.profiling_chunk_config.min_chunk:
                 logger.warning(
-                    "max_num_batched_tokens (%d) is smaller than "
-                    "profiling_chunk_config.min_chunk (%d). "
+                    "max_num_batched_tokens is smaller than profiling_chunk_config.min_chunk. "
+                    "max_num_batched_tokens=%d, min_chunk=%d. "
                     "Clamping min_chunk to %d to avoid it being silently ignored.",
                     max_batched,
                     self.profiling_chunk_config.min_chunk,
@@ -387,8 +387,8 @@ class AscendConfig:
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
                 logger.debug(
-                    "set compile_ranges_split_points to "
-                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                    "Set compile_ranges_split_points to %s for matmul and allreduce fusion",
+                    new_compile_ranges_split_points,
                 )
 
         else:
@@ -400,8 +400,8 @@ class AscendConfig:
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
                 logger.debug(
-                    "set compile_ranges_split_points to "
-                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                    "Set compile_ranges_split_points to %s for matmul and allreduce fusion",
+                    new_compile_ranges_split_points,
                 )
 
             if len(new_compile_ranges_split_points) > len(self._get_compile_ranges(vllm_config.compilation_config)):
@@ -559,8 +559,8 @@ class XliteGraphConfig:
                 )
             if vllm_config.cache_config.block_size != 128:
                 logger.warning(
-                    "Current cache block size is %s, which may not be optimal or compatible with xlite graph mode. "
-                    "The recommended block size for xlite graph mode is 128.",
+                    "Current cache block size may not be optimal for xlite graph mode. "
+                    "current_block_size=%d, recommended_block_size=128.",
                     vllm_config.cache_config.block_size,
                 )
 
@@ -710,7 +710,7 @@ def init_ascend_config(vllm_config):
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
     else:
-        logger.warning("Ascend config instance is not fully initialized; skip singleton cache update.")
+        logger.warning("Ascend config instance is not fully initialized. action: skip singleton cache update. ")
     return new_config
 
 

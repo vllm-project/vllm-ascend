@@ -70,7 +70,7 @@ class YuanrongHelper:
 
         device_id = self._device_id
         if device_id is None:
-            logger.error("Device id is not set. Call set_device() before using the yuanrong backend.")
+            logger.error("Device id is not set. Check device initialization and configuration.")
             raise RuntimeError("Yuanrong backend device id is not initialized.")
 
         blob_lists: list[Any] = []
@@ -144,7 +144,12 @@ class YuanrongBackend(Backend):
                 results.extend(1 if value else 0 for value in exists)
             return results
         except Exception as exc:
-            logger.error("Failed to check keys %s: %s", keys, exc)
+            logger.error(
+                "Failed to check keys. keys_count=%d, type=%s, error=%s. Check network and yuanrong service.",
+                len(keys),
+                type(exc).__name__,
+                exc,
+            )
             return [0] * len(keys)
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
@@ -167,9 +172,18 @@ class YuanrongBackend(Backend):
                         )
                     )
             if failed_keys:
-                logger.error("Failed to get %d keys. First few: %s", len(failed_keys), failed_keys[:10])
+                logger.error(
+                    "Failed to get keys. failed_count=%d, sample_keys=%s. Check key existence and memory state.",
+                    len(failed_keys),
+                    failed_keys[:10],
+                )
         except Exception as exc:
-            logger.error("Failed to get keys %s: %s", keys, exc)
+            logger.error(
+                "Failed to get keys. keys_count=%d, type=%s, error=%s. Check network and yuanrong service.",
+                len(keys),
+                type(exc).__name__,
+                exc,
+            )
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if len(keys) == 0:
@@ -188,4 +202,9 @@ class YuanrongBackend(Backend):
                         keys[start:end], blob_lists[start:end], self._ds_set_param
                     )
         except Exception as exc:
-            logger.error("Failed to put keys %s: %s", keys, exc)
+            logger.error(
+                "Failed to put keys. keys_count=%d, type=%s, error=%s. Check network and yuanrong service.",
+                len(keys),
+                type(exc).__name__,
+                exc,
+            )

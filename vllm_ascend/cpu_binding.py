@@ -32,7 +32,10 @@ def is_arm_cpu() -> bool:
         return False
     if arch in {"aarch64", "arm64"} or arch.startswith("arm"):
         return True
-    logger.warning("Unknown CPU architecture '%s', CPU binding will be disabled.", arch)
+    logger.warning(
+        "Unknown CPU architecture. arch=%s, action: disabling CPU binding.",
+        arch,
+    )
     return False
 
 
@@ -334,7 +337,7 @@ class CpuAlloc:
 
         # topo_affinity mode
         if not self.device_info.npu_affinity:
-            logger.warning("NPU topo affinity not found, fallback to global-slice CPU binding.")
+            logger.warning("NPU topo affinity not found. action: fallback to global-slice CPU binding.")
             self.build_global_slice_cpu_pool()
             return
 
@@ -405,11 +408,15 @@ class CpuAlloc:
             return
         target_numa = _get_npu_numa_node(npu)
         if target_numa is None:
-            logger.warning("[migrate] rank:%s -> NPU%s has no CPU pool, skip memory binding.", self.rank_id, npu)
+            logger.warning(
+                "[migrate] NPU has no CPU pool. rank=%s, npu=%s.",
+                self.rank_id,
+                npu,
+            )
             return
         all_numa_nodes = sorted(self.numa_to_cpu_map.keys())
         if target_numa not in all_numa_nodes:
-            logger.warning("[migrate] NPU:%s -> NUMA %s not found, skip memory binding.", npu, target_numa)
+            logger.warning("[migrate] NUMA node not found. npu=%s, numa=%s. ", npu, target_numa)
             return
         # Bind memory to the NPU's NUMA node only to minimize cross-NUMA traffic.
         logger.info("[migrate] NPU:%s -> NUMA [%s]", npu, target_numa)
@@ -442,7 +449,7 @@ class CpuAlloc:
         # Only bind IRQ for current rank's NPU to avoid multi-process overwrite.
         current_npu = self.device_info.running_npu_list[self.rank_id]
         if current_npu not in self.npu_cpu_pool:
-            logger.warning("[irq] rank:%s -> NPU%s has no cpu pool, skip irq binding.", self.rank_id, current_npu)
+            logger.warning("[irq] NPU has no CPU pool. rank=%s, npu=%s. ", self.rank_id, current_npu)
             return
 
         if shutil.which("systemctl"):
@@ -452,7 +459,7 @@ class CpuAlloc:
                 if return_code == 0:
                     logger.warning(
                         "The irqbalance service is running and has been stopped. "
-                        "You can run the systemctl start irqbalance command to restart it."
+                        "action: service stopped to enable IRQ binding. "
                     )
                     execute_command(["systemctl", "stop", "irqbalance"])
 
@@ -466,7 +473,7 @@ class CpuAlloc:
         npu = current_npu
         cpus = self.npu_cpu_pool[npu]
         if len(cpus) < 2:
-            logger.warning("[irq] NPU%s cpu pool too small (<2), skip irq binding.", npu)
+            logger.warning("[irq] CPU pool too small. npu=%s, cpu_count=%d, min_required=2. ", npu, len(cpus))
             return
 
         sq_cpu, cq_cpu = cpus[0], cpus[1]  # Reserved for IRQ binding
@@ -488,13 +495,13 @@ class CpuAlloc:
                 break
 
         if not pci_addr:
-            logger.warning("Can't find pci address of NPU%s .", npu)
+            logger.warning("Can't find PCI address. npu=%s. ", npu)
             return
 
         try:
             npu_irq_list = sorted(os.listdir(f"/sys/bus/pci/devices/{pci_addr}/msi_irqs/"), key=lambda x: int(x))
         except FileNotFoundError:
-            logger.warning("The msi_irqs folder cannot be found under /sys/bus/pci/devices/%s .", pci_addr)
+            logger.warning("The msi_irqs folder cannot be found. pci_addr=%s. ", pci_addr)
             return
 
         sq_irq, cq_irq = "", ""
@@ -504,7 +511,7 @@ class CpuAlloc:
                 cq_irq = str(int(irq) + 1)
                 break
         if not sq_irq:
-            logger.warning("The sq_send_trigger_irq of NPU%s is not found.", npu)
+            logger.warning("The sq_send_trigger_irq is not found. npu=%s. ", npu)
             return
 
         logger.info(

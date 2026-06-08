@@ -399,10 +399,20 @@ def enable_custom_op():
                 _CUSTOM_OP_ENABLED = True
             except ImportError:
                 _CUSTOM_OP_ENABLED = False
-                logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+                logger.warning(
+                    "Failed to register custom ops, all custom ops will be disabled. "
+                    "The custom ops library might not be installed or the environment is not configured correctly. "
+                    "Please check the custom ops installation and environment variables."
+                )
         else:
             _CUSTOM_OP_ENABLED = False
-            logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+            logger.warning(
+                "Failed to register custom ops, all custom ops will be disabled. "
+                "error=%s. "
+                "The custom ops library might not be installed or the environment is not configured correctly. "
+                "Please check the custom ops installation and environment variables.",
+                e,
+            )
     return _CUSTOM_OP_ENABLED
 
 
@@ -596,7 +606,11 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
                 f"cudagraph_capture_sizes(={valid_max_size})"
             )
         logger.warning(
-            "Truncating max_cudagraph_capture_size to %d",
+            "Truncating max_cudagraph_capture_size. "
+            "original_size=%d, truncated_size=%d. "
+            "The max_cudagraph_capture_size does not match the max value of cudagraph_capture_sizes. "
+            "Please check the compilation_config for consistency.",
+            vllm_config.compilation_config.max_cudagraph_capture_size,
             valid_max_size,
         )
 
@@ -606,7 +620,9 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
         vllm_config.compilation_config.cudagraph_capture_sizes
     ):
         logger.warning(
-            ("cudagraph_capture_sizes specified in compilation_config %s is overridden by config %s"),
+            "cudagraph_capture_sizes specified in compilation_config is overridden. "
+            "compilation_config_sizes=%s, overridden_sizes=%s. "
+            "The sizes are adjusted based on model configuration and resource constraints.",
             vllm_config.compilation_config.cudagraph_capture_sizes,
             cudagraph_capture_sizes,
         )
@@ -641,8 +657,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
         logger.warning(
-            "Got empty model config. This typically occurs when an empty vllm_config is "
-            "initialized (e.g., in unit tests), where config updates are intentionally skipped."
+            "Got empty model config. "
+            "This may indicate a configuration loading issue or an empty configuration file. "
+            "Please check the model configuration file and loading process."
         )
 
         return
@@ -717,10 +734,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         )
         logger.info("Calculated maximum supported batch sizes for ACL graph: %s", max_num_batch_sizes)
         logger.warning(
-            "Currently, communication is performed using FFTS+ method, which reduces "
-            "the number of available streams and, as a result, limits the range of runtime "
-            "shapes that can be handled. To both improve communication performance and "
-            "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
+            "Currently, communication is performed using FFTS+ method. "
+            "impact: reduces available streams, limits runtime shapes. "
+            "solution: set HCCL_OP_EXPANSION_MODE=AIV to improve performance and increase supported shapes. "
         )
 
     arch_name = vllm_config.model_config.architecture
@@ -995,7 +1011,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
-            logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
+            logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
 
     return bool(_ENABLE_SP)
 
@@ -1403,7 +1419,12 @@ def refresh_block_size(vllm_config):
     except RuntimeError:
         ascend_config = None
     if ascend_config is not None and ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
-        logger.warning("Setting block size to 128 for xlite compatibility.")
+        logger.warning(
+            "Setting block size for xlite compatibility. "
+            "original_block_size=%d, new_block_size=128. "
+            "xlite_graph_config requires block_size <= 128.",
+            cache_config.block_size,
+        )
         cache_config.block_size = 128
 
 

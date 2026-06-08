@@ -224,7 +224,7 @@ class NPUPlatform(Platform):
             from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_min_token_num
 
             pass_config.sp_min_token_num = get_sp_min_token_num(vllm_config)
-            logger.info("set sp_min_token_num to %s", pass_config.sp_min_token_num)
+            logger.info("Set sp_min_token_num. sp_min_token_num=%s", pass_config.sp_min_token_num)
 
         default_max_cg_capture_size = cls._get_default_max_cudagraph_capture_size(vllm_config)
         if default_max_cg_capture_size is not None:
@@ -414,7 +414,9 @@ class NPUPlatform(Platform):
             )
 
         if model_config is None:
-            logger.warning("Model config is missing. This may indicate that we are running a test case")
+            logger.info(
+                "Model config is missing. This may indicate that we are running a test case. context: model_config=None"
+            )
             enforce_eager = False
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
@@ -441,7 +443,8 @@ class NPUPlatform(Platform):
 
         if compilation_config.mode not in [CompilationMode.NONE, CompilationMode.VLLM_COMPILE]:
             logger.warning(
-                "NPU does not support %s compilation mode. Setting CUDAGraphMode to NONE", compilation_config.mode
+                "NPU does not support compilation mode. mode=%s, action: setting CUDAGraphMode to NONE.",
+                compilation_config.mode,
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -940,7 +943,8 @@ class NPUPlatform(Platform):
             # Disable Cascade Attention (GPU feature)
             if getattr(model_config, "disable_cascade_attn", False):
                 logger.warning(
-                    "Parameter '--disable-cascade-attn' is a GPU-specific feature. Resetting to False for Ascend."
+                    "GPU-specific parameter is not supported on Ascend. "
+                    "parameter=disable_cascade_attn, value=True, action: resetting to False."
                 )
                 model_config.disable_cascade_attn = False
 
@@ -949,7 +953,8 @@ class NPUPlatform(Platform):
             # Check and reset cpu_kvcache_space_bytes
             if getattr(vllm_config.cache_config, "cpu_kvcache_space_bytes", False):
                 logger.warning(
-                    "Parameter 'cpu_kvcache_space_bytes' is tied to cpu backend. Resetting to None for Ascend."
+                    "Parameter is tied to incompatible backend. "
+                    "parameter=cpu_kvcache_space_bytes, action: resetting to None for Ascend."
                 )
                 vllm_config.cache_config.cpu_kvcache_space_bytes = None
 
@@ -959,8 +964,8 @@ class NPUPlatform(Platform):
             # Ascend uses a different mechanism for Multi-Modal attention
             if getattr(multimodal_config, "mm_encoder_attn_backend", None) is not None:
                 logger.warning(
-                    "Parameter '--mm-encoder-attn-backend' is set but Ascend uses "
-                    "a plugin mechanism for multi-modal attention. Resetting to None."
+                    "Parameter is set but Ascend uses different mechanism. "
+                    "parameter=mm_encoder_attn_backend, action: resetting to None."
                 )
                 multimodal_config.mm_encoder_attn_backend = None
 
@@ -969,8 +974,8 @@ class NPUPlatform(Platform):
             # NVTX tracing is NVIDIA specific
             if getattr(vllm_config.observability_config, "enable_layerwise_nvtx_tracing", False):
                 logger.warning(
-                    "Parameter '--enable-layerwise-nvtx-tracing' relies on NVTX "
-                    "(NVIDIA Tools) and is not supported on Ascend. Resetting to False."
+                    "Parameter relies on NVIDIA-specific tools. "
+                    "parameter=enable_layerwise_nvtx_tracing, action: resetting to False."
                 )
                 vllm_config.observability_config.enable_layerwise_nvtx_tracing = False
 
@@ -979,7 +984,8 @@ class NPUPlatform(Platform):
             # Partial prefills are specific to ROCm optimization
             if getattr(vllm_config.scheduler_config, "max_num_partial_prefills", 1) != 1:
                 logger.warning(
-                    "Parameter '--max-num-partial-prefills' is optimized for ROCm. Resetting to default (1) for Ascend."
+                    "Parameter is optimized for incompatible platform. "
+                    "parameter=max_num_partial_prefills, action: resetting to default (1). "
                 )
                 vllm_config.scheduler_config.max_num_partial_prefills = 1
 
@@ -989,7 +995,8 @@ class NPUPlatform(Platform):
             if getattr(vllm_config.speculative_config, "quantization", None) is not None:
                 logger.warning(
                     "Speculative quantization is set but Ascend automatically uses "
-                    "the main model's quantization method. Resetting to None."
+                    "the main model's quantization method. "
+                    "parameter=quantization, action: resetting to None. "
                 )
                 vllm_config.speculative_config.quantization = None
 
@@ -999,8 +1006,9 @@ class NPUPlatform(Platform):
             current_buffer_size = getattr(vllm_config.kv_transfer_config, "kv_buffer_size", 1e9)
             if current_buffer_size != 1e9:
                 logger.warning(
-                    "Parameter 'kv_buffer_size' is optimized for NCCL and may be "
-                    "incompatible with current Ascend KV transfer status. Resetting to default (1e9)."
+                    "Parameter is optimized for incompatible backend. "
+                    "parameter=kv_buffer_size, value=%s, action: resetting to default (1e9). ",
+                    current_buffer_size,
                 )
                 # Use setattr to safely assign the value
                 vllm_config.kv_transfer_config.kv_buffer_size = 1e9
@@ -1008,8 +1016,8 @@ class NPUPlatform(Platform):
             # Check and reset enable_permute_local_kv
             if getattr(vllm_config.kv_transfer_config, "enable_permute_local_kv", False):
                 logger.warning(
-                    "Parameter 'enable_permute_local_kv' is tied to NIXL backend. "
-                    "Resetting to False for Ascend stability."
+                    "Parameter is tied to incompatible backend. "
+                    "parameter=enable_permute_local_kv, action: resetting to False. "
                 )
                 vllm_config.kv_transfer_config.enable_permute_local_kv = False
 
@@ -1029,8 +1037,7 @@ class NPUPlatform(Platform):
             for flag in force_false_flags:
                 if getattr(att_config, flag, False):
                     logger.warning(
-                        "Ignored parameter '%s'. This is a GPU-specific feature "
-                        "not supported on Ascend. Resetting to False.",
+                        "Ignored GPU-specific parameter. parameter=%s, action: resetting to False. ",
                         flag,
                     )
                     setattr(att_config, flag, False)
@@ -1038,7 +1045,8 @@ class NPUPlatform(Platform):
             # Reset specific values to None as Ascend uses its own internal logic
             if getattr(att_config, "flash_attn_version", None) is not None:
                 logger.warning(
-                    "Ignored parameter 'flash_attn_version'. Ascend uses its own attention backend. Resetting to None."
+                    "Ignored parameter. Ascend uses its own attention backend. "
+                    "parameter=flash_attn_version, action: resetting to None. "
                 )
                 att_config.flash_attn_version = None
 
@@ -1059,8 +1067,8 @@ class NPUPlatform(Platform):
             # CUDA Graph specific split points are not applicable
             if getattr(att_config, "flash_attn_max_num_splits_for_cuda_graph", 32) != 32:
                 logger.warning(
-                    "Parameter 'flash_attn_max_num_splits_for_cuda_graph' is "
-                    "ignored on Ascend. Resetting to default (32)."
+                    "Parameter is ignored on Ascend. "
+                    "parameter=flash_attn_max_num_splits_for_cuda_graph, action: resetting to default (32). "
                 )
                 att_config.flash_attn_max_num_splits_for_cuda_graph = 32
 
@@ -1070,8 +1078,8 @@ class NPUPlatform(Platform):
             # available on Ascend NPU
             if getattr(vllm_config.parallel_config, "ray_workers_use_nsight", False):
                 logger.warning(
-                    "'--ray-workers-use-nsight' requires NVIDIA Nsight which is "
-                    "not available on Ascend NPU. Resetting to False."
+                    "Parameter requires NVIDIA-specific tools. "
+                    "parameter=ray_workers_use_nsight, action: resetting to False. "
                 )
                 vllm_config.parallel_config.ray_workers_use_nsight = False
 
@@ -1112,20 +1120,16 @@ class NPUPlatform(Platform):
 
             if getattr(vllm_config.parallel_config, "enable_dbo", False):
                 logger.warning(
-                    "'--enable-dbo' is currently ignored on Ascend NPU because the "
-                    "upstream generic DBO path has not yet aligned with the Ascend "
-                    "backend/runtime model. Ascend may use separate backend/model-"
-                    "specific overlap optimizations, and this may converge as the "
-                    "generic overlap framework evolves. Resetting to False."
+                    "Parameter is currently ignored on Ascend. parameter=enable_dbo, action: resetting to False. "
                 )
                 vllm_config.parallel_config.enable_dbo = False
 
             ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
             if ubatch_size != 0:
                 logger.warning(
-                    "'--ubatch-size' is currently ignored on Ascend NPU because it "
-                    "depends on the generic DBO path, which is not yet aligned with "
-                    "the current Ascend backend/runtime model. Resetting to 0."
+                    "Parameter is currently ignored on Ascend. "
+                    "parameter=ubatch_size, value=%d, action: resetting to 0. ",
+                    ubatch_size,
                 )
                 vllm_config.parallel_config.ubatch_size = 0
 
