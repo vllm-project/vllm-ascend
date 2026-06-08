@@ -20,6 +20,7 @@ import subprocess
 import psutil
 import torch
 import torch_npu
+from vllm.config import CUDAGraphMode
 from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
@@ -29,6 +30,7 @@ from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 _IS_RC_DEVICE: bool | None = None
+_FP16_BYTES = 2
 
 
 def _is_rc_device() -> bool:
@@ -43,6 +45,45 @@ def _is_rc_device() -> bool:
             # Fallback to False if lspci is unavailable or fails.
             _IS_RC_DEVICE = False
     return _IS_RC_DEVICE
+
+
+def _get_310p_aclgraph_memory_reserve(vllm_config) -> int:
+    """Estimate extra memory to leave free for 310P ACL graph capture.
+
+    310P currently materializes full fp16 causal masks and casts them to
+    FRACTAL_NZ. During ACL graph capture, these mask/workspace allocations can
+    overlap with graph-pool allocations, so the KV cache budget needs a small
+    device-specific guard band.
+    """
+    compilation_config = vllm_config.compilation_config
+    if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+        return 0
+
+    additional_config = vllm_config.additional_config or {}
+    if "aclgraph_memory_reserve_bytes" in additional_config:
+        return int(additional_config["aclgraph_memory_reserve_bytes"])
+    if "aclgraph_memory_reserve_gib" in additional_config:
+        return int(float(additional_config["aclgraph_memory_reserve_gib"]) * GiB_bytes)
+
+    capture_sizes = compilation_config.cudagraph_capture_sizes or []
+    if not capture_sizes:
+        return 0
+
+    max_model_len = vllm_config.model_config.max_model_len
+    if max_model_len <= 0:
+        return GiB_bytes
+
+    full_mask_bytes = max_model_len * max_model_len * _FP16_BYTES
+
+    # The cached full causal mask is usually materialized during profile_run
+    # and should already be reflected in non-KV memory. Reserve one mask-sized
+    # guard for FRACTAL_NZ conversion/transient workspace, then add a small
+    # per-graph allowance for graph-pool overhead.
+    per_graph_overhead = 512 * (1 << 20)
+    estimated_reserve = full_mask_bytes + len(capture_sizes) * per_graph_overhead
+    min_reserve = GiB_bytes
+    max_reserve = 4 * GiB_bytes
+    return int(min(max(estimated_reserve, min_reserve), max_reserve))
 
 
 class NPUWorker310(NPUWorker):
@@ -127,6 +168,18 @@ class NPUWorker310(NPUWorker):
             self.available_kv_cache_memory_bytes = (
                 self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
             ) // 2
+
+        aclgraph_memory_reserve = _get_310p_aclgraph_memory_reserve(self.vllm_config)
+        if aclgraph_memory_reserve > 0:
+            self.available_kv_cache_memory_bytes = max(
+                0,
+                self.available_kv_cache_memory_bytes - aclgraph_memory_reserve,
+            )
+            logger.info_once(
+                "Reserved %.2f GiB from 310P KV cache budget for ACL graph capture mask/workspace memory.",
+                GiB(aclgraph_memory_reserve),
+                scope="local",
+            )
 
         logger.debug(profile_result)
         logger.info_once(
