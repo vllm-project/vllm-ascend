@@ -13,7 +13,6 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SingleTypeKVCacheManager,
-    spec_manager_map,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -157,7 +156,7 @@ class CompressAttentionManager(FullAttentionManager):
         self,
         request: Request,
         num_tokens: int,
-        alignment_tokens: int | None = None,
+        retention_interval: int | None = None,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -166,8 +165,7 @@ class CompressAttentionManager(FullAttentionManager):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
-            alignment_tokens: The cache-hit alignment used by upstream vLLM
-                main. v0.21.0 does not expose this argument in the base class.
+            retention_interval: Prefix-cache retention interval.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // (self.block_size * self.compress_ratio)
@@ -193,11 +191,14 @@ class CompressAttentionManager(FullAttentionManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        use_eagle: bool = False,
+        drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...]:
+        # vLLM B renamed ``use_eagle`` to ``drop_eagle_block``; accept both.
+        eagle_drop = use_eagle if vllm_version_is("0.21.0") else drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
         # ), (
@@ -219,7 +220,7 @@ class CompressAttentionManager(FullAttentionManager):
                     computed.append(cached)
             else:
                 break
-        if use_eagle and computed_blocks[0]:
+        if eagle_drop and computed_blocks[0]:
             # Need to drop the last matched block if eagle is enabled.
             for computed in computed_blocks:
                 computed.pop()
@@ -256,7 +257,15 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
-    manager_class = spec_manager_map[type(kv_cache_spec)]
+    if vllm_version_is("0.21.0"):
+        from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map  # type: ignore[import-not-found]
+
+        manager_class = spec_manager_map[type(kv_cache_spec)]
+    else:
+        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
+
+        manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+        assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
     if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
         if max_model_len is not None:

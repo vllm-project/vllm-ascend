@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -74,9 +75,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_num_batched_tokens: int | None = None,
+        scheduler_block_size: int | None = None,
     ):
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
+        self.scheduler_block_size = scheduler_block_size
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
@@ -101,6 +104,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
+        # v0.21.0 managers don't accept `scheduler_block_size`.
+        extra_mgr_kwargs: dict = {}
+        if not vllm_version_is("0.21.0"):
+            extra_mgr_kwargs["scheduler_block_size"] = scheduler_block_size
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
@@ -111,6 +118,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 pcp_world_size=pcp_world_size,
                 max_num_batched_tokens=max_num_batched_tokens,
                 max_model_len=max_model_len,
+                **extra_mgr_kwargs,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -252,13 +260,18 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 if use_eagle:
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
+                # vLLM B renamed the ``use_eagle`` kwarg to ``drop_eagle_block``.
+                if vllm_version_is("0.21.0"):
+                    eagle_kwarg = {"use_eagle": use_eagle}
+                else:
+                    eagle_kwarg = {"drop_eagle_block": use_eagle}
                 hit_blocks = manager_cls.find_longest_cache_hit(
                     block_hashes=_get_block_hashes(spec),
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
-                    use_eagle=use_eagle,
+                    **eagle_kwarg,
                     alignment_tokens=self.lcm_block_size,
                     dcp_world_size=self.dcp_world_size,
                     pcp_world_size=self.pcp_world_size,
@@ -307,6 +320,7 @@ def get_kv_cache_coordinator(
     dcp_world_size: int,
     pcp_world_size: int,
     hash_block_size: int,
+    scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
@@ -323,6 +337,7 @@ def get_kv_cache_coordinator(
             eagle_attn_layer_names=eagle_attn_layer_names,
             metrics_collector=metrics_collector,
             max_num_batched_tokens=max_num_batched_tokens,
+            scheduler_block_size=scheduler_block_size,
         )
 
     cp_enabled = dcp_world_size > 1 or pcp_world_size > 1
@@ -330,18 +345,21 @@ def get_kv_cache_coordinator(
     # Only CP hybrid prefix caching needs AscendHybridKVCacheCoordinator.
     # Otherwise keep upstream coordinators (non-CP / unitary / no-prefix-cache).
     if not cp_enabled or len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
-        return _orig_get_kv_cache_coordinator(
-            kv_cache_config,
-            max_model_len,
-            max_num_batched_tokens,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
-            dcp_world_size,
-            pcp_world_size,
-            hash_block_size,
-            metrics_collector,
+        orig_kwargs = dict(
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
+            use_eagle=use_eagle,
+            enable_caching=enable_caching,
+            enable_kv_cache_events=enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
         )
+        if not vllm_version_is("0.21.0"):
+            orig_kwargs["scheduler_block_size"] = scheduler_block_size
+        return _orig_get_kv_cache_coordinator(**orig_kwargs)
     return AscendHybridKVCacheCoordinator(
         kv_cache_config,
         max_model_len,
@@ -354,6 +372,7 @@ def get_kv_cache_coordinator(
         eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
         max_num_batched_tokens=max_num_batched_tokens,
+        scheduler_block_size=scheduler_block_size,
     )
 
 
