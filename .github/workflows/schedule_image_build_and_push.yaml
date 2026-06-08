@@ -1,7 +1,8 @@
 # This is a docker build check and publish job:
 # 1. PR Triggered docker image build check
+#   - 'image-build' label should be added
 #   - is for image build check
-#   - Enable on main/*-dev branch
+#   - Enable on main/releases branch
 #   - push: ${{ github.event_name != 'pull_request' }} ==> false
 # 2. branches push trigger image publish
 #   - is for branch/dev/nightly image
@@ -21,7 +22,7 @@ on:
     branches:
       - 'main'
       - 'releases/*'
-    types: [ labeled, synchronize ]
+    types: [ labeled ]
   workflow_dispatch:
     inputs:
       tag:
@@ -31,15 +32,8 @@ on:
         type: choice
         options:
           - main
-          - v0.19.1rc1
-          - v0.18.0
-          - v0.18.0rc1
-          - v0.17.0rc1
-          - v0.16.0rc1
-          - v0.15.0rc1
-          - v0.14.0rc1
-          - v0.13.0
-          - v0.13.0rc3
+          - v0.21.0rc1
+          - v0.20.2rc1
           - none
       branch:
         description: 'Docker branch for build results (mutually exclusive with tag)'
@@ -48,8 +42,8 @@ on:
         type: choice
         options:
           - main
+          - releases/v0.20.2rc
           - releases/v0.18.0
-          - releases/v0.13.0
           - none
 
 permissions:
