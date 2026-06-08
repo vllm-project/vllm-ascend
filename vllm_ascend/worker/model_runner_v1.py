@@ -83,13 +83,13 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (  # type: ignore[import-not-found]
         extract_routed_experts_for_current_batch,
         get_global_experts_capturer,
         issue_routing_d2h_copy,
     )
 else:
-    from vllm.v1.outputs import RoutedExpertsLists
+    from vllm.v1.outputs import RoutedExpertsLists  # type: ignore[import-not-found]
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler

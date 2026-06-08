@@ -13,17 +13,21 @@ from vllm_ascend.patch.platform.patch_kv_cache_interface import AscendMLAAttenti
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers import (
-        deepseek_compressor,  # type:ignore
-        deepseek_v4_attention,  # type:ignore
+    from vllm.model_executor.layers import (  # type: ignore[import-not-found]
+        deepseek_compressor,
+        deepseek_v4_attention,
     )
-    from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # type:ignore
-    from vllm.model_executor.layers.deepseek_v4_attention import DeepseekV4IndexerCache  # type:ignore
+    from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # type: ignore[import-not-found]
+    from vllm.model_executor.layers.deepseek_v4_attention import (  # type: ignore[import-not-found]
+        DeepseekV4IndexerCache,  # type: ignore[import-not-found]
+    )
 else:
-    import vllm.models.deepseek_v4.attention as deepseek_v4_attention
-    import vllm.models.deepseek_v4.compressor as deepseek_compressor
-    from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
-    from vllm.models.deepseek_v4.compressor import CompressorStateCache
+    import vllm.models.deepseek_v4.attention as deepseek_v4_attention  # type: ignore[import-not-found]
+    import vllm.models.deepseek_v4.compressor as deepseek_compressor  # type: ignore[import-not-found]
+    from vllm.models.deepseek_v4.attention import (  # type: ignore[import-not-found]
+        DeepseekV4IndexerCache,  # type: ignore[import-not-found]
+    )
+    from vllm.models.deepseek_v4.compressor import CompressorStateCache  # type: ignore[import-not-found]
 
 
 class AscendCompressorStateCache(CompressorStateCache):
