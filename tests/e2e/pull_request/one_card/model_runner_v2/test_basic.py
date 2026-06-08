@@ -22,6 +22,7 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+from tests.e2e.pull_request.utils import PROMPTS_SHORT, compare_logprobs
 from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
@@ -129,40 +130,14 @@ def test_qwen3_dense_graph_mode(
     enforce_eager: bool,
     compilation_config: dict,
 ) -> None:
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-    with VllmRunner(
-        model,
-        max_model_len=1024,
-        enforce_eager=enforce_eager,
-        compilation_config=compilation_config,
-    ) as runner:
-        outputs = runner.model.generate(prompts, sampling_params)
-
-    if model != "Qwen/Qwen3-0.6B":
-        return
-
-    expected_outputs = [
-        " Lina. I'm a 22-year-old student from China.",
-        " the same as the president of the United Nations. This is because the president",
-        " Paris. The capital of France is also the capital of the Republic of France",
-        " not just about the technology itself but also about the human aspect-how we",
-    ]
-
-    matches = 0
-    misses = 0
-    for output, expected_output in zip(outputs, expected_outputs):
-        if output.outputs[0].text[:10] == expected_output[:10]:
-            matches += 1
-        else:
-            misses += 1
-            print(f"output: {output.outputs[0].text}")
-            print(f"expected_output: {expected_output}")
-
-    assert misses == 0
+    # Verify graph-mode numerical consistency against an eager baseline via
+    # logprob comparison (see aclgraph/test_aclgraph_accuracy.py).
+    runner_kwargs = {
+        "model_name": model,
+        "max_model_len": 1024,
+        "enforce_eager": enforce_eager,
+        "compilation_config": compilation_config,
+    }
+    if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
+        runner_kwargs["quantization"] = "ascend"
+    compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)

@@ -31,7 +31,9 @@ if vllm_version_is("0.21.0"):
         GatedDeltaNetAttention as _GDNBaseCls,
     )
 else:
-    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # type: ignore[import-not-found]
+        QwenGatedDeltaNetAttention as _GDNBaseCls,
+    )
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 
