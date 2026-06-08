@@ -691,14 +691,10 @@ class RejectionSamplerConfig:
             )
         if not (0 < self.posterior_threshold <= 1):
             raise ValueError(
-                f"rejection_sampler_config.posterior_threshold must be in (0, 1], "
-                f"got {self.posterior_threshold}"
+                f"rejection_sampler_config.posterior_threshold must be in (0, 1], got {self.posterior_threshold}"
             )
         if self.posterior_alpha < 0:
-            raise ValueError(
-                f"rejection_sampler_config.posterior_alpha must be >= 0, "
-                f"got {self.posterior_alpha}"
-            )
+            raise ValueError(f"rejection_sampler_config.posterior_alpha must be >= 0, got {self.posterior_alpha}")
 
 
 class EplbConfig:
