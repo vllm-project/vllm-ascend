@@ -33,8 +33,8 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 class BaseDeviceAdaptor:
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
-        torch_npu._npu_reshape_and_cache(
-            key=key, value=value, key_cache=key_cache, value_cache=value_cache, slot_indices=slot_mapping
+        torch.ops._C_ascend.npu_scatter_pa_kv_cache_vllm(
+            key, value, key_cache, value_cache, slot_mapping
         )
 
     @staticmethod
@@ -199,14 +199,14 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
-        torch_npu.atb.npu_paged_cache_load(
+        torch.ops._C_ascend.npu_gather_pa_kv_cache_vllm(
             cache_kv_c,
             cache_k_pe,
             block_table,
             context_seq_len_npu,
-            seq_starts=seq_starts,
-            key=key,
-            value=value,
+            key,
+            value,
+            seq_starts,
         )
 
     @staticmethod

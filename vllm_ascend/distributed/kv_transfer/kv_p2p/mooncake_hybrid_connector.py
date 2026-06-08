@@ -736,14 +736,14 @@ class KVCacheRecvingThread(threading.Thread):
         # Process each layer in the KV cache
         for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
             # Load cache data into buffers
-            torch_npu.atb.npu_paged_cache_load(
+            torch.ops._C_ascend.npu_gather_pa_kv_cache_vllm(
                 k_cache_layer,
                 v_cache_layer,
                 block_table,
                 block_len_tensor,
-                seq_starts=seq_start_tensor,
-                key=k_buffer,
-                value=v_buffer,
+                k_buffer,
+                v_buffer,
+                seq_start_tensor,
             )
             if need_cat_cache:
                 self._cat_kv_cache(
@@ -774,8 +774,8 @@ class KVCacheRecvingThread(threading.Thread):
         v_buffer = _transpose_kv_cache_between_head(v_buffer)
 
         # Reshape and cache the processed buffers
-        torch_npu._npu_reshape_and_cache(
-            key=k_buffer, value=v_buffer, key_cache=k_cache_layer, value_cache=v_cache_layer, slot_indices=slot_mapping
+        torch.ops._C_ascend.npu_scatter_pa_kv_cache_vllm(
+            k_buffer, v_buffer, k_cache_layer, v_cache_layer, slot_mapping
         )
 
     def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping):
