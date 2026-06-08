@@ -165,11 +165,11 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
             alignment_tokens: The cache-hit alignment used by upstream vLLM
-                main. v0.20.2 does not expose this argument in the base class.
+                main. v0.21.0 does not expose this argument in the base class.
         """
         num_tokens //= self.compress_ratio
 
-        if vllm_version_is("0.20.2"):
+        if vllm_version_is("0.21.0"):
             return super().cache_blocks(request, num_tokens)
 
         return super().cache_blocks(
