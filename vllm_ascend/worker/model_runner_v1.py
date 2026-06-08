@@ -18,7 +18,6 @@
 #
 
 import math
-import os
 import sys
 import time
 from collections import defaultdict
@@ -167,6 +166,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
 if TYPE_CHECKING:
@@ -438,18 +438,8 @@ class NPUModelRunner(GPUModelRunner):
         self._used_fused_mtp_graph_sampler_output = False
         self._fused_mtp_graph_outputs_ready = False
         self._fused_mtp_runtime_common_attn_metadata: AscendCommonAttentionMetadata | None = None
-        self._fused_mtp_debug_enabled = os.getenv(
-            "VLLM_ASCEND_FUSED_MTP_DEBUG", "0"
-        ).lower() in ("1", "true", "yes", "on")
-        try:
-            fused_mtp_debug_interval = int(
-                os.getenv("VLLM_ASCEND_FUSED_MTP_DEBUG_INTERVAL", "200")
-            )
-        except ValueError:
-            fused_mtp_debug_interval = 200
-        self._fused_mtp_debug_interval = max(
-            fused_mtp_debug_interval, 1
-        )
+        self._fused_mtp_debug_enabled = ascend_envs.VLLM_ASCEND_FUSED_MTP_DEBUG
+        self._fused_mtp_debug_interval = ascend_envs.VLLM_ASCEND_FUSED_MTP_DEBUG_INTERVAL
         self._fused_mtp_debug_step = 0
         self._fused_mtp_debug_last_prepare: dict[str, Any] = {}
 
