@@ -1056,38 +1056,55 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
 
         # Rebuild CP/spec inputs after async accepted-token correction.
+        has_decode_req = bool(np.any(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            >= self.input_batch.num_prompt_tokens[:num_reqs]
+        ))
         should_rebuild_async_inputs = (
             self.use_cp
             and self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
-            and not with_prefill
+            and has_decode_req
         )
-        corrected_num_computed_tokens_np = None
+        base_num_computed_tokens_np = None
         if should_rebuild_async_inputs:
             # Async spec decode corrects num_computed_tokens on device.
-            # Copy once and reuse for CPU-side rebuilds in this iteration.
+            # Rebuild CPU-side inputs from the corrected positions.
             corrected_num_computed_tokens_np = (
                 self.num_computed_tokens[:num_reqs].cpu().numpy()
             )
 
-        if self.pcp_size > 1:
-            # When PCP (Prefill Context Parallel) is enabled, positions use
-            # special PCP offsets (position_pcp) that are only computed on CPU.
-            # Copy the correctly-computed CPU positions to GPU instead of
-            # recomputing on GPU (which would miss the PCP offsets).
+            # Mixed batch: only decode requests use async-corrected lengths.
+            # Prefill requests keep CPU-side prompt progress.
+            base_num_computed_tokens_np = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs].copy()
+            )
+            num_decode_reqs = self.pcp_manager.num_decode_reqs
+            base_num_computed_tokens_np[:num_decode_reqs] = (
+                corrected_num_computed_tokens_np[:num_decode_reqs]
+            )
 
-            if should_rebuild_async_inputs:
-                self._rebuild_input_ids_with_corrected_positions(
-                    scheduler_output,
-                    num_reqs,
-                    total_num_scheduled_tokens,
-                    req_indices,
-                    position_pcp,
-                    positions_np,
-                    cu_num_tokens,
-                    corrected_num_computed_tokens_np,
-                )
+            position_offsets = (
+                position_pcp
+                if self.pcp_size > 1
+                else self.query_pos.np
+            )
+
+            self._rebuild_input_ids_with_corrected_positions(
+                scheduler_output,
+                num_reqs,
+                total_num_scheduled_tokens,
+                req_indices,
+                position_offsets,
+                positions_np,
+                cu_num_tokens,
+                base_num_computed_tokens_np,
+            )
+
+        if self.pcp_size > 1 or should_rebuild_async_inputs:
+            # PCP and async rebuild both compute the correct positions on CPU.
+            # Copy positions_np to GPU so input_ids and positions stay aligned.
 
             self.positions[:total_num_scheduled_tokens].copy_(
                 torch.from_numpy(
@@ -1101,38 +1118,18 @@ class NPUModelRunner(GPUModelRunner):
                 + self.query_pos.gpu[:total_num_scheduled_tokens]
             )
 
-            if should_rebuild_async_inputs:
-                self._rebuild_input_ids_with_corrected_positions(
-                    scheduler_output,
-                    num_reqs,
-                    total_num_scheduled_tokens,
-                    req_indices,
-                    self.query_pos.np,
-                    positions_np,
-                    cu_num_tokens,
-                    corrected_num_computed_tokens_np,
-                )
-
         self.seq_lens[:num_reqs] = (
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        if (
-            self.use_cp
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
-            and prev_req_id_to_index
-            and self.decode_threshold > 2
-            and not with_prefill
-            and self.pcp_manager.async_rebuild_req_indices_full is not None
-        ):
+        if should_rebuild_async_inputs:
             req_indices_full = self.pcp_manager.async_rebuild_req_indices_full
             cu_num_tokens_full = self.pcp_manager.async_rebuild_cu_num_tokens_full
             num_tokens_full = self.pcp_manager.async_rebuild_num_tokens_full
 
-            assert corrected_num_computed_tokens_np is not None
-            base = corrected_num_computed_tokens_np
+            assert base_num_computed_tokens_np is not None
+            base = base_num_computed_tokens_np
 
             token_counts = np.diff(np.concatenate(([0], cu_num_tokens_full)))
             token_starts = np.repeat(cu_num_tokens_full - token_counts, token_counts)
@@ -1166,7 +1163,7 @@ class NPUModelRunner(GPUModelRunner):
                 req_indices_full,
                 positions_full,
                 cu_num_tokens_full,
-                self._draft_token_ids,
+                self._draft_token_ids,  # type: ignore[has-type]
                 scheduler_output,
                 self.num_spec_tokens,
                 precomputed_positions_np=positions_full,
@@ -1339,11 +1336,11 @@ class NPUModelRunner(GPUModelRunner):
         position_offsets,
         positions_np,
         cu_num_tokens,
-        corrected_num_computed_tokens_np,
+        base_num_computed_tokens_np,
     ) -> None:
-        # Reuse the corrected CPU copy of device-side starts so input_ids
-        # can be rebuilt from token_ids_cpu with the right positions.
-        base = corrected_num_computed_tokens_np
+        # base_num_computed_tokens_np contains per-request starts:
+        # decode requests use async-corrected lengths, prefill requests use CPU lengths.
+        base = base_num_computed_tokens_np
         np.add(
             base[req_indices],
             position_offsets[:total_num_scheduled_tokens],
@@ -2508,8 +2505,8 @@ class NPUModelRunner(GPUModelRunner):
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
-        sampling_metadata = self.input_batch.sampling_metadata
         self.input_batch.update_async_output_token_ids()
+        sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
