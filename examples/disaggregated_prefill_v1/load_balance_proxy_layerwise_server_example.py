@@ -569,14 +569,9 @@ async def handle_chat_completions(request: Request):
 @app.post("/reset_prefix_cache")
 async def reset_prefix_cache(request: Request):
     params = dict(request.query_params)
-    all_servers = [
-        (s.client, f"http://{s.host}:{s.port}") for s in proxy_state.prefillers + proxy_state.decoders
-    ]
+    all_servers = [(s.client, f"http://{s.host}:{s.port}") for s in proxy_state.prefillers + proxy_state.decoders]
     results = await asyncio.gather(
-        *[
-            client.post("/reset_prefix_cache", params=params)
-            for client, _ in all_servers
-        ],
+        *[client.post("/reset_prefix_cache", params=params) for client, _ in all_servers],
         return_exceptions=True,
     )
     failures = []
@@ -589,8 +584,10 @@ async def reset_prefix_cache(request: Request):
             failures.append(base_url)
     if failures:
         from fastapi.responses import JSONResponse
+
         return JSONResponse(status_code=500, content={"failed": failures})
     from fastapi.responses import Response as FastAPIResponse
+
     return FastAPIResponse(status_code=200)
 
 
@@ -601,6 +598,31 @@ async def healthcheck():
         "prefill_instances": len(proxy_state.prefillers),
         "decode_instances": len(proxy_state.decoders),
     }
+
+
+@app.post("/reset_prefix_cache")
+async def reset_prefix_cache(request: Request):
+    params = dict(request.query_params)
+    all_servers = [(s.client, f"http://{s.host}:{s.port}") for s in proxy_state.prefillers + proxy_state.decoders]
+    results = await asyncio.gather(
+        *[client.post(f"{base_url}/reset_prefix_cache", params=params) for client, base_url in all_servers],
+        return_exceptions=True,
+    )
+    failures = []
+    for (_, base_url), result in zip(all_servers, results):
+        if isinstance(result, Exception):
+            logger.error("reset_prefix_cache failed for %s: %s", base_url, result)
+            failures.append(base_url)
+        elif result.status_code != 200:
+            logger.error("reset_prefix_cache failed for %s: status %s", base_url, result.status_code)
+            failures.append(base_url)
+    if failures:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=500, content={"failed": failures})
+    from fastapi.responses import Response as FastAPIResponse
+
+    return FastAPIResponse(status_code=200)
 
 
 @app.post("/v1/metaserver")
