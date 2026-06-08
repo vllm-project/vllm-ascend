@@ -46,7 +46,7 @@ function install_compatible_triton_ascend() {
 
     if [[ "${cann_version}" == "9.0.0"* ]]; then
         _info "====> Install Triton Ascend for CANN ${cann_version}"
-        pip uninstall -y triton-ascend || true
+        pip uninstall -y triton triton-ascend || true
         pip install triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
     fi
 }
