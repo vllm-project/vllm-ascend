@@ -7,13 +7,13 @@ on:
 
 jobs:
   remove-wait-feedback-on-comment:
-    if: ${{ github.event_name == 'issue_comment' }}
+    if: ${{ github.event_name == 'issue_comment' && contains(github.event.issue.labels.*.name, 'wait-feedback') }}
     runs-on: ubuntu-latest
     permissions:
       issues: write
     steps:
       # When an issue tagged with "wait-feedback" receives a new response, the "wait-feedback" tag will be removed.
-      - run: gh issue edit "${{ github.event.issue.number }}" --remove-label "wait-feedback"
+      - run: gh issue edit "${{ github.event.issue.number }}" --remove-label "wait-feedback" --repo "${{ github.repository }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   stale:
