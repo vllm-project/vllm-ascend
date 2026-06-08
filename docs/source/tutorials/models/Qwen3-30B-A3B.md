@@ -1,98 +1,190 @@
 # Qwen3-30B-A3B
 
-## Run vllm-ascend on Multi-NPU with Qwen3 MoE
+## 1 Introduction
 
-Run docker container:
+Qwen3-30B-A3B is a Mixture-of-Experts (MoE) model in the Qwen3 series, featuring 30.5B total parameters with 3.3B activated per token. The sparse MoE architecture enables efficient training and inference, delivering strong performance across reasoning, instruction-following, and agent capabilities while maintaining lower computational cost compared to dense models of similar capability.
+
+This document will demonstrate the main validation steps for Qwen3-30B-A3B in the vLLM-Ascend environment, including supported features, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
+
+The Qwen3-30B-A3B model is first supported in v0.8.4rc2. This document is validated and written based on **vLLM-Ascend v0.13.0**. All **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use v0.13.0 or a later version.
+
+## 2 Supported Features
+
+Please refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
+
+Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
+
+## 3 Prerequisites
+
+### 3.1 Model Weight
+
+The following model variants are available. It is recommended to download the model weight to a shared directory across multiple nodes (e.g., `/root/.cache/`).
+
+| Model | Hardware Requirement | Download |
+|-------|---------------------|----------|
+| Qwen3-30B-A3B (BF16) | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) |
+| Qwen3-30B-A3B-W8A8 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelscope.cn/models/vllm-ascend/Qwen3-30B-A3B-W8A8) |
+
+These are the recommended numbers of cards, which can be adjusted according to the actual situation.
+
+:::{note}
+If the W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
+:::
+
+### 3.2 Verify Multi-node Communication (Optional)
+
+If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
+
+## 4 Installation
+
+### 4.1 Docker Image Installation
+
+You can use the official all-in-one Docker image for Qwen3 MoE models.
+
+**Docker Pull:**
+
+```bash
+docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```
+
+**Docker Run:**
 
 ```{code-block} bash
    :substitutions:
-# Update the vllm-ascend image
-# For Atlas A2 machines:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-# For Atlas A3 machines:
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+
+# Update --device according to your device (Atlas A2: /dev/davinci[0-7], Atlas A3: /dev/davinci[0-15]).
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
 docker run --rm \
---name vllm-ascend \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--p 8000:8000 \
--it $IMAGE bash
+    --name vllm-ascend-env \
+    --shm-size=1g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
 ```
 
-Set up environment variables:
+The default workdir is `/workspace`. vLLM and vLLM-Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`), so changes take effect immediately without requiring a new installation.
+
+**Installation Verification:**
+
+After starting the container, run the following command to verify the installation:
 
 ```bash
-# Load model from ModelScope to speed up download
+docker ps | grep vllm-ascend-env
+```
+
+Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+
+```bash
+pip show vllm-ascend
+```
+
+Expected result: The version information is displayed, matching the pulled image version.
+
+### 4.2 Source Code Installation
+
+If you prefer not to use the Docker image, you can build from source:
+
+1. Clone the repository:
+
+```bash
+git clone https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+```
+
+1. Install in development mode:
+
+```bash
+pip install -e .
+```
+
+**Installation Verification:**
+
+```bash
+pip show vllm-ascend
+```
+
+Expected result: The version information is displayed, confirming a successful installation.
+
+:::{note}
+If deploying a multi-node environment, set up the environment on each node.
+:::
+
+## 5 Online Service Deployment
+
+### 5.1 Single-Node Online Deployment
+
+Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
+
+**BF16 Model:**
+
+```bash
 export VLLM_USE_MODELSCOPE=True
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-# Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+vllm serve your_model_path \
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --max-model-len 4096
 ```
 
-### Online Inference on Multi-NPU
-
-Run the following script to start the vLLM server on Multi-NPU:
-
-For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 2, and for 32 GB of memory, tensor-parallel-size should be at least 4.
+**W8A8 Quantized Model:**
 
 ```bash
-vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 4 --enable-expert-parallel
+export VLLM_USE_MODELSCOPE=True
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve your_model_path \
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --max-model-len 4096 \
+    --quantization ascend
 ```
 
-Once your server is started, you can query the model with input prompts.
+:::{note}
+Replace `your_model_path` with the actual model path (e.g., Modelscope ID or local path). For an Atlas A2 with 64 GB NPU memory, `--tensor-parallel-size` should be at least 2; for 32 GB memory, at least 4. `--enable-expert-parallel` enables Expert Parallelism, which is required for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP. If the model is not a quantized model, remove the `--quantization ascend` parameter.
+:::
 
-```bash
-curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
-  "model": "Qwen/Qwen3-30B-A3B",
-  "messages": [
-    {"role": "user", "content": "Give me a short introduction to large language models."}
-  ],
-  "temperature": 0.6,
-  "top_p": 0.95,
-  "top_k": 20,
-  "max_completion_tokens": 4096
-}'
-```
+### 5.2 Offline Inference (Optional)
 
-### Offline Inference on Multi-NPU
+The model can also be used for offline batch inference via the Python API:
 
-Run the following script to execute offline inference on multi-NPU:
+:::{note}
+If using a quantized model, add `quantization="ascend"` to the LLM constructor. Replace `Qwen/Qwen3-30B-A3B` with your local model path.
+:::
 
 ```python
-import gc
-import torch
-
 from vllm import LLM, SamplingParams
-from vllm.distributed.parallel_state import (destroy_distributed_environment,
-                                             destroy_model_parallel)
-
-def clean_up():
-    destroy_model_parallel()
-    destroy_distributed_environment()
-    gc.collect()
-    torch.npu.empty_cache()
 
 prompts = [
     "Hello, my name is",
     "The future of AI is",
 ]
-sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
+sampling_params = SamplingParams(temperature=0.6, top_p=0.95)
+
 llm = LLM(model="Qwen/Qwen3-30B-A3B",
           tensor_parallel_size=4,
-          distributed_executor_backend="mp",
-          max_model_len=4096,
           enable_expert_parallel=True)
 
 outputs = llm.generate(prompts, sampling_params)
@@ -100,14 +192,241 @@ for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
-del llm
-clean_up()
 ```
 
-If you run this script successfully, you can see the info shown below:
+## 6 Functional Verification
 
-```bash
-Prompt: 'Hello, my name is', Generated text: " Lucy. I'm from the UK and I'm 11 years old."
-Prompt: 'The future of AI is', Generated text: ' a topic that has captured the imagination of scientists, philosophers, and the general public'
+After the service is started, the model can be invoked by sending a prompt.
+
+**Chat Completions API:**
+
+```shell
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qwen3",
+        "messages": [
+            {"role": "user", "content": "Give me a short introduction to large language models."}
+        ],
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "max_completion_tokens": 4096
+    }'
 ```
+
+Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
+
+## 7 Accuracy Evaluation
+
+### Using AISBench
+
+For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
+
+<!-- TODO: Add accuracy evaluation results when available -->
+
+### Using Language Model Evaluation Harness
+
+Using the `gsm8k` dataset as an example, run the accuracy evaluation in online mode:
+
+1. For `lm_eval` installation, please refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md).
+1. Run `lm_eval`:
+
+```shell
+lm_eval \
+  --model local-completions \
+  --model_args model=/root/.cache/vllm-ascend/Qwen3-30B-A3B-W8A8,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --tasks gsm8k \
+  --output_path ./
+```
+
+## 8 Performance
+
+### Using AISBench
+
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+### Using vLLM Benchmark
+
+Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+
+Take the `serve` subcommand as an example:
+
+```shell
+vllm bench serve \
+    --model vllm-ascend/Qwen3-30B-A3B-W8A8 \
+    --served-model-name qwen3 \
+    --port 8000 \
+    --dataset-name random \
+    --random-input 200 \
+    --num-prompts 200 \
+    --request-rate 1 \
+    --save-result \
+    --result-dir ./
+```
+
+<!-- TODO: Add performance evaluation results when available -->
+
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+#### Table 1: Scenario Overview
+
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
+|----------|----------------|-------------|----------------|------------------------|
+| High Throughput | Single-Node (TP1) | 1 (A2) | W8A8 | Single-card deployment maximizes concurrent request processing |
+| Low Latency | Single-Node (TP4) | 4 (A2) | W8A8 | Multi-card TP reduces per-token latency with expert parallelism |
+| Long Context | Single-Node (TP4) | 4 (A2) | W8A8 | Reduces concurrent sequences to accommodate longer max-model-len |
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes.
+
+#### Table 2: Detailed Node Configuration
+
+| Scenario | Configuration | #NPUs | TP | EP | max-num-seqs | max-model-len | max-num-batched-tokens | Async Scheduling | Spec Decode |
+|----------|---------------|-------|----|----|-------------|---------------|----------------------|------------------|-------------|
+| Low Latency | Single-Node | 4 | 4 | On | 100 | 37364 | 16384 | On | eagle3 |
+| High Throughput | Single-Node | 1 | 1 | Off | 100 | 37364 | 16384 | On | eagle3 |
+| Long Context | Single-Node | 4 | 4 | On | 14 | 135000 | 16384 | On | eagle3 |
+
+> For complete startup commands and parameter descriptions, please refer to the deployment examples below.
+
+**Low Latency Configuration:**
+
+```shell
+export VLLM_USE_V1=1
+export ASCEND_RT_VISIBLE_DEVICES=12,13,14,15
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_NZ=2
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+vllm serve your_model_path \
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --max-num-seqs 100 \
+    --max-model-len 37364 \
+    --max-num-batched-tokens 16384 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --distributed_executor_backend "mp" \
+    --no-enable-prefix-caching \
+    --async-scheduling True \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --gpu-memory-utilization 0.95 \
+    --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
+```
+
+**High Throughput Configuration:**
+
+```shell
+export VLLM_USE_V1=1
+export ASCEND_RT_VISIBLE_DEVICES=15
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_NZ=2
+
+vllm serve your_model_path \
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --max-num-seqs 100 \
+    --max-model-len 37364 \
+    --max-num-batched-tokens 16384 \
+    --tensor-parallel-size 1 \
+    --distributed_executor_backend "mp" \
+    --no-enable-prefix-caching \
+    --async-scheduling True \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --gpu-memory-utilization 0.95 \
+    --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
+```
+
+**Long Context Configuration:**
+
+```shell
+export VLLM_USE_V1=1
+export ASCEND_RT_VISIBLE_DEVICES=12,13,14,15
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_NZ=2
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+vllm serve your_model_path \
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --max-num-seqs 14 \
+    --max-model-len 135000 \
+    --max-num-batched-tokens 16384 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --distributed_executor_backend "mp" \
+    --no-enable-prefix-caching \
+    --async-scheduling True \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --gpu-memory-utilization 0.95 \
+    --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
+```
+
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+#### 9.2.2 Model-Specific Optimizations
+
+The following optimizations are specifically applicable to Qwen3-30B-A3B.
+
+**Optimizations Enabled by Default:**
+
+| Optimization Technique | Technical Principle | Performance Benefit |
+|------------------------|--------------------|---------------------|
+| Rope Optimization | The cos_sin_cache and indexing operations of positional encoding are executed only in the first layer, and subsequent layers reuse them directly | Reduces redundant computation during the decoding phase, accelerating inference |
+| AddRMSNormQuant Fusion | Merges address-wise multi-scale normalization and quantization operations into a single operator | Optimizes memory access patterns, improving computational efficiency |
+| FullGraph Optimization | Captures and replays the entire decoding graph at once using `compilation_config={"cudagraph_mode":"FULL_DECODE_ONLY"}` | Significantly reduces scheduling latency, stabilizes multi-device performance |
+
+**Optimizations Requiring Explicit Enablement:**
+
+| Optimization Technique | Technical Principle | Enablement Method | Applicable Scenarios | Precautions |
+|------------------------|--------------------|-------------------|----------------------|-------------|
+| FlashComm_v1 | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | High-concurrency, TP > 1 scenarios with MoE models | Threshold-protected; will not activate in low-concurrency scenarios |
+| NZ Weight Format | Converts weight tensors to FRACTAL_NZ format for improved compute efficiency | `export VLLM_ASCEND_ENABLE_NZ=2` | All scenarios with fp16/bf16 or quantized weights | Default is `1` (quantized only). Set to `2` for maximum performance; set to `0` for RL scenarios |
+| Asynchronous Scheduling | Non-blocking task scheduling to improve concurrent processing capability | `--async-scheduling` | Large-scale models, high-concurrency scenarios | Should be used in coordination with FullGraph optimization |
+| Speculative Decoding | Uses a lightweight draft model to predict future tokens, reducing decode latency | `--speculative-config '{"method": "eagle3", ...}'` | Low-latency scenarios | Requires a compatible eagle3 draft model |
+
+**Key Parameter Tuning:**
+
+- `--max-num-batched-tokens`: Determines the maximum number of tokens processed in a single batch. For MoE models like Qwen3-30B-A3B, a moderate value (e.g., 16384) helps balance prefill chunking with memory usage.
+- `--max-num-seqs`: Maximum number of concurrent requests. Ensure `max-num-seqs` × `data-parallel-size` >= target concurrency to avoid artificial queuing delays.
+- `--gpu-memory-utilization`: Controls the proportion of HBM used for KV cache. For MoE models, a value of 0.95 is typically safe on well-balanced EP configurations.
+
+## 10 FAQ
+
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers model-specific issues.
+
+### Q: What hardware is required for Qwen3-30B-A3B?
+
+The BF16 model requires 1 Atlas 800I A3 (64G × 16) node or 1 Atlas 800I A2 (64G × 8) node. The W8A8 quantized version has similar hardware requirements but uses less memory per card.
+
+### Q: Why is `--enable-expert-parallel` required?
+
+Qwen3-30B-A3B is a Mixture-of-Experts model where different experts reside on different NPUs. Expert Parallelism (EP) distributes these experts across devices, which is required for the model to fit in memory and run efficiently. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP.
+
+### Q: When should I use `VLLM_ASCEND_ENABLE_NZ=2`?
+
+Set `VLLM_ASCEND_ENABLE_NZ=2` when you want maximum throughput and your model uses fp16/bf16 weights. This forces FRACTAL_NZ weight format conversion for all weight types, improving compute efficiency. The default value `1` only converts quantized weights. Set to `0` for RL scenarios where NZ format may cause precision issues.
