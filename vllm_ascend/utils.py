@@ -211,6 +211,10 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.dtype == torch.float32:
         return False
 
+    # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
+    if weight.is_meta:
+        return False
+
     # 310P always converts to NZ.
     if is_310p():
         return True
@@ -235,6 +239,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - 310P: always convert supported weights to FRACTAL_NZ
 # - non-310P: follow VLLM_ASCEND_ENABLE_NZ
 # - FP32: never convert
+# - meta tensor: never convert
 def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
