@@ -115,7 +115,7 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_block_size() -> list[int]:
-        return [128]
+        return [64, 128]
 
 
 class AscendAttentionState(Enum):
@@ -124,6 +124,8 @@ class AscendAttentionState(Enum):
     DecodeOnly = 2
     ChunkedPrefill = 3
     SpecDecoding = 4
+    PdMergedNoCache = 5
+    PdMergedCacheHit = 6
 
 
 @dataclass
@@ -340,11 +342,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens=0,
     ) -> torch.Tensor:
         assert attn_metadata is not None
-        assert attn_metadata.attn_mask is not None
+        # assert attn_metadata.attn_mask is not None
 
         mask = attn_metadata.attn_mask
 
         if is_310p():
+            assert mask is not None
             # align q k v output tensors
             query = aligned_16(query)
             key = aligned_16(key)
@@ -398,6 +401,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self,
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
+        key: Optional[torch.Tensor] = None,
+        value: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if is_310p():
@@ -568,7 +573,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor],
+        kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
         trace_flag: bool = True,
@@ -628,16 +633,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # TODO: Remove this contiguous in the future.
             value = value.contiguous()
 
-            if len(kv_cache) > 1:
-                if self.key_cache is None:
-                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if self.key_cache is None:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if len(kv_cache) > 1 and attn_metadata.attn_state != \
+               AscendAttentionState.DecodeOnly:
                 slots = attn_metadata.slot_mapping
                 torch_npu._npu_reshape_and_cache(
                     key=key[:num_actual_tokens],
                     value=value[:num_actual_tokens],
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    slot_indices=slots)
+                    slot_indices=slots[:key[:num_actual_tokens].shape[0]])
             if attn_type == AttentionType.ENCODER_ONLY:
                 cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
                 attn_out = torch_npu.npu_fusion_attention(
@@ -664,8 +670,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 output = self._forward_prefill_cache_hit(
                     query, attn_metadata, output)
             elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                output = self._forward_decode_only(query, attn_metadata,
-                                                   output)
+                output = self._forward_decode_only(query, attn_metadata, key,
+                                                   value, output)
             # Normal V1 situation.
             else:
                 # npu_fused_infer_attention_score does not support cases

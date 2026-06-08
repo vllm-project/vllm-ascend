@@ -33,15 +33,38 @@ function config_pip_mirror() {
     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 }
 
+function get_cann_version() {
+    local info_file="/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/ascend_toolkit_install.info"
+    if [[ -f "${info_file}" ]]; then
+        grep "version=" "${info_file}" | head -n1 | cut -d'=' -f2 | tr -d '"'
+    fi
+}
+
+function install_compatible_triton_ascend() {
+    local cann_version
+    cann_version=$(get_cann_version)
+
+    if [[ "${cann_version}" == "9.0.0"* ]]; then
+        _info "====> Install Triton Ascend for CANN ${cann_version}"
+        pip uninstall -y triton triton-ascend || true
+        pip install triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
+    fi
+}
+
 function install_binary_test() {
 
     install_system_packages
     config_pip_mirror
     create_vllm_venv
 
-    PIP_VLLM_VERSION=$(get_version pip_vllm_version)
-    VLLM_VERSION=$(get_version vllm_version)
-    PIP_VLLM_ASCEND_VERSION=$(get_version pip_vllm_ascend_version)
+    pip install -r "${SCRIPT_DIR}/../../docs/requirements-docs.txt"
+
+    PIP_VLLM_VERSION=$(get_version pip_vllm_version) || _err "Failed to get pip_vllm_version"
+    VLLM_VERSION=$(get_version vllm_version) || _err "Failed to get vllm_version"
+    PIP_VLLM_ASCEND_VERSION=$(get_version pip_vllm_ascend_version) || _err "Failed to get pip_vllm_ascend_version"
+    if [[ -z "${PIP_VLLM_VERSION}" || -z "${VLLM_VERSION}" || -z "${PIP_VLLM_ASCEND_VERSION}" ]]; then
+        _err "Failed to resolve vLLM or vLLM Ascend version from docs/source/conf.py"
+    fi
     _info "====> Install vllm==${PIP_VLLM_VERSION} and vllm-ascend ${PIP_VLLM_ASCEND_VERSION}"
 
     # Setup extra-index-url for x86 & torch_npu dev version
@@ -59,6 +82,7 @@ function install_binary_test() {
     fi
 
     pip install vllm-ascend=="${PIP_VLLM_ASCEND_VERSION}"
+    install_compatible_triton_ascend
 
     pip list | grep vllm
 

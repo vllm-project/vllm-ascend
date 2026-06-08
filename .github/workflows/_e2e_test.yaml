@@ -42,6 +42,10 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
 
+      - name: Config git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
@@ -54,6 +58,10 @@ jobs:
           ref: ${{ inputs.vllm }}
           path: ./vllm-empty
           fetch-depth: 1
+
+      - name: Config vllm git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/vllm-empty"
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
@@ -136,6 +144,10 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
 
+      - name: Config git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
@@ -148,6 +160,10 @@ jobs:
           ref: ${{ inputs.vllm }}
           path: ./vllm-empty
           fetch-depth: 1
+
+      - name: Config vllm git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/vllm-empty"
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
@@ -165,6 +181,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'light' }}
         run: |
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
@@ -173,6 +190,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'full' }}
         run: |
           pytest -sv tests/e2e/multicard/test_data_parallel.py

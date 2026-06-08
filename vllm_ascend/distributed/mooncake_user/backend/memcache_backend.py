@@ -1,0 +1,123 @@
+# Standard
+from enum import Enum
+from typing import Optional
+
+import torch
+from vllm.config import ParallelConfig
+from vllm.logger import logger
+
+from vllm_ascend.distributed.mooncake_user.backend.backend import Backend
+
+
+class MmcDirect(Enum):
+    COPY_L2G = 0
+    COPY_G2L = 1
+    COPY_G2H = 2
+    COPY_H2G = 3
+
+
+class MemcacheBackend(Backend):
+
+    def __init__(self, parallel_config: ParallelConfig):
+        try:
+            from memcache_hybrid import DistributedObjectStore  # type: ignore
+        except ImportError as e:
+            raise ImportError(
+                "Please install memcache by following the instructions at "
+                "https://gitee.com/ascend/memfabric_hybrid "  # noqa: E501
+                "to run vLLM with MemcacheConnector.") from e
+        try:
+            self.rank = parallel_config.rank
+            self.store = DistributedObjectStore()
+            res = self.store.init(self.rank)
+            if res != 0:
+                raise RuntimeError(
+                    f"Failed to initialize DistributedObjectStore, error code: {res}"
+                )
+        except ValueError as e:
+            logger.error("Configuration loading failed: %s", e)
+            raise
+        except Exception as exc:
+            logger.error(
+                "An error occurred while loading the configuration: %s", exc)
+            raise
+
+    def set_device(self):
+        device = torch.device(f"npu:{self.rank}")
+        torch.npu.set_device(device)
+
+    def register_buffer(self, ptrs: list[int], sizes: list[int]):
+        # self.store.register_buffer(ptrs, sizes)
+        pass
+
+    def exists(self, key: str) -> bool:
+        return self.store.is_exist(key) == 1
+
+    def put(self, key: str, addrs: list[int], sizes: list[int]):
+        try:
+            res = self.store.put_from_layers(key, addrs, sizes,
+                                             MmcDirect.COPY_L2G.value)
+            for value in res:
+                if value != 0:
+                    logger.error(f"Failed to get key {key},res:{res}")
+        except Exception as e:
+            logger.error(f"Failed to put key {key},error:{e}")
+
+    def get(self, key: str, addrs: list[int], sizes: list[int]):
+        try:
+            res = self.store.get_into_layers(key, addrs, sizes,
+                                             MmcDirect.COPY_G2L.value)
+            for value in res:
+                if value != 0:
+                    logger.error(f"Failed to get key {key},res:{res}")
+        except Exception as e:
+            logger.error(f"Failed to get key {key}. {e}")
+
+    def get_batch(self, keys: list[str], addrs: list[list[int]],
+                  sizes: list[list[int]], block_ids: Optional[list[int]]):
+        try:
+            res = self.store.batch_get_into_layers(keys, addrs, sizes,
+                                                   MmcDirect.COPY_G2L.value)
+            for value in res:
+                if value != 0:
+                    logger.error(f"Failed to get key {keys},res:{res}")
+        except Exception as e:
+            logger.error(f"Failed to get key {keys}. {e}")
+
+    def put_batch(self, keys: list[str], addrs: list[list[int]],
+                  sizes: list[list[int]], block_ids: Optional[list[int]]):
+        try:
+            res = self.store.batch_put_from_layers(keys, addrs, sizes,
+                                                   MmcDirect.COPY_L2G.value)
+            for value in res:
+                if value != 0:
+                    logger.error(f"Failed to get key {keys},res:{res}")
+        except Exception as e:
+            logger.error(f"Failed to put key {keys},error:{e}")
+
+    def close(self):
+        self.store.close()
+        logger.info("Closed the memcache store connection")
+
+    def get_buffer(self, key: str):
+        try:
+            ret = self.store.get(key)
+            return ret
+        except Exception as e:
+            logger.error(f"Failed to get buffer, key {key}, error : {e}")
+
+    def remove(self, key: str):
+        try:
+            ret = self.store.remove(key)
+            if ret != 0:
+                logger.error(f"Failed to remove key {key}, ret {ret}")
+        except Exception as e:
+            logger.error(f"Failed to remove key {key}, error : {e}")
+
+    def put_from(self, key: str, addr: int, size: int):
+        try:
+            ret = self.store.put_from(key, addr, size)
+            if ret != 0:
+                logger.error(f"Failed to put key {key}, ret {ret}")
+        except Exception as e:
+            logger.error(f"Failed to put key {key}, error {e}")

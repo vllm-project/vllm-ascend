@@ -23,6 +23,8 @@ Run `pytest tests/e2e/multicard/test_qwen3_moe.py`.
 
 import os
 
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "max_split_size_mb:256")
+
 from modelscope import snapshot_download  # type: ignore
 
 from tests.e2e.conftest import VllmRunner

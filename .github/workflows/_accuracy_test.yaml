@@ -9,7 +9,7 @@ on:
       vllm-ascend:
         required: false
         type: string
-        default: main
+        default: ''
       runner:
         required: true
         type: string
@@ -41,13 +41,12 @@ jobs:
         GHA_VLLM_ASCEND_VERSION: ${{ inputs.vllm-ascend }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Set model name as output
         id: set_output
         run: |
-          echo "model_name=${{ inputs.model_name }}" >> $GITHUB_OUTPUT
+          model_base_name=$(basename "${{ inputs.model_name }}")
+          echo "model_name=${{ inputs.model_name }}" >> "$GITHUB_OUTPUT"
+          echo "markdown_name=$model_base_name" >> "$GITHUB_OUTPUT"
 
       - name: Config mirrors
         run: |
@@ -57,7 +56,46 @@ jobs:
           apt-get update -y
           apt install git -y
 
+      - name: Resolve vllm-ascend version
+        id: resolve_vllm_ascend
+        run: |
+          VERSION_INPUT="${{ inputs.vllm-ascend }}"
+
+          if [ -z "$VERSION_INPUT" ]; then
+            RESOLVED_VERSION="$GITHUB_REF_NAME"
+            echo "remote=false" >> "$GITHUB_OUTPUT"
+          elif [ "$VERSION_INPUT" = "latest" ]; then
+            TAGS=$(git ls-remote --tags --sort=-v:refname https://github.com/vllm-project/vllm-ascend "v*" | cut -f2 | sed 's|refs/tags/||')
+            LATEST_TAG=$(echo "$TAGS" | head -n1)
+            if [ -z "$LATEST_TAG" ]; then
+              RESOLVED_VERSION="main"
+            else
+              RESOLVED_VERSION="$LATEST_TAG"
+            fi
+            echo "remote=true" >> "$GITHUB_OUTPUT"
+          else
+            RESOLVED_VERSION="$VERSION_INPUT"
+            echo "remote=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$RESOLVED_VERSION" >> "$GITHUB_OUTPUT"
+          echo "GHA_VLLM_ASCEND_VERSION=$RESOLVED_VERSION" >> $GITHUB_ENV
+
+      - name: Checkout current vllm-project/vllm-ascend repo
+        if: ${{ steps.resolve_vllm_ascend.outputs.remote != 'true' }}
+        uses: actions/checkout@v4
+        with:
+          path: ./vllm-ascend
+
+      - name: Checkout specified vllm-project/vllm-ascend repo
+        if: ${{ steps.resolve_vllm_ascend.outputs.remote == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm-ascend
+          path: ./vllm-ascend
+          ref: ${{ steps.resolve_vllm_ascend.outputs.version }}
+
       - name: Install system dependencies
+        working-directory: ./vllm-ascend
         run: |
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
@@ -73,30 +111,6 @@ jobs:
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
-
-      - name: Resolve vllm-ascend version
-        run: |
-          VERSION_INPUT="${{ inputs.vllm-ascend }}"
-          
-          if [[ "$VERSION_INPUT" == "latest" ]]; then
-            TAGS=$(git ls-remote --tags --sort=-v:refname https://github.com/vllm-project/vllm-ascend "v*" | cut -f2 | sed 's|refs/tags/||')
-            LATEST_TAG=$(echo "$TAGS" | head -n1)
-            if [[ -z "$LATEST_TAG" ]]; then
-              RESOLVED_VERSION="main"
-            else
-              RESOLVED_VERSION="$LATEST_TAG"
-            fi
-          else
-            RESOLVED_VERSION="$VERSION_INPUT"
-          fi
-          echo "GHA_VLLM_ASCEND_VERSION=$RESOLVED_VERSION" >> $GITHUB_ENV
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm-ascend
-          path: ./vllm-ascend
-          ref: ${{ env.GHA_VLLM_ASCEND_VERSION }}
 
       - name: Install vllm-project/vllm-ascend
         working-directory: ./vllm-ascend
@@ -141,6 +155,7 @@ jobs:
 
       - name: Run accuracy test
         id: report
+        working-directory: ./vllm-ascend
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
@@ -152,24 +167,31 @@ jobs:
           TORCH_VERSION: ${{ env.GHA_TORCH_VERSION }}
           TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
         run: |
-          model_base_name=$(basename ${{ inputs.model_name }})
-          markdown_name="${model_base_name}"
-          echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
-          mkdir -p ./benchmarks/accuracy
+          mkdir -p ../benchmarks/accuracy
           pytest -sv ./tests/e2e/models/test_lm_eval_correctness.py \
-          --config ./tests/e2e/models/configs/${{ inputs.model_name }}.yaml
+          --config ./tests/e2e/models/configs/${{ inputs.model_name }}.yaml \
+          --report-dir ../benchmarks/accuracy
 
       - name: Generate step summary
         if: ${{ always() }}
         run: |
-          cat ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md >> $GITHUB_STEP_SUMMARY
+          report_path="./benchmarks/accuracy/${{ steps.set_output.outputs.markdown_name }}.md"
+          if [ -f "$report_path" ]; then
+            cat "$report_path" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Accuracy report was not generated: $report_path" >> "$GITHUB_STEP_SUMMARY"
+            find ./benchmarks/accuracy -maxdepth 1 -type f -name '*.md' -print >> "$GITHUB_STEP_SUMMARY" || true
+            if [ "${{ steps.report.outcome }}" = "success" ]; then
+              exit 1
+            fi
+          fi
 
       - name: Upload Report
         if: ${{ inputs.upload == true }}
         uses: actions/upload-artifact@v4
         with:
-          name: "report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}"
-          path: ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md
+          name: "report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.set_output.outputs.markdown_name }}"
+          path: ./benchmarks/accuracy/${{ steps.set_output.outputs.markdown_name }}.md
           if-no-files-found: warn
           retention-days: 90
           overwrite: true
