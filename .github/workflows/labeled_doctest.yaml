@@ -39,6 +39,9 @@ on:
     paths:
       # If we are changing the doctest we should do a PR test
       - '.github/workflows/labeled_doctest.yaml'
+      - 'docs/source/conf.py'
+      - 'docs/source/installation.md'
+      - 'docs/source/quick_start.md'
       - 'tests/e2e/doctests/**'
       - 'tests/e2e/common.sh'
       - 'tests/e2e/run_doctests.sh'
@@ -63,42 +66,31 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
+      - name: Checkout current source
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          path: matrix-src
+
       - id: set-matrix
         env:
           INPUT_DOC_VERSIONS: ${{ inputs.doc_versions || '["v0.18.0","latest"]' }}
         run: |
           set -euo pipefail
 
-          echo "${INPUT_DOC_VERSIONS}" | jq -e 'type == "array" and all(.[]; type == "string")' >/dev/null
-
           matrix_file="$(mktemp)"
           workdir="$(mktemp -d)"
           trap 'rm -rf "${matrix_file}" "${workdir}"' EXIT
           echo '{"include":[]}' > "${matrix_file}"
 
-          while IFS= read -r doc_version; do
-            version_url="https://readthedocs.org/api/v3/projects/vllm-ascend/versions/${doc_version}/"
-            metadata_file="${workdir}/${doc_version}.json"
-            repo_dir="${workdir}/repo-${doc_version//[^A-Za-z0-9._-]/-}"
-
-            echo "Resolving Read the Docs version: ${doc_version}"
-            curl --fail --show-error --location \
-              --retry 3 \
-              --retry-delay 5 \
-              "${version_url}" \
-              -o "${metadata_file}"
-
-            doc_ref="$(jq -r '.identifier // empty' "${metadata_file}")"
-            doc_verbose_name="$(jq -r '.verbose_name // empty' "${metadata_file}")"
-            documentation_url="$(jq -r '.urls.documentation // empty' "${metadata_file}")"
-
-            if [ -z "${doc_ref}" ]; then
-              echo "Read the Docs version ${doc_version} does not have an identifier." >&2
-              exit 1
-            fi
-
-            git clone --depth 1 --branch "${doc_ref}" \
-              https://github.com/vllm-project/vllm-ascend.git "${repo_dir}"
+          add_matrix_entries() {
+            local repo_dir="$1"
+            local doc_repository="$2"
+            local doc_version="$3"
+            local doc_ref="$4"
+            local doc_verbose_name="$5"
+            local documentation_url="$6"
+            local vllm_ascend_version
 
             vllm_ascend_version="$(python3 "${repo_dir}/docs/source/conf.py" \
               | jq -r '.vllm_ascend_version // empty')"
@@ -116,6 +108,7 @@ jobs:
 
               next_matrix_file="$(mktemp)"
               jq \
+                --arg doc_repository "${doc_repository}" \
                 --arg doc_version "${doc_version}" \
                 --arg doc_ref "${doc_ref}" \
                 --arg doc_verbose_name "${doc_verbose_name}" \
@@ -124,6 +117,7 @@ jobs:
                 --arg os_variant "${os_variant}" \
                 --arg image "${image}" \
                 '.include += [{
+                  doc_repository: $doc_repository,
                   doc_version: $doc_version,
                   doc_ref: $doc_ref,
                   doc_verbose_name: $doc_verbose_name,
@@ -134,7 +128,52 @@ jobs:
                 }]' "${matrix_file}" > "${next_matrix_file}"
               mv "${next_matrix_file}" "${matrix_file}"
             done
-          done < <(echo "${INPUT_DOC_VERSIONS}" | jq -r '.[]')
+          }
+
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            add_matrix_entries \
+              "${GITHUB_WORKSPACE}/matrix-src" \
+              "${GITHUB_REPOSITORY}" \
+              "pull_request" \
+              "${GITHUB_REF}" \
+              "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}" \
+              ""
+          else
+            echo "${INPUT_DOC_VERSIONS}" | jq -e 'type == "array" and all(.[]; type == "string")' >/dev/null
+
+            while IFS= read -r doc_version; do
+              version_url="https://readthedocs.org/api/v3/projects/vllm-ascend/versions/${doc_version}/"
+              metadata_file="${workdir}/${doc_version}.json"
+              repo_dir="${workdir}/repo-${doc_version//[^A-Za-z0-9._-]/-}"
+
+              echo "Resolving Read the Docs version: ${doc_version}"
+              curl --fail --show-error --location \
+                --retry 3 \
+                --retry-delay 5 \
+                "${version_url}" \
+                -o "${metadata_file}"
+
+              doc_ref="$(jq -r '.identifier // empty' "${metadata_file}")"
+              doc_verbose_name="$(jq -r '.verbose_name // empty' "${metadata_file}")"
+              documentation_url="$(jq -r '.urls.documentation // empty' "${metadata_file}")"
+
+              if [ -z "${doc_ref}" ]; then
+                echo "Read the Docs version ${doc_version} does not have an identifier." >&2
+                exit 1
+              fi
+
+              git clone --depth 1 --branch "${doc_ref}" \
+                https://github.com/vllm-project/vllm-ascend.git "${repo_dir}"
+
+              add_matrix_entries \
+                "${repo_dir}" \
+                "vllm-project/vllm-ascend" \
+                "${doc_version}" \
+                "${doc_ref}" \
+                "${doc_verbose_name}" \
+                "${documentation_url}"
+            done < <(echo "${INPUT_DOC_VERSIONS}" | jq -r '.[]')
+          fi
 
           echo "Resolved doctest matrix:"
           jq . "${matrix_file}"
@@ -159,13 +198,14 @@ jobs:
       - name: Checkout doctest source
         uses: actions/checkout@v4
         with:
-          repository: vllm-project/vllm-ascend
+          repository: ${{ matrix.doc_repository }}
           ref: ${{ matrix.doc_ref }}
           path: doctest-src
 
       - name: Check NPU/CANN and git info
         run: |
-          echo "====> Print Read the Docs info"
+          echo "====> Print doctest source info"
+          echo "Doc repository: ${{ matrix.doc_repository }}"
           echo "Doc version: ${{ matrix.doc_version }}"
           echo "Doc ref: ${{ matrix.doc_ref }}"
           echo "Doc verbose name: ${{ matrix.doc_verbose_name }}"

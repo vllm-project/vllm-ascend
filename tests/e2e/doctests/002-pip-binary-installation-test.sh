@@ -60,7 +60,7 @@ function install_binary_test() {
 
     # Setup extra-index-url for public PyPI mirror, Ascend packages, and PyTorch CPU wheels.
     local pip_extra_index_urls=(
-        "https://mirrors.huaweicloud.com/repository/pypi/simple"
+        "https://mirrors.huaweicloud.com/repository/pypi/variant"
         "https://mirrors.huaweicloud.com/ascend/repos/pypi"
         "https://download.pytorch.org/whl/cpu/"
     )
