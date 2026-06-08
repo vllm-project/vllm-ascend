@@ -2800,9 +2800,14 @@ class NPUModelRunner(GPUModelRunner):
                     dtype=torch.int64,
                     device=self.device,
                 )
+                slot_mapping_cpu = torch.zeros(
+                    (num_tokens_padded,),
+                    dtype=torch.int64,
+                )
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
+                slot_mapping_cpu = blk_table.slot_mapping.cpu[:maybe_pcp_full_tokens]
                 maybe_num_reqs_padded = num_reqs_padded * self.decode_token_per_req if self.use_cp else num_reqs_padded
                 blk_table_tensor = blk_table.get_device_tensor()[:maybe_num_reqs_padded]
 
@@ -2842,7 +2847,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.routed_experts_slot_mapping_device[:n].copy_(
                         slot_mapping
                     )
-            return blk_table_tensor, slot_mapping
+            return blk_table_tensor, slot_mapping, slot_mapping_cpu
 
         if self.use_compress and num_scheduled_tokens_compressed_list is not None:
             total_num_scheduled_tokens_compressed_list = [
@@ -2855,7 +2860,7 @@ class NPUModelRunner(GPUModelRunner):
             total_num_scheduled_tokens_compressed_list = None
             num_reqs_actual = num_reqs
 
-        block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(
+        block_table_gid_0, slot_mapping_gid_0, slot_mapping_cpu_gid_0 = _get_block_table_and_slot_mapping(
             0, total_num_scheduled_tokens_compressed_list)  # type: ignore[arg-type]
         self.long_seq_metadata, block_table_gid_0 = _get_pcp_metadata(block_table_gid_0)
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
@@ -2893,6 +2898,7 @@ class NPUModelRunner(GPUModelRunner):
             max_seq_len=max_seq_len,
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
+            slot_mapping_cpu=slot_mapping_cpu_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
             num_input_tokens=num_tokens_padded,
@@ -3011,7 +3017,7 @@ class NPUModelRunner(GPUModelRunner):
                     cm.query_start_loc = self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
 
             if kv_cache_gid > 0:
-                cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
+                cm.block_table_tensor, cm.slot_mapping, cm.slot_mapping_cpu = _get_block_table_and_slot_mapping(
                     kv_cache_gid, total_num_scheduled_tokens_compressed_list)  # type: ignore[arg-type]
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):

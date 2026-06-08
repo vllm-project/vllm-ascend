@@ -244,8 +244,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
 
         block_size = 128
-        if ascend_envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
-            slot_mapping_cpu = slot_mapping.cpu()
+        if get_ascend_config().c8_enable_reshape_optim:
+            slot_mapping_cpu = common_attn_metadata.slot_mapping_cpu[:num_input_tokens]
 
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
@@ -340,7 +340,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
 
-        if ascend_envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+        if get_ascend_config().c8_enable_reshape_optim:
             slot_mapping_list = slot_mapping_cpu.tolist()
             group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_pre(
                 slot_mapping, slot_mapping_list, block_size
@@ -1273,7 +1273,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
 
-            if self.is_kv_producer and ascend_envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+            if self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim:
                 torch.ops._C_ascend.store_kv_block(
                     k_li,
                     kv_cache[2],
@@ -1290,7 +1290,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.use_sparse_c8_indexer:
                 assert len(kv_cache) == 4
                 assert k_li_scale is not None
-                if self.is_kv_producer and ascend_envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+                if self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim:
                     torch.ops._C_ascend.store_kv_block(
                         k_li_scale,
                         kv_cache[3],
