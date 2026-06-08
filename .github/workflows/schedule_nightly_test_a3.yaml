@@ -27,24 +27,15 @@ on:
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
-        description: 'Branch to test (main or releases/v0.18.0)'
+        description: 'Branch to test'
         required: true
         default: 'main'
-        type: choice
-        options:
-          - main
-          - releases/v0.18.0
+        type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
         required: false
         default: 'all'
         type: string
-  pull_request:
-    branches:
-      - 'main'
-      - 'releases/v*'
-      - '*-dev'
-    types: [ labeled, synchronize ]
 
 permissions:
   contents: read
@@ -73,11 +64,41 @@ jobs:
     name: Parse trigger and determine test scope
     if: >-
       github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'nightly-test')
-    uses: ./.github/workflows/_parse_trigger.yaml
-    with:
-      test_cases: ${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}
+      github.event_name == 'workflow_dispatch'
+    runs-on: linux-aarch64-a2b3-0
+    outputs:
+      run: ${{ steps.parse.outputs.run }}
+      filter: ${{ steps.parse.outputs.filter }}
+      ref: ${{ steps.parse.outputs.ref }}
+    steps:
+      - name: Parse trigger
+        id: parse
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eventName = context.eventName;
+            const testCases = '${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}'.trim();
+
+            core.setOutput('ref', context.sha || 'unknown');
+
+            if (eventName === 'workflow_dispatch' && testCases) {
+              core.setOutput('run', 'true');
+              if (testCases === 'all') {
+                core.setOutput('filter', 'all');
+              } else {
+                core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
+              }
+              return;
+            }
+
+            if (eventName === 'schedule') {
+              core.setOutput('run', 'true');
+              core.setOutput('filter', 'all');
+              return;
+            }
+
+            core.setOutput('run', 'false');
+            core.setOutput('filter', '');
 
   setup-vars:
     name: Export global env vars as job outputs
@@ -91,15 +112,7 @@ jobs:
         run: |
           {
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              base_ref="${{ github.base_ref }}"
-              if [[ "$base_ref" == releases/* ]]; then
-                normalized=$(echo "$base_ref" | tr '/' '-')
-                echo "vllm_ascend_branches=[\"${normalized}\"]"
-              else
-                echo 'vllm_ascend_branches=["main"]'
-              fi
-            elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
               input_branch="${{ inputs.vllm_ascend_branch }}"
               # Normalize branch name for image tag (replace '/' with '-')
               normalized=$(echo "$input_branch" | tr '/' '-')
@@ -143,13 +156,6 @@ jobs:
           - name: multi-node-deepseek-v3.2-W8A8-EP
             config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
             size: 4
-#          - name: multi-node-GLM5_1-W8A8-EP
-#            config_file_path: GLM5_1-W8A8-EP.yaml
-#            size: 4
-#          - name: GLM5_1-W8A8-EP-external
-#            config_file_path: GLM5_1-W8A8-EP-external.yaml
-#            size: 4
-#            config_base_path: tests/e2e/nightly/multi_node/external_dp/config/
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -160,7 +166,6 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-#      config_base_path: ${{ matrix.test_config.config_base_path || '' }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
       should_run: >-
@@ -174,7 +179,6 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
-
 
   double-node-tests:
     name: double-node
@@ -376,7 +380,6 @@ jobs:
     secrets:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
-
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0
