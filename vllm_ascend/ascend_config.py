@@ -31,7 +31,6 @@ class AscendConfig:
 
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
-        model_config = vllm_config.model_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
@@ -178,14 +177,18 @@ class AscendConfig:
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
-        if vllm_config.kv_transfer_config is not None and model_config is not None and not model_config.is_deepseek_mla:
+        if (
+            vllm_config.kv_transfer_config is not None
+            and vllm_config.model_config is not None
+            and not vllm_config.model_config.is_deepseek_mla
+        ):
             prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {"tp_size": 1})["tp_size"]
             decode_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("decode", {"tp_size": 1})["tp_size"]
             assert prefill_tp_size % decode_tp_size == 0, "Prefill TP size must be divisible by Decode TP size."
             self.pd_tp_ratio = prefill_tp_size // decode_tp_size
             if self.pd_tp_ratio > 1:
                 # Total KV heads from vLLM's resolved architecture (ModelArchConfigConvertor).
-                num_kv_head = model_config.get_total_num_kv_heads()
+                num_kv_head = vllm_config.model_config.get_total_num_kv_heads()
                 if not num_kv_head or num_kv_head < 1:
                     raise ValueError(
                         "Could not determine a positive total KV head count for PD "
@@ -227,16 +230,16 @@ class AscendConfig:
         )
 
         use_sparse = (
-            model_config is not None
-            and hasattr(model_config, "hf_text_config")
-            and hasattr(model_config.hf_text_config, "index_topk")
+            vllm_config.model_config is not None
+            and hasattr(vllm_config.model_config, "hf_text_config")
+            and hasattr(vllm_config.model_config.hf_text_config, "index_topk")
         )
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
-            if model_config is None:
+            if vllm_config.model_config is None:
                 raise RuntimeError("enable_kv_nz requires a valid model_config.")
-            if not model_config.is_deepseek_mla or use_sparse:
+            if not vllm_config.model_config.is_deepseek_mla or use_sparse:
                 raise RuntimeError("enable_kv_nz is only supported for mla currently.")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise NotImplementedError(
@@ -250,8 +253,8 @@ class AscendConfig:
         )
         self._sparse_c8_layer_filter_enabled = self._has_sparse_c8_layer_config(quant_config)
         self.enable_sp_by_pass = (
-            model_config is not None
-            and not model_config.enforce_eager
+            vllm_config.model_config is not None
+            and not vllm_config.model_config.enforce_eager
             and vllm_config.compilation_config.pass_config.enable_sp
         )
 
@@ -424,7 +427,6 @@ class FinegrainedTPConfig:
     """
 
     def __init__(self, finegrained_tp_config: dict, vllm_config):
-        model_config = vllm_config.model_config
         self.oproj_tensor_parallel_size = finegrained_tp_config.get("oproj_tensor_parallel_size", 0)
         self.lmhead_tensor_parallel_size = finegrained_tp_config.get("lmhead_tensor_parallel_size", 0)
         self.embedding_tensor_parallel_size = finegrained_tp_config.get("embedding_tensor_parallel_size", 0)
@@ -436,7 +438,7 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
             # dummy_run does not run the entire attention module in eager mode,
             # so the o_proj tp split can only be used in graph mode.
-            if model_config and model_config.enforce_eager:
+            if vllm_config.model_config and vllm_config.model_config.enforce_eager:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
@@ -446,7 +448,7 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}")
             # dummy_run does not run the entire attention module in eager mode,
             # so the o_lora tp split can only be used in graph mode.
-            if model_config and model_config.enforce_eager:
+            if vllm_config.model_config and vllm_config.model_config.enforce_eager:
                 raise AssertionError("olora_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
