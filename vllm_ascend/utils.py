@@ -211,7 +211,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.dtype == torch.float32:
         return False
 
-    # meta tensor cannot use NZ.
+    # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
     if weight.is_meta:
         return False
 
