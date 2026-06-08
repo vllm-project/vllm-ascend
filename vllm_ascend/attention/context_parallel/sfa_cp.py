@@ -328,9 +328,7 @@ class AscendSFACPImpl(AscendSFAImpl):
                 decode_actual_seq_lengths_key,
                 return_softmax_lse=True,
             )
-            decode_attn_out = self._merge_decode_sfa_output(
-                decode_partial, decode_softmax_max, decode_softmax_sum
-            )
+            decode_attn_out = self._merge_decode_sfa_output(decode_partial, decode_softmax_max, decode_softmax_sum)
 
         if num_prefills < 1:
             return self._align_to_graph_bucket_tokens(decode_attn_out, attn_metadata)
@@ -487,9 +485,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return output.to(output_dtype)
 
-    def _gather_and_restore_prefill_kv_cross_pcp(
-        self, prefill_tensor: torch.Tensor, attn_metadata: M
-    ) -> torch.Tensor:
+    def _gather_and_restore_prefill_kv_cross_pcp(self, prefill_tensor: torch.Tensor, attn_metadata: M) -> torch.Tensor:
         prefill_tokens = prefill_tensor.shape[0]
         if prefill_tokens == 0:
             return prefill_tensor
@@ -756,9 +752,7 @@ class AscendSFACPImpl(AscendSFAImpl):
             )
 
         if kv_c_normed.shape[0] > num_decode_tokens:
-            prefill_kv_c_k_pe = torch.cat(
-                [kv_c_normed[num_decode_tokens:], k_pe[num_decode_tokens:]], dim=-1
-            )
+            prefill_kv_c_k_pe = torch.cat([kv_c_normed[num_decode_tokens:], k_pe[num_decode_tokens:]], dim=-1)
             prefill_kv_c_k_pe = self._gather_and_restore_prefill_kv_cross_pcp(prefill_kv_c_k_pe, attn_metadata)
             prefill_kv_c_normed, prefill_k_pe = prefill_kv_c_k_pe.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
