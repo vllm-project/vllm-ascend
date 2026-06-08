@@ -357,19 +357,20 @@ def rejection_sample(
     if HAS_TRITON:
         grid, block_size = cal_grid_and_block_size(batch_size)
 
-    logger.info_once(
-        "RejectionSampler config: block_verify=%s, entropy_verify=%s, "
-        "posterior_threshold=%s, posterior_alpha=%s, reduce_sample=%s, "
-        "has_triton=%s, all_greedy=%s, all_random=%s",
-        using_block_verify,
-        using_entropy_verify,
-        posterior_threshold,
-        posterior_alpha,
-        target_indices is not None,
-        HAS_TRITON,
-        sampling_metadata.all_greedy,
-        sampling_metadata.all_random,
-    )
+    if using_block_verify or using_entropy_verify:
+        logger.info_once(
+            "RejectionSampler config: block_verify=%s, entropy_verify=%s, "
+            "posterior_threshold=%s, posterior_alpha=%s, reduce_sample=%s, "
+            "has_triton=%s, all_greedy=%s, all_random=%s",
+            using_block_verify,
+            using_entropy_verify,
+            posterior_threshold,
+            posterior_alpha,
+            target_indices is not None,
+            HAS_TRITON,
+            sampling_metadata.all_greedy,
+            sampling_metadata.all_random,
+        )
 
     # For greedy sampling, we need to do allgather first to get global argmax
     if not sampling_metadata.all_random:
