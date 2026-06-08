@@ -74,6 +74,9 @@ class TestNPUPlatform(TestBase):
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())
 
+    def test_is_cumem_allocator_available(self):
+        self.assertTrue(self.platform.is_cumem_allocator_available())
+
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
     def test_pre_register_and_update_with_parser(self, mock_quant_config, mock_adapt_patch):

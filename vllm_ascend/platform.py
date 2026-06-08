@@ -125,6 +125,9 @@ class NPUPlatform(Platform):
     def is_sleep_mode_available(self) -> bool:
         return True
 
+    def is_cumem_allocator_available(self) -> bool:
+        return True
+
     @property
     def pass_key(self) -> str:
         """
