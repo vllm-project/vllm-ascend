@@ -79,7 +79,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH:-}
+    export CPATH="${ABSOLUTE_CATLASS_PATH}${CPATH:+:${CPATH}}"
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
@@ -143,7 +143,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH:-}
+    export CPATH="${ABSOLUTE_CATLASS_PATH}${CPATH:+:${CPATH}}"
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
     # dependency: cann-toolkit file moe_distribute_base.h
     HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
@@ -233,7 +233,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH:-}
+    export CPATH="${ABSOLUTE_CATLASS_PATH}${CPATH:+:${CPATH}}"
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
@@ -284,13 +284,14 @@ log_selected_ops
 (
   set -euo pipefail
 
+  : "${ROOT_DIR:?ROOT_DIR is not set}"
+
   log "subshell cwd before cd=$(pwd)"
   cd "${ROOT_DIR}/csrc"
   log "subshell cwd after cd=$(pwd)"
   log "preserving csrc/build and cleaning output dirs"
   rm -rf -- output build_out
 
-  : "${ROOT_DIR:?ROOT_DIR is not set}"
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
