@@ -28,6 +28,13 @@ DFLASH = {
     }
 }
 
+VWN_MODELS = {
+    "vwn_eagle3_m4_r1_5": {
+        "main": "Qwen/Qwen3-30B-A3B",
+        "spec": "ascend/vwn_eagle3",
+    },
+}
+
 BASELINES = {
     "eagle": [0.74, 0.44, 0.29],
     "eagle3": [0.68, 0.40, 0.18],
