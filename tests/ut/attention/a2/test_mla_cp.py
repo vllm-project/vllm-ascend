@@ -476,11 +476,11 @@ class TestAscendMLAImpl(TestBase):
         attn_metadata.decode.seq_lens_list = MagicMock()
 
         self.impl.enable_kv_nz = True
-
+        self.impl.speculative_config = None
         mock_npu_attention_update.return_value = (torch.randn(B, self.impl.num_heads, self.impl.kv_lora_rank), None)
         mock_npu_fused_infer_attention_score.return_value = [
-            torch.randn(B, N, self.impl.kv_lora_rank),
-            torch.randn(B, N, 1),
+            torch.randn(B, N, 1, self.impl.kv_lora_rank),
+            torch.randn(B, N, 1, 1),
         ]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
