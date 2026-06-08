@@ -1072,6 +1072,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.kv_cache_specs: list[KVCacheSpec] = [spec.kv_cache_spec for spec in self.kv_cache_config.kv_cache_groups]
         self.local_engine_id: str = " "
         self.engine_id = engine_id
+        self.dp_rank: int = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank: int = get_tensor_model_parallel_rank()
         self.tp_size: int = vllm_config.parallel_config.tensor_parallel_size
         self.pcp_size: int = vllm_config.parallel_config.prefill_context_parallel_size
@@ -1093,7 +1094,8 @@ class MooncakeLayerwiseConnectorWorker:
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size
+            + self.dp_rank * self.pcp_size * self.tp_size
+            + self.pcp_rank * self.tp_size
         )
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
