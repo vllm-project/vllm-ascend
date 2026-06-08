@@ -81,7 +81,13 @@ from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
-if not vllm_version_is("0.20.2"):
+if vllm_version_is("0.21.0"):
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+        extract_routed_experts_for_current_batch,
+        get_global_experts_capturer,
+        issue_routing_d2h_copy,
+    )
+else:
     from vllm.v1.outputs import RoutedExpertsLists
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
@@ -164,7 +170,6 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
@@ -1653,10 +1658,20 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
-        packed_tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
+        # On certain devices, CPU-side all_reduce may return dirty data. 
+        # When dp_allreduce_on_npu is True, route DP metadata
+        # synchronization through the NPU device group to avoid data corruption.
+        device_str, group = (
+            ("npu", get_dp_group().device_group)
+            if self.ascend_config.dp_allreduce_on_npu
+            else ("cpu", get_dp_group().cpu_group)
+        )
+        packed_tensor = torch.zeros(2, self.dp_size, device=device_str, dtype=torch.int32)
         packed_tensor[0][self.dp_rank] = num_tokens
         packed_tensor[1][self.dp_rank] = cudagraph_mode.value
-        dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
+        dist.all_reduce(packed_tensor, group=group)
+        if device_str == "npu":
+            packed_tensor = packed_tensor.cpu()
 
         # Unpack the results
         num_tokens_across_dp = packed_tensor[0, :]
@@ -2006,6 +2021,9 @@ class NPUModelRunner(GPUModelRunner):
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
+        
+        self.discard_request_mask.np[:num_reqs] = discard_requests_mask
+        self.discard_request_mask.copy_to_gpu(num_reqs)
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
@@ -2753,10 +2771,10 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.vllm_config.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.20.2"):
-                capturer = RoutedExpertsCapturer.get_instance()
+            if vllm_version_is("0.21.0"):
+                capturer = get_global_experts_capturer()
                 if capturer is not None:
-                    capturer.clear_buffer()
+                    capturer.finalize_pending_copy()
             elif self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
 
@@ -2945,7 +2963,7 @@ class NPUModelRunner(GPUModelRunner):
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
-                    if vllm_version_is("0.20.2"):
+                    if vllm_version_is("0.21.0"):
                         mamba_bufs = self._get_mamba_copy_bufs()
                         preprocess_bufs = mamba_bufs
                     else:
@@ -2960,7 +2978,6 @@ class NPUModelRunner(GPUModelRunner):
                         self.requests,
                         self.compilation_config.static_forward_context,
                         self.model.get_mamba_state_copy_func(),
-                        self._get_mamba_copy_bufs(),
                         preprocess_bufs,
                     )
                     # preprocess_mamba resets num_accepted_tokens_cpu to 1
@@ -2972,7 +2989,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
-                    if not vllm_version_is("0.20.2") and mamba_bufs.postprocess_align is not None:
+                    if not vllm_version_is("0.21.0") and mamba_bufs.postprocess_align is not None:
                         mamba_utils.stage_postprocess_inputs_to_gpu(
                             mamba_bufs.postprocess_align,
                             scheduler_output,
@@ -3404,12 +3421,25 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
+        if self.routed_experts_initialized and vllm_version_is("0.21.0"):
+            issue_routing_d2h_copy(
+                input_batch_req_ids=self.input_batch.req_ids,
+                num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                positions=self.positions,
+                positions_cpu=self._positions_cpu,
+            )
+
+        routed_experts_dict = None
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.20.2"):
-                capturer = RoutedExpertsCapturer.get_instance()
-                if capturer is not None:
-                    capturer.save_captured_experts(indices=self.cpu_slot_mapping)
+            if vllm_version_is("0.21.0") and self.routed_experts_initialized:
+                routed_experts_dict = extract_routed_experts_for_current_batch(
+                    req_ids=req_ids_output_copy,
+                    requests=self.requests,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    num_tokens_no_spec=self.input_batch.num_tokens_no_spec,
+                    max_model_len=self.max_model_len,
+                )
             elif self.routed_experts_initialized:
                 buf = self.routed_experts_capturer.get_device_buffer()
                 total = scheduler_output.total_num_scheduled_tokens
@@ -3435,7 +3465,9 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
             **(
-                {} if vllm_version_is("0.20.2") else {"routed_experts": routed_experts_lists}
+                {"routed_experts_dict": routed_experts_dict}
+                if vllm_version_is("0.21.0")
+                else {"routed_experts": routed_experts_lists}
             ),
         )
         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
@@ -3779,7 +3811,7 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None,
         sync_self: bool,
     ) -> IntermediateTensors:
-        # vllm renamed sync_and_slice to sync_and_gather in v0.20.2.
+        # vllm renamed sync_and_slice to sync_and_gather.
         # The Ascend override logic is identical: skip the upstream all_gather
         # (flashcomm1 does not scatter residual before PP send).
         return self.sync_and_slice_intermediate_tensors(
@@ -3979,8 +4011,7 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
-                maybe_num_reqs_padded = num_reqs_padded * self.decode_token_per_req if self.use_cp else num_reqs_padded
-                blk_table_tensor = blk_table.get_device_tensor()[:maybe_num_reqs_padded]
+                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
@@ -3996,7 +4027,7 @@ class NPUModelRunner(GPUModelRunner):
                         # the previous real request can feed stale block-table
                         # and [block, offset] scatter indices to DSA kernels.
                         slot_mapping[:num_tokens_padded].fill_(0)
-                        blk_table_tensor[:maybe_num_reqs_padded].fill_(0)
+                        blk_table_tensor[:num_reqs_padded].fill_(0)
                     else:
                         slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                         blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
@@ -4008,9 +4039,7 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid,
                 )
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
-                if vllm_version_is("0.20.2"):
-                    self.cpu_slot_mapping = slot_mapping.cpu().numpy()
-                elif self.routed_experts_initialized:
+                if not vllm_version_is("0.21.0") and self.routed_experts_initialized:
                     # snapshot slot_mapping into a private device
                     # buffer so the next ``_prepare_inputs`` does not
                     # overwrite it while D2H is still pending.
@@ -4748,17 +4777,17 @@ class NPUModelRunner(GPUModelRunner):
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
-    def _bind_routed_experts_capturer(self, capturer) -> None:
+    def _bind_routed_experts_capturer(self, capturer=None) -> None:
         # Upstream binds via ``module.router.set_capture_fn(...)`` on
         # FusedMoE layers whose router is a ``BaseRouter``. Ascend's
         # ``select_experts`` does not go through ``BaseRouter``, so the
         # upstream hook never fires. Instead, stash the capturer as a
         # plain attribute on every FusedMoE layer; ``apply()`` reads it
-        # back on the hot path. Only used on vLLM main (PR #39568+);
-        # the 0.20.2 path uses the ``RoutedExpertsCapturer.get_instance``
-        # singleton and never calls this method.
+        # back on the hot path.
+        if capturer is None:
+            # v0.21.0: capturer not passed by caller, get from global
+            capturer = get_global_experts_capturer()
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-
         for module in self.compilation_config.static_forward_context.values():
             if isinstance(module, FusedMoE):
                 module._ascend_routed_experts_capturer = capturer

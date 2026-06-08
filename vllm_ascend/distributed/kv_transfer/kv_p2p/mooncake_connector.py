@@ -164,8 +164,10 @@ class KVCacheTaskTracker:
                 self.delayed_free_requests.pop(request_id, None)
             else:
                 logger.warning(
-                    "MooncakeConnector finish req %s not in reqs to process."
-                    "If it is a P node, this request may have been force freed.",
+                    "MooncakeConnector finish req not in reqs to process. "
+                    "request_id=%s. "
+                    "Possible cause: Request was already completed or not properly tracked. "
+                    "Check: Verify request lifecycle and tracking logic.",
                     request_id,
                 )
 
@@ -200,7 +202,13 @@ class KVCacheTaskTracker:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
-                logger.info("Force freed request: %s", request_id)
+                logger.info(
+                    "Force freed expired request: %s. "
+                    "Reason: Request exceeded timeout threshold (%s seconds). "
+                    "Action: Resources have been forcibly released to prevent memory leak.",
+                    request_id,
+                    envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                )
             else:
                 break
         return expired_requests
@@ -261,12 +269,26 @@ class KVCacheSendingThread(threading.Thread):
             device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
             handshake_port = self.side_channel_port + device_index
             path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
-            logger.info("Starting listening on path: %s", path)
+            logger.info(
+                "KVCacheSendingThread started listening on path: %s. Thread: tp_rank=%d, pp_rank=%d, pcp_rank=%d",
+                path,
+                self.tp_rank,
+                self.pp_rank,
+                self.pcp_rank,
+            )
             with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
                 self.ready_event.set()
                 self.run_busy_loop(sock)
         except Exception as e:
-            logger.exception("Mooncake KVCacheSendingThread exception: %s", e)
+            logger.exception(
+                "Mooncake KVCacheSendingThread encountered exception. "
+                "Thread: tp_rank=%d, pp_rank=%d, listening_path=%s. "
+                "Error: %s",
+                self.tp_rank,
+                self.pp_rank,
+                path,
+                e,
+            )
 
     def run_busy_loop(self, sock: zmq.Socket):  # type: ignore
         encoder = msgspec.msgpack.Encoder()
@@ -280,13 +302,29 @@ class KVCacheSendingThread(threading.Thread):
             try:
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
-                    logger.error("Invalid message format: %s", frames)
+                    logger.error(
+                        "Invalid message format in KVCacheSendingThread. "
+                        "Expected: at least 2 frames (identity + payload). "
+                        "Actual: %d frames. "
+                        "Frames: %s. "
+                        "Check: Verify message sender implementation.",
+                        len(frames),
+                        frames,
+                    )
                     continue
 
                 identity = frames[0]
                 payload = [f for f in frames[1:] if f != b""]
                 if len(payload) != 1:
-                    logger.error("Invalid message format: %s", frames)
+                    logger.error(
+                        "Invalid message format in KVCacheSendingThread. "
+                        "Expected: exactly 1 payload frame. "
+                        "Actual: %d payload frames. "
+                        "Frames: %s. "
+                        "Check: Verify message sender removes empty frames correctly.",
+                        len(payload),
+                        frames,
+                    )
                     continue
 
                 msg = decoder.decode(payload[0])
@@ -318,9 +356,25 @@ class KVCacheSendingThread(threading.Thread):
                             logger.debug("Socket not ready, retrying to send ACK for request %s", msg[1])
                             time.sleep(0.01)
                 else:
-                    logger.error("Connection listener got unexpected message %s", msg)
+                    logger.error(
+                        "Connection listener received unexpected message type. "
+                        "Expected: GET_META_MSG or DONE_RECVING_MSG. "
+                        "Actual: %s. "
+                        "Full message: %s. "
+                        "Check: Verify message protocol implementation.",
+                        msg[0] if msg else "empty",
+                        msg,
+                    )
             except Exception as e:
-                logger.error("Connection listener got exception %s: %s", type(e), e)
+                logger.error(
+                    "Connection listener encountered exception during message processing. "
+                    "Exception type: %s. "
+                    "Error: %s. "
+                    "Context: Processing frames from socket. "
+                    "Check: Review message handling logic and socket state.",
+                    type(e).__name__,
+                    e,
+                )
 
 
 class KVCacheRecvingThread(threading.Thread):
@@ -496,12 +550,12 @@ class KVCacheRecvingThread(threading.Thread):
             try:
                 request_data = self.request_queue.get()
                 if request_data is None:
-                    logger.warning("Received a None request!")
+                    logger.warning("Received a None request. ")
                     self.request_queue.task_done()
                     continue
                 self._handle_request(request_data)
             except Exception as e:
-                logger.error("Error in KVCacheTransferThread: %s", e)
+                logger.error("Error in KVCacheTransferThread. error=%s. ", e)
 
     def _handle_request(self, req_meta: dict[str, Any]):
         request_id = req_meta["request_id"]
@@ -515,10 +569,7 @@ class KVCacheRecvingThread(threading.Thread):
         try:
             if transfer_failed:
                 self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
-                logger.warning(
-                    "Skipping KV cache transfer for request %s because a previous transfer failed.",
-                    remote_request_id,
-                )
+                logger.warning("Skipping KV cache transfer for request. remote_request_id=%s. ", remote_request_id)
             else:
                 try:
                     logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
@@ -720,7 +771,11 @@ class KVCacheRecvingThread(threading.Thread):
         )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
-            logger.error("Mooncake transfer failed for request %s", req_meta["remote_request_id"])
+            logger.error(
+                "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
+                req_meta["remote_request_id"],
+                ret,
+            )
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
         req_end_time = time.perf_counter()
@@ -1086,7 +1141,7 @@ class KVCacheRecvingThread(threading.Thread):
             )
             if agent_meta.kv_group2layeridx != self.kv_group2layeridx:
                 logger.warning(
-                    "Remote kv_group2layeridx is inconsistent with local kv_group2layeridx. remote=%s, local=%s",
+                    "Remote kv_group2layeridx is inconsistent with local. remote=%s, local=%s. ",
                     agent_meta.kv_group2layeridx,
                     self.kv_group2layeridx,
                 )
@@ -1121,14 +1176,17 @@ class KVCacheRecvingThread(threading.Thread):
                 logger.debug("Received response for request %s: %s", request_id, resp.decode("utf-8"))
             if resp != b"ACK":
                 logger.error(
-                    "Failed to receive ACK for request %s from %s:%d", request_id, remote_host, remote_handshake_port
+                    "Failed to receive ACK for request. request_id=%s, source=%s:%d. ",
+                    request_id,
+                    remote_host,
+                    remote_handshake_port,
                 )
                 raise RuntimeError(f"Failed to receive ACK, resp: {resp.decode('utf-8')}")
         except RuntimeError as e:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
                 sock = None
-                logger.warning("Unexpected error occurred in socket, %s, closing the original channel", e)
+                logger.warning("Unexpected error occurred in socket. error=%s. ", e)
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -1401,7 +1459,7 @@ class MooncakeConnectorScheduler:
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (request, local_block_ids, num_external_tokens)
                 else:
-                    logger.warning("Got invalid KVTransferParams: %s. This request will not utilize KVTransfer", params)
+                    logger.warning("Got invalid KVTransferParams. params=%s. ", params)
             else:
                 assert num_external_tokens == 0
             # Only trigger 1 KV transfer per request.
@@ -2509,10 +2567,10 @@ def ensure_zmq_send(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning("Send failed: %s, retrying... (%s attempts left)", e, retries_left)
+                logger.warning("Send failed. error=%s, attempts_left=%d. ", e, retries_left)
                 time.sleep(0.1)
             else:
-                logger.error("Send failed after all retries: %s", e)
+                logger.error("Send failed after all retries. error=%s. ", e)
                 raise RuntimeError(f"Failed to send data to {path} after {max_retries} retries: {e}")
 
 
@@ -2534,10 +2592,10 @@ def ensure_zmq_recv(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning("Receive failed: %s, retrying... (%s attempts left)", e, retries_left)
+                logger.warning("Receive failed. error=%s, attempts_left=%d. ", e, retries_left)
                 time.sleep(0.1)
             else:
-                logger.error("Receive failed from %s after all retries: %s", path, e)
+                logger.error("Receive failed after all retries. source=%s, error=%s. ", path, e)
                 raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
 
 
