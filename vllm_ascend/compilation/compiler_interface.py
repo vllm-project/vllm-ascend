@@ -17,8 +17,9 @@
 #
 import copy
 import functools
+import os
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.fx as fx
@@ -129,11 +130,13 @@ def npugraph_ex_compile(
     ascend_compilation_config: AscendCompilationConfig,
     compile_range: Range,
     key: str | None = None,
+    cache_dir: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
     # Try npugraph_ex first, fall back to torchair for backward compatibility.
     try:
         import npugraph_ex as nge
 
+        cache_path = os.path.join(cache_dir, key) if (cache_dir and key) else None
         torch.npu.set_compile_mode(jit_compile=False)
         config = nge.CompilerConfig()
         # _process_kwargs_options exists in both old and new npugraph_ex,
@@ -145,19 +148,55 @@ def npugraph_ex_compile(
         _configure_backend(
             config, ascend_compilation_config, vllm_config, process_kwargs_options=_process_kwargs_options
         )
-        npugraph_ex = nge.get_npu_backend(compiler_config=config)
+        import npugraph_ex.npu_fx_compiler as nfx
+
+        _original_get_compiled_gm = nfx._NpuFxCompiler._get_compiled_gm
+
+        def patched_get_compiled_gm(self, graph, example_inputs):
+            compiled_gm = _original_get_compiled_gm(self, graph, example_inputs)
+            if cache_path:
+                py_code = compiled_gm.get_code()
+                if py_code:
+                    # Triton kernel indices (kernel_side_table) are registered in-process
+                    # at compile time and are not serializable across process boundaries.
+                    # Graphs containing triton_kernel_wrapper calls must not be cached,
+                    # because loading the py_code in a new process will hit an
+                    # AssertionError in kernel_side_table.get_kernel().
+                    if "triton_kernel_wrapper" in py_code:
+                        logger.info(
+                            "Skipping npugraph_ex cache for graph containing Triton kernels "
+                            "(kernel_side_table indices are process-local): %s",
+                            cache_path,
+                        )
+                    else:
+                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                        with open(cache_path, "w") as f:
+                            f.write(py_code)
+                        logger.info("Saved compiled graph to cache: %s", cache_path)
+            return compiled_gm
+
+        nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
+        backend = nge.get_npu_backend(compiler_config=config)
+        # torch.compile requires the output of the fx graph to be a tuple
+        if not graph_returns_tuple(graph):
+            compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
+        else:
+            compiled_fn = backend(graph, example_inputs)
+        nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
+        return compiled_fn, (key, cache_path)
     except ImportError:
         import torchair
 
         torch.npu.set_compile_mode(jit_compile=False)
         config = torchair.CompilerConfig()
         _configure_backend(config, ascend_compilation_config, vllm_config)
-        npugraph_ex = torchair.get_npu_backend(compiler_config=config)
-
-    # torch.compile requires the output of the fx graph to be a tuple
-    if not graph_returns_tuple(graph):
-        return make_graph_return_tuple(graph, example_inputs, npugraph_ex), None
-    return npugraph_ex(graph, example_inputs), None
+        backend = torchair.get_npu_backend(compiler_config=config)
+        # torch.compile requires the output of the fx graph to be a tuple
+        if not graph_returns_tuple(graph):
+            compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
+        else:
+            compiled_fn = backend(graph, example_inputs)
+        return compiled_fn, None
 
 
 class AscendCompiler(CompilerInterface):
@@ -169,11 +208,25 @@ class AscendCompiler(CompilerInterface):
 
     name = "AscendCompiler"
 
+    # TODO(wxs): add passes related to compilation in compute_hash
     def compute_hash(self, vllm_config: VllmConfig) -> str:
-        npugraph_ex_enabled = get_ascend_config().ascend_compilation_config.enable_npugraph_ex
-        if npugraph_ex_enabled:
-            self.vllm_config = vllm_config
-        return vllm_config.compute_hash()
+        self.vllm_config = vllm_config
+        ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        from hashlib import sha256
+
+        import torch_npu
+
+        factors = {
+            "torch_npu_version": torch_npu.__version__,
+            "enable_npugraph_ex": ascend_compilation_config.enable_npugraph_ex,
+            "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
+        }
+        logger.info("AscendCompiler hash factors: %s", factors)
+        return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
+
+    def initialize_cache(self, cache_dir, disable_cache=False, prefix=""):
+        self.cache_dir = cache_dir
+        self.disable_cache = disable_cache
 
     def compile(
         self,
@@ -204,13 +257,88 @@ class AscendCompiler(CompilerInterface):
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex:
+            cache_dir = None if getattr(self, "disable_cache", False) else getattr(self, "cache_dir", None)
             logger.info_once(
                 "enable_npugraph_ex is enabled, which will bring graph compilation optimization.",
                 scope="global",
             )
             assert hasattr(self, "vllm_config")
             return npugraph_ex_compile(
-                graph, example_inputs, compiler_config, self.vllm_config, ascend_compilation_config, compile_range, key
+                graph,
+                example_inputs,
+                compiler_config,
+                self.vllm_config,
+                ascend_compilation_config,
+                compile_range,
+                key,
+                cache_dir,
             )
         else:
             return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)
+
+    def load(self, handle, graph, example_inputs, graph_index, compile_range):
+        key, path = handle
+        # Cache file may be absent when the graph was skipped at save time (e.g. it
+        # contained Triton kernels whose kernel_side_table indices are process-local
+        # and cannot be serialized).  Fall back to a fresh compilation so the Triton
+        # kernels are properly registered in the current process.
+        if not path or not os.path.exists(path):
+            logger.info(
+                "npugraph_ex cache miss for key %s (file absent or not saved), recompiling",
+                key,
+            )
+            # Mirror the same pre-processing done in compile(): deepcopy the graph
+            # to prevent make_graph_return_tuple from mutating the caller's copy,
+            # and re-wrap FakeTensor inputs under the current fake mode to avoid
+            # "fake mode mismatch" in aot_module_simplified.
+            graph = copy.deepcopy(graph)
+            from torch._guards import detect_fake_mode
+
+            current_fake_mode = detect_fake_mode()
+            if current_fake_mode is not None:
+                example_inputs = [
+                    current_fake_mode.from_tensor(inp)
+                    if (
+                        isinstance(inp, torch.Tensor)
+                        and hasattr(inp, "fake_mode")
+                        and inp.fake_mode is not current_fake_mode
+                    )
+                    else inp
+                    for inp in example_inputs
+                ]
+            ascend_compilation_config = get_ascend_config().ascend_compilation_config
+            assert hasattr(self, "vllm_config")
+            compiled_fn, _ = npugraph_ex_compile(
+                graph,
+                example_inputs,
+                {},
+                self.vllm_config,
+                ascend_compilation_config,
+                compile_range,
+                key,
+                getattr(self, "cache_dir", None),
+            )
+            return compiled_fn
+
+        from npugraph_ex.npu_fx_compiler import _CompiledFxArtifacts, _CompiledFxGraph
+
+        with open(path) as f:
+            py_code = f.read()
+        artifacts = _CompiledFxArtifacts()
+        artifacts.py_code = py_code
+        logger.info("Loaded npugraph_ex compilation cache from %s", path)
+        compiled_fn = cast(Callable[..., Any], _CompiledFxGraph.load_artifacts(artifacts))
+
+        # The saved code was compiled from the graph after make_graph_return_tuple mutated it
+        # to return a flat tuple. If the original graph didn't return a tuple, we need to
+        # recreate the unflatten wrapper so callers receive the original output structure.
+        if not graph_returns_tuple(graph):
+            _inner_fn = compiled_fn
+
+            def compiled_fn(*args, **kwargs):
+                result = _inner_fn(*args, **kwargs)
+                if isinstance(result, (tuple, list)) and len(result) == 1:
+                    return result[0]
+                return result
+
+        return compiled_fn
