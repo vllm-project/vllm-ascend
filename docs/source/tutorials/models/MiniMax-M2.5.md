@@ -9,6 +9,10 @@ This document provides a unified deployment guide for `MiniMax-M2.5` on vLLM Asc
 - **A3 single-node** deployment (Atlas 800 A3)
 - **A2 single-node** deployment (Atlas 800I A2)
 
+The `Minimax M2.5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all v0.17.0rc1 and later versions can run stably. To use the latest features (e.g., PD separation), it is recommended to use v0.18.0 or a later version.
+
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment.
+
 ## Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
