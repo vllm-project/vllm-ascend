@@ -1085,11 +1085,21 @@ class KVCacheRecvingThread(threading.Thread):
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
             )
             if agent_meta.kv_group2layeridx != self.kv_group2layeridx:
-                logger.warning(
-                    "Remote kv_group2layeridx is inconsistent with local kv_group2layeridx. remote=%s, local=%s",
-                    agent_meta.kv_group2layeridx,
-                    self.kv_group2layeridx,
+                # PD+PP场景下D/P节点的layer indices可能不同(D节点全部层,P节点子集)。
+                # _transfer_kv_cache中pp_layer_indices()会做实际的PP过滤,此处仅校验group spec一致性。
+                is_compatible = (
+                    agent_meta.kv_group2layeridx.keys() == self.kv_group2layeridx.keys()
+                    and all(
+                        agent_meta.kv_group2layeridx[gid][0] == local[0]
+                        for gid, local in self.kv_group2layeridx.items()
+                    )
                 )
+                if not is_compatible:
+                    logger.warning(
+                        "Remote kv_group2layeridx is inconsistent with local kv_group2layeridx. remote=%s, local=%s",
+                        agent_meta.kv_group2layeridx,
+                        self.kv_group2layeridx,
+                    )
             self.remote_kv_group2layeridx[engine_id][remote_handshake_port] = agent_meta.kv_group2layeridx
             self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
