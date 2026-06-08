@@ -34,6 +34,8 @@ from vllm_ascend.attention.attention_v1 import (
     AscendMetadata,
 )
 
+MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION = 3
+
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend310(AscendAttentionBackend):
@@ -96,6 +98,29 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     optimized for the Ascend 310P architecture.
     """
 
+    def _flash_attention_v3(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor,
+        seq_len: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        torch_npu._npu_flash_attention_v3(
+            query,
+            key,
+            value,
+            mask,
+            seq_len,
+            self.scale,
+            self.num_heads,
+            self.num_kv_heads,
+            mask_type=MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION,
+            out=output,
+        )
+        return output
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -104,18 +129,14 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        torch_npu._npu_flash_attention(
-            query=query,
-            key=key,
-            value=value,
-            mask=attn_metadata.attn_mask,
-            seq_len=attn_metadata.seq_lens,
-            scale_value=self.scale,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            out=output,
+        return self._flash_attention_v3(
+            query,
+            key,
+            value,
+            attn_metadata.attn_mask,
+            attn_metadata.seq_lens,
+            output,
         )
-        return output
 
     def forward_paged_attention(
         self,
@@ -184,18 +205,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             seq_len[-1] += delta
 
         mask = attn_metadata.attn_mask
-        torch_npu._npu_flash_attention(
-            query=query,
-            key=key,
-            value=value,
-            mask=mask,
-            seq_len=seq_len,
-            scale_value=self.scale,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            out=output,
-        )
-        return output
+        return self._flash_attention_v3(query, key, value, mask, seq_len, output)
 
     def forward_chunked_prefill_310(self, query, attn_metadata, output):
         """

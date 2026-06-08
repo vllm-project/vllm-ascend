@@ -21,6 +21,8 @@ import torch_npu
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d, nd_to_nz_spec
 
+FA_V3_COMPRESSED_MASK_SEQ_LEN = 2048
+
 
 class AttentionMaskBuilder310:
     chunked_prefill_attn_mask = None
@@ -93,8 +95,8 @@ class AttentionMaskBuilder310:
         """
         Retrieves the appropriate attention mask based on the model configuration.
 
-        It explicitly checks for 'pooling' runner types which are not supported
-        on 310P hardware.
+        The 310P FA v3 compressed-mask path only accepts a 4D FRACTAL_NZ mask
+        converted from a logical [2048, 2048] mask.
 
         Args:
             causal (bool): Whether to generate a causal mask.
@@ -108,39 +110,33 @@ class AttentionMaskBuilder310:
         """
         if getattr(model_config, "runner_type", None) == "pooling":
             if causal:
-                return self._get_causal_mask(self.max_seqlen)
+                return self._get_causal_mask()
             else:
-                return self._get_non_causal_mask(self.max_seqlen, model_config.dtype)
+                return self._get_non_causal_mask(model_config.dtype)
 
-        return self._get_causal_mask(self.max_seqlen)
+        return self._get_causal_mask()
 
-    def _get_causal_mask(self, max_seq_len: int) -> torch.Tensor:
+    def _get_causal_mask(self) -> torch.Tensor:
         """
         Internal method to get or update the cached causal attention mask.
 
-        If the cache is empty or the requested length exceeds the cached length,
-        a new mask is generated and converted to the NPU fractal format.
-
-        Args:
-            max_seq_len (int): The required sequence length.
+        If the cache is empty, a new [2048, 2048] mask is generated and
+        converted to the NPU fractal format.
 
         Returns:
             torch.Tensor: The cached causal mask in ACL_FORMAT_FRACTAL_NZ.
         """
         if self.causal_attn_mask_cache is None:
-            attn_mask = self.gen_causal_additive_mask(max_seq_len, self.device)
+            attn_mask = self.gen_causal_additive_mask(FA_V3_COMPRESSED_MASK_SEQ_LEN, self.device)
             self.causal_attn_mask_cache = torch_npu.npu_format_cast(nd_to_nz_2d(attn_mask), ACL_FORMAT_FRACTAL_NZ)
         return self.causal_attn_mask_cache
 
-    def _get_non_causal_mask(self, max_seq_len: int, dtype: torch.dtype) -> torch.Tensor:
+    def _get_non_causal_mask(self, dtype: torch.dtype) -> torch.Tensor:
         """
         Internal method to get or update the cached non-causal attention mask.
 
-        If the cache is empty or the requested length exceeds the cached length,
-        a new mask is generated and converted to the NPU fractal format.
-
-        Args:
-            max_seq_len (int): The required sequence length.
+        If the cache is empty, a new [2048, 2048] mask is generated and
+        converted to the NPU fractal format.
 
         Returns:
             torch.Tensor: The cached causal mask in ACL_FORMAT_FRACTAL_NZ.
@@ -148,7 +144,11 @@ class AttentionMaskBuilder310:
         if self.non_causal_attn_mask_cache is not None:
             return self.non_causal_attn_mask_cache
 
-        attention_mask_npu = torch.zeros(size=(max_seq_len, max_seq_len), dtype=dtype, device=self.device)
+        attention_mask_npu = torch.zeros(
+            size=(FA_V3_COMPRESSED_MASK_SEQ_LEN, FA_V3_COMPRESSED_MASK_SEQ_LEN),
+            dtype=dtype,
+            device=self.device,
+        )
         attention_mask_npu = nd_to_nz_2d(attention_mask_npu)
         self.non_causal_attn_mask_cache = torch_npu.npu_format_cast(
             attention_mask_npu.contiguous(), ACL_FORMAT_FRACTAL_NZ

@@ -23,6 +23,15 @@ from vllm_ascend._310p.attention.attention_v1 import (
     AscendAttentionBackendImpl310,
     AscendAttentionMetadataBuilder310,
     AscendAttentionState,
+    MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION,
+)
+from vllm_ascend._310p.attention.attention_mask import FA_V3_COMPRESSED_MASK_SEQ_LEN
+
+FA_V3_COMPRESSED_MASK_SHAPE = (
+    1,
+    FA_V3_COMPRESSED_MASK_SEQ_LEN // 16,
+    FA_V3_COMPRESSED_MASK_SEQ_LEN,
+    16,
 )
 
 
@@ -73,10 +82,10 @@ class TestAscendAttentionBackendImpl310(TestBase):
         )
 
     @patch("torch_npu._npu_reshape_and_cache")
-    @patch("torch_npu._npu_flash_attention")
+    @patch("torch_npu._npu_flash_attention_v3", create=True)
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_prefill_310(
-        self, mock_get_forward_context, mock_npu_npu_flash_attention, mock_npu_reshape_and_cache
+        self, mock_get_forward_context, mock_npu_flash_attention_v3, mock_npu_reshape_and_cache
     ):
         """Test forward pass in PrefillNoCache state"""
         query = torch.randn(10, 8, 64)
@@ -85,7 +94,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         output = torch.empty_like(query)
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.PrefillNoCache
-        metadata.attn_mask = torch.randn(1, 1, 10, 10)
+        metadata.attn_mask = torch.empty(FA_V3_COMPRESSED_MASK_SHAPE, dtype=torch.float16)
         metadata.query_lens = torch.tensor([10])
         metadata.seq_lens = torch.tensor([10])
         metadata.actual_seq_lengths_q = [10]
@@ -97,10 +106,49 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        mock_npu_npu_flash_attention.return_value = torch.ones(10, 8, 64)
-        output = self.impl.forward_impl(query, key, value, None, metadata, output)
+        mock_npu_flash_attention_v3.return_value = torch.ones(10, 8, 64)
+        result = self.impl.forward_impl(query, key, value, None, metadata, output)
 
-        mock_npu_npu_flash_attention.assert_called_once()
+        mock_npu_flash_attention_v3.assert_called_once()
+        args, kwargs = mock_npu_flash_attention_v3.call_args
+        self.assertIs(args[0], query)
+        self.assertIs(args[1], key)
+        self.assertIs(args[2], value)
+        self.assertIs(args[3], metadata.attn_mask)
+        self.assertIs(args[4], metadata.seq_lens)
+        self.assertEqual(args[5], self.impl.scale)
+        self.assertEqual(args[6], self.impl.num_heads)
+        self.assertEqual(args[7], self.impl.num_kv_heads)
+        self.assertEqual(kwargs["mask_type"], MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION)
+        self.assertIs(kwargs["out"], output)
+        self.assertIs(result, output)
+
+    @patch("torch_npu._npu_flash_attention_v3", create=True)
+    def test_forward_encoder_attention_uses_fa_v3_compress_mask(self, mock_npu_flash_attention_v3):
+        """Test encoder attention uses FA v3 with compressed mask type."""
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_mask = torch.empty(FA_V3_COMPRESSED_MASK_SHAPE, dtype=torch.float16)
+        metadata.seq_lens = torch.tensor([10])
+
+        result = self.impl._forward_encoder_attention(query, key, value, metadata, output)
+
+        mock_npu_flash_attention_v3.assert_called_once()
+        args, kwargs = mock_npu_flash_attention_v3.call_args
+        self.assertIs(args[0], query)
+        self.assertIs(args[1], key)
+        self.assertIs(args[2], value)
+        self.assertIs(args[3], metadata.attn_mask)
+        self.assertIs(args[4], metadata.seq_lens)
+        self.assertEqual(args[5], self.impl.scale)
+        self.assertEqual(args[6], self.impl.num_heads)
+        self.assertEqual(args[7], self.impl.num_kv_heads)
+        self.assertEqual(kwargs["mask_type"], MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION)
+        self.assertIs(kwargs["out"], output)
+        self.assertIs(result, output)
 
     @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
     @patch("torch_npu._npu_reshape_and_cache")
