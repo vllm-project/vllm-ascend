@@ -253,6 +253,10 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
+        # Whether to use NPU device group for DP metadata all_reduce.
+        # "True": use NPU device group, "False" (default): use CPU group.
+        self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)
+
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
 

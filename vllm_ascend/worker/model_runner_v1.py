@@ -617,10 +617,20 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
-        packed_tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
+        # On certain devices, CPU-side all_reduce may return dirty data. 
+        # When dp_allreduce_on_npu is True, route DP metadata
+        # synchronization through the NPU device group to avoid data corruption.
+        device_str, group = (
+            ("npu", get_dp_group().device_group)
+            if self.ascend_config.dp_allreduce_on_npu
+            else ("cpu", get_dp_group().cpu_group)
+        )
+        packed_tensor = torch.zeros(2, self.dp_size, device=device_str, dtype=torch.int32)
         packed_tensor[0][self.dp_rank] = num_tokens
         packed_tensor[1][self.dp_rank] = cudagraph_mode.value
-        dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
+        dist.all_reduce(packed_tensor, group=group)
+        if device_str == "npu":
+            packed_tensor = packed_tensor.cpu()
 
         # Unpack the results
         num_tokens_across_dp = packed_tensor[0, :]
