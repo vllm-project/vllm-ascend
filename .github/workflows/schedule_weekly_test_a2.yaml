@@ -34,3 +34,5 @@ jobs:
   doc-test:
     name: doc-test
     uses: ./.github/workflows/labeled_doctest.yaml
+    with:
+      doc_versions: '["v0.18.0","latest"]'
