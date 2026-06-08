@@ -2,7 +2,7 @@ test_name: "test DeepSeek-R1-W8A8 disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 4
 npu_per_node: 16
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
@@ -21,6 +21,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
           --host 0.0.0.0
@@ -42,7 +44,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
-          "engine_id": "0",
           "kv_connector_extra_config": {
                     "prefill": {
                             "dp_size": 2,
@@ -58,6 +59,8 @@ deployment:
           '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
           --host 0.0.0.0
@@ -79,7 +82,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30100",
-          "engine_id": "1",
           "kv_connector_extra_config": {
                     "prefill": {
                             "dp_size": 2,
@@ -94,6 +96,8 @@ deployment:
           --additional-config
           '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
         --host 0.0.0.0
@@ -117,7 +121,6 @@ deployment:
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "2",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,
@@ -132,6 +135,8 @@ deployment:
         --additional-config
         '{"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
         --headless
@@ -154,7 +159,6 @@ deployment:
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "2",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,

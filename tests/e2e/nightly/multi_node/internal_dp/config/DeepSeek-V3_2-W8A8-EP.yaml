@@ -2,7 +2,7 @@ test_name: "test DeepSeek-V3.2-W8A8-EP disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-V3.2-W8A8"
 num_nodes: 4
 npu_per_node: 16
-env_common:
+env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_MODELSCOPE: true
   SERVER_PORT: 8080
@@ -21,6 +21,9 @@ env_common:
   HCCL_INTRA_PCIE_ENABLE: 1
   HCCL_INTRA_ROCE_ENABLE: 0
 
+special_dependencies:
+  transformers: "5.9.0"
+
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0, 1]
@@ -30,6 +33,7 @@ disaggregated_prefill:
 deployment:
   -
     envs:
+      <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
@@ -58,7 +62,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
-          "engine_id": "0",
           "kv_connector_extra_config": {
                     "prefill": {
                             "dp_size": 2,
@@ -74,6 +77,7 @@ deployment:
 
   -
     envs:
+      <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
@@ -103,7 +107,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
-          "engine_id": "0",
           "kv_connector_extra_config": {
                     "prefill": {
                             "dp_size": 2,
@@ -117,6 +120,7 @@ deployment:
           }'
   -
     envs:
+      <<: *env_common
       VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
     server_cmd: >
@@ -147,7 +151,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30200",
-          "engine_id": "1",
           "kv_connector_extra_config": {
                       "prefill": {
                               "dp_size": 2,
@@ -162,6 +165,7 @@ deployment:
 
   -
     envs:
+      <<: *env_common
       VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
     server_cmd: >
@@ -193,7 +197,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30200",
-          "engine_id": "1",
           "kv_connector_extra_config": {
                       "prefill": {
                               "dp_size": 2,

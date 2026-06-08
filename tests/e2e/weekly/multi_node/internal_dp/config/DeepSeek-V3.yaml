@@ -13,7 +13,7 @@ test_name: "test DeepSeek-V3 disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-V3-W8A8"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
@@ -31,6 +31,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
         --host 0.0.0.0
@@ -52,7 +54,6 @@ deployment:
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "engine_id": "0",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,
@@ -66,6 +67,8 @@ deployment:
         }'
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
         --host 0.0.0.0
@@ -86,7 +89,6 @@ deployment:
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "1",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,

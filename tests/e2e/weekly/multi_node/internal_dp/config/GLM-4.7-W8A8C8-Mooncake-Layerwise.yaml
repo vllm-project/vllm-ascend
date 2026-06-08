@@ -2,7 +2,7 @@ test_name: "test GLM-4.7-W8A8C8 PD separation with mooncake layerwise connector"
 model: "vllm-ascend/GLM-4.7-W8A8C8"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   OMP_PROC_BIND: false
   HCCL_BUFFSIZE: 512
@@ -17,6 +17,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "vllm-ascend/GLM-4.7-W8A8C8"
         --host 0.0.0.0
@@ -40,7 +42,6 @@ deployment:
         '{"kv_connector": "MooncakeLayerwiseConnector",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "engine_id": "0",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,
@@ -53,6 +54,8 @@ deployment:
             }
         }'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "vllm-ascend/GLM-4.7-W8A8C8"
         --host 0.0.0.0
@@ -75,7 +78,6 @@ deployment:
         '{"kv_connector": "MooncakeLayerwiseConnector",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "1",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,

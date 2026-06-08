@@ -2,7 +2,7 @@ test_name: "test Qwen3-VL-235B-A22B disaggregated_prefill"
 model: "Qwen/Qwen3-VL-235B-A22B-Instruct"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
@@ -19,6 +19,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve "Qwen/Qwen3-VL-235B-A22B-Instruct"
       --host 0.0.0.0
@@ -38,7 +40,6 @@ deployment:
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_producer",
       "kv_port": "30000",
-      "engine_id": "0",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 2,
@@ -51,6 +52,8 @@ deployment:
           }
       }'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve "Qwen/Qwen3-VL-235B-A22B-Instruct"
       --host 0.0.0.0
@@ -71,7 +74,6 @@ deployment:
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_consumer",
       "kv_port": "30200",
-      "engine_id": "1",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 2,

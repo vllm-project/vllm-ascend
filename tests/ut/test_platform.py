@@ -23,6 +23,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config = MagicMock()
         mock_vllm_config.compilation_config = MagicMock()
         mock_vllm_config.model_config = MagicMock()
+        mock_vllm_config.model_config.is_hybrid = False
+        mock_vllm_config.model_config.is_encoder_decoder = False
         mock_vllm_config.parallel_config = MagicMock()
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
@@ -30,7 +32,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.speculative_config = None
         mock_vllm_config.additional_config = {}
         mock_vllm_config.compilation_config.pass_config.enable_sp = False
-        mock_vllm_config.compilation_config.cudagraph_mode = None
+        mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         return mock_vllm_config
 
     @staticmethod
@@ -41,14 +43,23 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         mock_ascend_config.ascend_fusion_config = None
         mock_ascend_config.recompute_scheduler_enable = False
+        mock_ascend_config.enable_balance_scheduling = False
+        mock_ascend_config.enable_mc2_hierarchy_comm = False
+        mock_ascend_config.enable_fused_mc2 = False
+        mock_ascend_config.enable_flashcomm1 = False
         mock_ascend_config.SLO_limits_for_dynamic_batch = -1
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
         return mock_ascend_config
 
     def setUp(self):
+        self._enable_sp_patch = patch("vllm_ascend.utils.enable_sp", return_value=False)
+        self._enable_sp_patch.start()
         self.platform = NPUPlatform()
         self.platform.supported_quantization[:] = ["ascend", "compressed-tensors"]
+
+    def tearDown(self):
+        self._enable_sp_patch.stop()
 
     def test_class_variables(self):
         self.assertEqual(NPUPlatform._enum, PlatformEnum.OOT)
@@ -362,7 +373,7 @@ class TestNPUPlatform(TestBase):
             with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
                 self.platform.check_and_update_config(vllm_config)
 
-        self.assertTrue("Compilation disabled, using eager mode by default" in cm.output[0])
+        self.assertTrue(any("Compilation disabled, using eager mode by default" in output for output in cm.output))
 
         self.assertEqual(
             vllm_config.compilation_config.mode,
@@ -525,6 +536,14 @@ class TestNPUPlatform(TestBase):
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
+
+    def test_validate_kv_load_failure_policy_rejects_hybrid_recompute(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.kv_transfer_config = MagicMock(kv_load_failure_policy="recompute")
+
+        with pytest.raises(AssertionError, match="Hybrid models do not support recompute mode kv load failure policy"):
+            self.platform._validate_kv_load_failure_policy(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

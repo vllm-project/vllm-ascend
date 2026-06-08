@@ -2,7 +2,7 @@ test_name: "test Qwen3-235B-A22B-W8A8 disaggregated_prefill"
 model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   HCCL_OP_EXPANSION_MODE: AIV
   VLLM_USE_MODELSCOPE: true
   TASK_QUEUE_ENABLE: 1
@@ -18,6 +18,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
         --host 0.0.0.0
@@ -38,7 +40,6 @@ deployment:
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "36000",
-        "engine_id": "0",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,
@@ -54,6 +55,8 @@ deployment:
         '{"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
         --host 0.0.0.0
@@ -74,7 +77,6 @@ deployment:
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "36100",
-        "engine_id": "1",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,

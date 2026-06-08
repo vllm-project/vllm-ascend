@@ -2,7 +2,7 @@ test_name: "test Qwen3-235B-A22B PD separation with mooncake layerwise connector
 model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 100
@@ -19,6 +19,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
@@ -42,8 +44,6 @@ deployment:
         '{"kv_connector": "MooncakeLayerwiseConnector",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,
@@ -56,6 +56,8 @@ deployment:
             }
         }'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
@@ -78,8 +80,6 @@ deployment:
         '{"kv_connector": "MooncakeLayerwiseConnector",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "1",
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
         "kv_connector_extra_config": {
                   "prefill": {
                           "dp_size": 2,
