@@ -17,8 +17,12 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from typing import Any, cast
+
 import torch
 from vllm.v1.worker.gpu.states import RequestState
+
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendRequestState(RequestState):
@@ -58,12 +62,24 @@ class AscendRequestState(RequestState):
         prompt_len,
         all_token_ids,
         num_computed_tokens,
+        max_tokens: int | None = None,
     ):
-        super().add_request(
-            req_id,
-            prompt_len,
-            all_token_ids,
-            num_computed_tokens,
-        )
+        base_add_request = cast(Any, super().add_request)
+        if vllm_version_is("0.21.0"):
+            base_add_request(
+                req_id,
+                prompt_len,
+                all_token_ids,
+                num_computed_tokens,
+            )
+        else:
+            assert max_tokens is not None, "max_tokens is required by vLLM main request state."
+            base_add_request(
+                req_id,
+                prompt_len,
+                all_token_ids,
+                num_computed_tokens,
+                max_tokens,
+            )
         req_idx = self.req_id_to_index[req_id]
         self.num_computed_tokens_cpu[req_idx] = num_computed_tokens
