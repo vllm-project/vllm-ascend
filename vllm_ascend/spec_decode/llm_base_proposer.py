@@ -1691,6 +1691,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             max_query_len=new_query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
+            slot_mapping_cpu=torch.from_numpy(self.cpu_slot_mapping) if self.cpu_slot_mapping is not None else None,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
             positions_cpu=common_attn_metadata.positions_cpu[token_indices]
