@@ -127,7 +127,7 @@ class BaseDeviceAdaptor:
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
-        swiglu_limit: float = 0.0,
+        swiglu_limit: int = 0,
         mxfp_quant_dtype: QuantType | None = None,
     ):
         if use_mxfp_quant:
@@ -477,192 +477,6 @@ class BaseDeviceAdaptor:
 
         return context_layer
 
-    # ===== Sparse Attention Metadata & Op Selectors =====
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
-        """Returns the metadata-building operator for sparse attention."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
-        """Returns kwargs for sparse attention metadata builder."""
-        return {"device": str(device)}
-
-    @staticmethod
-    def get_dsa_sparse_attn_op():
-        """Returns the sparse attention operator."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv
-
-    @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
-        """Returns base kwargs for sparse attention (extended by caller)."""
-        return {}
-
-    # ===== SWA / Compressor KV Scatter =====
-
-    @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
-        """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
-
-    # ===== Indexer Quant + Scatter =====
-
-    @staticmethod
-    def indexer_quantize_query(q):
-        """Quantize indexer query for lightning_indexer.
-        Non-A5: int8 quant with float16 scale."""
-        q_quant, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
-        q_scale = q_scale.to(torch.float16)
-        return q_quant, q_scale
-
-    @staticmethod
-    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
-        """Quantize q and scatter kv into indexer cache.
-        Non-A5: int8 quant + 2x scatter_nd_update_v2 for k_cache and scale_cache."""
-        q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
-        q_scale = q_scale.to(torch.float16)
-
-        kv_out = kv
-        kv_scale_out = None
-        if kv is not None:
-            kv_out, kv_scale_out = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
-            kv_scale_out = kv_scale_out.unsqueeze(-1).to(torch.float16)
-            if kv_scale_out.ndim < 4:
-                kv_scale_out = kv_scale_out.unsqueeze(-1)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_out)
-
-        return q, q_scale, kv_out, kv_scale_out
-
-    @staticmethod
-    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping):
-        """Part1 of multi-stream indexer scatter.
-        Non-A5: quantize kv + scatter k_cache.
-        Returns (kv_quant, kv_scale) for use in Part3, or (None, None) if kv is None."""
-        if kv is None:
-            return None, None
-        kv_out, kv_scale = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
-        kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
-        return kv_out, kv_scale
-
-    @staticmethod
-    def dsa_indexer_scatter_scale_part3(kv_scale, indexer_scale_cache, slot_mapping):
-        """Part3 of multi-stream indexer scatter.
-        Non-A5: scatter scale_cache (float16 conversion + scatter)."""
-        kv_scale = kv_scale.to(torch.float16)
-        if kv_scale.ndim < 4:
-            kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale)
-
-    @staticmethod
-    def warmup_indexer_quant_scatter(hidden_states, slot_mapping):
-        """Warmup profiling for indexer quant+scatter.
-        Non-A5: int8 quant + 2x scatter with dummy cache tensors."""
-        kv_dummy, kv_scale_dummy = torch_npu.npu_dynamic_quant(hidden_states, dst_type=torch.int8)
-        kv_scale_dummy = kv_scale_dummy.unsqueeze(-1).to(torch.float16)
-        if kv_scale_dummy.ndim < 4:
-            kv_scale_dummy = kv_scale_dummy.unsqueeze(-1)
-        dummy_shape = (1, 1, 1, kv_dummy.shape[-1])
-        indexer_k_cache = torch.zeros(dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
-        indexer_scale_cache = torch.zeros(dummy_shape, dtype=torch.float16, device=hidden_states.device)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_dummy)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_dummy)
-
-    # ===== Lightning Indexer Dtype Prep =====
-
-    @staticmethod
-    def prepare_dsa_indexer_weights(weights):
-        """Non-A5: cast indexer weights to float16."""
-        return weights.to(torch.float16)
-
-    @staticmethod
-    def prepare_dsa_indexer_query_scale(q_scale):
-        """Non-A5: q_scale already float16, pass through."""
-        return q_scale
-
-    @staticmethod
-    def prepare_dsa_indexer_key_scale(indexer_scale_cache):
-        """Non-A5: cast key dequant scale to float16."""
-        return indexer_scale_cache.squeeze(-2).to(torch.float16)
-
-    # ===== Q RMS Norm =====
-
-    @staticmethod
-    def apply_dsa_q_rms(q, eps, q_norm_without_weight=None):
-        """Apply Q RMS norm. Non-A5: triton_q_rms.
-        A5: uses q_norm_without_weight callable when provided."""
-        from vllm.triton_utils import HAS_TRITON
-
-        if HAS_TRITON:
-            from vllm_ascend.ops.triton.rms_norm import triton_q_rms
-
-            return triton_q_rms(q, eps)
-        return q
-
-    # ===== KV Cache Helpers =====
-
-    @staticmethod
-    def unpack_dsa_indexer_kv_cache(kv_cache):
-        """Unpack indexer kv_cache tuple.
-        Non-A5: returns (state_cache, k_cache, scale_cache, None).
-        A5: returns (state_cache, k_cache, scale_cache, full_cache)."""
-        _, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache = kv_cache
-        return indexer_state_cache, indexer_k_cache, indexer_scale_cache, None
-
-    @staticmethod
-    def unpack_dsa_forward_kv_cache(kv_cache, compress_ratio):
-        """Unpack kv_cache for forward pass.
-        Returns 6-tuple: (compress_kv_cache, swa_kv_cache, state_cache,
-        indexer_k_cache, indexer_scale_cache, indexer_full_cache).
-        Non-A5: indexer_full_cache is always None.
-        All devices: unused slots are None.
-        """
-        idx_full = 6  # 7th element (indexer_full_cache), A5 only
-        full_cache = kv_cache[idx_full] if len(kv_cache) > idx_full else None
-        if compress_ratio == 4:
-            # [0]=compress, [1]=swa, [2]=state, [3]=unused, [4]=ik, [5]=isc
-            return (kv_cache[0], kv_cache[1], kv_cache[2], kv_cache[4], kv_cache[5], full_cache)
-        elif compress_ratio == 128:
-            return (kv_cache[0], kv_cache[1], kv_cache[2], None, None, full_cache)
-        else:
-            return (None, kv_cache[1], None, None, None, full_cache)
-
-    @staticmethod
-    def pad_dsa_decode_slot_mapping(slot_mapping, num_decode_tokens, compress_ratio, num_decodes):
-        """Pad slot_mapping for decode metadata. Non-A5: pass through."""
-        return slot_mapping
-
-    @staticmethod
-    def format_dsa_slot_mapping(slot_mapping, block_size):
-        """Format slot_mapping for metadata storage.
-        Non-A5: 2D [block_idx, offset]; A5: 1D pass-through."""
-        return torch.stack([slot_mapping // block_size, slot_mapping % block_size], axis=-1)
-
-    @staticmethod
-    def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
-        """Non-A5: return the cached cu_seqlens_cmp_kv tensor.
-        A5 override always returns None."""
-        return cmp_kv_tensor
-
-    @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, **kwargs_to_add):
-        """Non-A5: add extra kwargs for sparse attention. A5: no-op."""
-        extra_kwargs.update(kwargs_to_add)
-
-    @staticmethod
-    def get_dsa_decode_cu_seqlens_ori_kv(
-        decode_ratio_to_sas_metadata, cache_key, seq_lens, num_decodes, zero_i32, fallback_cu_seqlens
-    ):
-        """Non-A5: return fallback directly (self.cu_seqlens_ori_kv)."""
-        return fallback_cu_seqlens
-
-    @staticmethod
-    def get_dsa_kernel_block_sizes():
-        """Non-A5: return supported kernel block sizes."""
-        return [8, 32, 128]
-
     @staticmethod
     def chunk_scaled_dot_kkt_fwd(NT, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK):
         chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
@@ -865,7 +679,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
-        swiglu_limit: float = 0.0,
+        swiglu_limit: int = 0,
         mxfp_quant_dtype: QuantType | None = None,
     ):
         if not use_mxfp_quant:
@@ -897,14 +711,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 weight_dtype=torch_npu.float4_e2m1fn_x2,
                 output_dtype=torch.bfloat16,
             )[0]
-            # DSV4 need swiglu_limit input
-            out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                hidden_states,
-                topk_weight=None,
-                group_index=None,
-                dst_type=torch.float8_e4m3fn,
-                quant_mode=2,
-                clamp_value=swiglu_limit,
+            hidden_states = torch_npu.npu_swiglu(hidden_states)
+            out, out_scale = torch_npu.npu_dynamic_mx_quant(
+                hidden_states, dst_type=torch.float8_e4m3fn, round_mode="rint"
             )
         else:
             out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
@@ -1004,7 +813,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             input_dtype=input_dtype,
             act_quant_type=act_quant_type,
             weight_quant_type=weight_quant_type,
-            scale_type=scale_type if mxfp_quant_dtype != QuantType.W4A8MXFP else None,
+            scale_type=scale_type,
             per_token_scale_type=per_token_scale_type,
             use_bf16=use_bf16,
             use_mxfp_quant=True,
@@ -1017,10 +826,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
-
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            gmm2_scale = None  # type: ignore[assignment]
-            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
 
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
             gmm2_scale = None  # type: ignore[assignment]

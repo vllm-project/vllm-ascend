@@ -123,10 +123,6 @@ def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
 
-def is_950():
-    return get_ascend_device_type() == AscendDeviceType.A5
-
-
 def _mark_op_side_effectful(op: Any) -> None:
     torch.fx.node.has_side_effect(op)
     default_overload = getattr(op, "default", None)
@@ -768,11 +764,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         return
     from vllm.model_executor.custom_op import CustomOp
 
-    from vllm_ascend.ops.activation import (
-        AscendQuickGELU,
-        AscendSiluAndMul,
-        AscendSiluAndMulWithClamp,
-    )
+    from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
@@ -806,7 +798,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     REGISTERED_ASCEND_OPS = {
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
-        "SiluAndMulClamp": AscendSiluAndMulWithClamp,
         "RotaryEmbedding": AscendRotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
