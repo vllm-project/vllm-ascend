@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import importlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -13,7 +14,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, BlockHashListWithBlockSize, KVCacheBlock
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
@@ -145,6 +145,32 @@ def _unwrap_spec(kv_cache_spec: Any) -> Any:
     if kv_cache_specs is None:
         return kv_cache_spec
     return next(iter(kv_cache_specs.values()))
+
+
+def _get_manager_class_for_spec(spec: Any) -> Any | None:
+    """Resolve the vLLM manager class across 0.20.x and 0.21.x APIs."""
+    try:
+        registry_module = importlib.import_module("vllm.v1.kv_cache_spec_registry")
+        registry = getattr(registry_module, "KVCacheSpecRegistry", None)
+    except ImportError:
+        registry = None
+    if registry is not None:
+        manager_cls = registry.get_manager_class(spec)
+        if manager_cls is not None:
+            return manager_cls
+
+    try:
+        manager_module = importlib.import_module("vllm.v1.core.single_type_kv_cache_manager")
+        spec_manager_map = getattr(manager_module, "spec_manager_map", {})
+    except ImportError:
+        return None
+    manager_cls = spec_manager_map.get(type(spec))
+    if manager_cls is not None:
+        return manager_cls
+    for spec_cls, candidate in spec_manager_map.items():
+        if isinstance(spec, spec_cls):
+            return candidate
+    return None
 
 
 class ExternalCachedBlockPool:
@@ -375,7 +401,9 @@ class ChunkedTokenDatabase:
         spec = self._get_effective_group_spec(kv_cache_group_id, cache_role)
         if spec is None:
             return None
-        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+        manager_cls = _get_manager_class_for_spec(spec)
+        if manager_cls is None:
+            return None
         reachable_block_mask = getattr(manager_cls, "reachable_block_mask", None)
         if reachable_block_mask is None:
             return None
@@ -410,7 +438,7 @@ class ChunkedTokenDatabase:
         spec = self._get_effective_group_spec(kv_cache_group_id, cache_role)
         if spec is None:
             return None
-        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+        manager_cls = _get_manager_class_for_spec(spec)
         if manager_cls is None:
             return None
         hashes = self._block_hashes_for_spec(block_hashes, spec)
