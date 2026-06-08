@@ -2388,7 +2388,7 @@ class TestRunMergedDraft(TestBase):
         if vllm_version_is("0.19.1"):
             assert hasattr(vllm.v1.spec_decode.eagle, "CpuGpuBuffer")
         else:
-            import vllm.v1.spec_decode.llm_base_proposer
+            import vllm.v1.spec_decode.llm_base_proposer  # type: ignore[import-not-found]
 
             assert hasattr(vllm.v1.spec_decode.llm_base_proposer, "CpuGpuBuffer")
         RunnerCls = vllm.v1.spec_decode.eagle.SpecDecodeBaseProposer
