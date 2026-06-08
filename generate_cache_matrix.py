@@ -14,11 +14,12 @@ Usage:
 
 import json
 import os
-import re
 import subprocess
 import sys
 from glob import glob
 from pathlib import Path
+
+import regex as re
 
 try:
     import yaml

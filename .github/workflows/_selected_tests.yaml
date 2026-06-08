@@ -72,9 +72,11 @@ jobs:
       CSRC_BUILD_CACHE_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
     steps:
       - name: Check NPU availability
+        id: check_npu
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           npu-smi info
+          echo "has_npu=true" >> "$GITHUB_OUTPUT"
 
       - name: Install packages
         run: |
