@@ -33,7 +33,6 @@ def solve_tril_16x16_kernel(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     LARGE_BLOCK_T: tl.constexpr,
-    EXTRACT_SLICE_STRIDE_1: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -107,7 +106,7 @@ def solve_tril_16x16_kernel(
 
         # for loop to update N_BLOCKS row vector
         for i in range(1, 16):
-            nblks_vec16 = -extract_slice(local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (EXTRACT_SLICE_STRIDE_1, 1))
+            nblks_vec16 = -extract_slice(local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (16 * N_BLOCKS, 1))
             b_a = tl.reshape(nblks_vec16, (N_BLOCKS, 16))
 
             dot_tmp = tl.trans(b_a[:, :, None] * b_A, (1, 0, 2))
@@ -367,9 +366,7 @@ def solve_tril(
     chunk_indices = chunk_indices_large_block
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, LARGE_BLOCK_T)
 
-    from vllm_ascend.device.device_op import DeviceOperator
-
-    DeviceOperator.solve_tril_16x16(
+    solve_tril_16x16_kernel[NT, B * H](
         A=A,
         Ad=Ad,
         cu_seqlens=cu_seqlens,
@@ -378,8 +375,8 @@ def solve_tril(
         H=H,
         BT=BT,
         LARGE_BLOCK_T=LARGE_BLOCK_T,
-        NT=NT,
-        B=B,
+        num_warps=1,
+        num_stages=4,
     )
 
     if BT == 16:
@@ -404,7 +401,6 @@ def solve_tril(
         num_warps=4,
         num_stages=3,
     )
-
     return Ai
 
 
@@ -462,9 +458,7 @@ def solve_tril_16x16_kernel_kda(
 
     offset = (i_t * 16) % BT
     if not USE_TMA:
-        p_A = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * 16, offset), (16, 16), (1, 0)
-        )
+        p_A = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * 16, offset), (16, 16), (1, 0))
         # [16, 16]
         b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
     else:
@@ -480,9 +474,7 @@ def solve_tril_16x16_kernel_kda(
         b_A = tl.where((o_i == i)[:, None], b_a, b_A)
     b_A += m_I
     if not USE_TMA:
-        p_Ai = tl.make_block_ptr(
-            Ai, (T, 16), (H * 16, 1), (i_t * 16, 0), (16, 16), (1, 0)
-        )
+        p_Ai = tl.make_block_ptr(Ai, (T, 16), (H * 16, 1), (i_t * 16, 0), (16, 16), (1, 0))
         tl.store(
             p_Ai,
             b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"),
@@ -536,12 +528,8 @@ def merge_16x16_to_32x32_inverse_kernel_kda(
     Ai += (bos * H + i_h) * BT
 
     if not USE_TMA:
-        p_A_11 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0)
-        )
-        p_A_22 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0)
-        )
+        p_A_11 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
+        p_A_22 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
         b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
         b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
     else:
@@ -567,9 +555,7 @@ def merge_16x16_to_32x32_inverse_kernel_kda(
     b_Ai_22 += m_I
 
     if not USE_TMA:
-        p_A_21 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0)
-        )
+        p_A_21 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
         b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
     else:
         b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
@@ -581,15 +567,9 @@ def merge_16x16_to_32x32_inverse_kernel_kda(
     )
 
     if not USE_TMA:
-        p_Ai_11 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0)
-        )
-        p_Ai_21 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0)
-        )
-        p_Ai_22 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0)
-        )
+        p_Ai_11 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
+        p_Ai_21 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
+        p_Ai_22 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
         tl.store(
             p_Ai_11,
             b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"),
@@ -606,15 +586,9 @@ def merge_16x16_to_32x32_inverse_kernel_kda(
             boundary_check=(0, 1),
         )
     else:
-        desc_o.store(
-            [i_t * BT + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
+        desc_o.store([i_t * BT + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -665,18 +639,10 @@ def merge_16x16_to_64x64_inverse_kernel_kda(
     Ai += (bos * H + i_h) * BT
 
     if not USE_TMA:
-        p_A_11 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0)
-        )
-        p_A_22 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0)
-        )
-        p_A_33 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0)
-        )
-        p_A_44 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0)
-        )
+        p_A_11 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
+        p_A_22 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
+        p_A_33 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0))
+        p_A_44 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0))
         b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
         b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
         b_Ai_33 = tl.load(p_A_33, boundary_check=(0, 1)).to(tl.float32)
@@ -717,24 +683,12 @@ def merge_16x16_to_64x64_inverse_kernel_kda(
     b_Ai_44 += m_I
 
     if not USE_TMA:
-        p_A_21 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0)
-        )
-        p_A_31 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0)
-        )
-        p_A_32 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0)
-        )
-        p_A_41 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0)
-        )
-        p_A_42 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0)
-        )
-        p_A_43 = tl.make_block_ptr(
-            A, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0)
-        )
+        p_A_21 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
+        p_A_31 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0))
+        p_A_32 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0))
+        p_A_41 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0))
+        p_A_42 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0))
+        p_A_43 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0))
         b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
         b_A_31 = tl.load(p_A_31, boundary_check=(0, 1)).to(tl.float32)
         b_A_32 = tl.load(p_A_32, boundary_check=(0, 1)).to(tl.float32)
@@ -767,14 +721,12 @@ def merge_16x16_to_64x64_inverse_kernel_kda(
 
     b_Ai_31 = -tl.dot(
         b_Ai_33,
-        tl.dot(b_A_31, b_Ai_11, input_precision=DOT_PRECISION)
-        + tl.dot(b_A_32, b_Ai_21, input_precision=DOT_PRECISION),
+        tl.dot(b_A_31, b_Ai_11, input_precision=DOT_PRECISION) + tl.dot(b_A_32, b_Ai_21, input_precision=DOT_PRECISION),
         input_precision=DOT_PRECISION,
     )
     b_Ai_42 = -tl.dot(
         b_Ai_44,
-        tl.dot(b_A_42, b_Ai_22, input_precision=DOT_PRECISION)
-        + tl.dot(b_A_43, b_Ai_32, input_precision=DOT_PRECISION),
+        tl.dot(b_A_42, b_Ai_22, input_precision=DOT_PRECISION) + tl.dot(b_A_43, b_Ai_32, input_precision=DOT_PRECISION),
         input_precision=DOT_PRECISION,
     )
     b_Ai_41 = -tl.dot(
@@ -786,36 +738,16 @@ def merge_16x16_to_64x64_inverse_kernel_kda(
     )
 
     if not USE_TMA:
-        p_Ai_11 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0)
-        )
-        p_Ai_22 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0)
-        )
-        p_Ai_33 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0)
-        )
-        p_Ai_44 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0)
-        )
-        p_Ai_21 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0)
-        )
-        p_Ai_31 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0)
-        )
-        p_Ai_32 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0)
-        )
-        p_Ai_41 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0)
-        )
-        p_Ai_42 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0)
-        )
-        p_Ai_43 = tl.make_block_ptr(
-            Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0)
-        )
+        p_Ai_11 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
+        p_Ai_22 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
+        p_Ai_33 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0))
+        p_Ai_44 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0))
+        p_Ai_21 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
+        p_Ai_31 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0))
+        p_Ai_32 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0))
+        p_Ai_41 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0))
+        p_Ai_42 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0))
+        p_Ai_43 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0))
         tl.store(
             p_Ai_11,
             b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"),
@@ -867,36 +799,16 @@ def merge_16x16_to_64x64_inverse_kernel_kda(
             boundary_check=(0, 1),
         )
     else:
-        desc_o.store(
-            [i_t * BT + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 32, 32], b_Ai_33.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 48, 48], b_Ai_44.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 32, 0], b_Ai_31.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 32, 16], b_Ai_32.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 48, 0], b_Ai_41.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 48, 16], b_Ai_42.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
-        desc_o.store(
-            [i_t * BT + 48, 32], b_Ai_43.to(desc_o.dtype, fp_downcast_rounding="rtne")
-        )
+        desc_o.store([i_t * BT + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 32, 32], b_Ai_33.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 48, 48], b_Ai_44.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 32, 0], b_Ai_31.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 32, 16], b_Ai_32.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 48, 0], b_Ai_41.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 48, 16], b_Ai_42.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 48, 32], b_Ai_43.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
 @input_guard

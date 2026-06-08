@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: ignore-errors
 """Precision tests for vllm's chunk_kda Triton operator on NPU.
 
 Compares chunk_kda against a naive recurrent reference (float32).
@@ -8,7 +9,6 @@ Compares chunk_kda against a naive recurrent reference (float32).
 import pytest
 import torch
 import torch.nn.functional as F
-
 import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.triton.fla.kda import chunk_kda
@@ -34,7 +34,7 @@ def naive_recurrent_kda(
     dtype = v.dtype
     B, T, H, K, V = *q.shape, v.shape[-1]
     if scale is None:
-        scale = K ** -0.5
+        scale = K**-0.5
 
     q, k, v, g, beta = map(lambda x: x.to(torch.float), [q, k, v, g, beta])
     q = q * scale
@@ -58,25 +58,23 @@ def naive_recurrent_kda(
 
 
 def assert_close(
-    name: str, ref: torch.Tensor, tri: torch.Tensor,
-    ratio: float, err_atol: float = 1e-6,
+    name: str,
+    ref: torch.Tensor,
+    tri: torch.Tensor,
+    ratio: float,
+    err_atol: float = 1e-6,
 ):
     """RMSE-based relative error comparison."""
     abs_err = (ref.detach() - tri.detach()).flatten().abs().max().item()
-    rmse_diff = (
-        (ref.detach() - tri.detach()).flatten().square().mean().sqrt().item()
-    )
+    rmse_diff = (ref.detach() - tri.detach()).flatten().square().mean().sqrt().item()
     rmse_base = ref.detach().flatten().square().mean().sqrt().item()
     rel_err = rmse_diff / (rmse_base + 1e-8)
-    print(f"{name:>4} | abs={abs_err:.6f}"
-          f" | rmse={rel_err:.6f} | thr={ratio}")
+    print(f"{name:>4} | abs={abs_err:.6f} | rmse={rel_err:.6f} | thr={ratio}")
     if abs_err <= err_atol:
         return
     assert not torch.isnan(ref).any(), f"{name}: NaN detected in ref"
     assert not torch.isnan(tri).any(), f"{name}: NaN detected in tri"
-    assert rel_err < ratio, (
-        f"{name}: max abs err {abs_err:.6f}, rmse ratio {rel_err:.6f} >= {ratio}"
-    )
+    assert rel_err < ratio, f"{name}: max abs err {abs_err:.6f}, rmse ratio {rel_err:.6f} >= {ratio}"
 
 
 @pytest.mark.parametrize(
@@ -116,9 +114,7 @@ def test_chunk_kda(
     q = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
     k = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
     v = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
-    g = F.logsigmoid(
-        torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)
-    ).to(dtype)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)).to(dtype)
     beta = torch.rand(B, T, H, dtype=dtype, device=DEVICE).sigmoid()
     h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=DEVICE)
 
@@ -129,8 +125,13 @@ def test_chunk_kda(
         q_i = l2norm_fwd(q[:, s:e].contiguous())
         k_i = l2norm_fwd(k[:, s:e].contiguous())
         o_i, ht_i = naive_recurrent_kda(
-            q_i, k_i, v[:, s:e], g[:, s:e], beta[:, s:e],
-            initial_state=h0[i], output_final_state=True,
+            q_i,
+            k_i,
+            v[:, s:e],
+            g[:, s:e],
+            beta[:, s:e],
+            initial_state=h0[i],
+            output_final_state=True,
         )
         ref_outputs.append(o_i)
         ref_states.append(ht_i)
@@ -139,7 +140,11 @@ def test_chunk_kda(
 
     # h0 transposed to (V, K) layout for the kernel; naive uses (K, V)
     tri_o, tri_ht = chunk_kda(
-        q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
         initial_state=h0.transpose(-1, -2).contiguous().clone(),
         output_final_state=True,
         cu_seqlens=cu_seqlens_t,

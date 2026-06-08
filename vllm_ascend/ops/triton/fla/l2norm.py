@@ -7,6 +7,7 @@
 # The original source code was licensed under the MIT license and included
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# mypy: ignore-errors
 
 import os
 
@@ -37,10 +38,7 @@ def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr,
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16, 32]
-    ],
+    configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16, 32]],
     key=["D"],
 )
 @triton.jit
@@ -64,11 +62,7 @@ def l2norm_fwd_kernel_fla_large(
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({"BT": BT}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
-        for BT in BT_LIST
-    ],
+    configs=[triton.Config({"BT": BT}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16] for BT in BT_LIST],
     key=["D"],
 )
 @triton.jit(do_not_specialize=["NB"])
@@ -92,9 +86,7 @@ def l2norm_fwd_kernel_fla(
 
 
 @triton.jit
-def l2norm_fwd_kernel_fla_simple(
-    X, Y, eps, M, N: tl.constexpr, BD: tl.constexpr, MBLOCK: tl.constexpr
-):
+def l2norm_fwd_kernel_fla_simple(X, Y, eps, M, N: tl.constexpr, BD: tl.constexpr, MBLOCK: tl.constexpr):
     xoffset = tl.program_id(0) * MBLOCK
     row_idx = xoffset + tl.arange(0, MBLOCK)[:, None]
     xmask = row_idx < M
@@ -178,7 +170,7 @@ def l2norm_fwd(
     else:
         y = torch.empty_like(x, dtype=output_dtype)
     assert y.stride(-1) == 1
-    T, D = x.shape[0], x.shape[-1]
+    D = x.shape[-1]
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))

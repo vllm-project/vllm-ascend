@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: ignore-errors
 """Precision tests for vllm's fused_recurrent_kda Triton operator on NPU.
 
 Tests the recurrent-mode (decode) kernel against a naive PyTorch recurrent
@@ -11,7 +12,6 @@ on NPU triton-ascend.
 import pytest
 import torch
 import torch.nn.functional as F
-
 import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.triton.fla.kda import fused_recurrent_kda
@@ -42,7 +42,7 @@ def naive_recurrent_kda(
     dtype = v.dtype
     B, T, H, K, V = *q.shape, v.shape[-1]
     if scale is None:
-        scale = K ** -0.5
+        scale = K**-0.5
 
     q, k, v, g, beta = map(lambda x: x.to(torch.float), [q, k, v, g, beta])
     q = q * scale
@@ -74,23 +74,15 @@ def assert_close(
 ):
     """RMSE-based relative error comparison (same logic as FLA's assert_close)."""
     abs_err = (ref.detach() - tri.detach()).flatten().abs().max().item()
-    rmse_diff = (
-        (ref.detach() - tri.detach()).flatten().square().mean().sqrt().item()
-    )
+    rmse_diff = (ref.detach() - tri.detach()).flatten().square().mean().sqrt().item()
     rmse_base = ref.detach().flatten().square().mean().sqrt().item()
     rel_err = rmse_diff / (rmse_base + 1e-8)
-    print(
-        f"{name:>8} | max abs err: {abs_err:.6f}"
-        f" | rmse ratio: {rel_err:.6f} | threshold: {ratio}"
-    )
+    print(f"{name:>8} | max abs err: {abs_err:.6f} | rmse ratio: {rel_err:.6f} | threshold: {ratio}")
     if abs_err <= err_atol:
         return
     assert not torch.isnan(ref).any(), f"{name}: NaN detected in ref"
     assert not torch.isnan(tri).any(), f"{name}: NaN detected in tri"
-    assert rel_err < ratio, (
-        f"{name}: max abs err {abs_err:.6f},"
-        f" rmse ratio {rel_err:.6f} >= {ratio}"
-    )
+    assert rel_err < ratio, f"{name}: max abs err {abs_err:.6f}, rmse ratio {rel_err:.6f} >= {ratio}"
 
 
 # ---------------------------------------------------------------------------
@@ -140,9 +132,7 @@ def test_fused_recurrent_kda(
     q = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
     k = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
     v = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
-    g = F.logsigmoid(
-        torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)
-    ).to(dtype)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)).to(dtype)
     beta = torch.rand(B, T, H, dtype=dtype, device=DEVICE).sigmoid()
     # Kernel layout: [T, H, V, K] = [T, H, D, D].
     # For varlen without ssm_state_indices, seq i reads from h0[cu_seqlens[i]].
@@ -232,22 +222,16 @@ def test_fused_recurrent_kda_decode_inplace(
     q = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
     k = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
     v = torch.randn(B, T, H, D, dtype=dtype, device=DEVICE)
-    g = F.logsigmoid(
-        torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)
-    ).to(dtype)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)).to(dtype)
     beta = torch.rand(B, T, H, dtype=dtype, device=DEVICE).sigmoid()
 
     # State buffer: slot 0 is NULL (invalid), slots 1..N are valid
     max_slots = N + 1
-    state_buf = torch.randn(
-        max_slots, H, D, D, dtype=torch.float32, device=DEVICE
-    )
+    state_buf = torch.randn(max_slots, H, D, D, dtype=torch.float32, device=DEVICE)
     state_buf[0] = 0  # NULL slot
 
     # ssm_state_indices: seq i -> slot (i + 1), all valid (> 0)
-    ssm_state_indices = torch.arange(
-        1, N + 1, dtype=torch.long, device=DEVICE
-    )
+    ssm_state_indices = torch.arange(1, N + 1, dtype=torch.long, device=DEVICE)
 
     # --- naive reference per sequence ---
     ref_outputs = []
@@ -295,9 +279,7 @@ def test_fused_recurrent_kda_decode_inplace(
         assert_close(f"ht_{i}", ref_states[i], tri_state, NPU_RMSE_RATIO_HT)
 
     # Verify NULL slot was not modified
-    assert torch.all(state_buf_tri[0] == 0), (
-        "NULL slot (0) should not be modified"
-    )
+    assert torch.all(state_buf_tri[0] == 0), "NULL slot (0) should not be modified"
 
 
 # ---------------------------------------------------------------------------
@@ -336,9 +318,7 @@ def test_fused_recurrent_kda_fp32(
     q = torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)
     k = torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)
     v = torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)
-    g = F.logsigmoid(
-        torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE)
-    )
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float32, device=DEVICE))
     beta = torch.rand(B, T, H, dtype=torch.float32, device=DEVICE).sigmoid()
     h0 = torch.randn(T, H, D, D, dtype=torch.float32, device=DEVICE)
 
