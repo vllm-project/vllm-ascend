@@ -109,7 +109,7 @@ GLM-4.1V-9B-Thinking can be deployed on a single Atlas A2 (e.g., Ascend-910b) NP
 
 Run the following script to start the vLLM API server:
 
-```{code-block} bash
+```bash
 :sync-yaml: tests/e2e/models/configs/GLM-4.1V-9B-Thinking.yaml
 :sync-target: test_cases[0].model test_cases[0].server_cmd
 :sync-class: cmd
