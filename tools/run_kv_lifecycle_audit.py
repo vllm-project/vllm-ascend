@@ -38,10 +38,7 @@ def snapshot(scheduler, label: str) -> dict[str, object]:
         "running": len(scheduler.running),
         "waiting": len(scheduler.waiting),
         "finished_req_ids": sorted(scheduler.finished_req_ids),
-        "req_to_blocks": {
-            req_id: len(blocks)
-            for req_id, blocks in manager.req_to_blocks.items()
-        },
+        "req_to_blocks": {req_id: len(blocks) for req_id, blocks in manager.req_to_blocks.items()},
     }
 
 
@@ -142,12 +139,7 @@ def main() -> int:
     print(f"failures={len(failures)}")
     if records:
         first = records[0]
-        print(
-            "first_iter="
-            f"{first['start_free_blocks']} "
-            f"{first['end_free_blocks']} "
-            f"{first['delayed_send_marked']}"
-        )
+        print(f"first_iter={first['start_free_blocks']} {first['end_free_blocks']} {first['delayed_send_marked']}")
     print(out_path)
     return 0 if passed else 1
 

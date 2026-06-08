@@ -8,9 +8,9 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.sample.rejection_sampler import (
-    AscendRejectionSampler,
     MAX_SPEC_LEN,
     PLACEHOLDER_TOKEN_ID,
+    AscendRejectionSampler,
     apply_sampling_constraints,
     rejection_sample,
 )
@@ -130,9 +130,7 @@ class SpecSamplingNPUExecutor:
             ),
             predict_bonus_token=True,
             logprobs_mode_override=(
-                "processed_logits"
-                if self.rejection_sampler.is_processed_logprobs_mode
-                else "raw_logits"
+                "processed_logits" if self.rejection_sampler.is_processed_logprobs_mode else "raw_logits"
             ),
         )
         bonus_token_ids = bonus_sampler_output.sampled_token_ids

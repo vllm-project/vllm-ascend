@@ -15,7 +15,6 @@ import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.request import RequestStatus
-from vllm.v1.kv_cache_interface import MambaSpec
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -490,9 +489,7 @@ class TestCoreFunctionality(unittest.TestCase):
     @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
     @patch.object(KVCacheRecvingThread, "_send_done_signal_to_free_remote_port")
     @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
-    def test_handle_request_marks_failure_and_finishes_request(
-        self, mock_transfer, mock_send_free, mock_send_recv
-    ):
+    def test_handle_request_marks_failure_and_finishes_request(self, mock_transfer, mock_send_free, mock_send_recv):
         mock_transfer.side_effect = RuntimeError("transfer failed")
         mock_send_free.return_value = None
         mock_send_recv.return_value = None
@@ -510,9 +507,7 @@ class TestCoreFunctionality(unittest.TestCase):
     @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
     @patch.object(KVCacheRecvingThread, "_send_done_signal_to_free_remote_port")
     @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
-    def test_handle_request_carries_failure_across_partial_groups(
-        self, mock_transfer, mock_send_free, mock_send_recv
-    ):
+    def test_handle_request_carries_failure_across_partial_groups(self, mock_transfer, mock_send_free, mock_send_recv):
         partial_req = dict(self.test_req)
         partial_req["all_task_done"] = False
         final_req = dict(self.test_req)

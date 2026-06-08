@@ -7,9 +7,7 @@ from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run one minimal MTP generation and dump one spec-sampling PoC case."
-    )
+    parser = argparse.ArgumentParser(description="Run one minimal MTP generation and dump one spec-sampling PoC case.")
     parser.add_argument(
         "--model",
         default="/home/117_share/weight/DeepSeek-V4-Flash-w8a8-mtp",

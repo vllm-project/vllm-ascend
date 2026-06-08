@@ -72,8 +72,7 @@ class BalanceScheduler(Scheduler):
         if not hasattr(self, "kv_cache_manager") or not hasattr(self.kv_cache_manager, "coordinator"):
             return False
         return any(
-            req_id in manager.req_to_blocks
-            for manager in self.kv_cache_manager.coordinator.single_type_managers
+            req_id in manager.req_to_blocks for manager in self.kv_cache_manager.coordinator.single_type_managers
         )
 
     def _update_from_kv_xfer_finished(self, kv_connector_output):

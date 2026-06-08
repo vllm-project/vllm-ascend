@@ -484,9 +484,7 @@ class KVCacheRecvingThread(threading.Thread):
     def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds | list[int]) -> None:
         if local_block_ids and isinstance(local_block_ids[0], (list, tuple)):
             flattened_block_ids: set[int] = {
-                block_id
-                for group_block_ids in local_block_ids
-                for block_id in group_block_ids
+                block_id for group_block_ids in local_block_ids for block_id in group_block_ids
             }
         else:
             flattened_block_ids = set(local_block_ids) if local_block_ids else set()

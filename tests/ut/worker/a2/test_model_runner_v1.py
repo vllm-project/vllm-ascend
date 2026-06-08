@@ -155,9 +155,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
 
     @patch("torch.npu.current_stream")
     @patch("torch.npu.stream")
-    def test_copy_valid_sampled_token_count_syncs_host_accepted_counts(
-        self, mock_npu_stream, mock_current_stream
-    ):
+    def test_copy_valid_sampled_token_count_syncs_host_accepted_counts(self, mock_npu_stream, mock_current_stream):
         mock_current_stream.return_value = MagicMock()
         mock_npu_stream.side_effect = lambda _stream: nullcontext()
 
@@ -176,18 +174,12 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
 
         runner._copy_valid_sampled_token_count(next_token_ids, valid_counts)
 
-        self.assertTrue(
-            torch.equal(runner.input_batch.num_accepted_tokens_cpu_tensor[:2], valid_counts)
-        )
-        self.assertTrue(
-            torch.equal(runner.input_batch.prev_sampled_token_ids, next_token_ids.unsqueeze(1))
-        )
+        self.assertTrue(torch.equal(runner.input_batch.num_accepted_tokens_cpu_tensor[:2], valid_counts))
+        self.assertTrue(torch.equal(runner.input_batch.prev_sampled_token_ids, next_token_ids.unsqueeze(1)))
 
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
     @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
-    def test_sample_mtp_returns_executor_counts_explicitly(
-        self, mock_get_ascend_config, mock_lmhead_tp_enable
-    ):
+    def test_sample_mtp_returns_executor_counts_explicitly(self, mock_get_ascend_config, mock_lmhead_tp_enable):
         mock_lmhead_tp_enable.return_value = False
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_reduce_sample = False
@@ -233,9 +225,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
 
     @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
     @patch("torch.distributed.broadcast")
-    def test_sync_mtp_output_counts_across_tp_broadcasts_from_rank0(
-        self, mock_broadcast, mock_get_tp_group
-    ):
+    def test_sync_mtp_output_counts_across_tp_broadcasts_from_rank0(self, mock_broadcast, mock_get_tp_group):
         runner = self._build_runner()
         runner.speculative_config = SimpleNamespace(method="mtp")
         mock_get_tp_group.return_value = SimpleNamespace(world_size=2, device_group="tp")
@@ -282,8 +272,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
             ]
             runner.attn_groups = [fake_group]
             runner.need_accepted_tokens = any(
-                isinstance(attn_group[0].get_metadata_builder(0), DummyGDN)
-                for attn_group in runner.attn_groups
+                isinstance(attn_group[0].get_metadata_builder(0), DummyGDN) for attn_group in runner.attn_groups
             )
 
             self.assertTrue(runner.need_accepted_tokens)
