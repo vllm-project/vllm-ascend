@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import torch
 from vllm.distributed.parallel_state import get_tp_group
@@ -28,6 +28,15 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+
+
+@dataclass
+class SamplingRandomTensors:
+    # External random tensors are the bridge for moving sampling into graph
+    # replay later. They let the caller prepare all randomness up front.
+    bonus_q: torch.Tensor | None = None
+    uniform_probs: torch.Tensor | None = None
+    recovered_q: torch.Tensor | None = None
 
 
 class AscendRejectionSampler(RejectionSampler):
@@ -80,6 +89,75 @@ class AscendRejectionSampler(RejectionSampler):
         # Store Ascend-specific optimizations
         self._ascend_optimizations_enabled = True
         self.top_k = None
+        self.random_tensors: SamplingRandomTensors | None = None
+
+    def set_random_tensors(self, random_tensors: SamplingRandomTensors | None):
+        self.random_tensors = random_tensors
+
+    def build_logprobs_tensors_from_prepared_inputs(
+        self,
+        metadata: SpecDecodeMetadata,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        target_logits_or_tuple: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None],
+        raw_target_logits: torch.Tensor,
+        bonus_sampler_output: SamplerOutput,
+        output_token_ids: torch.Tensor,
+    ):
+        if sampling_metadata.max_num_logprobs is None:
+            return None
+
+        return self._get_logprobs_tensors(
+            sampling_metadata.max_num_logprobs,
+            metadata,
+            logits,
+            target_logits_or_tuple if self.is_processed_logprobs_mode else raw_target_logits,
+            bonus_sampler_output.logprobs_tensors.logprobs,
+            output_token_ids,
+        )
+
+    def forward_with_prepared_inputs(
+        self,
+        metadata: SpecDecodeMetadata,
+        draft_probs: torch.Tensor | None,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        bonus_sampler_output: SamplerOutput,
+        target_logits_or_tuple: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None],
+        raw_target_logits: torch.Tensor,
+        random_tensors: SamplingRandomTensors | None = None,
+    ) -> SamplerOutput:
+        if random_tensors is None:
+            random_tensors = self.random_tensors
+        self.random_tensors = None
+
+        bonus_token_ids = bonus_sampler_output.sampled_token_ids
+        output_token_ids = rejection_sample(
+            metadata.draft_token_ids,
+            metadata.num_draft_tokens,
+            metadata.max_spec_len,
+            metadata.cu_num_draft_tokens,
+            draft_probs,
+            target_logits_or_tuple,
+            bonus_token_ids,
+            sampling_metadata,
+            random_tensors=random_tensors,
+        )
+
+        logprobs_tensors = self.build_logprobs_tensors_from_prepared_inputs(
+            metadata,
+            logits,
+            sampling_metadata,
+            target_logits_or_tuple,
+            raw_target_logits,
+            bonus_sampler_output,
+            output_token_ids,
+        )
+
+        return SamplerOutput(
+            sampled_token_ids=output_token_ids,
+            logprobs_tensors=logprobs_tensors,
+        )
 
     def forward(
         self,
@@ -89,6 +167,9 @@ class AscendRejectionSampler(RejectionSampler):
         # [num_tokens + batch_size, vocab_size]
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        bonus_sampler_output: SamplerOutput | None = None,
+        target_logits_or_tuple: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None] | None = None,
+        raw_target_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
         """
         Args:
@@ -114,72 +195,62 @@ class AscendRejectionSampler(RejectionSampler):
         """
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         bonus_logits_indices = metadata.bonus_logits_indices
-        target_logits_indices = metadata.target_logits_indices
+        random_tensors = self.random_tensors
 
         # When indexing with a tensor (bonus_logits_indices), PyTorch
         # creates a new tensor with separate storage from the original
         # logits tensor. This means any in-place operations on bonus_logits
         # won't affect the original logits tensor.
         assert logits is not None
-        bonus_logits = logits[bonus_logits_indices]
-        bonus_sampler_output = self.sampler(
-            logits=bonus_logits,
-            sampling_metadata=replace(
-                sampling_metadata,
-                max_num_logprobs=-1,
-            ),
-            predict_bonus_token=True,
-            # Override the logprobs mode to return logits because they are
-            # needed later to compute the accepted token logprobs.
-            logprobs_mode_override="processed_logits" if self.is_processed_logprobs_mode else "raw_logits",
-        )
+        if bonus_sampler_output is None:
+            bonus_logits = logits[bonus_logits_indices]
+            self.sampler.set_external_q(None if random_tensors is None else random_tensors.bonus_q)
+            bonus_sampler_output = self.sampler(
+                logits=bonus_logits,
+                sampling_metadata=replace(
+                    sampling_metadata,
+                    max_num_logprobs=-1,
+                ),
+                predict_bonus_token=True,
+                # Override the logprobs mode to return logits because they are
+                # needed later to compute the accepted token logprobs.
+                logprobs_mode_override="processed_logits" if self.is_processed_logprobs_mode else "raw_logits",
+            )
         bonus_token_ids = bonus_sampler_output.sampled_token_ids
 
-        # Just like `bonus_logits`, `target_logits` is a new tensor with
-        # separate storage from the original `logits` tensor. Therefore,
-        # it is safe to update `target_logits` in place.
-        raw_target_logits = logits[target_logits_indices]
-        # Use float32 for the target_logits.
-        raw_target_logits = raw_target_logits.to(torch.float32)
-        target_logits = raw_target_logits
-        if not self.is_processed_logprobs_mode:
-            # Clone raw_target_logits before applying processors to preserve
-            # the original raw logits for logprobs computation, since
-            # apply_logits_processors modifies the tensor in-place.
-            target_logits = target_logits.clone()
-        target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
-        # [num_tokens, vocab_size]
-        # NOTE(woosuk): `target_logits` can be updated in place inside the
-        # `apply_sampling_constraints` function.
-        target_logits = apply_sampling_constraints(
-            target_logits, metadata.cu_num_draft_tokens, sampling_metadata, self.top_k
-        )
-
-        output_token_ids = rejection_sample(
-            metadata.draft_token_ids,
-            metadata.num_draft_tokens,
-            metadata.max_spec_len,
-            metadata.cu_num_draft_tokens,
-            draft_probs,
-            target_logits,
-            bonus_token_ids,
-            sampling_metadata,
-        )
-
-        logprobs_tensors = None
-        if sampling_metadata.max_num_logprobs is not None:
-            logprobs_tensors = self._get_logprobs_tensors(
-                sampling_metadata.max_num_logprobs,
-                metadata,
-                logits,
-                target_logits if self.is_processed_logprobs_mode else raw_target_logits,
-                bonus_sampler_output.logprobs_tensors.logprobs,
-                output_token_ids,
+        if target_logits_or_tuple is None:
+            target_logits_indices = metadata.target_logits_indices
+            # Just like `bonus_logits`, `target_logits` is a new tensor with
+            # separate storage from the original `logits` tensor. Therefore,
+            # it is safe to update `target_logits` in place.
+            raw_target_logits = logits[target_logits_indices]
+            # Use float32 for the target_logits.
+            raw_target_logits = raw_target_logits.to(torch.float32)
+            target_logits = raw_target_logits
+            if not self.is_processed_logprobs_mode:
+                # Clone raw_target_logits before applying processors to preserve
+                # the original raw logits for logprobs computation, since
+                # apply_logits_processors modifies the tensor in-place.
+                target_logits = target_logits.clone()
+            target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
+            # [num_tokens, vocab_size]
+            # NOTE(woosuk): `target_logits` can be updated in place inside the
+            # `apply_sampling_constraints` function.
+            target_logits = apply_sampling_constraints(
+                target_logits, metadata.cu_num_draft_tokens, sampling_metadata, self.top_k
             )
-
-        return SamplerOutput(
-            sampled_token_ids=output_token_ids,
-            logprobs_tensors=logprobs_tensors,
+        else:
+            target_logits = target_logits_or_tuple
+            assert raw_target_logits is not None
+        return self.forward_with_prepared_inputs(
+            metadata,
+            draft_probs,
+            logits,
+            sampling_metadata,
+            bonus_sampler_output,
+            target_logits,
+            raw_target_logits,
+            random_tensors=random_tensors,
         )
 
 
@@ -284,6 +355,7 @@ def rejection_sample(
     # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    random_tensors: SamplingRandomTensors | None = None,
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -402,11 +474,15 @@ def rejection_sample(
         assert target_probs.is_contiguous()
 
         # Generate uniform probabilities for rejection sampling
-        uniform_probs = generate_uniform_probs(
-            num_tokens,
-            num_draft_tokens,
-            sampling_metadata.generators,
-            device,
+        uniform_probs = (
+            random_tensors.uniform_probs
+            if random_tensors is not None and random_tensors.uniform_probs is not None
+            else generate_uniform_probs(
+                num_tokens,
+                num_draft_tokens,
+                sampling_metadata.generators,
+                device,
+            )
         )
 
         # Sample recovered tokens for each position
@@ -423,6 +499,7 @@ def rejection_sample(
             target_indices=target_indices,
             global_vocab_size=global_vocab_size,
             enable_reduce_sampling=True,
+            q=random_tensors.recovered_q if random_tensors is not None else None,
         )
 
         if not using_block_verify:
@@ -513,11 +590,15 @@ def rejection_sample(
         assert target_probs.is_contiguous()
 
         # Generate uniform probabilities for rejection sampling
-        uniform_probs = generate_uniform_probs(
-            num_tokens,
-            num_draft_tokens,
-            sampling_metadata.generators,
-            device,
+        uniform_probs = (
+            random_tensors.uniform_probs
+            if random_tensors is not None and random_tensors.uniform_probs is not None
+            else generate_uniform_probs(
+                num_tokens,
+                num_draft_tokens,
+                sampling_metadata.generators,
+                device,
+            )
         )
 
         # Sample recovered tokens for each position
@@ -534,6 +615,7 @@ def rejection_sample(
             target_indices=None,
             global_vocab_size=vocab_size,
             enable_reduce_sampling=False,
+            q=random_tensors.recovered_q if random_tensors is not None else None,
         )
 
         if not using_block_verify:
@@ -672,24 +754,26 @@ def sample_recovered_tokens(
     target_indices: torch.Tensor | None = None,
     global_vocab_size: int | None = None,
     enable_reduce_sampling: bool = False,
+    q: torch.Tensor | None = None,
 ) -> torch.Tensor:
     batch_size = len(num_draft_tokens)
     vocab_size = target_probs.shape[-1]
 
-    q = torch.empty(
-        (batch_size, vocab_size),
-        dtype=torch.float32,
-        device=device,
-    )
-    q.exponential_()
+    if q is None:
+        q = torch.empty(
+            (batch_size, vocab_size),
+            dtype=torch.float32,
+            device=device,
+        )
+        q.exponential_()
 
-    num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(device, non_blocking=True)
-    has_draft_mask = num_draft_tensor > 0
+        num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(device, non_blocking=True)
+        has_draft_mask = num_draft_tensor > 0
 
-    for i, generator in sampling_metadata.generators.items():
-        temp_q = torch.empty_like(q[i])
-        temp_q.exponential_(generator=generator)
-        q[i] = torch.where(has_draft_mask[i], temp_q, q[i])
+        for i, generator in sampling_metadata.generators.items():
+            temp_q = torch.empty_like(q[i])
+            temp_q.exponential_(generator=generator)
+            q[i] = torch.where(has_draft_mask[i], temp_q, q[i])
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
     if HAS_TRITON:

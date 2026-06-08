@@ -476,6 +476,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
             self.query_start_loc.copy_to_gpu()
 
+            positions_cpu = None
+            if self.use_compress:
+                positions_cpu = getattr(self.runner, "_dsa_positions_cpu_buf", None)
+                if positions_cpu is None:
+                    raise RuntimeError(
+                        "Compressed DSA graph capture requires runner._dsa_positions_cpu_buf to be initialized."
+                    )
+
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
@@ -492,6 +500,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
                 positions=self.runner.positions,
+                positions_cpu=positions_cpu,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
@@ -505,6 +514,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
+            extra_attn_metadata_args: dict[str, Any] = {}
+            if self.use_compress:
+                extra_attn_metadata_args = dict(
+                    prefill_ratio_to_sas_metadata=dict(),
+                    decode_ratio_to_sas_metadata=dict(),
+                    common_ratio_to_sas_metadata=dict(),
+                    block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+                )
             # update the tensor's address for each step.
             for draft_step in range(self.num_speculative_tokens):
                 common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -519,6 +536,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
                     AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
+                    **extra_attn_metadata_args,
                 )
                 per_layer_attn_metadata = dict()
                 for layer_name in self.attn_layer_names:

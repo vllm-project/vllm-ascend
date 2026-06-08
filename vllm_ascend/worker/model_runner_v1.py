@@ -85,7 +85,7 @@ if not vllm_version_is("0.20.2"):
     from vllm.v1.outputs import RoutedExpertsLists
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.sample.rejection_sampler import RejectionSampler, generate_uniform_probs
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
@@ -164,7 +164,11 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
-from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.sample.rejection_sampler import (
+    AscendRejectionSampler,
+    SamplingRandomTensors,
+    apply_sampling_constraints,
+)
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -239,9 +243,49 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     attn_metadata: "PerLayerAttnMetadata"
     positions: torch.Tensor
+    sampling_state: "SamplingExecutionState"
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+@dataclass
+class SamplingExecutionState:
+    sampling_metadata: SamplingMetadata
+    non_spec_max_topk: int | None
+    spec_sampling_state: "SpecSamplingExecutionState | None"
+    output_token_ids_enabled: bool
+    req_ids_snapshot: list[str]
+
+
+@dataclass
+class PreparedSpecSamplingInputs:
+    random_tensors: SamplingRandomTensors | None
+    bonus_sampler_output: SamplerOutput | None
+    target_logits_or_tuple: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None] | None
+    raw_target_logits: torch.Tensor | None
+
+
+@dataclass
+class SpecSamplingExecutionState:
+    max_topk: int | None
+    prepared_inputs: PreparedSpecSamplingInputs
+
+
+@dataclass
+class SamplingBookkeepingState:
+    logprobs_lists: LogprobsLists | None
+    valid_sampled_token_ids: list[list[int]]
+    prompt_logprobs_dict: dict[str, LogprobsTensors | None]
+    req_ids_output_copy: list[str]
+    req_id_to_index_output_copy: dict[str, int]
+    invalid_req_indices: list[int]
+
+
+@dataclass
+class SamplingPhaseResult:
+    sampler_output: SamplerOutput
+    bookkeeping_state: SamplingBookkeepingState
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -1672,16 +1716,20 @@ class NPUModelRunner(GPUModelRunner):
         return draft_token_ids
 
     def _copy_draft_token_ids_to_cpu(
-        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
+        self,
+        scheduler_output: "SchedulerOutput",
+        output_token_ids_enabled: bool,
+        req_ids_snapshot: list[str],
+        zeros_only: bool = False,
     ) -> None:
         if not self.num_spec_tokens:
             return
         if self.use_async_scheduling and not (
             scheduler_output.has_structured_output_requests
-            or self.input_batch.sampling_metadata.output_token_ids
+            or output_token_ids_enabled
         ):
             return
-        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+        self._draft_token_req_ids = req_ids_snapshot.copy()
 
         draft_token_ids: torch.Tensor = self._draft_token_ids  # type: ignore[has-type]
         if not torch.is_tensor(draft_token_ids):
@@ -2106,10 +2154,10 @@ class NPUModelRunner(GPUModelRunner):
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
-            # Apply structured output bitmasks if present
-            self.execute_model_state = ExecuteModelState(
+            self.execute_model_state = self._build_execute_model_state(
                 scheduler_output,
                 logits,
+                self.input_batch.sampling_metadata,
                 spec_decode_metadata,
                 spec_decode_common_attn_metadata,
                 hidden_states,
@@ -2154,6 +2202,30 @@ class NPUModelRunner(GPUModelRunner):
             output.kv_connector_output = kv_connector_output
             return output
 
+        output = self._sample_tokens_from_execute_state(grammar_output, kv_connector_output)
+        return output
+
+    def _prepare_logits_for_sampling(
+        self,
+        logits: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+        grammar_output: "GrammarOutput | None",
+    ) -> torch.Tensor:
+        # Apply structured output bitmasks if present.
+        if grammar_output is not None:
+            # here we are different from gpu_model_runner,
+            # the apply_grammar_bitmask uses torch.compile to optimize this,ascend does not support it now
+            logits_dtype = logits.dtype
+            logits = logits.to("cpu").float()
+            apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
+            logits = logits.to(self.device).to(logits_dtype)
+        return logits
+
+    def _sample_tokens_from_execute_state(
+        self,
+        grammar_output: "GrammarOutput | None",
+        kv_connector_output,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         # Unpack ephemeral state.
         (
             scheduler_output,
@@ -2165,6 +2237,7 @@ class NPUModelRunner(GPUModelRunner):
             aux_hidden_states,
             attn_metadata,
             positions,
+            sampling_state,
             ec_connector_output,
             cudagraph_stats,
             batch_desc,
@@ -2172,110 +2245,83 @@ class NPUModelRunner(GPUModelRunner):
         # Clear ephemeral state.
         self.execute_model_state = None
 
-        # Apply structured output bitmasks if present.
-        if grammar_output is not None:
-            # here we are different from gpu_model_runner,
-            # the apply_grammar_bitmask uses torch.compile to optimize this,ascend does not support it now
-            logits_dtype = logits.dtype
-            logits = logits.to("cpu").float()
-            apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
-            logits = logits.to(self.device).to(logits_dtype)
-
-        with record_function_or_nullcontext("sample_token"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
-
-        if self.need_accepted_tokens:
-            if self.sampling_done_event is None:
-                self.sampling_done_event = torch.npu.Event()
-
-            assert self.sampling_done_event is not None
-            self.sampling_done_event.record()
-
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
-
-        def propose_draft_token_ids(sampled_token_ids):
-            assert spec_decode_common_attn_metadata is not None
-            self._draft_token_ids = self.propose_draft_token_ids(
-                sampled_token_ids,
-                self.input_batch.sampling_metadata,
-                scheduler_output,
-                spec_decode_metadata,
-                spec_decode_common_attn_metadata,
-                positions,
-                scheduler_output.total_num_scheduled_tokens,
-                hidden_states,
-                aux_hidden_states,
-                sample_hidden_states,
-                batch_desc,
-            )
-            self._copy_draft_token_ids_to_cpu(scheduler_output)
-
-        (
-            logprobs_lists,
-            valid_sampled_token_ids,
-            prompt_logprobs_dict,
-            req_ids_output_copy,
-            req_id_to_index_output_copy,
-            invalid_req_indices,
-        ) = self._bookkeeping_sync(
-            scheduler_output,
-            sampler_output,
+        logits = self._prepare_logits_for_sampling(
             logits,
-            hidden_states,
-            scheduler_output.total_num_scheduled_tokens,
-            spec_decode_metadata,
+            scheduler_output,
+            grammar_output,
         )
 
-        with record_function_or_nullcontext("draft_token"):
-            if self.speculative_config:
-                input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
-                    spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
-                    <= self.effective_drafter_max_model_len
-                )
-                use_padded_batch = (
-                    self.speculative_config
-                    and (
-                        self.speculative_config.use_eagle()
-                        or self.speculative_config.uses_draft_model()
-                        or self.speculative_config.uses_extract_hidden_states()
-                        or self.speculative_config.use_ngram_gpu()
-                    )
-                    and not self.speculative_config.disable_padded_drafter_batch
-                )
-                if use_padded_batch:
-                    # EAGLE speculative decoding can use the GPU sampled tokens
-                    # as inputs, and does not need to wait for bookkeeping to finish.
-                    sampled_token_ids = sampler_output.sampled_token_ids
-                    if input_fits_in_drafter:
-                        propose_draft_token_ids(sampler_output.sampled_token_ids)
-                    elif self.valid_sampled_token_count_event is not None:
-                        assert spec_decode_common_attn_metadata is not None
-                        if self.drafter is not None: # Fix mypy type check for drafter None check
-                            next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
-                                    sampled_token_ids,
-                                    self.requests,
-                                    self.input_batch,
-                                    self.discard_request_indices.gpu,
-                                    self.num_discarded_requests,
-                                )
-                            self._copy_valid_sampled_token_count(
-                                next_token_ids, valid_sampled_tokens_count
-                            )
-                            self._draft_token_ids = torch.zeros(
-                                1, device=self.device, dtype=torch.int32
-                            ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
-                            self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
-                if self.speculative_config and not use_padded_batch and input_fits_in_drafter:
-                    # ngram and other speculative decoding methods use the sampled
-                    # tokens on the CPU, so they are run after bookkeeping.
-                    propose_draft_token_ids(valid_sampled_token_ids)
+        sampling_phase_result = self._run_sampling_phase(
+            scheduler_output,
+            logits,
+            sampling_state,
+            spec_decode_metadata,
+            spec_decode_common_attn_metadata,
+            positions,
+            hidden_states,
+            aux_hidden_states,
+            sample_hidden_states,
+            batch_desc,
+        )
+        return self._finalize_sampling_phase_result(
+            sampling_phase_result,
+            scheduler_output,
+            kv_connector_output,
+            ec_connector_output,
+            cudagraph_stats,
+        )
 
-            # vLLM v0.18 defers KV connector finalization during target-model
-            # forward when speculative decoding is enabled. Finalize here after
-            # draft model runs so KV pool save/put can complete.
-            if self.speculative_config is not None:
-                self.finalize_kv_connector()
+    def _finalize_sampling_phase_result(
+        self,
+        sampling_phase_result: SamplingPhaseResult,
+        scheduler_output: "SchedulerOutput",
+        kv_connector_output,
+        ec_connector_output,
+        cudagraph_stats,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        sampler_output = sampling_phase_result.sampler_output
+        bookkeeping_state = sampling_phase_result.bookkeeping_state
 
+        routed_experts_lists = self._collect_routed_experts_lists(
+            scheduler_output.total_num_scheduled_tokens,
+        )
+
+        model_runner_output = self._build_model_runner_output(
+            bookkeeping_state.req_ids_output_copy,
+            bookkeeping_state.req_id_to_index_output_copy,
+            bookkeeping_state.valid_sampled_token_ids,
+            bookkeeping_state.logprobs_lists,
+            bookkeeping_state.prompt_logprobs_dict,
+            kv_connector_output,
+            ec_connector_output,
+            cudagraph_stats,
+            routed_experts_lists,
+        )
+        self._finalize_model_runner_output(model_runner_output)
+
+        self._handle_post_sampling_state_updates(
+            sampler_output.sampled_token_ids,
+            scheduler_output,
+        )
+
+        if not self.use_async_scheduling:
+            return model_runner_output
+
+        async_output = self._build_async_model_runner_output(
+            model_runner_output,
+            sampler_output,
+            bookkeeping_state.invalid_req_indices,
+        )
+        self.input_batch.set_async_sampled_token_ids(
+            async_output.sampled_token_ids_cpu,
+            async_output.async_copy_ready_event,
+        )
+        return async_output
+
+    def _collect_routed_experts_lists(
+        self,
+        total_num_scheduled_tokens: int,
+    ):
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
@@ -2284,7 +2330,7 @@ class NPUModelRunner(GPUModelRunner):
                     capturer.save_captured_experts(indices=self.cpu_slot_mapping)
             elif self.routed_experts_initialized:
                 buf = self.routed_experts_capturer.get_device_buffer()
-                total = scheduler_output.total_num_scheduled_tokens
+                total = total_num_scheduled_tokens
                 self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
                 self.routed_experts_slot_mapping_cpu[:total].copy_(
                     self.routed_experts_slot_mapping_device[:total],
@@ -2295,8 +2341,152 @@ class NPUModelRunner(GPUModelRunner):
                     routing_data=self.routed_experts_cpu[:total].numpy(),
                     slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
                 )
+        return routed_experts_lists
 
-        model_runner_output = ModelRunnerOutput(
+    def _finalize_model_runner_output(
+        self,
+        model_runner_output: ModelRunnerOutput,
+    ) -> None:
+        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
+            self._sync_device()
+            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
+
+        if self.dynamic_eplb:
+            self.eplb_updator.forward_end()
+
+        self._finalize_dump_data()
+
+    def _run_sampling_phase(
+        self,
+        scheduler_output: "SchedulerOutput",
+        logits: torch.Tensor,
+        sampling_state: SamplingExecutionState,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        sample_hidden_states: torch.Tensor,
+        batch_desc: BatchDescriptor,
+    ) -> SamplingPhaseResult:
+        with record_function_or_nullcontext("sample_token"):
+            sampler_output = self._sample(
+                logits,
+                spec_decode_metadata,
+                sampling_state,
+            )
+
+        if self.need_accepted_tokens:
+            if self.sampling_done_event is None:
+                self.sampling_done_event = torch.npu.Event()
+
+            assert self.sampling_done_event is not None
+            self.sampling_done_event.record()
+
+        self.valid_sampled_token_count_gpu: torch.Tensor | None = None  # type: ignore[no-redef]
+
+        bookkeeping_state = self._process_sampled_tokens_after_sampling(
+            scheduler_output,
+            sampler_output,
+            logits,
+            sampling_state,
+            spec_decode_metadata,
+            spec_decode_common_attn_metadata,
+            positions,
+            hidden_states,
+            aux_hidden_states,
+            sample_hidden_states,
+            batch_desc,
+            scheduler_output.total_num_scheduled_tokens,
+        )
+
+        return SamplingPhaseResult(
+            sampler_output=sampler_output,
+            bookkeeping_state=bookkeeping_state,
+        )
+
+    def _process_sampled_tokens_after_sampling(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampler_output: SamplerOutput,
+        logits: torch.Tensor | None,
+        sampling_state: SamplingExecutionState,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        sample_hidden_states: torch.Tensor,
+        batch_desc: BatchDescriptor,
+        num_scheduled_tokens: int,
+    ) -> SamplingBookkeepingState:
+        bookkeeping_state = self._run_sampling_bookkeeping(
+            scheduler_output,
+            sampler_output,
+            logits,
+            hidden_states,
+            num_scheduled_tokens,
+            spec_decode_metadata,
+        )
+
+        with record_function_or_nullcontext("draft_token"):
+            self._handle_speculative_post_sampling(
+                sampler_output,
+                scheduler_output,
+                sampling_state,
+                spec_decode_metadata,
+                spec_decode_common_attn_metadata,
+                positions,
+                hidden_states,
+                aux_hidden_states,
+                sample_hidden_states,
+                batch_desc,
+                bookkeeping_state.valid_sampled_token_ids,
+            )
+
+            # vLLM v0.18 defers KV connector finalization during target-model
+            # forward when speculative decoding is enabled. Finalize here after
+            # draft model runs so KV pool save/put can complete.
+            if self.speculative_config is not None:
+                self.finalize_kv_connector()
+
+        return bookkeeping_state
+
+    def _handle_post_sampling_state_updates(
+        self,
+        sampled_token_ids: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        if self.need_accepted_tokens:
+            assert self.sampling_done_event is not None
+            with (
+                record_function_or_nullcontext("async_state_update"),
+                torch.npu.stream(global_stream()),
+            ):
+                global_stream().wait_event(self.sampling_done_event)
+                self._update_states_after_model_execute(sampled_token_ids, scheduler_output)
+
+        # In async scheduling + PP, broadcast sampled token ids from the
+        # last PP rank so other PP ranks can receive them without going
+        # through the scheduler/engine IPC path.
+        if self.use_async_scheduling:
+            pp = get_pp_group()
+            if pp.world_size > 1 and pp.is_last_rank:
+                self._pp_broadcast_prev_sampled_token_ids(sampled_token_ids)
+
+    def _build_model_runner_output(
+        self,
+        req_ids_output_copy: list[str],
+        req_id_to_index_output_copy: dict[str, int],
+        valid_sampled_token_ids: list[list[int]],
+        logprobs_lists: LogprobsLists | None,
+        prompt_logprobs_dict: dict[str, LogprobsTensors | None],
+        kv_connector_output,
+        ec_connector_output,
+        cudagraph_stats,
+        routed_experts_lists,
+    ) -> ModelRunnerOutput:
+        return ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
@@ -2310,35 +2500,14 @@ class NPUModelRunner(GPUModelRunner):
                 {} if vllm_version_is("0.20.2") else {"routed_experts": routed_experts_lists}
             ),
         )
-        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
-            self._sync_device()
-            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
-        if self.dynamic_eplb:
-            self.eplb_updator.forward_end()
-
-        self._finalize_dump_data()
-
-        if self.need_accepted_tokens:
-            assert self.sampling_done_event is not None
-            with (
-                record_function_or_nullcontext("async_state_update"),
-                torch.npu.stream(global_stream()),
-            ):
-                global_stream().wait_event(self.sampling_done_event)
-                self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
-
-        # In async scheduling + PP, broadcast sampled token ids from the
-        # last PP rank so other PP ranks can receive them without going
-        # through the scheduler/engine IPC path.
-        if self.use_async_scheduling:
-            pp = get_pp_group()
-            if pp.world_size > 1 and pp.is_last_rank:
-                self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
-
-        if not self.use_async_scheduling:
-            return model_runner_output
-        async_output = AsyncGPUModelRunnerOutput(
+    def _build_async_model_runner_output(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        sampler_output: SamplerOutput,
+        invalid_req_indices: list[int],
+    ) -> AsyncGPUModelRunnerOutput:
+        return AsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,
             logprobs_tensors=sampler_output.logprobs_tensors,
@@ -2346,40 +2515,450 @@ class NPUModelRunner(GPUModelRunner):
             async_output_copy_stream=self.async_output_copy_stream,
             vocab_size=self.input_batch.vocab_size,
         )
-        self.input_batch.set_async_sampled_token_ids(
-            async_output.sampled_token_ids_cpu,
-            async_output.async_copy_ready_event,
+
+    def _run_sampling_bookkeeping(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampler_output: SamplerOutput,
+        logits: torch.Tensor | None,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> SamplingBookkeepingState:
+        (
+            logprobs_lists,
+            valid_sampled_token_ids,
+            prompt_logprobs_dict,
+            req_ids_output_copy,
+            req_id_to_index_output_copy,
+            invalid_req_indices,
+        ) = self._bookkeeping_sync(
+            scheduler_output,
+            sampler_output,
+            logits,
+            hidden_states,
+            num_scheduled_tokens,
+            spec_decode_metadata,
         )
-        return async_output
+        return SamplingBookkeepingState(
+            logprobs_lists=logprobs_lists,
+            valid_sampled_token_ids=valid_sampled_token_ids,
+            prompt_logprobs_dict=prompt_logprobs_dict,
+            req_ids_output_copy=req_ids_output_copy,
+            req_id_to_index_output_copy=req_id_to_index_output_copy,
+            invalid_req_indices=invalid_req_indices,
+        )
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
-    def _sample(self, logits, spec_decode_metadata):
-        # Sample the next token and get logprobs if needed.
-        sampling_metadata = self.input_batch.sampling_metadata
-        self.input_batch.update_async_output_token_ids()
+    def _make_sampling_q(
+        self,
+        num_rows: int,
+        num_cols: int,
+        generators: dict[int, torch.Generator] | None,
+    ) -> torch.Tensor | None:
+        if num_rows <= 0 or num_cols <= 0:
+            return None
+
+        generators = generators or {}
+        q = torch.empty((num_rows, num_cols), device=self.device, dtype=torch.float32)
+        if len(generators) != num_rows:
+            q.exponential_()
+        if generators:
+            for i, generator in generators.items():
+                if 0 <= i < num_rows:
+                    q[i].exponential_(generator=generator)
+        return q
+
+    def _get_sampling_width(self, logits: torch.Tensor, max_topk: int | None) -> int:
+        if max_topk is not None and get_ascend_config().enable_reduce_sample:
+            return int(max_topk) * get_tp_group().world_size
+        return logits.shape[1]
+
+    def _prepare_spec_sampling_random_tensors(
+        self,
+        logits: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+        max_topk: int | None,
+    ) -> SamplingRandomTensors | None:
+        if sampling_metadata.all_greedy:
+            return None
+
+        selected_vocab_size = self._get_sampling_width(logits, max_topk)
+        batch_size = len(spec_decode_metadata.num_draft_tokens)
+        num_tokens = spec_decode_metadata.draft_token_ids.shape[0]
+        generators = sampling_metadata.generators or {}
+
+        return SamplingRandomTensors(
+            bonus_q=self._make_sampling_q(batch_size, selected_vocab_size, generators),
+            uniform_probs=generate_uniform_probs(
+                num_tokens,
+                spec_decode_metadata.num_draft_tokens,
+                generators,
+                self.device,
+            ),
+            recovered_q=self._make_sampling_q(batch_size, selected_vocab_size, generators),
+        )
+
+    def _prepare_spec_sampling_state(
+        self,
+        logits: torch.Tensor | None,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        sampling_metadata: SamplingMetadata,
+    ) -> SpecSamplingExecutionState | None:
         if spec_decode_metadata is None:
-            if lmhead_tp_enable() and logits is not None:
-                logits = logits[: self.input_batch.num_reqs]
-            if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
-                max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-                self.sampler.prepare_sampling(max_topk)
+            return None
+        assert logits is not None
+
+        max_topk = None
+        if (
+            sampling_metadata.top_k is not None
+            and get_ascend_config().enable_reduce_sample
+            and logits is not None
+        ):
+            max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+
+        random_tensors = self._prepare_spec_sampling_random_tensors(
+            logits,
+            spec_decode_metadata,
+            sampling_metadata,
+            max_topk,
+        )
+        bonus_sampler_output = self._sample_spec_decode_bonus_tokens(
+            logits,
+            spec_decode_metadata,
+            sampling_metadata,
+            random_tensors,
+        )
+        target_logits_or_tuple, raw_target_logits = self._prepare_spec_target_logits(
+            logits,
+            spec_decode_metadata,
+            sampling_metadata,
+            max_topk,
+        )
+
+        return SpecSamplingExecutionState(
+            max_topk=max_topk,
+            prepared_inputs=PreparedSpecSamplingInputs(
+                random_tensors=random_tensors,
+                bonus_sampler_output=bonus_sampler_output,
+                target_logits_or_tuple=target_logits_or_tuple,
+                raw_target_logits=raw_target_logits,
+            ),
+        )
+
+    def _prepare_spec_target_logits(
+        self,
+        logits: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+        max_topk: int | None,
+    ) -> tuple[torch.Tensor | tuple[torch.Tensor, torch.Tensor | None], torch.Tensor]:
+        raw_target_logits = logits[spec_decode_metadata.target_logits_indices]
+        raw_target_logits = raw_target_logits.to(torch.float32)
+        target_logits = raw_target_logits
+        if not self.rejection_sampler.is_processed_logprobs_mode:
+            target_logits = target_logits.clone()
+        target_logits = self.rejection_sampler.apply_logits_processors(
+            target_logits,
+            sampling_metadata,
+            spec_decode_metadata,
+        )
+        target_logits = apply_sampling_constraints(
+            target_logits,
+            spec_decode_metadata.cu_num_draft_tokens,
+            sampling_metadata,
+            max_topk,
+        )
+        return target_logits, raw_target_logits
+
+    def _prepare_non_spec_max_topk(
+        self,
+        logits: torch.Tensor | None,
+        sampling_metadata: SamplingMetadata,
+    ) -> int | None:
+        if (
+            sampling_metadata.top_k is not None
+            and get_ascend_config().enable_reduce_sample
+            and logits is not None
+        ):
+            return self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+        return None
+
+    def _prepare_sampling_execution_state(
+        self,
+        logits: torch.Tensor | None,
+        sampling_metadata: SamplingMetadata,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> SamplingExecutionState:
+        return SamplingExecutionState(
+            sampling_metadata=sampling_metadata,
+            non_spec_max_topk=self._prepare_non_spec_max_topk(logits, sampling_metadata),
+            spec_sampling_state=self._prepare_spec_sampling_state(logits, spec_decode_metadata, sampling_metadata),
+            output_token_ids_enabled=bool(sampling_metadata.output_token_ids),
+            req_ids_snapshot=self.input_batch.req_ids.copy(),
+        )
+
+    def _build_execute_model_state(
+        self,
+        scheduler_output: "SchedulerOutput",
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
+        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        attn_metadata: "PerLayerAttnMetadata",
+        positions: torch.Tensor,
+        ec_connector_output: "ECConnectorOutput | None",
+        cudagraph_stats: CUDAGraphStat | None,
+        batch_desc: BatchDescriptor,
+    ) -> ExecuteModelState:
+        return ExecuteModelState(
+            scheduler_output,
+            logits,
+            spec_decode_metadata,
+            spec_decode_common_attn_metadata,
+            hidden_states,
+            sample_hidden_states,
+            aux_hidden_states,
+            attn_metadata,
+            positions,
+            self._prepare_sampling_execution_state(logits, sampling_metadata, spec_decode_metadata),
+            ec_connector_output,
+            cudagraph_stats,
+            batch_desc,
+        )
+
+    def _sample_non_spec_decode(
+        self,
+        logits: torch.Tensor,
+        sampling_state: SamplingExecutionState,
+    ) -> SamplerOutput:
+        sampling_metadata = sampling_state.sampling_metadata
+        if lmhead_tp_enable() and logits is not None:
+            logits = logits[: self.input_batch.num_reqs]
+        max_topk = sampling_state.non_spec_max_topk
+        with self._configure_non_spec_sampler(max_topk):
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
 
+    @contextmanager
+    def _configure_non_spec_sampler(self, max_topk: int | None):
+        self.sampler.prepare_sampling(max_topk)
+        try:
+            yield
+        finally:
+            self.sampler.prepare_sampling(None)
+
+    def _sample_spec_decode(
+        self,
+        logits: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata,
+        sampling_state: SamplingExecutionState,
+    ) -> SamplerOutput:
+        sampling_metadata = sampling_state.sampling_metadata
+        spec_sampling_state = sampling_state.spec_sampling_state
+        max_topk = None
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
-        if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
-            max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-            self.rejection_sampler.prepare_sampling(max_topk)
-        sampler_output = self.rejection_sampler(
+        if spec_sampling_state is not None:
+            max_topk = spec_sampling_state.max_topk
+        prepared_inputs = spec_sampling_state.prepared_inputs if spec_sampling_state is not None else None
+        random_tensors = prepared_inputs.random_tensors if prepared_inputs is not None else None
+        if random_tensors is None:
+            random_tensors = self._prepare_spec_sampling_random_tensors(
+                logits,
+                spec_decode_metadata,
+                sampling_metadata,
+                max_topk,
+            )
+        bonus_sampler_output = (
+            prepared_inputs.bonus_sampler_output
+            if prepared_inputs is not None else None
+        )
+        if bonus_sampler_output is None:
+            bonus_sampler_output = self._sample_spec_decode_bonus_tokens(
+                logits,
+                spec_decode_metadata,
+                sampling_metadata,
+                random_tensors,
+            )
+        target_logits = (
+            prepared_inputs.target_logits_or_tuple
+            if prepared_inputs is not None else None
+        )
+        raw_target_logits = (
+            prepared_inputs.raw_target_logits
+            if prepared_inputs is not None else None
+        )
+        if target_logits is None or raw_target_logits is None:
+            target_logits, raw_target_logits = self._prepare_spec_target_logits(
+                logits,
+                spec_decode_metadata,
+                sampling_metadata,
+                max_topk,
+            )
+        return self._build_spec_sampler_output(
             spec_decode_metadata,
-            None,  # draft_probs
             logits,
             sampling_metadata,
+            bonus_sampler_output,
+            target_logits,
+            raw_target_logits,
+            random_tensors,
         )
-        return sampler_output
+
+    def _sample_spec_decode_bonus_tokens(
+        self,
+        logits: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+        random_tensors: SamplingRandomTensors | None,
+    ) -> SamplerOutput:
+        bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
+        self.sampler.set_external_q(None if random_tensors is None else random_tensors.bonus_q)
+        return self.sampler(
+            logits=bonus_logits,
+            sampling_metadata=replace(
+                sampling_metadata,
+                max_num_logprobs=-1,
+            ),
+            predict_bonus_token=True,
+            logprobs_mode_override="processed_logits" if self.rejection_sampler.is_processed_logprobs_mode else "raw_logits",
+        )
+
+    def _build_spec_sampler_output(
+        self,
+        spec_decode_metadata: SpecDecodeMetadata,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        bonus_sampler_output: SamplerOutput,
+        target_logits: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None],
+        raw_target_logits: torch.Tensor,
+        random_tensors: SamplingRandomTensors | None,
+    ) -> SamplerOutput:
+        return self.rejection_sampler.forward_with_prepared_inputs(
+            spec_decode_metadata,
+            None,
+            logits,
+            sampling_metadata,
+            bonus_sampler_output,
+            target_logits,
+            raw_target_logits,
+            random_tensors=random_tensors,
+        )
+
+    def _sample(
+        self,
+        logits,
+        spec_decode_metadata: SpecDecodeMetadata | None = None,
+        sampling_state: SamplingExecutionState | None = None,
+    ):
+        # Sample the next token and get logprobs if needed.
+        self.input_batch.update_async_output_token_ids()
+        if sampling_state is None:
+            sampling_metadata = self.input_batch.sampling_metadata
+            sampling_state = self._prepare_sampling_execution_state(
+                logits,
+                sampling_metadata,
+                spec_decode_metadata,
+            )
+        if spec_decode_metadata is None:
+            return self._sample_non_spec_decode(logits, sampling_state)
+
+        return self._sample_spec_decode(
+            logits,
+            spec_decode_metadata,
+            sampling_state,
+        )
+
+    def _handle_speculative_post_sampling(
+        self,
+        sampler_output: SamplerOutput,
+        scheduler_output: "SchedulerOutput",
+        sampling_state: SamplingExecutionState,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        sample_hidden_states: torch.Tensor,
+        batch_desc: BatchDescriptor,
+        valid_sampled_token_ids: list[list[int]],
+    ) -> None:
+        if not self.speculative_config:
+            return
+
+        input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
+            spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
+            <= self.effective_drafter_max_model_len
+        )
+        use_padded_batch = (
+            self.speculative_config
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+                or self.speculative_config.uses_extract_hidden_states()
+                or self.speculative_config.use_ngram_gpu()
+            )
+            and not self.speculative_config.disable_padded_drafter_batch
+        )
+
+        def propose_draft_token_ids(sampled_token_ids):
+            assert spec_decode_common_attn_metadata is not None
+            self._draft_token_ids = self.propose_draft_token_ids(
+                sampled_token_ids,
+                sampling_state.sampling_metadata,
+                scheduler_output,
+                spec_decode_metadata,
+                spec_decode_common_attn_metadata,
+                positions,
+                scheduler_output.total_num_scheduled_tokens,
+                hidden_states,
+                aux_hidden_states,
+                sample_hidden_states,
+                batch_desc,
+            )
+            self._copy_draft_token_ids_to_cpu(
+                scheduler_output,
+                sampling_state.output_token_ids_enabled,
+                sampling_state.req_ids_snapshot,
+            )
+
+        if use_padded_batch:
+            # EAGLE speculative decoding can use the GPU sampled tokens
+            # as inputs, and does not need to wait for bookkeeping to finish.
+            sampled_token_ids = sampler_output.sampled_token_ids
+            if input_fits_in_drafter:
+                propose_draft_token_ids(sampler_output.sampled_token_ids)
+            elif self.valid_sampled_token_count_event is not None:
+                assert spec_decode_common_attn_metadata is not None
+                if self.drafter is not None:  # Fix mypy type check for drafter None check
+                    next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
+                        sampled_token_ids,
+                        self.requests,
+                        self.input_batch,
+                        self.discard_request_indices.gpu,
+                        self.num_discarded_requests,
+                    )
+                    self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
+                    self._draft_token_ids = torch.zeros(
+                        1, device=self.device, dtype=torch.int32
+                    ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+                    self._copy_draft_token_ids_to_cpu(
+                        scheduler_output,
+                        sampling_state.output_token_ids_enabled,
+                        sampling_state.req_ids_snapshot,
+                        zeros_only=True,
+                    )
+        elif input_fits_in_drafter:
+            # ngram and other speculative decoding methods use the sampled
+            # tokens on the CPU, so they are run after bookkeeping.
+            propose_draft_token_ids(valid_sampled_token_ids)
 
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids
