@@ -1,8 +1,8 @@
 import os
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-from unittest.mock import MagicMock, patch
 from vllm.config import (
     CacheConfig,
     CUDAGraphMode,
@@ -98,7 +98,7 @@ def model_runner():
     with (
         set_current_vllm_config(vllm_config),
         patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group,
-        patch("vllm_ascend.worker.block_table.get_pcp_group") as mock_get_pcp_group
+        patch("vllm_ascend.worker.block_table.get_pcp_group") as mock_get_pcp_group,
     ):
         mock_dcp_group = MagicMock(spec=GroupCoordinator)
         mock_dcp_group.world_size = 1
