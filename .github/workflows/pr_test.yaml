@@ -47,14 +47,20 @@ jobs:
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope.outputs.has_tests }}
-      test_groups: ${{ steps.scope.outputs.test_groups }}
-      matched_modules: ${{ steps.scope.outputs.matched_modules }}
+      has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
+      test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
+      matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
     steps:
       - name: Validate PR title prefix
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
+          PR_TITLE=$(curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])") || {
+              echo "::error::Failed to fetch PR title from GitHub API"
+              exit 1
+            }
+
           if [ -z "$PR_TITLE" ]; then
             echo "::error::PR title cannot be empty"
             exit 1
@@ -102,6 +108,17 @@ jobs:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
+            src:
+              - 'vllm_ascend/**'
+              - 'setup.py'
+              - 'csrc/**'
+              - 'requirements.txt'
+              - 'pyproject.toml'
+              - 'cmake/**'
+              - '.github/**'
+              - 'tests/**'
+              - 'tools/**'
+              - 'CMakeLists.txt'
 
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
@@ -145,12 +162,23 @@ jobs:
 
       - name: Select tests based on changed files
         id: scope
+        if: steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }}
+
+      - name: Set no-tests output when source paths unchanged
+        id: noop
+        if: steps.filter.outputs.src != 'true'
+        run: |
+          {
+            echo "has_tests=false"
+            echo "test_groups=[]"
+            echo "matched_modules="
+          } >> "$GITHUB_OUTPUT"
 
   run-selected-tests:
     needs: lint-and-select-tests
