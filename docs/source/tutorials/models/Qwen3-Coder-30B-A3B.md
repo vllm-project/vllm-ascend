@@ -144,6 +144,24 @@ vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
 For an Atlas A2 with 64 GB NPU memory, `--tensor-parallel-size` should be at least 2; for 32 GB memory, at least 4. `--enable-expert-parallel` enables Expert Parallelism, which is required for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP. Qwen3-Coder supports up to 1M token context length. Adjust `--max-model-len` based on your use case and available memory. Replace `Qwen/Qwen3-Coder-30B-A3B-Instruct` with your local model path.
 :::
 
+**Service Verification:**
+
+After the service is started, verify it is running:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qwen3-coder",
+        "messages": [
+            {"role": "user", "content": "Hello."}
+        ],
+        "max_tokens": 10
+    }'
+```
+
+Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
+
 ### 5.2 Offline Inference (Optional)
 
 The model can also be used for offline batch inference via the Python API:

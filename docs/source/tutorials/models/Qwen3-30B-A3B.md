@@ -163,6 +163,24 @@ vllm serve your_model_path \
 Replace `your_model_path` with the actual model path (e.g., Modelscope ID or local path). For an Atlas A2 with 64 GB NPU memory, `--tensor-parallel-size` should be at least 2; for 32 GB memory, at least 4. `--enable-expert-parallel` enables Expert Parallelism, which is required for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP. If the model is not a quantized model, remove the `--quantization ascend` parameter.
 :::
 
+**Service Verification:**
+
+After the service is started, verify it is running:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qwen3",
+        "messages": [
+            {"role": "user", "content": "Hello."}
+        ],
+        "max_tokens": 10
+    }'
+```
+
+Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
+
 ### 5.2 Offline Inference (Optional)
 
 The model can also be used for offline batch inference via the Python API:
