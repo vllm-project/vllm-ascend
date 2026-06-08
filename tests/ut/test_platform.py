@@ -337,7 +337,7 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        with self.assertLogs(logger="vllm", level="WARNING") as cm:
+        with self.assertLogs(logger="vllm", level="INFO") as cm:
             from vllm_ascend import platform
 
             importlib.reload(platform)
@@ -364,12 +364,11 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
+        from vllm_ascend import platform
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
         with self.assertLogs(logger="vllm", level="INFO") as cm:
-            from vllm_ascend import platform
-
-            importlib.reload(platform)
-            self.platform = platform.NPUPlatform()
-
             with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
                 self.platform.check_and_update_config(vllm_config)
 
@@ -403,12 +402,11 @@ class TestNPUPlatform(TestBase):
 
         vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
+        from vllm_ascend import platform
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
         with self.assertLogs(logger="vllm", level="WARNING") as cm:
-            from vllm_ascend import platform
-
-            importlib.reload(platform)
-            self.platform = platform.NPUPlatform()
-
             with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
                 self.platform.check_and_update_config(vllm_config)
 
