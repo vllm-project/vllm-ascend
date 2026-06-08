@@ -467,7 +467,7 @@ def get_block_hashes(
     scale_factor = group_block_size // hash_block_size
     return [
         _rehash_block_hash_group(block_hashes[idx : idx + scale_factor])
-        for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
+        for idx in range(0, len(block_hashes), scale_factor)
     ]
 
 
