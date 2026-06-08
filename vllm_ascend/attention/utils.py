@@ -141,6 +141,7 @@ class AscendPrefillContextParallelMetadata:
     # chunked prefill calculation. Therefore, this value needs to be passed to the backend.
     # TODO:To be refactored.
     attn_chunk_seqlens: torch.Tensor = None
+    dcp_mtp_attn_mask: torch.Tensor = None
 
 
 @dataclass
