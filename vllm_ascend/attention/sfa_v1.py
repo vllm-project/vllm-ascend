@@ -1211,14 +1211,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim:
-                    torch.ops._C_ascend.store_kv_block(
-                        k_li,
-                        kv_cache[2],
-                        attn_metadata.group_len,
-                        attn_metadata.group_key_idx,
-                        attn_metadata.group_key_cache_idx,
-                        attn_metadata.block_size,
-                    )
+                torch.ops._C_ascend.store_kv_block(
+                    k_li,
+                    kv_cache[2],
+                    attn_metadata.group_len,
+                    attn_metadata.group_key_idx,
+                    attn_metadata.group_key_cache_idx,
+                    attn_metadata.block_size,
+                )
             else:
                 torch_npu.npu_scatter_nd_update_(
                     kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
