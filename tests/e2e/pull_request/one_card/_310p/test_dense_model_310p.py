@@ -17,6 +17,44 @@
 
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.model_utils import check_outputs_equal
+
+
+QWEN3_5_PREFIX_MAMBA_PROMPT = (
+    "You are reading a compact synthetic operations ledger. "
+    "Use only the rows below when answering the final question.\n"
+    + "\n".join(
+        f"Row {i}: route R{i:03d} moves cargo from zone {i % 11} to zone {(i * 7) % 13}; "
+        f"priority is {i % 5}."
+        for i in range(64)
+    )
+    + "\n"
+)
+
+QWEN3_5_PREFIX_MAMBA_PROMPTS = [
+    QWEN3_5_PREFIX_MAMBA_PROMPT + "Question: What route is listed in row 17? Answer briefly.",
+    QWEN3_5_PREFIX_MAMBA_PROMPT + "Question: What priority is listed in row 42? Answer briefly.",
+]
+
+
+def _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[tuple[list[int], str]]:
+    outputs = []
+    runner_kwargs = {
+        "tensor_parallel_size": 1,
+        "enforce_eager": True,
+        "dtype": "float16",
+        "max_model_len": 2048,
+        "max_num_batched_tokens": 2048,
+        "enable_prefix_caching": enable_prefix_caching,
+        "mamba_ssm_cache_dtype": "float16",
+    }
+    if enable_prefix_caching:
+        runner_kwargs["mamba_cache_mode"] = "align"
+
+    with VllmRunner("Qwen/Qwen3.5-4B", **runner_kwargs) as vllm_model:
+        for prompt in QWEN3_5_PREFIX_MAMBA_PROMPTS:
+            outputs.extend(vllm_model.generate_greedy([prompt], max_tokens=8))
+    return outputs
 
 
 def test_qwen3_dense_tp1_fp16():
@@ -85,6 +123,20 @@ def test_qwen3_5_dense_tp1_fp16():
         max_model_len=16384,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@wait_until_npu_memory_free(0.7)
+def test_qwen3_5_dense_prefix_mamba_cache_tp1_fp16():
+    prefix_cache_outputs = _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching=True)
+    no_prefix_cache_outputs = _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching=False)
+
+    assert len(prefix_cache_outputs) == len(no_prefix_cache_outputs) == len(QWEN3_5_PREFIX_MAMBA_PROMPTS)
+    check_outputs_equal(
+        outputs_0_lst=no_prefix_cache_outputs,
+        outputs_1_lst=prefix_cache_outputs,
+        name_0="no_prefix_cache_outputs",
+        name_1="prefix_cache_outputs",
+    )
 
 
 @wait_until_npu_memory_free(0.7)
