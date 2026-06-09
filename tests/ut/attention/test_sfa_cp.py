@@ -256,26 +256,65 @@ class TestAscendSFACPMetadataBuilder(TestBase):
 
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.enabling_mlapo", return_value=False)
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_build_cp_metadata(self, mock_enabling_mlapo):
+    def test_build_cp_metadata_all_prefill(self, mock_enabling_mlapo):
+        """num_decodes=0: all sequences are prefills."""
         builder = self._build_builder()
         block_arange = builder.block_arange_buffer
         seq_lens = torch.tensor([8, 16], dtype=torch.int32)
+        num_decodes = 0
 
         common_attn_metadata = MagicMock()
         long_seq_metadata = MagicMock()
         long_seq_metadata.q_head_idx_tensor = torch.tensor([0, 1])
         long_seq_metadata.q_tail_idx_tensor = torch.tensor([2, 3])
         long_seq_metadata.q_full_idx = torch.tensor([0, 1, 2, 3])
+        long_seq_metadata.attn_mask_full_seqlens = torch.tensor([4, 8, 16, 32])
         long_seq_metadata.pcp_allgather_restore_idx = torch.tensor([0, 1, 2, 3])
         common_attn_metadata.prefill_context_parallel_metadata = long_seq_metadata
         common_attn_metadata.num_computed_tokens_cpu = torch.tensor([0, 0], dtype=torch.int32)
 
-        result = builder.build_cp_metadata(block_arange, seq_lens, common_attn_metadata)
+        result = builder.build_cp_metadata(block_arange, seq_lens, common_attn_metadata, num_decodes)
         self.assertIsInstance(result, AscendPCPMetadata)
         self.assertIs(result.q_head_idx, long_seq_metadata.q_head_idx_tensor)
         self.assertIs(result.q_tail_idx, long_seq_metadata.q_tail_idx_tensor)
         self.assertIsNotNone(result.head_attn_nomask_seqlens)
         self.assertIsNotNone(result.tail_attn_nomask_seqlens)
+        # all prefill: full_overall_attn_seq_lens = cat([all q_head_kv_lens, all q_tail_kv_lens])
+        expected_full_seqlens = torch.cat([result.head_attn_nomask_seqlens, result.tail_attn_nomask_seqlens], dim=0)
+        self.assertTrue(torch.equal(result.full_overall_attn_seq_lens, expected_full_seqlens))
+
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enabling_mlapo", return_value=False)
+    @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
+    def test_build_cp_metadata_mixed_decode_prefill(self, mock_enabling_mlapo):
+        """num_decodes=1: first seq is decode, second is prefill."""
+        builder = self._build_builder()
+        block_arange = builder.block_arange_buffer
+        seq_lens = torch.tensor([8, 16, 32], dtype=torch.int32)
+        num_decodes = 1
+
+        common_attn_metadata = MagicMock()
+        long_seq_metadata = MagicMock()
+        long_seq_metadata.q_head_idx_tensor = torch.tensor([0, 1])
+        long_seq_metadata.q_tail_idx_tensor = torch.tensor([2, 3])
+        long_seq_metadata.q_full_idx = torch.tensor([0, 1, 2, 3])
+        long_seq_metadata.attn_mask_full_seqlens = torch.tensor([8, 16, 32, 64])
+        long_seq_metadata.pcp_allgather_restore_idx = torch.tensor([0, 1, 2, 3])
+        common_attn_metadata.prefill_context_parallel_metadata = long_seq_metadata
+        common_attn_metadata.num_computed_tokens_cpu = torch.tensor([0, 0, 0], dtype=torch.int32)
+
+        result = builder.build_cp_metadata(block_arange, seq_lens, common_attn_metadata, num_decodes)
+        self.assertIsInstance(result, AscendPCPMetadata)
+        # full_overall_attn_seq_lens should skip decode tokens (first num_decodes entries)
+        expected_full_seqlens = torch.cat(
+            [
+                result.head_attn_nomask_seqlens[num_decodes:],
+                result.tail_attn_nomask_seqlens[num_decodes:],
+            ],
+            dim=0,
+        )
+        self.assertTrue(torch.equal(result.full_overall_attn_seq_lens, expected_full_seqlens))
+        # Verify decode entries were excluded
+        self.assertEqual(result.full_overall_attn_seq_lens.numel(), (seq_lens.numel() - num_decodes) * 2)
 
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.enabling_mlapo", return_value=False)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.split_decodes_and_prefills")
@@ -863,67 +902,17 @@ class TestAscendSFACPImpl(TestBase):
         # After all_gather pcp_size=2 -> 8 entries, then index_select with 8 indices
         self.assertEqual(result.shape[0], 8)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
-    def test_exec_kv_no_pcp(self, mock_torch_npu):
-        # When pcp_size==1, simply delegates to super().exec_kv
-        self.impl.pcp_size = 1
-        with patch.object(AscendSFAImpl, "exec_kv", return_value=("a", "b")) as mock_super:
-            result = self.impl.exec_kv(
-                kv_no_split=torch.randn(2, 64),
-                cos=torch.randn(2, 32),
-                sin=torch.randn(2, 32),
-                kv_cache=(torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 32)),
-                slots=torch.tensor([0, 1], dtype=torch.int32),
-                attn_metadata=MagicMock(),
-            )
-        mock_super.assert_called_once()
-        self.assertEqual(result, ("a", "b"))
-
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu")
-    @patch_distributed_groups(dcp_size=1, pcp_size=2, needs_mocks=False)
-    def test_exec_kv_with_pcp(self, mock_torch_npu):
-        self.impl.pcp_size = 2
-        # Configure dimensions
-        self.impl.kv_lora_rank = 32
-        self.impl.qk_rope_head_dim = 16
-        self.impl.num_kv_heads = 1
-
-        kv_a_layernorm = MagicMock()
-        kv_a_layernorm.side_effect = lambda x: x
-        self.impl.kv_a_layernorm = kv_a_layernorm
-        self.impl.rope_single = MagicMock(side_effect=lambda x, cos, sin: x)
-
-        # 2 input tokens, [num_tokens, kv_lora_rank + qk_rope_head_dim]
-        kv_no_split = torch.randn(2, 32 + 16)
-        cos = torch.randn(2, 16)
-        sin = torch.randn(2, 16)
-        kv_cache = (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16))
-        slots = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
-
-        attn_metadata = MagicMock()
-        sfa_cp_metadata = MagicMock()
-        sfa_cp_metadata.pcp_allgather_restore_idx = torch.arange(4)
-        attn_metadata.sfa_cp_metadata = sfa_cp_metadata
-        attn_metadata.slot_mapping = slots
-
-        result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-        self.assertEqual(result, (None, None))
-        mock_torch_npu._npu_reshape_and_cache.assert_called_once()
-
-    @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
-    def test_execute_sparse_flash_attention_process_decode_only(self):
-        # num_prefills < 1: returns aligned decode output
+    def test_cp_process_decode_only(self):
+        """decode_kv is a 3-tuple, prefill_kv is None, no prefills."""
         self.impl.pcp_size = 1
         self.impl.dcp_size = 1
         ql_nope = torch.randn(2, 4, 32)
         q_pe = torch.randn(2, 4, 16)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, 32),
-        )
+        decode_kv = (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16), 4)
+        prefill_kv = None
         topk_indices = torch.tensor([[0], [0]], dtype=torch.int32)
+
         attn_metadata = MagicMock()
         attn_metadata.num_decodes = 2
         attn_metadata.num_decode_tokens = 2
@@ -942,35 +931,39 @@ class TestAscendSFACPImpl(TestBase):
             create=True,
             return_value=(torch.randn(2, 4, 32), None, None),
         ):
-            result = self.impl._execute_sparse_flash_attention_process(
-                ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+            result = self.impl._execute_sparse_flash_attention_cp_process(
+                ql_nope,
+                q_pe,
+                decode_kv,
+                prefill_kv,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
             )
         self.assertIsNotNone(result)
+        self.assertEqual(result.shape[0], 2)
 
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
-    def test_execute_sparse_flash_attention_process_prefill_only_no_pcp(self):
-        # Case: only prefills, pcp_size==1
+    def test_cp_process_prefill_only_no_pcp(self):
+        """decode_kv is None, prefill_kv is a 2-tuple, pcp_size==1."""
         self.impl.pcp_size = 1
         self.impl.dcp_size = 1
         ql_nope = torch.randn(4, 4, 32)
         q_pe = torch.randn(4, 4, 16)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, 32),
-        )
+        decode_kv = None
+        prefill_kv = (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16))
         topk_indices = torch.tensor([[0]] * 4, dtype=torch.int32)
+
         attn_metadata = MagicMock()
         attn_metadata.num_decodes = 0
         attn_metadata.num_decode_tokens = 0
         attn_metadata.num_prefills = 2
-        attn_metadata.block_table = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
-
+        attn_metadata.prefill_allgather_kv_event = None
         sfa_cp_metadata = MagicMock()
         sfa_cp_metadata.valid_block_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
         sfa_cp_metadata.block_table_cp = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
         sfa_cp_metadata.prefill_q_cum_seqlens = torch.tensor([2, 4], dtype=torch.int32)
-        sfa_cp_metadata.block_arange = torch.tensor([0], dtype=torch.int32)
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
 
         actual_seq_lengths_query = torch.tensor([2, 4], dtype=torch.int32)
@@ -982,41 +975,88 @@ class TestAscendSFACPImpl(TestBase):
             create=True,
             return_value=(torch.randn(4, 4, 32), None, None),
         ):
-            result = self.impl._execute_sparse_flash_attention_process(
-                ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+            result = self.impl._execute_sparse_flash_attention_cp_process(
+                ql_nope,
+                q_pe,
+                decode_kv,
+                prefill_kv,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 4)
 
+    @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
+    def test_cp_process_prefill_event_wait(self):
+        """prefill_allgather_kv_event.wait() called when event is not None."""
+        self.impl.pcp_size = 1
+        self.impl.dcp_size = 1
+        ql_nope = torch.randn(2, 4, 32)
+        q_pe = torch.randn(2, 4, 16)
+        decode_kv = None
+        prefill_kv = (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16))
+
+        mock_event = MagicMock()
+        attn_metadata = MagicMock()
+        attn_metadata.num_decodes = 0
+        attn_metadata.num_decode_tokens = 0
+        attn_metadata.num_prefills = 1
+        attn_metadata.prefill_allgather_kv_event = mock_event
+        sfa_cp_metadata = MagicMock()
+        sfa_cp_metadata.valid_block_ids = torch.tensor([0, 1], dtype=torch.int64)
+        sfa_cp_metadata.block_table_cp = torch.tensor([[0, 1]], dtype=torch.int32)
+        sfa_cp_metadata.prefill_q_cum_seqlens = torch.tensor([2], dtype=torch.int32)
+        attn_metadata.sfa_cp_metadata = sfa_cp_metadata
+
+        actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)
+        actual_seq_lengths_key = torch.tensor([4], dtype=torch.int32)
+
+        with patch.object(
+            torch.ops._C_ascend,
+            "npu_sparse_flash_attention",
+            create=True,
+            return_value=(torch.randn(2, 4, 32), None, None),
+        ):
+            self.impl._execute_sparse_flash_attention_cp_process(
+                ql_nope,
+                q_pe,
+                decode_kv,
+                prefill_kv,
+                torch.tensor([[0]] * 2, dtype=torch.int32),
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
+        mock_event.wait.assert_called_once()
+
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_execute_sparse_flash_attention_process_prefill_with_pcp(self):
+    def test_cp_process_prefill_with_pcp(self):
+        """prefill + pcp>1: head/tail split path."""
         self.impl.pcp_size = 2
         self.impl.dcp_size = 2
         ql_nope = torch.randn(4, 4, 32)
         q_pe = torch.randn(4, 4, 16)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, 32),
-        )
+        decode_kv = None
+        prefill_kv = (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16))
         topk_indices = torch.tensor([[0]] * 4, dtype=torch.int32)
+
         attn_metadata = MagicMock()
         attn_metadata.num_decodes = 0
         attn_metadata.num_decode_tokens = 0
         attn_metadata.num_prefills = 2
         attn_metadata.num_input_tokens = 4
-        attn_metadata.block_table = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
-
+        attn_metadata.prefill_allgather_kv_event = None
         sfa_cp_metadata = MagicMock()
         sfa_cp_metadata.valid_block_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
         sfa_cp_metadata.block_table_cp = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+        sfa_cp_metadata.block_table_cp_repeat = torch.tensor([[0, 1, 0, 1], [2, 3, 2, 3]], dtype=torch.int32)
         sfa_cp_metadata.prefill_q_cum_seqlens = torch.tensor([2, 4], dtype=torch.int32)
-        sfa_cp_metadata.q_head_idx = torch.tensor([0, 1], dtype=torch.int64)
-        sfa_cp_metadata.q_tail_idx = torch.tensor([2, 3], dtype=torch.int64)
+        sfa_cp_metadata.q_head_tail_idx = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
         sfa_cp_metadata.q_full_idx = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
-        sfa_cp_metadata.head_attn_nomask_seqlens = torch.tensor([4, 4], dtype=torch.int32)
-        sfa_cp_metadata.tail_attn_nomask_seqlens = torch.tensor([8, 8], dtype=torch.int32)
-        sfa_cp_metadata.block_arange = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+        sfa_cp_metadata.attn_mask_full_seqlens = torch.tensor([4, 4, 8, 8], dtype=torch.int32)
+        sfa_cp_metadata.full_overall_attn_seq_lens = torch.tensor([4, 4, 8, 8], dtype=torch.int32)
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
 
         actual_seq_lengths_query = torch.tensor([2, 4], dtype=torch.int32)
@@ -1027,46 +1067,50 @@ class TestAscendSFACPImpl(TestBase):
                 torch.ops._C_ascend,
                 "npu_sparse_flash_attention",
                 create=True,
-                return_value=(torch.randn(2, 4, 32), None, None),
+                return_value=(torch.randn(4, 4, 32), None, None),
             ),
             patch("vllm_ascend.attention.context_parallel.sfa_cp.get_forward_context") as mock_fc,
         ):
             mock_fc.return_value = MagicMock(num_tokens=4)
-            result = self.impl._execute_sparse_flash_attention_process(
-                ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+            result = self.impl._execute_sparse_flash_attention_cp_process(
+                ql_nope,
+                q_pe,
+                decode_kv,
+                prefill_kv,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
             )
         self.assertIsNotNone(result)
 
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_execute_sparse_flash_attention_process_decode_and_prefill_with_pcp(self):
-        # Covers final torch.cat([decode_attn_out, attn_output]) (line 326)
+    def test_cp_process_decode_and_prefill_with_pcp(self):
+        """decode_kv and prefill_kv both provided, pcp>1: final cat."""
         self.impl.pcp_size = 2
         self.impl.dcp_size = 2
-
         ql_nope = torch.randn(5, 4, 32)
         q_pe = torch.randn(5, 4, 16)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, 32),
-        )
+        decode_kv = (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16), 4)
+        prefill_kv = (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16))
         topk_indices = torch.tensor([[0]] * 5, dtype=torch.int32)
+
         attn_metadata = MagicMock()
         attn_metadata.num_decodes = 1
         attn_metadata.num_decode_tokens = 1
         attn_metadata.num_prefills = 2
         attn_metadata.num_input_tokens = 5
         attn_metadata.block_table = torch.tensor([[0], [1], [2]], dtype=torch.int32)
-
+        attn_metadata.prefill_allgather_kv_event = None
         sfa_cp_metadata = MagicMock()
         sfa_cp_metadata.valid_block_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
         sfa_cp_metadata.block_table_cp = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+        sfa_cp_metadata.block_table_cp_repeat = torch.tensor([[0, 1, 0, 1], [2, 3, 2, 3]], dtype=torch.int32)
         sfa_cp_metadata.prefill_q_cum_seqlens = torch.tensor([2, 4], dtype=torch.int32)
-        sfa_cp_metadata.q_head_idx = torch.tensor([0, 1], dtype=torch.int64)
-        sfa_cp_metadata.q_tail_idx = torch.tensor([2, 3], dtype=torch.int64)
+        sfa_cp_metadata.q_head_tail_idx = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
         sfa_cp_metadata.q_full_idx = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
-        sfa_cp_metadata.head_attn_nomask_seqlens = torch.tensor([4, 4, 4], dtype=torch.int32)
-        sfa_cp_metadata.tail_attn_nomask_seqlens = torch.tensor([8, 8, 8], dtype=torch.int32)
+        sfa_cp_metadata.attn_mask_full_seqlens = torch.tensor([4, 4, 8, 8], dtype=torch.int32)
+        sfa_cp_metadata.full_overall_attn_seq_lens = torch.tensor([4, 4, 8, 8], dtype=torch.int32)
         sfa_cp_metadata.block_arange = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
 
@@ -1086,30 +1130,36 @@ class TestAscendSFACPImpl(TestBase):
             patch("vllm_ascend.attention.context_parallel.sfa_cp.get_forward_context") as mock_fc,
         ):
             mock_fc.return_value = MagicMock(num_tokens=5)
-            result = self.impl._execute_sparse_flash_attention_process(
-                ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+            result = self.impl._execute_sparse_flash_attention_cp_process(
+                ql_nope,
+                q_pe,
+                decode_kv,
+                prefill_kv,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 5)
 
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
-    def test_execute_sparse_flash_attention_process_decode_and_prefill_no_pcp(self):
+    def test_cp_process_decode_and_prefill_no_pcp(self):
+        """Both decode and prefill, pcp_size==1: cats decode + prefill output."""
         self.impl.pcp_size = 1
         self.impl.dcp_size = 1
         ql_nope = torch.randn(3, 4, 32)
         q_pe = torch.randn(3, 4, 16)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, 32),
-        )
+        decode_kv = (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16), 4)
+        prefill_kv = (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16))
         topk_indices = torch.tensor([[0]] * 3, dtype=torch.int32)
+
         attn_metadata = MagicMock()
         attn_metadata.num_decodes = 1
         attn_metadata.num_decode_tokens = 1
         attn_metadata.num_prefills = 1
         attn_metadata.block_table = torch.tensor([[0], [1]], dtype=torch.int32)
-
+        attn_metadata.prefill_allgather_kv_event = None
         sfa_cp_metadata = MagicMock()
         sfa_cp_metadata.valid_block_ids = torch.tensor([0, 1], dtype=torch.int64)
         sfa_cp_metadata.block_table_cp = torch.tensor([[0, 1]], dtype=torch.int32)
@@ -1120,7 +1170,6 @@ class TestAscendSFACPImpl(TestBase):
         actual_seq_lengths_query = torch.tensor([1, 3], dtype=torch.int32)
         actual_seq_lengths_key = torch.tensor([4, 8], dtype=torch.int32)
 
-        # Use side_effect so each call returns attention_out with the q-shape.
         def fake_sfa(query, **kwargs):
             return torch.randn(query.shape[0], query.shape[1], query.shape[2]), None, None
 
@@ -1130,8 +1179,15 @@ class TestAscendSFACPImpl(TestBase):
             create=True,
             side_effect=fake_sfa,
         ):
-            result = self.impl._execute_sparse_flash_attention_process(
-                ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+            result = self.impl._execute_sparse_flash_attention_cp_process(
+                ql_nope,
+                q_pe,
+                decode_kv,
+                prefill_kv,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 3)
@@ -1139,28 +1195,12 @@ class TestAscendSFACPImpl(TestBase):
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
-    def test_indexer_select_post_process_decode_only_simple(self, mock_rope):
-        # Case: num_prefills==0, returns decode_topk_indices
+    def test_indexer_cp_decode_only(self, mock_rope):
+        """num_prefills==0, returns decode_topk_indices."""
         self.impl.pcp_size = 1
         self.impl.dcp_size = 1
         self.impl.use_torch_npu_lightning_indexer = False
-
-        x = torch.randn(2, self.impl.qk_head_dim)
-        q_c = torch.randn(2, self.impl.q_lora_rank)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, self.impl.head_dim),
-        )
-        cos = torch.randn(2, self.impl.qk_rope_head_dim)
-        sin = torch.randn(2, self.impl.qk_rope_head_dim)
-
-        kw_out = torch.randn(2, self.impl.head_dim * 2)
-        self.impl.wk_weights_proj.return_value = (kw_out, None)
-        self.impl.wq_b.return_value = (
-            torch.randn(2, self.impl.n_head * self.impl.head_dim),
-            None,
-        )
+        self.impl.wq_b.return_value = (torch.randn(2, self.impl.n_head * self.impl.head_dim), None)
         mock_rope.return_value = torch.randn(2, self.impl.n_head, self.impl.head_dim)
 
         attn_metadata = MagicMock()
@@ -1168,13 +1208,9 @@ class TestAscendSFACPImpl(TestBase):
         attn_metadata.num_decode_tokens = 2
         attn_metadata.num_prefills = 0
         attn_metadata.block_table = torch.tensor([[0], [1]], dtype=torch.int32)
-
         sfa_cp_metadata = MagicMock()
         sfa_cp_metadata.block_arange = torch.tensor([0], dtype=torch.int32)
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
-
-        actual_seq_lengths_query = torch.tensor([1, 2], dtype=torch.int32)
-        actual_seq_lengths_key = torch.tensor([4, 8], dtype=torch.int32)
 
         with patch.object(
             torch.ops._C_ascend,
@@ -1182,37 +1218,30 @@ class TestAscendSFACPImpl(TestBase):
             create=True,
             return_value=(torch.tensor([[0]] * 2), None),
         ):
-            result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+            result = self.impl.indexer_select_cp_post_process(
+                weights=torch.randn(2, 64),
+                q_c=torch.randn(2, self.impl.q_lora_rank),
+                prefill_key=None,
+                decode_key=torch.randn(4, 1, 1, self.impl.head_dim),
+                decode_block_num=4,
+                attn_metadata=attn_metadata,
+                cos=torch.randn(2, self.impl.qk_rope_head_dim),
+                sin=torch.randn(2, self.impl.qk_rope_head_dim),
+                actual_seq_lengths_query=torch.tensor([1, 2], dtype=torch.int32),
+                actual_seq_lengths_key=torch.tensor([4, 8], dtype=torch.int32),
             )
         self.assertIsNotNone(result)
 
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", False)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
-    def test_indexer_select_post_process_decode_only_no_triton(self, mock_torch_npu):
-        # Test no-triton path
+    def test_indexer_cp_no_triton_path(self, mock_torch_npu):
+        """No-triton branch: npu_rotary_mul path."""
         self.impl.pcp_size = 1
         self.impl.dcp_size = 1
         self.impl.use_torch_npu_lightning_indexer = False
         self.impl.is_rope_neox_style = True
-
-        x = torch.randn(2, self.impl.qk_head_dim)
-        q_c = torch.randn(2, self.impl.q_lora_rank)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, self.impl.head_dim),
-        )
-        cos = torch.randn(2, self.impl.qk_rope_head_dim)
-        sin = torch.randn(2, self.impl.qk_rope_head_dim)
-
-        kw_out = torch.randn(2, self.impl.head_dim * 2)
-        self.impl.wk_weights_proj.return_value = (kw_out, None)
-        self.impl.wq_b.return_value = (
-            torch.randn(2, self.impl.n_head * self.impl.head_dim),
-            None,
-        )
+        self.impl.wq_b.return_value = (torch.randn(2, self.impl.n_head * self.impl.head_dim), None)
         mock_torch_npu.npu_rotary_mul.return_value = torch.randn(2, self.impl.n_head, 1, self.impl.qk_rope_head_dim)
 
         attn_metadata = MagicMock()
@@ -1220,13 +1249,9 @@ class TestAscendSFACPImpl(TestBase):
         attn_metadata.num_decode_tokens = 2
         attn_metadata.num_prefills = 0
         attn_metadata.block_table = torch.tensor([[0], [1]], dtype=torch.int32)
-
         sfa_cp_metadata = MagicMock()
         sfa_cp_metadata.block_arange = torch.tensor([0], dtype=torch.int32)
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
-
-        actual_seq_lengths_query = torch.tensor([1, 2], dtype=torch.int32)
-        actual_seq_lengths_key = torch.tensor([4, 8], dtype=torch.int32)
 
         with patch.object(
             torch.ops._C_ascend,
@@ -1234,53 +1259,41 @@ class TestAscendSFACPImpl(TestBase):
             create=True,
             return_value=(torch.tensor([[0]] * 2), None),
         ):
-            result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+            result = self.impl.indexer_select_cp_post_process(
+                weights=torch.randn(2, 64),
+                q_c=torch.randn(2, self.impl.q_lora_rank),
+                prefill_key=None,
+                decode_key=torch.randn(4, 1, 1, self.impl.head_dim),
+                decode_block_num=4,
+                attn_metadata=attn_metadata,
+                cos=torch.randn(2, self.impl.qk_rope_head_dim),
+                sin=torch.randn(2, self.impl.qk_rope_head_dim),
+                actual_seq_lengths_query=torch.tensor([1, 2], dtype=torch.int32),
+                actual_seq_lengths_key=torch.tensor([4, 8], dtype=torch.int32),
             )
         self.assertIsNotNone(result)
 
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
-    def test_indexer_select_post_process_prefill_only_no_pcp(self, mock_rope):
-        # Case: only prefills, pcp_size==1
+    def test_indexer_cp_prefill_only_no_pcp(self, mock_rope):
+        """prefill only, pcp_size==1."""
         self.impl.pcp_size = 1
         self.impl.dcp_size = 1
         self.impl.use_torch_npu_lightning_indexer = False
-
-        x = torch.randn(2, self.impl.qk_head_dim)
-        q_c = torch.randn(2, self.impl.q_lora_rank)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, self.impl.head_dim),
-        )
-        cos = torch.randn(2, self.impl.qk_rope_head_dim)
-        sin = torch.randn(2, self.impl.qk_rope_head_dim)
-
-        kw_out = torch.randn(2, self.impl.head_dim * 2)
-        self.impl.wk_weights_proj.return_value = (kw_out, None)
-        self.impl.wq_b.return_value = (
-            torch.randn(2, self.impl.n_head * self.impl.head_dim),
-            None,
-        )
+        self.impl.wq_b.return_value = (torch.randn(2, self.impl.n_head * self.impl.head_dim), None)
         mock_rope.return_value = torch.randn(2, self.impl.n_head, self.impl.head_dim)
 
         attn_metadata = MagicMock()
         attn_metadata.num_decodes = 0
         attn_metadata.num_decode_tokens = 0
         attn_metadata.num_prefills = 1
-        attn_metadata.block_table = torch.tensor([[0]], dtype=torch.int32)
-
+        attn_metadata.prefill_allgather_kli_event = None
         sfa_cp_metadata = MagicMock()
         sfa_cp_metadata.valid_block_ids = torch.tensor([0, 1], dtype=torch.int64)
         sfa_cp_metadata.block_table_cp = torch.tensor([[0, 1]], dtype=torch.int32)
         sfa_cp_metadata.prefill_q_cum_seqlens = torch.tensor([2], dtype=torch.int32)
-        sfa_cp_metadata.block_arange = torch.tensor([0], dtype=torch.int32)
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
-
-        actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)
-        actual_seq_lengths_key = torch.tensor([4], dtype=torch.int32)
 
         with patch.object(
             torch.ops._C_ascend,
@@ -1288,120 +1301,89 @@ class TestAscendSFACPImpl(TestBase):
             create=True,
             return_value=(torch.tensor([[0]] * 2), None),
         ):
-            result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+            result = self.impl.indexer_select_cp_post_process(
+                weights=torch.randn(2, 64),
+                q_c=torch.randn(2, self.impl.q_lora_rank),
+                prefill_key=torch.randn(4, 1, 1, self.impl.head_dim),
+                decode_key=None,
+                decode_block_num=0,
+                attn_metadata=attn_metadata,
+                cos=torch.randn(2, self.impl.qk_rope_head_dim),
+                sin=torch.randn(2, self.impl.qk_rope_head_dim),
+                actual_seq_lengths_query=torch.tensor([2], dtype=torch.int32),
+                actual_seq_lengths_key=torch.tensor([4], dtype=torch.int32),
             )
         self.assertIsNotNone(result)
 
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
-    def test_indexer_select_post_process_decode_and_prefill_no_pcp(self, mock_rope):
+    def test_indexer_cp_prefill_kli_event_wait(self, mock_rope):
+        """prefill_allgather_kli_event.wait() called when set."""
         self.impl.pcp_size = 1
         self.impl.dcp_size = 1
         self.impl.use_torch_npu_lightning_indexer = False
+        self.impl.wq_b.return_value = (torch.randn(2, self.impl.n_head * self.impl.head_dim), None)
+        mock_rope.return_value = torch.randn(2, self.impl.n_head, self.impl.head_dim)
 
-        x = torch.randn(3, self.impl.qk_head_dim)
-        q_c = torch.randn(3, self.impl.q_lora_rank)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, self.impl.head_dim),
-        )
-        cos = torch.randn(3, self.impl.qk_rope_head_dim)
-        sin = torch.randn(3, self.impl.qk_rope_head_dim)
-
-        kw_out = torch.randn(3, self.impl.head_dim * 2)
-        self.impl.wk_weights_proj.return_value = (kw_out, None)
-        self.impl.wq_b.return_value = (
-            torch.randn(3, self.impl.n_head * self.impl.head_dim),
-            None,
-        )
-        mock_rope.return_value = torch.randn(3, self.impl.n_head, self.impl.head_dim)
-
+        mock_kli_event = MagicMock()
         attn_metadata = MagicMock()
-        attn_metadata.num_decodes = 1
-        attn_metadata.num_decode_tokens = 1
+        attn_metadata.num_decodes = 0
+        attn_metadata.num_decode_tokens = 0
         attn_metadata.num_prefills = 1
-        attn_metadata.block_table = torch.tensor([[0], [1]], dtype=torch.int32)
-
+        attn_metadata.prefill_allgather_kli_event = mock_kli_event
         sfa_cp_metadata = MagicMock()
         sfa_cp_metadata.valid_block_ids = torch.tensor([0, 1], dtype=torch.int64)
         sfa_cp_metadata.block_table_cp = torch.tensor([[0, 1]], dtype=torch.int32)
         sfa_cp_metadata.prefill_q_cum_seqlens = torch.tensor([2], dtype=torch.int32)
-        sfa_cp_metadata.block_arange = torch.tensor([0], dtype=torch.int32)
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
-
-        actual_seq_lengths_query = torch.tensor([1, 3], dtype=torch.int32)
-        actual_seq_lengths_key = torch.tensor([4, 8], dtype=torch.int32)
-
-        # In each call, returned tensor has rows matching q
-        call_counter = [0]
-
-        def fake_indexer(query, **kwargs):
-            call_counter[0] += 1
-            return torch.tensor([[0]] * query.shape[0]), None
 
         with patch.object(
             torch.ops._C_ascend,
             "npu_lightning_indexer",
             create=True,
-            side_effect=fake_indexer,
+            return_value=(torch.tensor([[0]] * 2), None),
         ):
-            result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+            self.impl.indexer_select_cp_post_process(
+                weights=torch.randn(2, 64),
+                q_c=torch.randn(2, self.impl.q_lora_rank),
+                prefill_key=torch.randn(4, 1, 1, self.impl.head_dim),
+                decode_key=None,
+                decode_block_num=0,
+                attn_metadata=attn_metadata,
+                cos=torch.randn(2, self.impl.qk_rope_head_dim),
+                sin=torch.randn(2, self.impl.qk_rope_head_dim),
+                actual_seq_lengths_query=torch.tensor([2], dtype=torch.int32),
+                actual_seq_lengths_key=torch.tensor([4], dtype=torch.int32),
             )
-        self.assertIsNotNone(result)
-        self.assertEqual(result.shape[0], 3)
+        mock_kli_event.wait.assert_called_once()
 
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_indexer_select_post_process_prefill_with_pcp(self, mock_rope):
-        # Case: prefills + pcp head/tail processing
+    def test_indexer_cp_prefill_with_pcp(self, mock_rope):
+        """prefill + pcp>1: head/tail indexer select."""
         self.impl.pcp_size = 2
         self.impl.dcp_size = 2
         self.impl.use_torch_npu_lightning_indexer = False
-
-        # 4 prefill tokens
-        x = torch.randn(4, self.impl.qk_head_dim)
-        q_c = torch.randn(4, self.impl.q_lora_rank)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, self.impl.head_dim),
-        )
-        cos = torch.randn(4, self.impl.qk_rope_head_dim)
-        sin = torch.randn(4, self.impl.qk_rope_head_dim)
-
-        kw_out = torch.randn(4, self.impl.head_dim * 2)
-        self.impl.wk_weights_proj.return_value = (kw_out, None)
-        self.impl.wq_b.return_value = (
-            torch.randn(4, self.impl.n_head * self.impl.head_dim),
-            None,
-        )
+        self.impl.wq_b.return_value = (torch.randn(4, self.impl.n_head * self.impl.head_dim), None)
         mock_rope.return_value = torch.randn(4, self.impl.n_head, self.impl.head_dim)
 
         attn_metadata = MagicMock()
         attn_metadata.num_decodes = 0
         attn_metadata.num_decode_tokens = 0
         attn_metadata.num_prefills = 2
-        attn_metadata.block_table = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
-
+        attn_metadata.prefill_allgather_kli_event = None
         sfa_cp_metadata = MagicMock()
         sfa_cp_metadata.valid_block_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
         sfa_cp_metadata.block_table_cp = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+        sfa_cp_metadata.block_table_cp_repeat = torch.tensor([[0, 1, 0, 1], [2, 3, 2, 3]], dtype=torch.int32)
         sfa_cp_metadata.prefill_q_cum_seqlens = torch.tensor([2, 4], dtype=torch.int32)
-        sfa_cp_metadata.q_head_idx = torch.tensor([0, 1], dtype=torch.int64)
-        sfa_cp_metadata.q_tail_idx = torch.tensor([2, 3], dtype=torch.int64)
+        sfa_cp_metadata.q_head_tail_idx = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
         sfa_cp_metadata.q_full_idx = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
-        sfa_cp_metadata.head_attn_nomask_seqlens = torch.tensor([4, 4], dtype=torch.int32)
-        sfa_cp_metadata.tail_attn_nomask_seqlens = torch.tensor([8, 8], dtype=torch.int32)
-        sfa_cp_metadata.block_arange = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+        sfa_cp_metadata.attn_mask_full_seqlens = torch.tensor([4, 4, 8, 8], dtype=torch.int32)
+        sfa_cp_metadata.full_overall_attn_seq_lens = torch.tensor([4, 4, 8, 8], dtype=torch.int32)
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
-
-        actual_seq_lengths_query = torch.tensor([2, 4], dtype=torch.int32)
-        actual_seq_lengths_key = torch.tensor([4, 8], dtype=torch.int32)
 
         def fake_indexer(query, **kwargs):
             return torch.tensor([[0]] * query.shape[0]), None
@@ -1412,8 +1394,17 @@ class TestAscendSFACPImpl(TestBase):
             create=True,
             side_effect=fake_indexer,
         ):
-            result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+            result = self.impl.indexer_select_cp_post_process(
+                weights=torch.randn(4, 64),
+                q_c=torch.randn(4, self.impl.q_lora_rank),
+                prefill_key=torch.randn(4, 1, 1, self.impl.head_dim),
+                decode_key=None,
+                decode_block_num=0,
+                attn_metadata=attn_metadata,
+                cos=torch.randn(4, self.impl.qk_rope_head_dim),
+                sin=torch.randn(4, self.impl.qk_rope_head_dim),
+                actual_seq_lengths_query=torch.tensor([2, 4], dtype=torch.int32),
+                actual_seq_lengths_key=torch.tensor([4, 8], dtype=torch.int32),
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 4)
@@ -1421,29 +1412,13 @@ class TestAscendSFACPImpl(TestBase):
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_indexer_select_post_process_decode_and_prefill_with_pcp(self, mock_rope):
-        # Case: decodes + prefills + pcp; covers final torch.cat([decode, attn_output]).
+    def test_indexer_cp_decode_and_prefill_with_pcp(self, mock_rope):
+        """decode + prefill + pcp>1: cats decode + prefill output."""
         self.impl.pcp_size = 2
         self.impl.dcp_size = 2
         self.impl.use_torch_npu_lightning_indexer = False
-
         # 1 decode + 4 prefill = 5 total
-        x = torch.randn(5, self.impl.qk_head_dim)
-        q_c = torch.randn(5, self.impl.q_lora_rank)
-        kv_cache = (
-            torch.randn(4, 1, 1, 32),
-            torch.randn(4, 1, 1, 16),
-            torch.randn(4, 1, 1, self.impl.head_dim),
-        )
-        cos = torch.randn(5, self.impl.qk_rope_head_dim)
-        sin = torch.randn(5, self.impl.qk_rope_head_dim)
-
-        kw_out = torch.randn(5, self.impl.head_dim * 2)
-        self.impl.wk_weights_proj.return_value = (kw_out, None)
-        self.impl.wq_b.return_value = (
-            torch.randn(5, self.impl.n_head * self.impl.head_dim),
-            None,
-        )
+        self.impl.wq_b.return_value = (torch.randn(5, self.impl.n_head * self.impl.head_dim), None)
         mock_rope.return_value = torch.randn(5, self.impl.n_head, self.impl.head_dim)
 
         attn_metadata = MagicMock()
@@ -1451,21 +1426,18 @@ class TestAscendSFACPImpl(TestBase):
         attn_metadata.num_decode_tokens = 1
         attn_metadata.num_prefills = 2
         attn_metadata.block_table = torch.tensor([[0], [1], [2]], dtype=torch.int32)
-
+        attn_metadata.prefill_allgather_kli_event = None
         sfa_cp_metadata = MagicMock()
         sfa_cp_metadata.valid_block_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
         sfa_cp_metadata.block_table_cp = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+        sfa_cp_metadata.block_table_cp_repeat = torch.tensor([[0, 1, 0, 1], [2, 3, 2, 3]], dtype=torch.int32)
         sfa_cp_metadata.prefill_q_cum_seqlens = torch.tensor([2, 4], dtype=torch.int32)
-        sfa_cp_metadata.q_head_idx = torch.tensor([0, 1], dtype=torch.int64)
-        sfa_cp_metadata.q_tail_idx = torch.tensor([2, 3], dtype=torch.int64)
+        sfa_cp_metadata.q_head_tail_idx = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
         sfa_cp_metadata.q_full_idx = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
-        sfa_cp_metadata.head_attn_nomask_seqlens = torch.tensor([4, 4, 4], dtype=torch.int32)
-        sfa_cp_metadata.tail_attn_nomask_seqlens = torch.tensor([8, 8, 8], dtype=torch.int32)
+        sfa_cp_metadata.attn_mask_full_seqlens = torch.tensor([4, 4, 8, 8], dtype=torch.int32)
+        sfa_cp_metadata.full_overall_attn_seq_lens = torch.tensor([4, 4, 8, 8], dtype=torch.int32)
         sfa_cp_metadata.block_arange = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
-
-        actual_seq_lengths_query = torch.tensor([1, 3, 5], dtype=torch.int32)
-        actual_seq_lengths_key = torch.tensor([4, 8, 8], dtype=torch.int32)
 
         def fake_indexer(query, **kwargs):
             return torch.tensor([[0]] * query.shape[0]), None
@@ -1476,8 +1448,235 @@ class TestAscendSFACPImpl(TestBase):
             create=True,
             side_effect=fake_indexer,
         ):
-            result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+            result = self.impl.indexer_select_cp_post_process(
+                weights=torch.randn(5, 64),
+                q_c=torch.randn(5, self.impl.q_lora_rank),
+                prefill_key=torch.randn(4, 1, 1, self.impl.head_dim),
+                decode_key=torch.randn(4, 1, 1, self.impl.head_dim),
+                decode_block_num=4,
+                attn_metadata=attn_metadata,
+                cos=torch.randn(5, self.impl.qk_rope_head_dim),
+                sin=torch.randn(5, self.impl.qk_rope_head_dim),
+                actual_seq_lengths_query=torch.tensor([1, 3, 5], dtype=torch.int32),
+                actual_seq_lengths_key=torch.tensor([4, 8, 8], dtype=torch.int32),
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 5)
+
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.wait_for_kv_layer_from_connector")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.maybe_save_kv_layer_to_connector")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.get_weight_prefetch_method")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp_with_pcp_shard", return_value=False)
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu")
+    @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
+    def test_forward_decode_only(
+        self,
+        mock_torch_npu,
+        _mock_pcp_shard,
+        mock_prefetch,
+        mock_save_kv,
+        mock_wait_kv,
+    ):
+        """forward decode only, no CP."""
+        self.impl.pcp_size = 1
+        self.impl.dcp_size = 1
+        self.impl.num_kv_heads = 1
+        self.impl.num_heads = 4
+        self.impl.head_dim = 128
+        self.impl.v_head_dim = 128
+        self.impl.q_lora_rank = 64
+        self.impl.kv_lora_rank = 32
+        self.impl.qk_rope_head_dim = 16
+        self.impl.enable_mlapo = False
+        self.impl.enable_sp = False
+        self.impl.enable_dsa_cp_with_pcp_shard = False
+        self.impl.skip_topk = False
+        self.impl.use_sparse_c8_indexer = False
+        self.impl.is_kv_producer = True
+
+        mock_prefetch.return_value = MagicMock()
+
+        # fused_qkv_a_proj output: [q_c, kv_no_split]
+        fused_dim = self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
+        self.impl.fused_qkv_a_proj.return_value = (torch.randn(2, fused_dim), None)
+
+        self.impl.q_a_layernorm = MagicMock(side_effect=lambda x: x)
+        self.impl.kv_a_layernorm = MagicMock(side_effect=lambda x: x)
+        self.impl.rope_single = MagicMock(side_effect=lambda x, c, s: x)
+        self.impl.k_norm = MagicMock(side_effect=lambda x: x)
+        kw_out = torch.randn(2, self.impl.head_dim * 2)
+        self.impl.wk_weights_proj.return_value = (kw_out, None)
+        self.impl.wq_b.return_value = (torch.randn(2, self.impl.n_head * self.impl.head_dim), None)
+        self.impl._q_proj_and_k_up_proj = MagicMock(
+            return_value=(
+                torch.randn(2, self.impl.num_heads, self.impl.head_dim),
+                torch.randn(2, self.impl.num_heads, self.impl.qk_rope_head_dim),
+            )
+        )
+        self.impl._v_up_proj = MagicMock(return_value=torch.randn(2, self.impl.num_heads * self.impl.v_head_dim))
+        self.impl.o_proj.return_value = (torch.randn(2, self.impl.num_heads * self.impl.v_head_dim), None)
+
+        kv_cache = (
+            torch.randn(4, 1, 1, 32),
+            torch.randn(4, 1, 1, 16),
+            torch.randn(4, 1, 1, self.impl.head_dim),
+        )
+        output = torch.empty(2, self.impl.num_heads * self.impl.v_head_dim)
+
+        attn_metadata = MagicMock()
+        attn_metadata.num_actual_tokens = 2
+        attn_metadata.num_input_tokens = 2
+        attn_metadata.cos = torch.randn(2, self.impl.qk_rope_head_dim)
+        attn_metadata.sin = torch.randn(2, self.impl.qk_rope_head_dim)
+        attn_metadata.slot_mapping = torch.tensor([0, 1], dtype=torch.int32)
+        attn_metadata.block_table = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+        attn_metadata.cum_query_lens = torch.tensor([1, 2], dtype=torch.int32)
+        attn_metadata.seq_lens = torch.tensor([4, 8], dtype=torch.int32)
+        attn_metadata.num_decodes = 2
+        attn_metadata.num_decode_tokens = 2
+        attn_metadata.num_prefills = 0
+        attn_metadata.attn_state = AscendAttentionState.DecodeOnly
+        sfa_cp_metadata = MagicMock()
+        sfa_cp_metadata.block_arange = torch.tensor([0], dtype=torch.int32)
+        attn_metadata.sfa_cp_metadata = sfa_cp_metadata
+
+        with (
+            patch.object(
+                torch.ops._C_ascend, "npu_lightning_indexer", create=True, return_value=(torch.tensor([[0]] * 2), None)
+            ),
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_sparse_flash_attention",
+                create=True,
+                return_value=(torch.randn(2, 4, 128), None, None),
+            ),
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True),
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso") as mock_rope,
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.get_forward_context") as mock_fc,
+        ):
+            mock_rope.return_value = torch.randn(2, self.impl.n_head, self.impl.head_dim)
+            mock_fc.return_value = MagicMock(num_tokens=2)
+            result = self.impl.forward(
+                "layer_0",
+                torch.randn(2, fused_dim),
+                kv_cache,
+                attn_metadata,
+                need_gather_q_kv=False,
+                output=output,
+            )
+        self.assertIsNotNone(result)
+
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu")
+    def test_forward_profiling_run(self, mock_torch_npu):
+        """forward with attn_metadata=None (profiling)."""
+        self.impl.enable_dsa_cp_with_layer_shard = False
+        output = torch.randn(2, 256)
+        result = self.impl.forward(
+            "layer_0",
+            torch.randn(2, 64),
+            (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16), torch.randn(4, 1, 1, 128)),
+            None,
+            need_gather_q_kv=False,
+            output=output,
+        )
+        self.assertTrue(torch.all(result == 0))
+
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.wait_for_kv_layer_from_connector")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.maybe_save_kv_layer_to_connector")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.get_weight_prefetch_method")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp_with_pcp_shard", return_value=False)
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu")
+    @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
+    def test_forward_skip_topk(
+        self,
+        mock_torch_npu,
+        _mock_pcp_shard,
+        mock_prefetch,
+        mock_save_kv,
+        mock_wait_kv,
+    ):
+        """forward with skip_topk=True: uses cached topk_indices."""
+        self.impl.pcp_size = 1
+        self.impl.dcp_size = 1
+        self.impl.num_kv_heads = 1
+        self.impl.num_heads = 4
+        self.impl.head_dim = 128
+        self.impl.v_head_dim = 128
+        self.impl.q_lora_rank = 64
+        self.impl.kv_lora_rank = 32
+        self.impl.qk_rope_head_dim = 16
+        self.impl.enable_mlapo = False
+        self.impl.enable_sp = False
+        self.impl.enable_dsa_cp_with_pcp_shard = False
+        self.impl.skip_topk = True
+        self.impl.use_sparse_c8_indexer = False
+        self.impl.is_kv_producer = True
+        self.impl.topk_indices_buffer = torch.zeros(10, 2048, dtype=torch.int32)
+
+        mock_prefetch.return_value = MagicMock()
+
+        fused_dim = self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
+        self.impl.fused_qkv_a_proj.return_value = (torch.randn(2, fused_dim), None)
+        self.impl.q_a_layernorm = MagicMock(side_effect=lambda x: x)
+        self.impl.kv_a_layernorm = MagicMock(side_effect=lambda x: x)
+        self.impl.rope_single = MagicMock(side_effect=lambda x, c, s: x)
+        self.impl.k_norm = MagicMock(side_effect=lambda x: x)
+        self.impl.wk_weights_proj.return_value = (torch.randn(2, self.impl.head_dim * 2), None)
+        self.impl._q_proj_and_k_up_proj = MagicMock(
+            return_value=(
+                torch.randn(2, self.impl.num_heads, self.impl.head_dim),
+                torch.randn(2, self.impl.num_heads, self.impl.qk_rope_head_dim),
+            )
+        )
+        self.impl._v_up_proj = MagicMock(return_value=torch.randn(2, self.impl.num_heads * self.impl.v_head_dim))
+        self.impl.o_proj.return_value = (torch.randn(2, self.impl.num_heads * self.impl.v_head_dim), None)
+
+        kv_cache = (
+            torch.randn(4, 1, 1, 32),
+            torch.randn(4, 1, 1, 16),
+            torch.randn(4, 1, 1, self.impl.head_dim),
+        )
+        output = torch.empty(2, self.impl.num_heads * self.impl.v_head_dim)
+
+        attn_metadata = MagicMock()
+        attn_metadata.num_actual_tokens = 2
+        attn_metadata.num_input_tokens = 2
+        attn_metadata.cos = torch.randn(2, self.impl.qk_rope_head_dim)
+        attn_metadata.sin = torch.randn(2, self.impl.qk_rope_head_dim)
+        attn_metadata.slot_mapping = torch.tensor([0, 1], dtype=torch.int32)
+        attn_metadata.block_table = torch.tensor([[0, 1]], dtype=torch.int32)
+        attn_metadata.cum_query_lens = torch.tensor([2], dtype=torch.int32)
+        attn_metadata.seq_lens = torch.tensor([4], dtype=torch.int32)
+        attn_metadata.num_decodes = 1
+        attn_metadata.num_decode_tokens = 1
+        attn_metadata.num_prefills = 1
+        attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        attn_metadata.prefill_slot_mapping = torch.tensor([0, 1], dtype=torch.int32)
+        sfa_cp_metadata = MagicMock()
+        sfa_cp_metadata.valid_block_ids = torch.tensor([0, 1], dtype=torch.int64)
+        sfa_cp_metadata.block_table_cp = torch.tensor([[0, 1]], dtype=torch.int32)
+        sfa_cp_metadata.block_table_cp_repeat = torch.tensor([[0, 1, 0, 1]], dtype=torch.int32)
+        sfa_cp_metadata.prefill_q_cum_seqlens = torch.tensor([2], dtype=torch.int32)
+        sfa_cp_metadata.block_arange = torch.tensor([0], dtype=torch.int32)
+        attn_metadata.sfa_cp_metadata = sfa_cp_metadata
+        attn_metadata.dsa_cp_context = None
+
+        with (
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_sparse_flash_attention",
+                create=True,
+                return_value=(torch.randn(2, 4, 128), None, None),
+            ),
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.all_gather_async") as mock_ag,
+        ):
+            mock_ag.return_value = (torch.randn(2, 48), None)
+            result = self.impl.forward(
+                "layer_0",
+                torch.randn(2, fused_dim),
+                kv_cache,
+                attn_metadata,
+                need_gather_q_kv=False,
+                output=output,
+            )
+        self.assertIsNotNone(result)
