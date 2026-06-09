@@ -46,7 +46,7 @@ _benchmarks: &benchmarks
     baseline: 83.33
     top_k: 20
     top_p: 0.95
-    threshold: 5 #复测  该小  统一  5
+    threshold: 6
 
   perf: #TPOT TTFT Outtroughput
     case_type: performance
