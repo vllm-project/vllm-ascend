@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import torch
 import torch.nn as nn
 from transformers import LlamaConfig
@@ -9,12 +6,17 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.models.llama_eagle3 import (
     Eagle3LlamaForCausalLM,
     LlamaDecoderLayer as Eagle3LlamaDecoderLayer,
     LlamaModel as Eagle3LlamaModel,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import get_draft_quant_config, maybe_prefix
 
 
 def _linear(inp, out, vc, qc, pfx):
@@ -53,8 +55,6 @@ class VwnLlamaDecoderLayer(Eagle3LlamaDecoderLayer):
         hs, wd = self.hidden_size, int(self.hidden_size * r)
         self.m, self.wider_dim, self.layer_idx = m, wd, layer_idx
 
-        # VWN feeds hidden_size (not 2*hidden_size) into attention,
-        # restore qkv_proj overridden by the parent eagle3 decoder.
         if layer_idx == 0:
             self.self_attn.qkv_proj = QKVParallelLinear(
                 hs, self.self_attn.head_dim,
@@ -106,13 +106,53 @@ class VwnLlamaDecoderLayer(Eagle3LlamaDecoderLayer):
 class VwnLlamaModel(Eagle3LlamaModel):
 
     def __init__(self, *, vllm_config, start_layer_id=0, prefix=""):
-        super().__init__(vllm_config=vllm_config, start_layer_id=start_layer_id,
-                         prefix=prefix)
+        nn.Module.__init__(self)
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.vocab_size = self.config.vocab_size
+        self.quant_config = get_draft_quant_config(vllm_config)
+
+        eagle_config = getattr(self.config, "eagle_config", None)
+        if eagle_config is not None and "use_aux_hidden_state" in eagle_config:
+            self.use_aux_hidden_state = eagle_config["use_aux_hidden_state"]
+        else:
+            self.use_aux_hidden_state = True
+        self.norm_before_fc = getattr(self.config, "norm_before_fc", False)
+
         vc = get_current_vllm_config()
+        self.embed_tokens = VocabParallelEmbedding(
+            self.config.vocab_size,
+            self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
+        )
         self.layers = nn.ModuleList([
             VwnLlamaDecoderLayer(vc, maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
                                  self.config, layer_idx=i)
             for i in range(self.config.num_hidden_layers)])
+        if self.use_aux_hidden_state:
+            if hasattr(self.config, "target_hidden_size"):
+                fc_input_size = self.config.target_hidden_size * 3
+            else:
+                fc_input_size = self.config.hidden_size * 3
+            if self.norm_before_fc:
+                self.input_norm = RMSNorm(
+                    fc_input_size,
+                    eps=self.config.rms_norm_eps,
+                )
+            else:
+                self.input_norm = None
+            self.fc = ReplicatedLinear(
+                input_size=fc_input_size,
+                output_size=self.config.hidden_size,
+                bias=False,
+                params_dtype=vllm_config.model_config.dtype,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "fc"),
+                return_bias=False,
+            )
+        self.norm = RMSNorm(
+            self.config.hidden_size,
+            eps=self.config.rms_norm_eps,
+        )
 
     def forward(self, input_ids, positions, hidden_states, input_embeds=None):
         if input_embeds is None:
@@ -128,7 +168,42 @@ class VwnLlamaModel(Eagle3LlamaModel):
 class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
 
     def __init__(self, *, vllm_config, prefix=""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        nn.Module.__init__(self)
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        if getattr(self.config, "draft_vocab_size", None) is None:
+            base_vocab_size = getattr(self.config, "vocab_size", None)
+            self.config.draft_vocab_size = base_vocab_size
+
         n = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.config.target_layer_count = n
+
         self.model = VwnLlamaModel(vllm_config=vllm_config, prefix="model",
                                    start_layer_id=n)
+
+        logit_scale = getattr(self.config, "logit_scale", 1.0)
+        self.lm_head = ParallelLMHead(
+            self.config.draft_vocab_size,
+            self.config.hidden_size,
+            quant_config=get_draft_quant_config(vllm_config),
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        self.logits_processor = LogitsProcessor(
+            self.config.draft_vocab_size, scale=logit_scale,
+        )
+        self.draft_id_to_target_id = nn.Parameter(
+            torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
+            requires_grad=False,
+        )
+
+        self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
+
+        if self.use_parallel_drafting:
+            self.register_buffer(
+                "mask_hidden",
+                torch.zeros(
+                    1,
+                    (3 if self.model.use_aux_hidden_state else 1)
+                    * self.config.hidden_size,
+                ),
+                persistent=False,
+            )
