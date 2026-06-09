@@ -51,13 +51,11 @@ from parse_schedule_config import (  # noqa: E402
 # Minimal runner_map for tests (avoids needing runner_label.json on disk)
 # ---------------------------------------------------------------------------
 RUNNER_MAP: dict[tuple[str, int], str] = {
-    ("a3", 0): "linux-aarch64-a3-0",
     ("a3", 1): "linux-aarch64-a3-1",
     ("a3", 2): "linux-aarch64-a3-2",
     ("a3", 4): "linux-aarch64-a3-4",
     ("a3", 8): "linux-aarch64-a3-8",
     ("a3", 16): "linux-aarch64-a3-16",
-    ("a2", 0): "linux-amd64-cpu-8-hk",
     ("a2", 1): "linux-aarch64-a2b3-1",
     ("a2", 2): "linux-aarch64-a2b3-2",
     ("a2", 4): "linux-aarch64-a2b3-4",
@@ -196,7 +194,6 @@ class TestMainOutputCompatibility:
 {
   "runner-a2-1": {"chip": "a2", "npu_num": 1},
   "runner-a2-4": {"chip": "a2", "npu_num": 4},
-  "runner-a3-0": {"chip": "a3", "npu_num": 0},
   "runner-a3-2": {"chip": "a3", "npu_num": 2}
 }
 """,
@@ -236,6 +233,7 @@ class TestMainOutputCompatibility:
         assert outputs["image_build_targets"] == ["a2", "a3"]
         assert outputs["multi_node_matrix"][0]["multi_node_type"] == "external_dp"
         assert outputs["multi_node_matrix"][0]["size"] == 2
+        assert "runner" not in outputs["multi_node_matrix"][0]
 
 
 @pytest.fixture
@@ -347,6 +345,7 @@ class TestModelTwoNodeExternalDp:
         item = matrix_item(case, "multi_node_matrix")
         assert item["multi_node_type"] == "external_dp"
         assert item["size"] == 2
+        assert "runner" not in item
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +560,11 @@ class TestFilterMatching:
     def test_filter_no_match(self):
         case = self._case("tests/e2e/schedule/model/Qwen/one_node/Qwen3-235B-A22B-W8A8.yaml")
         assert not _matches_filter(case, "DeepSeek")
+
+    def test_filter_comma_separated_list_matches_any_item(self):
+        case = self._case("tests/e2e/schedule/model/Qwen/one_node/Qwen3-235B-A22B-W8A8.yaml")
+        assert _matches_filter(case, "DeepSeek,Qwen")
+        assert not _matches_filter(case, "DeepSeek,GLM")
 
     def test_filter_by_resource_segment(self):
         case = self._case("tests/e2e/schedule/ops/one_node/test_dispatch_ffn_combine.py")

@@ -46,6 +46,27 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 /rerun
 ```
 
+### `/nightly`
+
+Trigger registered periodic nightly cases on the current PR commit. Cases are selected
+from `nightly-main` in `.github/workflows/scripts/schedule_config.yaml` and matched with
+the same `test_filter` rules used by the `Periodic-Test` workflow.
+
+**Examples:**
+
+```text
+# Run all nightly-main cases
+/nightly all
+
+# Run one or more filtered nightly cases
+/nightly Qwen3-8B test_fused_moe
+
+# Use images from a non-main branch tag while testing the PR commit
+/nightly Qwen3-8B --branch release/v0.11
+```
+
+Only users with triage+ permission can trigger `/nightly`.
+
 ## Behavior
 
 1. When you comment a slash command, a 👀 reaction is added to your comment to indicate it has been received
@@ -57,6 +78,7 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 | Command | PR comments | Issue comments |
 |---|---|---|
 | `/e2e` | ✅ | ❌ |
+| `/nightly` | ✅ | ❌ |
 | `/rerun` | ✅ | ❌ |
 
 ## Permission
@@ -64,6 +86,7 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 | Command | Who can trigger |
 |---|---|
 | `/e2e` | PR author, or users with triage+ permission on the repository |
+| `/nightly` | Users with triage+ permission on the repository |
 | `/rerun` | PR author, or users with triage+ permission on the repository |
 
 Permission is verified via the GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`).

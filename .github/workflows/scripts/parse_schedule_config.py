@@ -315,14 +315,15 @@ class ModelFramework(BaseFramework):
         """Parse one model YAML into a case and decide its route."""
         resource_dir, resource_type, resource_num = _detect_resource(path)
         chip = _detect_chip(path)
-        runner = _resolve_runner(chip, resource_type, resource_num, self.runner_map)
 
         if resource_type == "card" or resource_num == 1:
             route = "single_node"
+            runner = _resolve_runner(chip, resource_type, resource_num, self.runner_map)
             multi_node_type = None
             size = None
         else:
             route = "multi_node"
+            runner = ""
             multi_node_type = _detect_multi_node_type(path)
             size = resource_num
 
@@ -362,7 +363,6 @@ class ModelFramework(BaseFramework):
                     {
                         "name": case.name,
                         "chip": case.chip,
-                        "runner": case.runner,
                         "config_path": case.case_path,
                         "multi_node_type": case.multi_node_type or "internal_dp",
                         "extra_components": False,
@@ -600,8 +600,19 @@ def _dedupe_cases(cases: list[PeriodicCase]) -> tuple[list[PeriodicCase], dict[s
     return result, duplicates
 
 
+def _split_test_filters(test_filter: str) -> list[str]:
+    """Normalize comma-separated --test-filter input into individual filters."""
+    filters = [item.strip() for item in test_filter.split(",") if item.strip()]
+    return filters or ["all"]
+
+
 def _matches_filter(case: PeriodicCase, test_filter: str) -> bool:
-    """Match --test-filter against path, filename, stem, path segment, or name."""
+    """Match one or more filters against path, filename, stem, segment, or name."""
+    filters = _split_test_filters(test_filter)
+    if len(filters) > 1:
+        return any(_matches_filter(case, item) for item in filters)
+
+    test_filter = filters[0]
     if test_filter == "all":
         return True
     paths = case.case_path if isinstance(case.case_path, list) else [case.case_path or case.path]
@@ -632,7 +643,8 @@ def _build_summary(
     summary_lines = ["=== Selected test cases ==="]
     for c in all_cases:
         loc = ", ".join(c.case_path) if isinstance(c.case_path, list) else c.case_path
-        summary_lines.append(f"  [{c.framework:8s}] [{c.route:11s}] [{c.chip}] [{c.runner:30s}] {c.name} ({loc})")
+        runner = c.runner or "workflow-default"
+        summary_lines.append(f"  [{c.framework:8s}] [{c.route:11s}] [{c.chip}] [{runner:30s}] {c.name} ({loc})")
     summary_lines.append(
         f"\nTotals: "
         f"{len(outputs.get('single_node_matrix', []))} single-node, "

@@ -10,7 +10,8 @@ on:
       runner:
         required: false
         type: string
-        default: linux-aarch64-a3-0
+        default: ''
+        description: optional controller runner override; defaults by soc_version
       image:
         required: false
         type: string
@@ -100,7 +101,7 @@ jobs:
     name: ${{ inputs.config_path || inputs.name }}
     timeout-minutes: 120
     # This is the runner with no NPU for k8s controller
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner || (inputs.soc_version == 'a2' && 'linux-amd64-cpu-8-hk' || 'linux-aarch64-a3-0') }}
     if: ${{ inputs.should_run }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu

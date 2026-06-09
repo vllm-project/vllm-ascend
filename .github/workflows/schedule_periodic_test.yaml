@@ -153,7 +153,6 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version:      ${{ matrix.test_config.chip }}
-      runner:           ${{ matrix.test_config.runner }}
       image:            swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ needs.parse-config.outputs.branch_tag }}-${{ matrix.test_config.chip }}
       config_path:      ${{ matrix.test_config.config_path }}
       multi_node_type:  ${{ matrix.test_config.multi_node_type }}

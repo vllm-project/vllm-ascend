@@ -60,6 +60,25 @@ Because `image_build_targets` is derived from the selected cases, a filtered man
 only builds the images it actually needs (e.g. a2-only selection builds the a2 image
 only).
 
+### PR slash command (`/nightly`)
+
+Maintainers with triage+ permission can trigger nightly cases from a pull request
+comment:
+
+```text
+/nightly all
+/nightly Qwen3-8B test_fused_moe
+/nightly Qwen3-8B --branch release/v0.11
+```
+
+The slash command is handled by
+`.github/workflows/pr_nightly_command.yml`, separate from `Periodic-Test`. It parses the
+PR branch's `schedule_config.yaml` and file tree with the base branch parser, then calls
+the same reusable model / accuracy / ops workflows with `request_id` and the PR commit
+SHA. The test jobs therefore run the PR code while reusing existing nightly images. The
+optional `--branch` value selects the image branch tag; it does not replace the PR commit
+under test.
+
 ## Adding a New Periodic Test
 
 No workflow edits are required. Two steps:

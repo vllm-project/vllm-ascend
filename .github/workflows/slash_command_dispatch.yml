@@ -32,6 +32,7 @@ jobs:
           reaction-token: ${{ secrets.GITHUB_TOKEN }}
           commands: |
             e2e
+            nightly
             rerun
           permission: none
           issue-type: both
@@ -40,6 +41,11 @@ jobs:
             [
               {
                 "command": "e2e",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "nightly",
                 "permission": "none",
                 "issue_type": "pull-request"
               },
