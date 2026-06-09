@@ -75,6 +75,11 @@ on:
         type: string
         default: ''
         description: non-empty when triggered by PR /nightly command
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+        description: print resolved inputs and skip k8s/test execution
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -97,12 +102,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dry-run:
+    name: dry-run / ${{ inputs.name || inputs.config_path }}
+    runs-on: ${{ inputs.runner || (inputs.soc_version == 'a2' && 'linux-amd64-cpu-8-hk' || 'linux-aarch64-a3-0') }}
+    if: ${{ inputs.should_run && inputs.dry_run }}
+    steps:
+      - name: Print dry-run inputs
+        run: |
+          echo "workflow=e2e_nightly_multi_node"
+          echo "soc_version=${{ inputs.soc_version }}"
+          echo "runner=${{ inputs.runner || (inputs.soc_version == 'a2' && 'linux-amd64-cpu-8-hk' || 'linux-aarch64-a3-0') }}"
+          echo "image=${{ inputs.image }}"
+          echo "config_path=${{ inputs.config_path }}"
+          echo "multi_node_type=${{ inputs.multi_node_type }}"
+          echo "extra_components=${{ inputs.extra_components }}"
+          echo "replicas=${{ inputs.replicas }}"
+          echo "size=${{ inputs.size }}"
+          echo "name=${{ inputs.name }}"
+          echo "vllm_ascend_branch=${{ inputs.vllm_ascend_branch }}"
+
   e2e:
     name: ${{ inputs.config_path || inputs.name }}
     timeout-minutes: 120
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner || (inputs.soc_version == 'a2' && 'linux-amd64-cpu-8-hk' || 'linux-aarch64-a3-0') }}
-    if: ${{ inputs.should_run }}
+    if: ${{ inputs.should_run && !inputs.dry_run }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
       env:

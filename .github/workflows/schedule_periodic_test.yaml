@@ -47,6 +47,16 @@ on:
         required: false
         default: 'all'
         type: string
+      parse_only:
+        description: 'Only parse schedule_config.yaml and print the selected cases'
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: 'Fan out workflow jobs without building images or running tests'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -101,6 +111,37 @@ jobs:
       - name: Parse schedule config
         id: parse
         run: |
+          if [ "${{ inputs.parse_only == true }}" = "true" ]; then
+            for schedule in nightly weekly; do
+              if [ "$schedule" = "nightly" ]; then
+                cron="45 15 * * *"
+              else
+                cron="45 15 * * 1"
+              fi
+
+              echo "::group::Parse ${schedule} schedule (${cron})"
+              tmp_output="$(mktemp)"
+              GITHUB_OUTPUT="$tmp_output" python3 .github/workflows/scripts/parse_schedule_config.py \
+                --config .github/workflows/scripts/schedule_config.yaml \
+                --runner-label .github/workflows/scripts/runner_label.json \
+                --event-name schedule \
+                --cron "$cron" \
+                --test-filter all
+              rm -f "$tmp_output"
+              echo "::endgroup::"
+            done
+
+            {
+              echo "single_node_matrix=[]"
+              echo "multi_node_matrix=[]"
+              echo "accuracy_matrix=[]"
+              echo "ops_matrix=[]"
+              echo "image_build_targets=[]"
+              echo 'selected_cases_summary="parse_only=true: validated nightly and weekly schedule parsing"'
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           python3 .github/workflows/scripts/parse_schedule_config.py \
             --config .github/workflows/scripts/schedule_config.yaml \
             --runner-label .github/workflows/scripts/runner_label.json \
@@ -118,7 +159,10 @@ jobs:
   build-image:
     name: Build nightly image (${{ matrix.target }} / ${{ needs.parse-config.outputs.branch_tag }})
     needs: parse-config
-    if: needs.parse-config.outputs.image_build_targets != '[]'
+    if: >-
+      needs.parse-config.outputs.image_build_targets != '[]' &&
+      inputs.parse_only != true &&
+      inputs.dry_run != true
     strategy:
       fail-fast: false
       matrix:
@@ -143,6 +187,7 @@ jobs:
     needs: [parse-config, build-image]
     if: >-
       always() &&
+      inputs.parse_only != true &&
       needs.parse-config.outputs.multi_node_matrix != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
@@ -160,6 +205,7 @@ jobs:
       size:             ${{ matrix.test_config.size }}
       name:             ${{ matrix.test_config.name }}
       should_run:       true
+      dry_run:          ${{ inputs.dry_run == true }}
       ascend_log_prefix: /root/.cache/ascend-logs/${{ needs.parse-config.outputs.branch_tag }}
       vllm_ascend_branch: ${{ needs.parse-config.outputs.branch_ref }}
     secrets:
@@ -175,6 +221,7 @@ jobs:
     needs: [parse-config, build-image, multi-node-tests]
     if: >-
       always() &&
+      inputs.parse_only != true &&
       needs.parse-config.outputs.single_node_matrix != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
@@ -190,6 +237,7 @@ jobs:
       tests:       ${{ matrix.test_config.tests }}
       name:        ${{ matrix.test_config.name }}
       should_run:  true
+      dry_run:     ${{ inputs.dry_run == true }}
       vllm_ascend_branch: ${{ needs.parse-config.outputs.branch_ref }}
     secrets:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
@@ -203,6 +251,7 @@ jobs:
     needs: [parse-config, build-image]
     if: >-
       always() &&
+      inputs.parse_only != true &&
       needs.parse-config.outputs.accuracy_matrix != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
@@ -216,6 +265,7 @@ jobs:
       model_filter: all
       image:        swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ needs.parse-config.outputs.branch_tag }}-${{ matrix.test_config.chip }}
       is_run:       true
+      dry_run:      ${{ inputs.dry_run == true }}
       upload:       false
 
   # ---------------------------------------------------------------------------
@@ -226,6 +276,7 @@ jobs:
     needs: [parse-config, build-image]
     if: >-
       always() &&
+      inputs.parse_only != true &&
       needs.parse-config.outputs.ops_matrix != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
@@ -239,6 +290,7 @@ jobs:
       tests:              ${{ matrix.test_config.tests }}
       name:               ${{ matrix.test_config.name }}
       should_run:         true
+      dry_run:            ${{ inputs.dry_run == true }}
       vllm_ascend_branch: ${{ needs.parse-config.outputs.branch_ref }}
 
   # ---------------------------------------------------------------------------
@@ -264,6 +316,8 @@ jobs:
     if: >-
       always() &&
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      inputs.parse_only != true &&
+      inputs.dry_run != true &&
       needs.parse-config.result == 'success'
     runs-on: ubuntu-latest
     steps:

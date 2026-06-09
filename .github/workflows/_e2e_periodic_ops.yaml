@@ -57,16 +57,35 @@ on:
         type: string
         default: ''
         description: PR commit SHA for PR-triggered checkout
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+        description: print resolved inputs and skip ops execution
 
 defaults:
   run:
     shell: bash -el {0}
 
 jobs:
+  dry-run:
+    name: dry-run / ${{ inputs.name }}
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.should_run && inputs.dry_run }}
+    steps:
+      - name: Print dry-run inputs
+        run: |
+          echo "workflow=e2e_periodic_ops"
+          echo "runner=${{ inputs.runner }}"
+          echo "image=${{ inputs.image }}"
+          echo "tests=${{ inputs.tests }}"
+          echo "name=${{ inputs.name }}"
+          echo "vllm_ascend_branch=${{ inputs.vllm_ascend_branch }}"
+
   ops-test:
     name: ${{ inputs.name }}
     runs-on: ${{ inputs.runner }}
-    if: inputs.should_run
+    if: ${{ inputs.should_run && !inputs.dry_run }}
     container:
       image: ${{ inputs.image }}
       options: --network host --shm-size 1g --device /dev/davinci_manager --device /dev/hisi_hdc --device /dev/devmm_svm

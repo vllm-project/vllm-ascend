@@ -55,6 +55,11 @@ on:
         type: string
         default: ''
         description: PR commit SHA for PR-triggered checkout
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+        description: print resolved inputs and skip test execution
     secrets:
       OBS_ACCESS_KEY:
         required: false
@@ -75,10 +80,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dry-run:
+    name: dry-run / ${{ inputs.name || inputs.config_path || inputs.tests }}
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.should_run && inputs.dry_run }}
+    steps:
+      - name: Print dry-run inputs
+        run: |
+          echo "workflow=e2e_nightly_single_node"
+          echo "runner=${{ inputs.runner }}"
+          echo "image=${{ inputs.image }}"
+          echo "config_path=${{ inputs.config_path }}"
+          echo "tests=${{ inputs.tests }}"
+          echo "name=${{ inputs.name }}"
+          echo "vllm_ascend_branch=${{ inputs.vllm_ascend_branch }}"
+
   e2e-nightly:
     name: ${{ inputs.name || inputs.config_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
-    if: ${{ inputs.should_run }}
+    if: ${{ inputs.should_run && !inputs.dry_run }}
     timeout-minutes: 600
     container:
       image: ${{ inputs.image }}

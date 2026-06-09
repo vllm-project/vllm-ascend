@@ -53,6 +53,11 @@ on:
         type: string
         default: ''
         description: PR commit SHA for PR-triggered checkout
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+        description: print resolved inputs and skip accuracy execution
     secrets:
       OBS_ACCESS_KEY:
         required: false
@@ -73,10 +78,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dry-run:
+    name: dry-run / accuracy test
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.is_run && inputs.dry_run }}
+    steps:
+      - name: Print dry-run inputs
+        run: |
+          echo "workflow=e2e_nightly_single_node_models"
+          echo "runner=${{ inputs.runner }}"
+          echo "image=${{ inputs.image }}"
+          echo "config_paths=${{ inputs.config_paths }}"
+          echo "model_filter=${{ inputs.model_filter }}"
+          echo "upload=${{ inputs.upload }}"
+
   e2e-nightly:
     name: accuracy test
     runs-on: ${{ inputs.runner }}
-    if: ${{ inputs.is_run }}
+    if: ${{ inputs.is_run && !inputs.dry_run }}
     container:
       image: "${{ inputs.image }}"
       env:
