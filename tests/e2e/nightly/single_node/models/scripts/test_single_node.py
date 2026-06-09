@@ -412,6 +412,28 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
     # TODO: remove this part after the transformers version upgraded
+    workspace = "/vllm-workspace/vllm-ascend"
+    benchmark_dir = os.path.join(workspace, "benchmark")
+    os.chdir(workspace)
+    clone_cmd = [
+        "git", "clone", "-b", "v3.1-20260609-master",
+        "https://github.com/AISBench/benchmark.git"
+    ]
+    subprocess.call(clone_cmd)
+    os.chdir(benchmark_dir)
+    pip_install_pkgs = [
+        sys.executable, "-m", "pip", "install", "pytest", "asyncio", "pytest-asyncio"
+    ]
+    subprocess.call(pip_install_pkgs)
+    pip_install_editable = [
+        sys.executable, "-m", "pip", "install", "-e", ".",
+        "-r", "requirements/api.txt",
+        "-r", "requirements/extra.txt"
+    ]
+    subprocess.call(pip_install_editable)
+    pip_cache_purge = [sys.executable, "-m", "pip", "cache", "purge"]
+    subprocess.call(pip_cache_purge)
+
     if config.special_dependencies:
         for k, v in config.special_dependencies.items():
             command = [
