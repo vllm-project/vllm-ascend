@@ -200,6 +200,24 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM47 inline zero-argument streaming parser fix.
 #
+# ** 7c. File: platform/patch_anthropic_system_message.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.anthropic.protocol.AnthropicMessage`
+#      `vllm.entrypoints.anthropic.serving.AnthropicServingMessages`
+#    Why:
+#       Recent Claude Code clients can send `role: system` entries inside the
+#       Anthropic Messages API `messages` array. The pinned vLLM rejects those
+#       requests before inference starts.
+#    How：
+#       Monkey-patch Anthropic message role validation to accept `system`, merge
+#       inline system messages with the top-level system prompt, and skip inline
+#       system entries when converting the remaining chat history.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/44000
+#       https://github.com/vllm-project/vllm/pull/44283
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #44283.
+#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
