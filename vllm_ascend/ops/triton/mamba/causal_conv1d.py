@@ -124,13 +124,14 @@ def causal_conv1d_fn(
     seqlens = seqlens.tolist()
     splits = torch.split(x, seqlens, dim=-1)
     width = weight.shape[1]
-    last_width_prefill_x = extract_last_width(x, query_start_loc[num_decodes:], conv_states.shape[-1])
+    state_len = width - 1
+    last_width_prefill_x = extract_last_width(x, query_start_loc[num_decodes:], state_len)
 
     if get_pcp_group().world_size > 1:
         all_last_width_prefill_x = get_pcp_group().all_gather(last_width_prefill_x.unsqueeze(0).contiguous(), 0)
         pcp_rank = get_pcp_group().rank_in_group
         if pcp_rank > 0:
-            conv_states[cache_indices[num_decodes:]] = all_last_width_prefill_x[pcp_rank - 1, ...]
+            conv_states[cache_indices[num_decodes:], :, :state_len] = all_last_width_prefill_x[pcp_rank - 1, ...]
 
     for i in range(len(seqlens)):
         x_s = splits[i]
@@ -149,7 +150,7 @@ def causal_conv1d_fn(
         )
 
     if get_pcp_group().world_size > 1:
-        conv_states[cache_indices[num_decodes:]] = all_last_width_prefill_x[-1, ...]
+        conv_states[cache_indices[num_decodes:], :, :state_len] = all_last_width_prefill_x[-1, ...]
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
     out_ref_tensor = torch.cat(out_ref, dim=0)
     return out_ref_tensor

@@ -57,7 +57,12 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
+from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    RegisterRegions,
+    collect_storage_merged_register_regions,
+    get_transfer_timeout_value,
+    validate_register_region_count,
+)
 from vllm_ascend.utils import enable_custom_op
 
 # isort: off
@@ -1814,10 +1819,16 @@ class MooncakeConnectorWorker:
 
         if has_mamba_group:
             ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
+            register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
         else:
-            ptrs, lengths = self._get_registered_layer_buffers(kv_caches)
+            # For normal attention / sparse-c8 KV cache, keep metadata at the
+            # logical tensor level but merge registration ranges by underlying
+            # storage to avoid exceeding the HCCL per-process region limit.
+            register_regions = collect_storage_merged_register_regions(kv_caches)
 
-        global_te.register_buffer(ptrs, lengths)
+        validate_register_region_count(register_regions)
+        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
             "block_len_per_addr=%s, block_size_scale=%s, ptrs=%s, lengths=%s",
@@ -1825,8 +1836,8 @@ class MooncakeConnectorWorker:
             self.kv_caches_base_addr,
             self.block_len_per_addr,
             self.block_size_scale,
-            ptrs,
-            lengths,
+            register_regions.ptrs,
+            register_regions.lengths,
         )
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(

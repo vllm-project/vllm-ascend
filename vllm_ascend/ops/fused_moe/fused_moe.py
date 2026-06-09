@@ -787,17 +787,7 @@ class AscendFusedMoE(FusedMoE):
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
-                hidden_states = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self._shared_experts.gate_up_proj.weight,
-                    self._shared_experts.gate_up_proj.weight_scale,
-                    scale_dtype=torch_npu.float8_e8m0fnu,
-                    pertoken_scale=pertoken_scale,
-                    pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-                    bias=None,
-                    output_dtype=original_dtype,
-                    group_sizes=[1, 1, 32],
-                )
+                hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
                 # Execute activation concurrently with gmm2.
                 maybe_wait_event(fused_moe_evts.before_gmm2)
                 quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
@@ -811,17 +801,7 @@ class AscendFusedMoE(FusedMoE):
                 # Execute the down projection concurrently with the combine
                 # communication.
                 maybe_wait_event(fused_moe_evts.before_combine)
-                shared_out = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self._shared_experts.down_proj.weight,
-                    self._shared_experts.down_proj.weight_scale,
-                    scale_dtype=torch_npu.float8_e8m0fnu,
-                    pertoken_scale=swiglu_out_scale,
-                    pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-                    bias=None,
-                    output_dtype=original_dtype,
-                    group_sizes=[1, 1, 32],
-                )
+                shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
