@@ -4,6 +4,7 @@ import importlib
 import math
 import threading
 from collections.abc import Generator
+from typing import Any
 
 import torch
 from vllm import envs
@@ -289,9 +290,9 @@ class KVPoolWorker:
     def _init_layerwise_config(self) -> None:
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for i in range(self.num_layers)]
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for i in range(self.num_layers)]
-        self.layer_load_finished_events = None
-        self.layer_save_finished_events = None
-        self.layer_transfer_finished_events = None
+        self.layer_load_finished_events: list[threading.Event] | None = None
+        self.layer_save_finished_events: list[threading.Event] | None = None
+        self.layer_transfer_finished_events: list[threading.Event] | None = None
 
         self.kv_transfer_thread_cpus: list[int] = []
         if get_ascend_config().enable_cpu_binding:
@@ -306,7 +307,7 @@ class KVPoolWorker:
 
         self.next_layer_to_submit = 0
         self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
-        self.sync_save_events = None
+        self.sync_save_events: list[torch.npu.Event] | None = None
 
     def _bind_kv_transfer_thread(
         self,
@@ -474,6 +475,7 @@ class KVPoolWorker:
                     self.put_step,
                     self.kv_role,
                     ready_event_sending,
+                    self.group_uses_align_state,
                     self.enable_kv_events,
                 )
                 self.kv_send_thread.start()
@@ -673,9 +675,6 @@ class KVPoolWorker:
             self._infer_cache_group_metadata(0, list(kv_caches.keys()))
 
         self.page_size_bytes = sum(self.block_len)
-        self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
-        self.token_database.set_block_len(self.block_len)
-        self.token_database.set_block_stride(self.block_stride)
         self.token_database.set_group_buffers(
             self.group_kv_caches_base_addr,
             self.group_block_len,
@@ -692,7 +691,7 @@ class KVPoolWorker:
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
-        self.layerwise_retrievers = []
+        self.layerwise_retrievers: list[Any] = []
         if self.use_layerwise:
             self.next_layer_to_submit = 0
             reset_attention_compute_start_gate()
@@ -717,10 +716,10 @@ class KVPoolWorker:
             if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
             ):
-                token_len = request.load_spec.kvpool_cached_tokens + 1
+                token_len = load_spec.kvpool_cached_tokens + 1
             else:
-                token_len = request.load_spec.kvpool_cached_tokens
-            request.load_spec.token_len = token_len
+                token_len = load_spec.kvpool_cached_tokens
+            load_spec.token_len = token_len
             logger.debug(
                 "KV pool worker prepare get req=%s token_len_chunk=%d get_token_len=%d "
                 "vllm_cached=%d kvpool_cached=%d groups=%s load_async=%s",
@@ -745,7 +744,7 @@ class KVPoolWorker:
             for group_id in load_group_ids:
                 block_ids = request.block_ids_by_group[group_id]
                 group_block_size = self.grouped_block_size[group_id]
-                mask_num = request.load_spec.vllm_cached_tokens // group_block_size * group_block_size
+                mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
                 skip_null = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
                 for start, end, key, _ in self.token_database.process_tokens_with_block_ids(
                     token_len,
@@ -895,6 +894,7 @@ class KVPoolWorker:
 
     def _submit_ready_layer_loads(self) -> None:
         assert self.kv_recv_thread is not None
+        recv_thread = self.kv_recv_thread
 
         def submit_layer_load(layer_id: int) -> bool:
             if not self.layer_load_tasks[layer_id]:
@@ -903,8 +903,8 @@ class KVPoolWorker:
             attention_start_gate = None
             if layer_id != self.current_layer:
                 attention_start_gate = get_attention_compute_start_gate()
-            self.kv_recv_thread.add_request(
-                LayerLoadTask(
+            recv_thread.add_request(
+                LayerLoadTask(  # type: ignore[arg-type]
                     wait_for_save_layer=wait_for_save_layer,
                     transfer_tasks=self.layer_load_tasks[layer_id],
                     layer_id=layer_id,
@@ -922,6 +922,7 @@ class KVPoolWorker:
                 submitted_layers += 1
 
     def wait_for_layer_load(self) -> None:
+        assert self.layer_load_finished_events is not None
         reset_attention_compute_start_gate()
         self._submit_ready_layer_loads()
         should_wait = bool(self.layer_load_tasks[self.current_layer])
@@ -941,11 +942,15 @@ class KVPoolWorker:
         return invalid_blocks
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
+        assert self.sync_save_events is not None
+        assert self.layer_save_finished_events is not None
+        assert self.kv_send_thread is not None
+        send_thread = self.kv_send_thread
         self.sync_save_events[self.current_layer].record()
         if self.layer_save_tasks[self.current_layer]:
             for block_range in self.layer_save_tasks[self.current_layer][0].block_ranges:
-                self.kv_send_thread.add_stored_request(block_range.request.req_id)
-            self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
+                send_thread.add_stored_request(block_range.request.req_id)
+            send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
         else:
             self.layer_save_finished_events[self.current_layer].set()
         if self.current_layer == self.num_layers - 1:
@@ -1131,8 +1136,10 @@ class KVPoolWorker:
 
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         if self.kv_send_thread is not None:
+            send_thread = self.kv_send_thread
             for req_id in meta.preempted_req_ids:
-                self.kv_send_thread.delete_finished_stored_request(req_id)
+                if isinstance(send_thread, (KVCacheStoreSendingThread, KVCacheStoreLayerSendingThread)):
+                    send_thread.delete_finished_stored_request(req_id)
             self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
             if self.use_layerwise:
                 self.kv_send_thread.get_and_clear_finished_requests()

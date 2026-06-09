@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from typing import Any
 
 from vllm.config import ParallelConfig
 
 
 class Backend(ABC):
+    store: Any | None = None
+
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig):
         pass

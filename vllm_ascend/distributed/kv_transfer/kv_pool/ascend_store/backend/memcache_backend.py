@@ -102,7 +102,7 @@ class MemcacheBackend(Backend):
 
         store = DistributedObjectStore()
 
-        original_cpus = os.sched_getaffinity(0)
+        original_cpus = os.sched_getaffinity(0)  # type: ignore[attr-defined]
         expanded_cpus = original_cpus | set(client_cpus)
         affinity_changed = False
         if client_cpus and expanded_cpus != original_cpus:
@@ -239,7 +239,7 @@ class MemcacheBackend(Backend):
     @staticmethod
     def _set_current_thread_affinity(cpus: set[int]) -> bool:
         try:
-            os.sched_setaffinity(0, cpus)
+            os.sched_setaffinity(0, cpus)  # type: ignore[attr-defined]
             return True
         except OSError as err:
             logger.warning(
@@ -289,9 +289,11 @@ class MemcacheBackend(Backend):
         return self.store.batch_is_exist(keys)
 
     def batch_get_key_info(self, keys: list[str]):
+        assert self.store is not None
         return self.store.batch_get_key_info(keys)
 
     def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
+        assert self.store is not None
         return self.store.batch_alloc(keys, sizes)
 
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):

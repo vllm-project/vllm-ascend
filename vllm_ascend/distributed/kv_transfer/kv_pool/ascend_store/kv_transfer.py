@@ -5,7 +5,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -57,9 +57,9 @@ class LayerBatchBuilder:
         self.my_key_index = my_key_index
         self.num_ranks_per_layer = num_ranks_per_layer
         self.page_size_bytes = page_size_bytes
-        self._block_len_np = np.asarray(token_database.block_len, dtype=np.int64)
+        self._block_len_np = np.asarray(token_database.group_block_len[0], dtype=np.int64)
         self._kv_caches_base_addr_np = np.asarray(
-            token_database.kv_caches_base_addr,
+            token_database.group_kv_caches_base_addr[0],
             dtype=np.int64,
         )
         self._full_block_inner_offsets_np = np.concatenate(
@@ -271,7 +271,7 @@ class KVTransferThread(threading.Thread):
         self.tp_size = tp_size
         self.dcp_size = dcp_size
         self.token_database = token_database
-        self.num_addrs_per_block = len(token_database.block_len)
+        self.num_addrs_per_block = len(token_database.group_block_len[0])
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
@@ -386,6 +386,7 @@ class KVTransferThread(threading.Thread):
         if max_transfer_addrs <= 0:
             max_transfer_addrs = len(gvas)
 
+        assert self.m_store.store is not None
         for start in range(0, len(gvas), max_transfer_addrs):
             end = start + max_transfer_addrs
             split_gvas, split_addrs, split_sizes = self._split_transfer_packets(
@@ -1139,7 +1140,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.put_step = put_step
         self.enable_kv_event = enable_kv_event
         self.layerwise_event_starts: dict[str, set[int]] = defaultdict(set)
-        self.stored_requests: dict[str, int] = defaultdict(int)
+        self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.done_task_lock = threading.Lock()
         self.layerwise_event_lock = threading.Lock()
         self.layer_save_finished_events = layer_save_finished_events
@@ -1230,6 +1231,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             raise ValueError(f"Expected at most one layer transfer task, got {len(transfer_tasks)}")
         task = transfer_tasks[0]
         shared = task.shared_block_data
+        req_meta: LayerBatchReqMeta | None
         if shared is not None:
             req_meta = self.layer_batch_builder.build_addrs(shared, task.layer_id)
         else:
@@ -1284,14 +1286,15 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             self.request_queue.task_done()
         else:
             # Key-lookup based path
-            keys = req_meta.keys
-            starts = req_meta.starts
-            ends = req_meta.ends
-            current_event = req_meta.current_event
+            multi_req = cast(LayerMultiBlockReqMeta, req_meta)
+            keys = multi_req.keys
+            starts = multi_req.starts
+            ends = multi_req.ends
+            current_event = multi_req.current_event
             total_block = len(keys)
-            is_last_chunk = req_meta.is_last_chunk
+            is_last_chunk = multi_req.is_last_chunk
             with self.done_task_lock:
-                if req_meta.req_id not in self.stored_requests:
+                if multi_req.req_id not in self.stored_requests:
                     self.request_queue.task_done()
                     return
             if not self.dcp_size > 1:
@@ -1301,12 +1304,12 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
             if not keys:
                 if layer_id == self.final_layer_id:
-                    stored_events = self._build_stored_events(req_meta)
+                    stored_events = self._build_stored_events(multi_req)
                     if stored_events:
                         self.update_kv_event(stored_events)
                 if is_last_chunk and layer_id == self.final_layer_id:
-                    self.dec_stored_request(req_meta.req_id)
-                    self.set_finished_request(req_meta.req_id)
+                    self.dec_stored_request(multi_req.req_id)
+                    self.set_finished_request(multi_req.req_id)
                 self.request_queue.task_done()
                 return
 
@@ -1319,12 +1322,12 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
             if not missing_indices:
                 if layer_id == self.final_layer_id:
-                    stored_events = self._build_stored_events(req_meta)
+                    stored_events = self._build_stored_events(multi_req)
                     if stored_events:
                         self.update_kv_event(stored_events)
                 if is_last_chunk and layer_id == self.final_layer_id:
-                    self.dec_stored_request(req_meta.req_id)
-                    self.set_finished_request(req_meta.req_id)
+                    self.dec_stored_request(multi_req.req_id)
+                    self.set_finished_request(multi_req.req_id)
                 self.request_queue.task_done()
                 return
 
@@ -1336,7 +1339,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             size_list = []
             for index, key in enumerate(key_list):
                 addr, size, _ = self.token_database.prepare_value_layer(
-                    starts[index], ends[index], req_meta.block_ids_by_group[0], layer_id
+                    starts[index], ends[index], multi_req.block_ids_by_group[0], layer_id
                 )
                 addr_list.append(addr)
                 size_list.append(size)
@@ -1344,16 +1347,16 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             if current_event is not None:
                 current_event.synchronize()
             self.m_store.put(key_list, addr_list, size_list)
-            self._record_layerwise_event_starts(req_meta, starts)
-            stored_events = self._build_stored_events(req_meta)
+            self._record_layerwise_event_starts(multi_req, starts)
+            stored_events = self._build_stored_events(multi_req)
             if stored_events:
                 self.update_kv_event(stored_events)
 
             if layer_id == self.final_layer_id and is_last_chunk:
                 with self.layerwise_event_lock:
-                    self.layerwise_event_starts.pop(req_meta.req_id, None)
-                self.dec_stored_request(req_meta.req_id)
-                self.set_finished_request(req_meta.req_id)
+                    self.layerwise_event_starts.pop(multi_req.req_id, None)
+                self.dec_stored_request(multi_req.req_id)
+                self.set_finished_request(multi_req.req_id)
             self.request_queue.task_done()
 
             if layer_id == self.final_layer_id:
@@ -1362,7 +1365,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                     len(key_list),
                     total_block,
                     len(missing_indices),
-                    req_meta.req_id,
+                    multi_req.req_id,
                     layer_id,
                 )
             else:
@@ -1371,7 +1374,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                     len(key_list),
                     total_block,
                     len(missing_indices),
-                    req_meta.req_id,
+                    multi_req.req_id,
                     layer_id,
                 )
 
