@@ -32,6 +32,11 @@ on:
         required: false
         default: ''
         description: 'The vllm-ascend ref to test.'
+      enable-coverage:
+        type: boolean
+        required: false
+        default: false
+        description: 'Whether to run tests with coverage enabled.'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -228,6 +233,7 @@ jobs:
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "with-device" \
+            ${{ inputs.enable-coverage && '--enable-coverage' || '' }} \
             ${{ matrix.group.tests }}
 
       - name: Run selected tests without device
@@ -240,6 +246,7 @@ jobs:
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "without-device" \
+            ${{ inputs.enable-coverage && '--enable-coverage' || '' }} \
             ${{ matrix.group.tests }}
 
       - name: Upload selected test logs

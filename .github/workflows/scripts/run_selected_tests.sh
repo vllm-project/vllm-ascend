@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+enable_coverage=false
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --enable-coverage)
+      enable_coverage=true
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+
 if [ "$#" -lt 4 ]; then
-  echo "Usage: $0 <npu_type> <num_npus> <with-device|without-device> <test> [test ...]"
+  echo "Usage: $0 [--enable-coverage] <npu_type> <num_npus> <with-device|without-device> <test> [test ...]"
   exit 1
 fi
 
@@ -21,8 +36,19 @@ test_results=()
 failed_logs=()
 test_index=0
 pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
 mkdir -p "${pytest_log_dir}"
+
+setup_coverage() {
+  local target="$1"
+  local test_basename="${target%.py}"
+  test_basename="${test_basename//\//__}"
+  local covdata_dir="${project_root}/tests/outputs/${test_basename}/covdata"
+  mkdir -p "${covdata_dir}"
+  export COVERAGE_FILE="${covdata_dir}/coverage"
+  echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
+}
 
 print_test_info() {
   echo -e "\033[1;34m=== TEST INFO ===\033[0m"
@@ -30,6 +56,7 @@ print_test_info() {
   if [ "${npu_type}" != "cpu" ]; then
     echo -e "  \033[33mNPU count:\033[0m ${num_npus}"
   fi
+  echo -e "  \033[33mCoverage:\033[0m ${enable_coverage}"
   echo -e "  \033[33mTargets:\033[0m"
   for target in "${targets[@]}"; do
     echo -e "    \033[32m-\033[0m ${target}"
@@ -65,8 +92,14 @@ run_pytest_target() {
   local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
-  set +e
-  pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+  if [ "${enable_coverage}" = "true" ]; then
+    setup_coverage "${target}"
+    set +e
+    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+  else
+    set +e
+    pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+  fi
   local status=${PIPESTATUS[0]}
   set -e
   echo "::endgroup::"
@@ -89,8 +122,14 @@ run_pytest_batch() {
 
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
-  set +e
-  pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+  if [ "${enable_coverage}" = "true" ]; then
+    setup_coverage "cpu-ut"
+    set +e
+    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+  else
+    set +e
+    pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+  fi
   local status=${PIPESTATUS[0]}
   set -e
   echo "::endgroup::"

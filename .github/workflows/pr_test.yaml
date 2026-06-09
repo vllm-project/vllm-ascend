@@ -28,6 +28,21 @@ on:
       - 'main'
       - '*-dev'
       - 'releases/v*'
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      vllm_ascend_ref:
+        description: "vllm-ascend ref (branch, tag, or SHA)"
+        required: false
+        default: "main"
+        type: string
+      vllm_version:
+        description: "vllm version (commit hash or tag)"
+        required: false
+        default: "v0.20.2"
+        type: string
+
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -42,7 +57,7 @@ concurrency:
 
 jobs:
   lint-and-select-tests:
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+    if: ${{ github.event_name == 'pull_request' && (github.event.action != 'labeled' || github.event.label.name == 'ready') }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -191,3 +206,51 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+
+# ─── Schedule/Dispatch path: full tests ────────────────────────────────────────
+
+  select-full-tests:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: linux-amd64-cpu-8-hk
+    outputs:
+      has_tests: ${{ steps.full-scope.outputs.has_tests }}
+      test_groups: ${{ steps.full-scope.outputs.test_groups }}
+      matched_modules: ${{ steps.full-scope.outputs.matched_modules }}
+      vllm_ascend_ref: ${{ steps.resolve-refs.outputs.vllm_ascend_ref }}
+      vllm_version: ${{ steps.resolve-refs.outputs.vllm_version }}
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.vllm_ascend_ref || 'main' }}
+          fetch-depth: 0
+
+      - name: Resolve refs
+        id: resolve-refs
+        run: |
+          echo "vllm_ascend_ref=${{ inputs.vllm_ascend_ref || 'main' }}" >> "$GITHUB_OUTPUT"
+          echo "vllm_version=${{ inputs.vllm_version || 'v0.20.2' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Select all tests
+        id: full-scope
+        run: |
+          pip install regex pyyaml
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          python3 .github/workflows/scripts/select_tests.py \
+            --changed-files vllm_ascend/dummy.py \
+            --run-all-modules
+
+  run-full-tests:
+    needs: select-full-tests
+    if: ${{ needs.select-full-tests.outputs.has_tests == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version:
+          - ${{ needs.select-full-tests.outputs.vllm_version }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ needs.select-full-tests.outputs.vllm_ascend_ref }}
+      test_groups: ${{ needs.select-full-tests.outputs.test_groups }}
+      enable-coverage: true
