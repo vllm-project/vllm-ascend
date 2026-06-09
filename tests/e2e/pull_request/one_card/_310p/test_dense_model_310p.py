@@ -36,22 +36,35 @@ QWEN3_5_PREFIX_MAMBA_PROMPTS = [
 
 
 def _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[tuple[list[int], str]]:
-    outputs = []
-    runner_kwargs = {
-        "tensor_parallel_size": 1,
-        "enforce_eager": True,
-        "dtype": "float16",
-        "max_model_len": 2048,
-        "max_num_batched_tokens": 2048,
-        "enable_prefix_caching": enable_prefix_caching,
-        "mamba_ssm_cache_dtype": "float16",
-    }
-    if enable_prefix_caching:
-        runner_kwargs["mamba_cache_mode"] = "align"
+    outputs: list[tuple[list[int], str]] = []
 
-    with VllmRunner("Qwen/Qwen3.5-4B", **runner_kwargs) as vllm_model:
-        for prompt in QWEN3_5_PREFIX_MAMBA_PROMPTS:
-            outputs.extend(vllm_model.generate_greedy([prompt], max_tokens=8))
+    if enable_prefix_caching:
+        with VllmRunner(
+            "Qwen/Qwen3.5-4B",
+            tensor_parallel_size=1,
+            enforce_eager=True,
+            dtype="float16",
+            max_model_len=2048,
+            max_num_batched_tokens=2048,
+            enable_prefix_caching=True,
+            mamba_cache_mode="align",
+            mamba_ssm_cache_dtype="float16",
+        ) as vllm_model:
+            for prompt in QWEN3_5_PREFIX_MAMBA_PROMPTS:
+                outputs.extend(vllm_model.generate_greedy([prompt], max_tokens=8))
+    else:
+        with VllmRunner(
+            "Qwen/Qwen3.5-4B",
+            tensor_parallel_size=1,
+            enforce_eager=True,
+            dtype="float16",
+            max_model_len=2048,
+            max_num_batched_tokens=2048,
+            enable_prefix_caching=False,
+            mamba_ssm_cache_dtype="float16",
+        ) as vllm_model:
+            for prompt in QWEN3_5_PREFIX_MAMBA_PROMPTS:
+                outputs.extend(vllm_model.generate_greedy([prompt], max_tokens=8))
     return outputs
 
 
