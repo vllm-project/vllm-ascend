@@ -1019,20 +1019,43 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _debug_compare_sfa_prolog_v3_q_down_proj(
         self,
         hidden_states: torch.Tensor,
+        qkv_lora_ref: torch.Tensor,
         q_c_raw_ref: torch.Tensor,
         q_c_ref: torch.Tensor,
     ) -> None:
+        assert self.fused_qkv_a_proj is not None
         assert self.q_a_layernorm is not None
 
         try:
             token_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states.contiguous())
+            need_unsqueeze = False
+            if pertoken_scale.dim() == 2:
+                need_unsqueeze = True
+                token_x = token_x.squeeze(dim=1)
+                pertoken_scale = pertoken_scale.squeeze(dim=1)
+
+            bias = getattr(self.fused_qkv_a_proj, "bias", None)
+            qkv_lora = torch_npu.npu_quant_matmul(
+                token_x,
+                self.fused_qkv_a_proj.weight,
+                self.fused_qkv_a_proj.weight_scale,
+                pertoken_scale=pertoken_scale,
+                bias=bias,
+                output_dtype=hidden_states.dtype,
+            )
+            if need_unsqueeze:
+                qkv_lora = qkv_lora.unsqueeze(dim=1)
+            q_c_raw_from_full = qkv_lora[..., : self.q_lora_rank]
+
             q_c_raw = torch_npu.npu_quant_matmul(
                 token_x,
                 self.weight_dq,
                 self.dequant_scale_w_dq.view(-1),
-                pertoken_scale=pertoken_scale.view(-1),
+                pertoken_scale=pertoken_scale,
                 output_dtype=hidden_states.dtype,
             )
+            if need_unsqueeze:
+                q_c_raw = q_c_raw.unsqueeze(dim=1)
             q_c_norm = self.q_a_layernorm(q_c_raw)
         except Exception:
             logger.exception(
@@ -1041,6 +1064,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             return
 
+        self._debug_sfa_prolog_v3_tensor_diff("qkv_full_quant_matmul", qkv_lora_ref, qkv_lora)
+        self._debug_sfa_prolog_v3_tensor_diff(
+            "q_c_raw_from_full_quant_matmul",
+            q_c_raw_ref,
+            q_c_raw_from_full,
+        )
         self._debug_sfa_prolog_v3_tensor_diff("q_c_raw_quant_matmul", q_c_raw_ref, q_c_raw)
         self._debug_sfa_prolog_v3_tensor_diff("q_c_quant_matmul_norm", q_c_ref, q_c_norm)
 
@@ -1068,7 +1097,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dim=-1,
             )
             q_c_ref = self.q_a_layernorm(q_c_raw_ref)
-            self._debug_compare_sfa_prolog_v3_q_down_proj(hidden_states, q_c_raw_ref, q_c_ref)
+            self._debug_compare_sfa_prolog_v3_q_down_proj(
+                hidden_states,
+                qkv_lora_ref,
+                q_c_raw_ref,
+                q_c_ref,
+            )
             ql_nope_ref, q_pe_ref = self._q_proj_and_k_up_proj(q_c_ref)
             q_pe_ref = self.rope_single(q_pe_ref, cos, sin)
 
