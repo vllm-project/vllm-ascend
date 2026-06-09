@@ -24,8 +24,8 @@ extern "C" {
 __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombineW4A8GetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensorList* weight2,
                                                                                         const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                                                         const aclTensorList* bias1, const aclTensorList* bias2,
-                                                                                        const aclTensor* probs,
-                                                                                        const char* group, int64_t maxOutputSize,
+                                                                                        const aclTensor* probs, const aclTensor* xActiveMask,
+                                                                                        const char* group, int64_t maxOutputSize, double swigluLimit,
                                                                                         const aclTensor* out, const aclTensor* expertTokenNums,
                                                                                         uint64_t* workspaceSize, aclOpExecutor** executor);
 

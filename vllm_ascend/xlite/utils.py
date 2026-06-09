@@ -40,3 +40,12 @@ def _get_nested_attr(obj: Any, /, *attrs: str, default: Any = None) -> Any:
         if (current := getattr(current, attr, _MISSING)) is _MISSING:
             return default
     return current
+
+
+def rgetattr(obj: Any, attr, default=None):
+    try:
+        for part in attr.split("."):
+            obj = getattr(obj, part)
+        return obj
+    except AttributeError:
+        return default

@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.layernorm import RMSNormGated
 
@@ -41,11 +42,27 @@ class AscendGemmaRMSNorm310(AscendGemmaRMSNorm):
 
 
 class AscendRMSNormGated310(RMSNormGated):
+    def _apply_activation(self, z: torch.Tensor) -> torch.Tensor:
+        if self.activation == "sigmoid":
+            return torch.sigmoid(z)
+        if self.activation in ("silu", "swish"):
+            return F.silu(z)
+        raise AssertionError(f"Unsupported activation: {self.activation}")
+
     def forward_oot(
         self,
         x: torch.Tensor,
         z: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # 310P should not depend on the Triton-gated layernorm path.
-        # Reuse the upstream native implementation directly.
-        return super().forward_native(x, z)
+        if self.group_size is not None:
+            return super().forward_native(x, z)
+
+        if z is not None and not self.norm_before_gate:
+            x = torch.mul(x, self._apply_activation(z))
+
+        x, _ = torch_npu.npu_rms_norm(x, self.weight, self.eps)
+
+        if z is not None and self.norm_before_gate:
+            x = torch.mul(x, self._apply_activation(z))
+
+        return x

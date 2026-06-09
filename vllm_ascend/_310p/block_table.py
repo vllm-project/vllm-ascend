@@ -1,7 +1,10 @@
+from typing import Any, cast
+
 import numpy as np
 import torch
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 from vllm_ascend.worker.block_table import BlockTable as AscendBlockTable
@@ -9,8 +12,11 @@ from vllm_ascend.worker.block_table import MultiGroupBlockTable as AscendMultiGr
 
 
 class BlockTable(AscendBlockTable):
-    def compute_slot_mapping(self, *args) -> None:
+    def compute_slot_mapping(self, *args: Any) -> None:
         req_indices, positions = self._normalize_slot_mapping_inputs(*args)
+        self._compute_slot_mapping_numpy(req_indices, positions)
+
+    def _compute_slot_mapping_numpy(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
         num_tokens = positions.shape[0]
         if num_tokens == 0:
             self.slot_mapping.copy_to_gpu(0)
@@ -44,7 +50,7 @@ class BlockTable(AscendBlockTable):
 
         self.slot_mapping.copy_to_gpu(num_tokens)
 
-    def _get_block_table_indices(self, req_indices: np.ndarray, logical_block_idx: np.ndarray) -> np.ndarray:
+    def _get_block_table_indices(self, req_indices, logical_block_idx):
         row_stride = self.max_num_blocks_per_req * self.blocks_per_phys_block
         return req_indices * row_stride + logical_block_idx
 
@@ -73,7 +79,12 @@ class BlockTable(AscendBlockTable):
         if isinstance(value, np.ndarray):
             return value.astype(np.int64, copy=False)
         if isinstance(value, torch.Tensor):
-            return value.detach().cpu().numpy().astype(np.int64, copy=False)
+            if value.device.type != "cpu":
+                raise TypeError(
+                    "310P slot mapping must be computed from CPU req_indices/positions; "
+                    "device tensor inputs would require unsupported NPU arithmetic or D2H"
+                )
+            return value.detach().numpy().astype(np.int64, copy=False)
         return np.asarray(value, dtype=np.int64)
 
 
@@ -90,6 +101,7 @@ class MultiGroupBlockTable(AscendMultiGroupBlockTable):
         max_num_blocks: list[int] | None = None,
         kernel_sizes: list[list[int]] | None = None,
         cp_kv_cache_interleave_size: int = 1,
+        kv_cache_groups: list[KVCacheGroupSpec] | None = None,
     ) -> None:
         if kernel_sizes is None:
             kernel_sizes = [[0]] * len(block_sizes)
@@ -109,21 +121,82 @@ class MultiGroupBlockTable(AscendMultiGroupBlockTable):
                 f"max_num_blocks length ({len(max_num_blocks)}) must match block_sizes length ({len(block_sizes)})"
             )
 
-        self.block_tables = [
-            BlockTable(
-                block_size,
-                max_num_reqs,
-                max_num_blocks_per_req,
-                max_num_batched_tokens,
-                pin_memory,
-                device,
-                kernel_size_list,
-                cp_kv_cache_interleave_size,
-                num_speculative_tokens,
-            )
-            for block_size, kernel_size_list, max_num_blocks_per_req in zip(block_sizes, kernel_sizes, max_num_blocks)
-        ]
+        if kv_cache_groups is not None:
+            self.block_tables = [
+                BlockTable(
+                    block_size,
+                    max_num_reqs,
+                    max_num_blocks_per_req,
+                    max_num_batched_tokens,
+                    pin_memory,
+                    device,
+                    kernel_size_list,
+                    cp_kv_cache_interleave_size,
+                    num_speculative_tokens,
+                    kv_cache_group,
+                )
+                for block_size, kernel_size_list, max_num_blocks_per_req, kv_cache_group in zip(
+                    block_sizes, kernel_sizes, max_num_blocks, kv_cache_groups
+                )
+            ]
+        else:
+            self.block_tables = [
+                BlockTable(
+                    block_size,
+                    max_num_reqs,
+                    max_num_blocks_per_req,
+                    max_num_batched_tokens,
+                    pin_memory,
+                    device,
+                    kernel_size_list,
+                    cp_kv_cache_interleave_size,
+                    num_speculative_tokens,
+                )
+                for block_size, kernel_size_list, max_num_blocks_per_req in zip(
+                    block_sizes, kernel_sizes, max_num_blocks
+                )
+            ]
 
-    def compute_slot_mapping(self, *args) -> None:
-        for block_table in self.block_tables:
-            block_table.compute_slot_mapping(*args)
+    def compute_slot_mapping(
+        self,
+        num_reqs_or_req_indices: int | np.ndarray | torch.Tensor,
+        query_start_loc_or_positions: np.ndarray | torch.Tensor,
+        positions: np.ndarray | torch.Tensor | None = None,
+        positions_compressed_list: list[np.ndarray] | None = None,
+        req_indices_compressed_list: list[np.ndarray] | None = None,
+    ) -> None:
+        for i, block_table_base in enumerate(self.block_tables):
+            block_table = cast(BlockTable, block_table_base)
+            if positions_compressed_list is not None and req_indices_compressed_list is not None:
+                block_table.compute_slot_mapping(
+                    req_indices_compressed_list[i],
+                    positions_compressed_list[i],
+                )
+            elif positions is None:
+                block_table.compute_slot_mapping(
+                    num_reqs_or_req_indices,
+                    query_start_loc_or_positions,
+                )
+            else:
+                block_table.compute_slot_mapping(
+                    num_reqs_or_req_indices,
+                    query_start_loc_or_positions,
+                    positions,
+                )
+
+    def compute_slot_mapping_draft(
+        self,
+        req_indices: np.ndarray,
+        positions: np.ndarray,
+        positions_compressed_list: list[np.ndarray] | None = None,
+        req_indices_compressed_list: list[np.ndarray] | None = None,
+    ) -> None:
+        for i, block_table_base in enumerate(self.block_tables):
+            block_table = cast(BlockTable, block_table_base)
+            if positions_compressed_list is not None and req_indices_compressed_list is not None:
+                block_table.compute_slot_mapping(
+                    req_indices_compressed_list[i],
+                    positions_compressed_list[i],
+                )
+            else:
+                block_table.compute_slot_mapping(req_indices, positions)

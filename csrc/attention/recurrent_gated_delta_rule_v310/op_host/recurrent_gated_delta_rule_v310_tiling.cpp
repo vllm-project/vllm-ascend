@@ -510,6 +510,7 @@ int64_t RecurrentGatedDeltaRuleV310Tiling::CalcWorkingUbBytes(int64_t aNv, int64
 {
     int64_t usedUbBytes = CalcFixedUbBytes(aNv, aDv, aDk);
     usedUbBytes += MAX_MTP * (8 * aDk + 4 * aDv + 4 * aNv); // 8 for qk in ub, 4 for v in ub, 4 for beta in ub
+    usedUbBytes += 256 + 128; // bank conflict padding (256B kInUb↔stateInUb, 128B stateInUb↔broadTmpInUb)
     return usedUbBytes;
 }
 
@@ -518,7 +519,7 @@ int64_t RecurrentGatedDeltaRuleV310Tiling::CalcVStepCoeff(int64_t aDk, uint32_t 
 {
     int64_t coeff = (2 + static_cast<int64_t>(2 * stateOutBufferNum)) * aDk +
                     static_cast<int64_t>(4 * attnOutBufferNum); // stateIn/stateOut/attnOut queues
-    coeff += (4 + 4) * aDk + 4 + 4;                             // qInUb/kInUb/vInUb/deltaInUb/attnInUb
+    coeff += (4 + 4 + 2) * aDk + 4 + 4;                           // stateInUb/broadTmpInUb/foldTmpUb/deltaInUb/attnInUb
     return coeff;
 }
 

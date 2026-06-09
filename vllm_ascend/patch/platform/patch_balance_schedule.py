@@ -24,6 +24,14 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
+_ORIGINAL_RUN_ENGINE_CORE = EngineCoreProc.run_engine_core
+_ORIGINAL_SCHEDULER = Scheduler
+
+
+def _balance_scheduling_enabled(vllm_config) -> bool:
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    return bool(additional_config.get("enable_balance_scheduling", False))
+
 
 class BalanceScheduler(Scheduler):
     def __init__(
@@ -47,17 +55,22 @@ class BalanceScheduler(Scheduler):
             include_finished_set,
             log_stats,
         )
-        # Balance scheduling.
-        self.balance_queue = [
-            torch.tensor([0], dtype=torch.int, device="cpu")
-            for _ in range(self.vllm_config.parallel_config.data_parallel_size)
-        ]
+        self._balance_enabled = _balance_scheduling_enabled(vllm_config)
+        if self._balance_enabled:
+            self.balance_queue = [
+                torch.tensor([0], dtype=torch.int, device="cpu")
+                for _ in range(self.vllm_config.parallel_config.data_parallel_size)
+            ]
 
     def balance_gather(self, dp_group):
+        if not self._balance_enabled:
+            return
         running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
         dist.all_gather(self.balance_queue, running_tensor, group=dp_group)
 
     def schedule(self) -> SchedulerOutput:
+        if not self._balance_enabled:
+            return super().schedule()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -654,6 +667,9 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
 
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
+    vllm_config = kwargs.get("vllm_config")
+    if not _balance_scheduling_enabled(vllm_config):
+        return _ORIGINAL_RUN_ENGINE_CORE(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
     # Signal handler used for graceful termination.
     # SystemExit exception is only raised once to allow this and worker

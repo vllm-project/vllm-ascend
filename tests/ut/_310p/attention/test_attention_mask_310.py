@@ -26,17 +26,11 @@ class TestAttentionMaskBuilder310(TestBase):
         self.max_seqlen = 4096
         self.attention_mask_builder = AttentionMaskBuilder310(torch.device("cpu"), self.max_seqlen)
 
-    def test_get_attention_mask_310_for_pooling_model(self):
-        model_config = MagicMock()
-        model_config.runner_type = "pooling"
-        with self.assertRaises(NotImplementedError):
-            self.attention_mask_builder.get_attention_mask(model_config)
-
     @patch("torch_npu.npu_format_cast")
     def test_get_attention_mask_310(self, mock_format_cast):
         mock_format_cast.side_effect = lambda x, y: x
         model_config = MagicMock()
-        attn_mask = self.attention_mask_builder.get_attention_mask(model_config)
+        attn_mask = self.attention_mask_builder.get_attention_mask(causal=True, model_config=model_config)
         self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
         self.assertEqual(attn_mask[0][-1][0][-1], torch.tensor(float("-inf"), dtype=torch.float16))
 

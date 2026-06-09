@@ -1,0 +1,91 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  HCCL_BUFFSIZE: "512"
+  SERVER_PORT: "DEFAULT_PORT"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  VLLM_ASCEND_ENABLE_NZ: "1"
+
+_server_cmd: &server_cmd
+  - "--enable-expert-parallel"
+  - "--enable-prefix-caching"
+  - "--enable-chunked-prefill"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--tensor-parallel-size"
+  - "4"
+  - "--data-parallel-size"
+  - "4"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "133120"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--max-num-seqs"
+  - "16"
+  - "--quantization"
+  - "ascend"
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--seed"
+  - "42"
+  - "--compilation-config"
+  - '{"cudagraph_capture_sizes":[4,8,12,16,32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+  - "--speculative-config"
+  - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
+  - "--additional-config"
+  - '{"enable_shared_expert_dp":true}'
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--mm-encoder-tp-mode"
+  - "data"
+
+_benchmarks: &benchmarks
+  acc_aime2025:
+    case_type: accuracy
+    dataset_path: vllm-ascend/aime2025
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 65536
+    temperature: 0.0
+    top_p: 1
+    top_k: -1
+    repetition_penalty: 1.0
+    batch_size: 32
+    baseline: 95
+    threshold: 5
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_kimi
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 8
+    max_out_len: 1024
+    batch_size: 2
+    trust_remote_code: true
+    request_rate: 0
+    baseline: 1
+    threshold: 0.97
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Kimi-K2.5-W4A8-Case"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    benchmarks:
+      <<: *benchmarks

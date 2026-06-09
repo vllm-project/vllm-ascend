@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
+from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm.distributed.parallel_state import get_pp_group
 
@@ -109,22 +110,23 @@ class EplbUpdator:
         if self.get_update_info_flag():
             self.update_info_all = self.eplb_process.block_update_q.get()
         if self.update_expert_weight_flag():
-            (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
-                0
-            )
-            log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
-            self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
-            updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
-            self.eplb_loader.generate_expert_d2d_transfer_task(
-                expert_send_info,
-                expert_recv_info,
-                updated_expert_map_this_rank,
-                layer_id,
-            )
+            with record_function_or_nullcontext("EPLB generate p2p task"):
+                (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = (
+                    self.update_info_all.pop(0)
+                )
+                log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
+                self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
+                updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
+                self.eplb_loader.generate_expert_d2d_transfer_task(
+                    expert_send_info,
+                    expert_recv_info,
+                    updated_expert_map_this_rank,
+                    layer_id,
+                )
 
-            # set asynchronous stream for d2d expert weight update
-            self.reqs = []
-            self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
+                # set asynchronous stream for d2d expert weight update
+                self.reqs = []
+                self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self):
         # If EPLB is restricted to a specific PP stage and this is not it, skip
@@ -132,8 +134,9 @@ class EplbUpdator:
             return
 
         if self.wakeup_eplb_worker_flag():
-            self.compute_and_set_moe_load()
-            self.wakeup_eplb_worker()
+            with record_function_or_nullcontext("EPLB gather moe load"):
+                self.compute_and_set_moe_load()
+                self.wakeup_eplb_worker()
 
         if self.update_expert_weight_flag():
             if self.expert_map_record_path is None:

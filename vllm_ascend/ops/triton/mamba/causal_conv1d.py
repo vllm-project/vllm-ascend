@@ -13,8 +13,15 @@ import torch
 import torch.nn.functional as F
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+
+if not HAS_TRITON:
+    from vllm_ascend._310p.ops.causal_conv1d import (
+        causal_conv1d_update as _pytorch_update,
+    )
+else:
+    _pytorch_update = None
 
 
 def causal_conv1d_ref(
@@ -117,13 +124,14 @@ def causal_conv1d_fn(
     seqlens = seqlens.tolist()
     splits = torch.split(x, seqlens, dim=-1)
     width = weight.shape[1]
-    last_width_prefill_x = extract_last_width(x, query_start_loc[num_decodes:], conv_states.shape[-1])
+    state_len = width - 1
+    last_width_prefill_x = extract_last_width(x, query_start_loc[num_decodes:], state_len)
 
     if get_pcp_group().world_size > 1:
         all_last_width_prefill_x = get_pcp_group().all_gather(last_width_prefill_x.unsqueeze(0).contiguous(), 0)
         pcp_rank = get_pcp_group().rank_in_group
         if pcp_rank > 0:
-            conv_states[cache_indices[num_decodes:]] = all_last_width_prefill_x[pcp_rank - 1, ...]
+            conv_states[cache_indices[num_decodes:], :, :state_len] = all_last_width_prefill_x[pcp_rank - 1, ...]
 
     for i in range(len(seqlens)):
         x_s = splits[i]
@@ -142,7 +150,7 @@ def causal_conv1d_fn(
         )
 
     if get_pcp_group().world_size > 1:
-        conv_states[cache_indices[num_decodes:]] = all_last_width_prefill_x[-1, ...]
+        conv_states[cache_indices[num_decodes:], :, :state_len] = all_last_width_prefill_x[-1, ...]
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
     out_ref_tensor = torch.cat(out_ref, dim=0)
     return out_ref_tensor
@@ -577,6 +585,19 @@ def causal_conv1d_update_npu(
             indices 0 and 3
     out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
     """
+    if not HAS_TRITON:
+        return _pytorch_update(
+            x,
+            conv_state,
+            weight,
+            bias,
+            activation,
+            conv_state_indices=conv_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            query_start_loc=query_start_loc,
+            pad_slot_id=pad_slot_id,
+        )
+
     weight = weight.transpose(0, 1).contiguous()
     conv_state = conv_state.transpose(1, 2).contiguous()
     if validate_data:

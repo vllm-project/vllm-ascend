@@ -2,21 +2,6 @@ model_name: "Tencent-Hunyuan/Hunyuan-A13B-Instruct"
 model_type: "vllm"
 hardware: "Atlas A2 Series"
 
-test_cases:
-  - model: "Tencent-Hunyuan/Hunyuan-A13B-Instruct"
-    server_cmd:
-      - --served-model-name
-      - Hunyuan-A13B-Instruct
-      - --tensor-parallel-size
-      - "4"
-      - --max-model-len
-      - "32768"
-      - --gpu-memory-utilization
-      - "0.90"
-      - --enforce-eager
-      - --port
-      - "8000"
-
 serve:
   tensor_parallel_size: 4
   dtype: auto

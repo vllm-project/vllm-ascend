@@ -35,6 +35,30 @@ class TestVllmAdaptor(unittest.TestCase):
         self.mock_size = patch("vllm_ascend.eplb.adaptor.vllm_adaptor.dist.get_world_size", return_value=4).start()
         self.adaptor = VllmEplbAdaptor(self.model)
 
+    @patch("torch.empty_like", return_value=torch.zeros(16, 32))
+    def test_init_fp16(self, mock_func):
+        self.model.quant_config = None
+        VllmEplbAdaptor(self.model)
+
+    @patch("torch.empty_like", return_value=torch.zeros(16, 32))
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_init_w8a8(self, mock_get_config, mock_func):
+        mock_config = MagicMock()
+        mock_config.enable_fused_mc2 = 0
+        mock_get_config.return_value = mock_config
+        VllmEplbAdaptor(self.model)
+
+    @patch("torch.empty_like", return_value=torch.zeros(16, 32))
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_language_model_w8a8(self, mock_get_config, mock_func):
+        mock_config = MagicMock()
+        mock_config.enable_fused_mc2 = 0
+        mock_get_config.return_value = mock_config
+        model = MagicMock()
+        model.language_model = self.model
+        model.config.text_config = self.model.config
+        VllmEplbAdaptor(model)
+
     def tearDown(self):
         self.mock_rank.stop()
         self.mock_size.stop()

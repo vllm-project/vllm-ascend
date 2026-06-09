@@ -190,7 +190,7 @@
     import numpy as np
     import random
     import math
-    import torchair
+    import npugraph_ex as nge
     import custom_ops
 
     data_type = torch.bfloat16
@@ -232,10 +232,9 @@
     cmp_kv = torch.tensor(np.random.uniform(-5, 10, (block_num2, cmp_block_size, n2, dn))).to(data_type).npu()
     sinks = torch.rand(n1).to(torch.float32).npu()
 
-    from torchair.configs.compiler_config import CompilerConfig
+    from npugraph_ex.configs.compiler_config import CompilerConfig
     config = CompilerConfig()
-    config.mode = "reduce-overhead"
-    npu_backend = torchair.get_npu_backend(compiler_config=config)
+    npu_backend = nge.get_npu_backend(compiler_config=config)
 
     class Network(torch.nn.Module):
         def __init__(self):

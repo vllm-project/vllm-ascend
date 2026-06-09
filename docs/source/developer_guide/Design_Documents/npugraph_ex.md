@@ -15,15 +15,15 @@ You can get its code [code](https://gitcode.com/Ascend/torchair)
 
 ### FX fusion pass
 
-npugraph_ex now provides three default operator fusion passes, and more will be added in the future.
+npugraph_ex now provides some operator fusion passes, and more will be added in the future.
 
 Operator combinations that meet the replacement rules can be replaced with the corresponding fused operators.
 
-You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00017.html)
+You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)
 
 ## Custom fusion pass
 
-Users can register a custom graph fusion pass in TorchAir to modify PyTorch FX graphs. The registration relies on the register_replacement API.
+Users can register a custom graph fusion pass in npugraph_ex to modify PyTorch FX graphs. The registration relies on the register_replacement API.
 
 Below is the declaration of this API and a demo of its usage.
 
@@ -44,11 +44,11 @@ Usage Example
 
 ```python
 import functools
-import torch, torch_npu, torchair
+import torch, torch_npu, npugraph_ex
 
 from torch._inductor.pattern_matcher import Match
 from torch._subclasses.fake_tensor import FakeTensorMode
-from torchair.core.utils import logger
+from npugraph_ex.core.utils import logger
 
 # Assume fusing the add operator and the npu_rms_norm operator into the npu_add_rms_norm operator
 # Define a search_fn to find the operator combinations in the original FX graph before fusion.
@@ -85,8 +85,8 @@ with fake_mode:
     input_tensor = functools.partial(torch.empty, (1, 1, 2), device="npu", dtype=torch.float16)
     kwargs_tensor = functools.partial(torch.empty, 2, device="npu", dtype=torch.float16)
 
-    # Call the torchair.register_replacement API with search_fn, replace_fn, and example_inputs. If there are additional validations, you can pass them in as extra_check.
-    torchair.register_replacement(
+    # Call the npugraph_ex.register_replacement API with search_fn, replace_fn, and example_inputs. If there are additional validations, you can pass them in as extra_check.
+    npugraph_ex.register_replacement(
         search_fn=search_fn,
         replace_fn=replace_fn,
         example_inputs=(input_tensor(), input_tensor(), kwargs_tensor()),

@@ -36,6 +36,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
 from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable
 
@@ -263,12 +264,17 @@ class AscendLogitsProcessor(LogitsProcessor):
     ) -> torch.Tensor | None:
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
-        local_logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
+        logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
         # Gather logits for tensor parallel
-        logits = get_lmhead_tp_group().all_to_all(local_logits)
+        if not get_ascend_config().enable_reduce_sample:
+            logits = get_lmhead_tp_group().all_to_all(logits)
+
         # Remove paddings in vocab (if any)
         if logits is not None:
-            logits = logits[..., : self.org_vocab_size]
+            if not get_ascend_config().enable_reduce_sample:
+                logits = logits[..., : self.org_vocab_size]
+            else:
+                logits = logits[..., : lm_head.num_org_embeddings_per_partition]
         return logits
 
     def _get_logits_normal(
@@ -277,12 +283,16 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
-        local_logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
         # Gather logits for tensor parallel
-        logits = self._gather_logits(local_logits)
+        if not get_ascend_config().enable_reduce_sample:
+            logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            logits = logits[..., : self.org_vocab_size]
+            if not get_ascend_config().enable_reduce_sample:
+                logits = logits[..., : self.org_vocab_size]
+            else:
+                logits = logits[..., : lm_head.num_org_embeddings_per_partition]
 
         return logits
