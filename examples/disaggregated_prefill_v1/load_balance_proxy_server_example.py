@@ -135,7 +135,7 @@ from typing import Any, cast
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -219,15 +219,19 @@ def server_key(host: str, port: int) -> str:
     return f"{normalize_host(host)}:{int(port)}"
 
 
-def build_base_url(host: str, port: int) -> str:
-    url = f"http://{host}:{port}/v1"
+def build_server_url(host: str, port: int) -> str:
+    url = f"http://{host}:{port}"
     try:
         ip = ipaddress.ip_address(host)
         if isinstance(ip, ipaddress.IPv6Address):
-            url = f"http://[{host}]:{port}/v1"
+            url = f"http://[{host}]:{port}"
     except Exception:
         pass
     return url
+
+
+def build_base_url(host: str, port: int) -> str:
+    return f"{build_server_url(host, port)}/v1"
 
 
 class SharedProxyScheduler:
@@ -531,12 +535,10 @@ class WorkerRuntime:
         snapshot = self.scheduler.get_snapshot()
         role_targets = {
             ServerRole.PREFILL: {
-                server_key(s["host"], s["port"]): (s["host"], s["port"])
-                for s in snapshot["prefill_instances"]
+                server_key(s["host"], s["port"]): (s["host"], s["port"]) for s in snapshot["prefill_instances"]
             },
             ServerRole.DECODE: {
-                server_key(s["host"], s["port"]): (s["host"], s["port"])
-                for s in snapshot["decode_instances"]
+                server_key(s["host"], s["port"]): (s["host"], s["port"]) for s in snapshot["decode_instances"]
             },
         }
         for role, targets in role_targets.items():
@@ -875,9 +877,7 @@ async def _abort_prefill_selection(
     is_initial_request: bool,
 ) -> None:
     if is_initial_request:
-        await runtime.schedule(
-            "finish_request", prefiller_key, prefiller_score, None, 0.0, release_prefill_kv=True
-        )
+        await runtime.schedule("finish_request", prefiller_key, prefiller_score, None, 0.0, release_prefill_kv=True)
     else:
         await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
 
@@ -1053,9 +1053,7 @@ async def handle_completions_impl(api: str, request: Request):
                                 req_data["prompt"] = origin_prompt + generated_token
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                            instance_info = await reassign_instances(
-                                api, req_data, tmp_request_length, instance_info
-                            )
+                            instance_info = await reassign_instances(api, req_data, tmp_request_length, instance_info)
                             released_kv = False
                             break
                         if retry_count > 0 and not stream_flag:
@@ -1160,23 +1158,25 @@ async def handle_chat_completions(request: Request):
 @app.post("/reset_prefix_cache")
 async def reset_prefix_cache(request: Request):
     params = dict(request.query_params)
-    failures = []
-    for client, base_url in [
-        (s.client, f"http://{s.host}:{s.port}") for s in proxy_state.prefillers + proxy_state.decoders
-    ]:
+    runtime = get_runtime()
+    await runtime.sync_clients()
+    snapshot = runtime.scheduler.get_snapshot()
+    backend_instances = [(ServerRole.PREFILL, server) for server in snapshot["prefill_instances"]] + [
+        (ServerRole.DECODE, server) for server in snapshot["decode_instances"]
+    ]
+    failures: list[str] = []
+    for role, server in backend_instances:
+        base_url = build_server_url(server["host"], server["port"])
         try:
+            client = await runtime.get_client(role, server_key(server["host"], server["port"]))
             resp = await client.post(f"{base_url}/reset_prefix_cache", params=params)
             resp.raise_for_status()
         except Exception as e:
             logger.error("reset_prefix_cache failed for %s: %s", base_url, e)
             failures.append(base_url)
     if failures:
-        from fastapi.responses import JSONResponse
-
         return JSONResponse(status_code=500, content={"failed": failures})
-    from fastapi.responses import Response as FastAPIResponse
-
-    return FastAPIResponse(status_code=200)
+    return Response(status_code=200)
 
 
 @app.get("/healthcheck")
