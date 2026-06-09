@@ -480,10 +480,11 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
-    def _mark_failed_recv_request(self, request_id: str, local_block_ids: list[int]) -> None:
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            self.invalid_block_ids.update(local_block_ids)
+            for group_ids in local_block_ids:
+                self.invalid_block_ids.update(group_ids)
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -720,7 +721,16 @@ class KVCacheRecvingThread(threading.Thread):
         )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
-            logger.error("Mooncake transfer failed for request %s", req_meta["remote_request_id"])
+            logger.error(
+                "Mooncake transfer failed for request %s, ret=%s, session=%s, "
+                "src_list_len=%s, dst_list_len=%s, length_list_len=%s",
+                req_meta["remote_request_id"],
+                ret,
+                session_id,
+                len(src_list),
+                len(dst_list),
+                len(length_list),
+            )
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
         req_end_time = time.perf_counter()
@@ -1084,22 +1094,23 @@ class KVCacheRecvingThread(threading.Thread):
             assert engine_id != self.local_engine_id, (
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
             )
-            if agent_meta.kv_group2layeridx != self.kv_group2layeridx:
-                # PD+PP场景下D/P节点的layer indices可能不同(D节点全部层,P节点子集)。
-                # _transfer_kv_cache中pp_layer_indices()会做实际的PP过滤,此处仅校验group spec一致性。
-                is_compatible = (
-                    agent_meta.kv_group2layeridx.keys() == self.kv_group2layeridx.keys()
-                    and all(
-                        agent_meta.kv_group2layeridx[gid][0] == local[0]
-                        for gid, local in self.kv_group2layeridx.items()
-                    )
+            # Check group spec compatibility between P and D nodes.
+            # In PD+PP mode, layer indices naturally differ (D node may have all
+            # layers while each P node PP rank has a subset), so we only compare
+            # group keys and specs (first element of each tuple), not layer indices.
+            is_compatible = (
+                agent_meta.kv_group2layeridx.keys() == self.kv_group2layeridx.keys()
+                and all(
+                    agent_meta.kv_group2layeridx[gid][0] == local[0]
+                    for gid, local in self.kv_group2layeridx.items()
                 )
-                if not is_compatible:
-                    logger.warning(
-                        "Remote kv_group2layeridx is inconsistent with local kv_group2layeridx. remote=%s, local=%s",
-                        agent_meta.kv_group2layeridx,
-                        self.kv_group2layeridx,
-                    )
+            )
+            if not is_compatible:
+                logger.warning(
+                    "Remote kv_group2layeridx is incompatible with local kv_group2layeridx. remote=%s, local=%s",
+                    agent_meta.kv_group2layeridx,
+                    self.kv_group2layeridx,
+                )
             self.remote_kv_group2layeridx[engine_id][remote_handshake_port] = agent_meta.kv_group2layeridx
             self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
