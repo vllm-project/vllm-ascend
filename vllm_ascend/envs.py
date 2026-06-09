@@ -87,6 +87,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
     # Whether to enable SFA preprocessing with mla_prolog_v3.
     "VLLM_ASCEND_ENABLE_SFA_PROLOG_V3": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_SFA_PROLOG_V3", "0"))),
+    # Whether to compare SFA mla_prolog_v3 intermediate tensors against native preprocessing.
+    "VLLM_ASCEND_DEBUG_SFA_PROLOG_V3": lambda: bool(int(os.getenv("VLLM_ASCEND_DEBUG_SFA_PROLOG_V3", "0"))),
     # Whether to enable weight cast format to FRACTAL_NZ.
     # 0: close nz;
     # 1: only quant case enable nz;

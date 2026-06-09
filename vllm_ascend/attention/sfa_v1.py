@@ -953,6 +953,110 @@ class AscendSFAImpl(MLAAttentionImpl):
             return q_c
         return q_c.to(dtype) * q_c_scale.view(-1, 1).to(dtype)
 
+    def _debug_sfa_prolog_v3_tensor_diff(
+        self,
+        name: str,
+        ref: torch.Tensor,
+        got: torch.Tensor,
+    ) -> None:
+        if ref.shape != got.shape:
+            logger.warning(
+                "[SFA prolog debug][%s] %s shape mismatch: ref=%s got=%s",
+                self.layer_name,
+                name,
+                tuple(ref.shape),
+                tuple(got.shape),
+            )
+            return
+
+        ref_dtype = ref.dtype
+        got_dtype = got.dtype
+        ref = ref.detach().float()
+        got = got.detach().float()
+        diff = (ref - got).abs()
+        mean_abs = diff.mean()
+        ref_mean = ref.abs().mean().clamp_min(1e-6)
+        logger.info(
+            "[SFA prolog debug][%s] %s shape=%s ref_dtype=%s got_dtype=%s max_abs=%s mean_abs=%s rel=%s",
+            self.layer_name,
+            name,
+            tuple(ref.shape),
+            ref_dtype,
+            got_dtype,
+            diff.max().item(),
+            mean_abs.item(),
+            (mean_abs / ref_mean).item(),
+        )
+
+    def _debug_sfa_prolog_v3_topk_diff(
+        self,
+        ref: torch.Tensor,
+        got: torch.Tensor,
+    ) -> None:
+        if ref.shape != got.shape:
+            logger.warning(
+                "[SFA prolog debug][%s] topk shape mismatch: ref=%s got=%s",
+                self.layer_name,
+                tuple(ref.shape),
+                tuple(got.shape),
+            )
+            return
+
+        same_ratio = (ref == got).float().mean()
+        logger.info(
+            "[SFA prolog debug][%s] topk shape=%s same_ratio=%s",
+            self.layer_name,
+            tuple(ref.shape),
+            same_ratio.item(),
+        )
+
+    def _debug_compare_sfa_prolog_v3_preprocess(
+        self,
+        hidden_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        slots: torch.Tensor | None,
+        attn_metadata: M,
+        q_c: torch.Tensor,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor | None,
+        k_pe: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert self.fused_qkv_a_proj is not None
+        assert self.q_a_layernorm is not None
+
+        with torch.no_grad():
+            qkv_lora_ref = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c_ref, kv_no_split_ref = qkv_lora_ref.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            q_c_ref = self.q_a_layernorm(q_c_ref)
+            ql_nope_ref, q_pe_ref = self._q_proj_and_k_up_proj(q_c_ref)
+            q_pe_ref = self.rope_single(q_pe_ref, cos, sin)
+
+            self._debug_sfa_prolog_v3_tensor_diff("q_c", q_c_ref, q_c)
+            self._debug_sfa_prolog_v3_tensor_diff("ql_nope", ql_nope_ref, ql_nope)
+            self._debug_sfa_prolog_v3_tensor_diff("q_pe", q_pe_ref, q_pe)
+
+            if self.enable_dsa_cp and slots is not None and k_nope is not None and k_pe is not None:
+                tmp_kv_cache = (torch.empty_like(kv_cache[0]), torch.empty_like(kv_cache[1]))
+                k_pe_ref, k_nope_ref = self.exec_kv(
+                    kv_no_split_ref,
+                    cos,
+                    sin,
+                    tmp_kv_cache,
+                    slots,
+                    attn_metadata,
+                )
+                if k_nope_ref is not None and k_pe_ref is not None:
+                    self._debug_sfa_prolog_v3_tensor_diff("k_nope", k_nope_ref, k_nope)
+                    self._debug_sfa_prolog_v3_tensor_diff("k_pe", k_pe_ref, k_pe)
+
+        return q_c_ref
+
     def _sfa_preprocess_with_prolog_v3(
         self,
         hidden_states: torch.Tensor,
@@ -1410,6 +1514,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         }
 
         precomputed_c8_query = None
+        debug_q_c_ref = None
 
         if self.enable_sfa_prolog_v3:
             if self.enable_dsa_cp:
@@ -1418,6 +1523,20 @@ class AscendSFAImpl(MLAAttentionImpl):
                     cos=cos,
                     sin=sin,
                 )
+                if ascend_envs.VLLM_ASCEND_DEBUG_SFA_PROLOG_V3:
+                    debug_q_c_ref = self._debug_compare_sfa_prolog_v3_preprocess(
+                        hidden_states=hidden_states,
+                        cos=cos,
+                        sin=sin,
+                        kv_cache=kv_cache,
+                        slots=slot_mapping_cp,
+                        attn_metadata=attn_metadata,
+                        q_c=q_c,
+                        ql_nope=ql_nope,
+                        q_pe=q_pe,
+                        k_nope=k_nope,
+                        k_pe=k_pe,
+                    )
                 k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
                 wait_for_kv_layer_from_connector(layer_name)
 
@@ -1457,6 +1576,20 @@ class AscendSFAImpl(MLAAttentionImpl):
                     slot_mapping=slot_mapping,
                     cache_mode="PA_BSND",
                 )
+                if ascend_envs.VLLM_ASCEND_DEBUG_SFA_PROLOG_V3:
+                    debug_q_c_ref = self._debug_compare_sfa_prolog_v3_preprocess(
+                        hidden_states=hidden_states,
+                        cos=cos,
+                        sin=sin,
+                        kv_cache=kv_cache,
+                        slots=None,
+                        attn_metadata=attn_metadata,
+                        q_c=q_c,
+                        ql_nope=ql_nope,
+                        q_pe=q_pe,
+                        k_nope=None,
+                        k_pe=None,
+                    )
                 k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
                 wait_for_kv_layer_from_connector(layer_name)
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
@@ -1559,6 +1692,19 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             if self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
+            if debug_q_c_ref is not None:
+                topk_indices_ref = self.indexer_select_post_process(
+                    x=hidden_states,
+                    q_c=debug_q_c_ref,
+                    kv_cache=kv_cache,
+                    attn_metadata=attn_metadata,
+                    cos=cos,
+                    sin=sin,
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_key=actual_seq_lengths_key,
+                    precomputed_c8_query=None,
+                )
+                self._debug_sfa_prolog_v3_topk_diff(topk_indices_ref, topk_indices)
 
         attn_output = self._execute_sparse_flash_attention_process(
             ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
