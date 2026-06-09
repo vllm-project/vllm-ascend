@@ -476,8 +476,11 @@ def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHa
 
 def _block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
     if isinstance(block_hash, str):
-        if len(block_hash) == 64 and all(char in "0123456789abcdefABCDEF" for char in block_hash):
-            return bytes.fromhex(block_hash)
+        if len(block_hash) == 64:
+            try:
+                return bytes.fromhex(block_hash)
+            except ValueError:
+                return block_hash.encode("utf-8")
         return block_hash.encode("utf-8")
     return bytes(block_hash)
 
