@@ -306,6 +306,12 @@ jobs:
           - name: hy3-preview
             os: linux-aarch64-a3-16
             config_file_path: Hy3-preview.yaml
+          - name: InternVL3.5-38B
+            os: linux-aarch64-a3-16
+            config_file_path: InternVL3.5-38B.yaml
+          - name: InternVL3.5-241B-A28B
+            os: linux-aarch64-a3-16
+            config_file_path: InternVL3.5-241B-A28B.yaml
           # pytest-driven tests
           - name: custom-multi-ops
             os: linux-aarch64-a3-16
