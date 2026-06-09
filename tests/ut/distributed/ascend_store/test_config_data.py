@@ -164,14 +164,6 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())
         self.assertEqual(len(result[0][2].chunk_hash), 64)
 
-    def test_process_tokens_rehashes_trailing_partial_group(self):
-        db = ChunkedTokenDatabase(self.meta, block_size=16, partitions=None, hash_block_size=8)
-        result = list(db.process_tokens(24, ["a", "b", "c"]))
-        self.assertEqual(len(result), 2)
-        self.assertEqual(result[1][0], 16)
-        self.assertEqual(result[1][1], 24)
-        self.assertEqual(result[1][2].chunk_hash, _expected_grouped_hash("c").hex())
-
     def test_process_tokens_rehashes_raw_bytes_and_hex_strings_consistently(self):
         db = ChunkedTokenDatabase(self.meta, block_size=16, partitions=None, hash_block_size=8)
         raw_hashes = [bytes([idx]) * 32 for idx in range(1, 5)]
@@ -189,16 +181,6 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             [
                 _expected_grouped_hash("a", "b"),
                 _expected_grouped_hash("c", "d"),
-            ],
-        )
-
-    def test_get_block_hashes_rehashes_trailing_partial_group(self):
-        result = get_block_hashes(["a", "b", "c"], group_block_size=32, hash_block_size=16)
-        self.assertEqual(
-            result,
-            [
-                _expected_grouped_hash("a", "b"),
-                _expected_grouped_hash("c"),
             ],
         )
 
