@@ -931,11 +931,7 @@ class RecomputeScheduler(Scheduler):
                     and req_id in model_runner_output.routed_experts_dict
                 ):
                     routed_experts = model_runner_output.routed_experts_dict[req_id]
-            elif (
-                getattr(self, "enable_return_routed_experts", False)
-                and routing_data is not None
-                and new_token_ids
-            ):
+            elif getattr(self, "enable_return_routed_experts", False) and routing_data is not None and new_token_ids:
                 req_offset = routing_offsets[req_id]
                 end = req_offset + num_tokens_scheduled
                 block_ids = self._re_block_ids.pop(req_id, [])
