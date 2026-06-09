@@ -380,6 +380,15 @@ class NPUModelRunner(GPUModelRunner):
             and self.model_config.is_mm_prefix_lm,
         )
 
+        # reinit valid_sampled_token_count_cpu with torch.int64 dtype
+        if self.use_async_scheduling and self.num_spec_tokens:
+            self.valid_sampled_token_count_cpu = torch.empty(
+                self.max_num_reqs,
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=self.pin_memory,
+            )
+
         try:
             self.dcp_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
@@ -1454,7 +1463,6 @@ class NPUModelRunner(GPUModelRunner):
         default_stream = torch.npu.current_stream()
         with torch.npu.stream(self.valid_sampled_token_count_copy_stream): 
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)
-            counts = valid_sampled_tokens_count.to(self.valid_sampled_token_count_cpu.dtype)
             counts_cpu = self.valid_sampled_token_count_cpu
             assert counts_cpu is not None
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
