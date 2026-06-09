@@ -1264,7 +1264,7 @@ class MooncakeConnectorScheduler:
 
         # P-side truncation can leave block ids allocated for the original
         # prompt length. Drop those unwritten blocks before SWA tail clipping.
-        computed_block_ids = self._compute_transfer_block_ids(block_ids, len(request.prompt_token_ids))
+        computed_block_ids = self._compute_transfer_block_ids(block_ids, request.num_prompt_tokens)
         computed_block_ids = self.get_sw_clipped_blocks(computed_block_ids)
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
         delay_free_blocks = sum(computed_block_lens) > 0
@@ -1272,7 +1272,7 @@ class MooncakeConnectorScheduler:
             logger.info("Delaying free of %d blocks for request %s", len(computed_block_ids), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
 
-        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        num_prompt_blocks = math.ceil(request.num_prompt_tokens / self.block_size)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,

@@ -15,9 +15,19 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
 
 
 class MockRequest:
-    def __init__(self, request_id, prompt_token_ids, kv_transfer_params, status):
+    def __init__(
+        self,
+        request_id,
+        prompt_token_ids,
+        kv_transfer_params,
+        status,
+        num_prompt_tokens=None,
+    ):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
+        if num_prompt_tokens is None:
+            num_prompt_tokens = len(prompt_token_ids) if prompt_token_ids is not None else 0
+        self.num_prompt_tokens = num_prompt_tokens
         self.kv_transfer_params = kv_transfer_params
         self.status = status
         self.output_token_ids = [101]
@@ -65,3 +75,21 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         self.assertEqual(params["remote_block_ids"], ([0], [100, 101]))
         self.assertEqual(params["num_prompt_blocks"], 2)
         self.assertIn("req1", scheduler._reqs_need_send)
+
+    def test_request_finished_uses_num_prompt_tokens(self):
+        scheduler = self._make_scheduler()
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=None,
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+            num_prompt_tokens=129,
+        )
+        block_ids = (list(range(10)), [100, 101, 102, 103])
+
+        delay_free, params = scheduler.request_finished_all_groups(request, block_ids)
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        self.assertEqual(params["remote_block_ids"], ([0], [100, 101]))
+        self.assertEqual(params["num_prompt_blocks"], 2)
