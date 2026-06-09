@@ -387,6 +387,28 @@ class NPUModelRunner(GPUModelRunner):
             num_rejected,
         )
 
+        self._copy_num_computed_tokens_to_cpu()
+
+    def postprocess_sampled(
+        self,
+        idx_mapping,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+        query_start_loc=None,
+    ):
+        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs."""
+        super().postprocess_sampled(
+            idx_mapping,
+            sampled_tokens,
+            num_sampled,
+            num_rejected,
+            query_start_loc,
+        )
+
+        self._copy_num_computed_tokens_to_cpu()
+
+    def _copy_num_computed_tokens_to_cpu(self):
         # npu attention backend still need to use seq_lens_cpu,
         # we need to copy num_computed_tokens back to cpu.
         default_stream = torch.cuda.current_stream()
