@@ -75,10 +75,8 @@ class TestAscendAttentionBackendImpl310(TestBase):
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu._npu_flash_attention")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_forward_prefill_310(
-        self, mock_get_forward_context, mock_npu_npu_flash_attention, mock_npu_reshape_and_cache
-    ):
-        """Test forward pass in PrefillNoCache state"""
+    def test_forward_prefill_310(self, mock_get_forward_context, mock_npu_flash_attention, mock_npu_reshape_and_cache):
+        """Test forward pass in PrefillNoCache state."""
         query = torch.randn(10, 8, 64)
         key = torch.randn(10, 8, 64)
         value = torch.randn(10, 8, 64)
@@ -96,11 +94,23 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.num_prefills = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
 
+        self.impl.support_compressed_mask = False
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        mock_npu_npu_flash_attention.return_value = torch.ones(10, 8, 64)
-        output = self.impl.forward_impl(query, key, value, None, metadata, output)
+        mock_npu_flash_attention.return_value = torch.ones(10, 8, 64)
+        result = self.impl.forward_impl(query, key, value, None, metadata, output)
 
-        mock_npu_npu_flash_attention.assert_called_once()
+        mock_npu_flash_attention.assert_called_once()
+        _, kwargs = mock_npu_flash_attention.call_args
+        self.assertIs(kwargs["query"], query)
+        self.assertIs(kwargs["key"], key)
+        self.assertIs(kwargs["value"], value)
+        self.assertIs(kwargs["mask"], metadata.attn_mask)
+        self.assertIs(kwargs["seq_len"], metadata.seq_lens)
+        self.assertEqual(kwargs["scale_value"], self.impl.scale)
+        self.assertEqual(kwargs["num_heads"], self.impl.num_heads)
+        self.assertEqual(kwargs["num_kv_heads"], self.impl.num_kv_heads)
+        self.assertIs(kwargs["out"], output)
+        self.assertIs(result, output)
 
     @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
     @patch("torch_npu._npu_reshape_and_cache")
@@ -131,6 +141,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.num_prefills = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
 
+        self.impl.support_compressed_mask = False
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         mock_npu_paged_attention_splitfuse.return_value = torch.ones(5, 8, 64)
         output = self.impl.forward_impl(query, key, value, None, metadata, output)
@@ -166,6 +177,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         metadata.num_prefills = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
 
+        self.impl.support_compressed_mask = False
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         mock_npu_paged_attention_splitfuse.return_value = torch.ones(5, 8, 64)
         output = self.impl.forward_impl(query, key, value, None, metadata, output)

@@ -29,6 +29,7 @@ class TestAttentionMaskBuilder310(TestBase):
     @patch("torch_npu.npu_format_cast")
     def test_get_attention_mask_310(self, mock_format_cast):
         mock_format_cast.side_effect = lambda x, y: x
+        self.attention_mask_builder.support_compressed_mask = False
         model_config = MagicMock()
         attn_mask = self.attention_mask_builder.get_attention_mask(causal=True, model_config=model_config)
         self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
