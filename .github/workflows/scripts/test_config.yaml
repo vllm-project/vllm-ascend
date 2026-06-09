@@ -244,7 +244,7 @@
 - name: cpu_weight_offload
   optional: true
   source_file_dependencies:
-    - vllm_ascend/model_executor/offloader
+    - vllm_ascend/model_executor
     - vllm_ascend/worker/model_runner_v1.py
     - vllm_ascend/compilation/acl_graph.py
   tests:
