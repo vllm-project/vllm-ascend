@@ -5,7 +5,6 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
@@ -42,16 +41,13 @@ class SimpleCPUOffloadWorker:
         self.store_stream: torch.npu.Stream | None = None
 
         self._load_events: list[tuple[int, torch.npu.Event]] = []
-        self._store_events: list[tuple[int, torch.npu.Event]] = []
         self._load_hwm: int = -1
-        self._store_hwm: int = -1
 
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
         self._pending_load_event_indices: set[int] = set()
-        self._pending_store_event_indices: set[int] = set()
         self._submitted_load_event_indices: set[int] = set()
-        self._submitted_store_event_indices: set[int] = set()
         self._completed_store_events: dict[int, int] = {}
+        self._load_stream_waited = False
 
     def register_kv_caches(
         self,
@@ -136,14 +132,9 @@ class SimpleCPUOffloadWorker:
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata
-        if metadata.load_event >= 0:
-            self._pending_load_event_indices.add(metadata.load_event)
-        if metadata.store_event >= 0:
-            self._pending_store_event_indices.add(metadata.store_event)
+        self._load_stream_waited = False
         if metadata.preempt_load_event >= 0:
             self._pending_load_event_indices.add(metadata.preempt_load_event)
-        if metadata.preempt_store_event >= 0:
-            self._pending_store_event_indices.add(metadata.preempt_store_event)
 
     def clear_connector_metadata(self) -> None:
         """Clear metadata after the model runner finishes the current step."""
@@ -153,30 +144,43 @@ class SimpleCPUOffloadWorker:
         self,
         kv_connector_metadata: SimpleCPUOffloadMetadata,
     ) -> None:
-        """Flush in-flight transfers before preempted blocks are reused."""
-        if not kv_connector_metadata.need_flush:
-            return
-        self._flush_and_sync_all()
+        """Save preempted blocks before input preparation can overwrite them."""
+        if kv_connector_metadata.need_flush:
+            self._flush_and_sync_all()
+
+        # The scheduler may immediately reuse preempted block IDs in this same
+        # step. This blocking D2H must therefore run before _update_states()
+        # processes new_block_ids_to_zero and before model forward writes KV.
+        self._submit_transfer(
+            kv_connector_metadata.preempt_store_gpu_blocks,
+            kv_connector_metadata.preempt_store_cpu_blocks,
+            kv_connector_metadata.preempt_store_event,
+            is_store=True,
+            sync=True,
+        )
 
     def start_load_kv(self) -> None:
-        """Submit pre-forward preemption offload/load transfers."""
+        """Submit pre-forward recompute H2D transfers."""
         metadata = self._connector_metadata
         if metadata is None:
             return
 
-        self._submit_transfer(
-            metadata.preempt_store_gpu_blocks,
-            metadata.preempt_store_cpu_blocks,
-            metadata.preempt_store_event,
-            is_store=True,
-            sync=True,
-        )
         self._submit_transfer(
             metadata.preempt_load_cpu_blocks,
             metadata.preempt_load_gpu_blocks,
             metadata.preempt_load_event,
             is_store=False,
         )
+
+    def wait_for_layer_load(self) -> None:
+        """Make the current forward stream wait for the recompute H2D copy."""
+        if self._load_stream_waited or self.load_stream is None:
+            return
+        metadata = self._connector_metadata
+        if metadata is None or metadata.preempt_load_event < 0:
+            return
+        torch.npu.current_stream().wait_stream(self.load_stream)
+        self._load_stream_waited = True
 
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
@@ -186,22 +190,10 @@ class SimpleCPUOffloadWorker:
         self._load_events.clear()
         self._submitted_load_event_indices.clear()
 
-        for event_idx, event in self._store_events:
-            event.synchronize()
-            self._store_hwm = event_idx
-            self._completed_store_events[event_idx] = 1
-            self._pending_store_event_indices.discard(event_idx)
-        self._store_events.clear()
-        self._submitted_store_event_indices.clear()
-
-    def _poll_stream_events(self, is_store: bool) -> int:
-        """Return the highest completed transfer event index."""
-        if is_store:
-            events = self._store_events
-            hwm = self._store_hwm
-        else:
-            events = self._load_events
-            hwm = self._load_hwm
+    def _poll_load_events(self) -> int:
+        """Return the highest completed H2D event index."""
+        events = self._load_events
+        hwm = self._load_hwm
 
         while events:
             event_idx, event = events[0]
@@ -210,10 +202,7 @@ class SimpleCPUOffloadWorker:
             hwm = event_idx
             events.pop(0)
 
-        if is_store:
-            self._store_hwm = hwm
-        else:
-            self._load_hwm = hwm
+        self._load_hwm = hwm
         return hwm
 
     def _submit_transfer(
@@ -227,20 +216,14 @@ class SimpleCPUOffloadWorker:
         """Submit a CPU<->NPU block copy and record a completion event."""
         if event_idx < 0:
             return
-        submitted_events = (
-            self._submitted_store_event_indices
-            if is_store
-            else self._submitted_load_event_indices
-        )
-        if event_idx in submitted_events:
+        if not is_store and event_idx in self._submitted_load_event_indices:
             return
-        submitted_events.add(event_idx)
+        if not is_store:
+            self._submitted_load_event_indices.add(event_idx)
 
         if not src_block_ids:
             if is_store:
-                self._store_hwm = max(self._store_hwm, event_idx)
-                if sync:
-                    self._completed_store_events[event_idx] = 1
+                self._completed_store_events[event_idx] = 1
             else:
                 self._load_hwm = max(self._load_hwm, event_idx)
             return
@@ -279,9 +262,6 @@ class SimpleCPUOffloadWorker:
         if sync:
             event.synchronize()
             if is_store:
-                self._store_hwm = max(self._store_hwm, event_idx)
-                self._pending_store_event_indices.discard(event_idx)
-                self._submitted_store_event_indices.discard(event_idx)
                 self._completed_store_events[event_idx] = 1
             else:
                 self._load_hwm = max(self._load_hwm, event_idx)
@@ -289,34 +269,21 @@ class SimpleCPUOffloadWorker:
                 self._submitted_load_event_indices.discard(event_idx)
             return
 
-        events = self._store_events if is_store else self._load_events
-        events.append((event_idx, event))
+        assert not is_store
+        self._load_events.append((event_idx, event))
 
     def get_finished(
         self,
         finished_req_ids: set[str],
     ) -> tuple[set[str] | None, set[str] | None]:
-        """Submit/poll transfer work and report completed loads."""
+        """Poll recompute transfers and report completed request restores."""
         metadata = self._connector_metadata
         if metadata is None:
             return None, None
 
-        self._submit_transfer(
-            metadata.load_cpu_blocks,
-            metadata.load_gpu_blocks,
-            metadata.load_event,
-            is_store=False,
-        )
-        self._submit_transfer(
-            metadata.store_gpu_blocks,
-            metadata.store_cpu_blocks,
-            metadata.store_event,
-            is_store=True,
-        )
-
         finished_recving: set[str] = set()
         if self._pending_load_event_indices:
-            load_hwm = self._poll_stream_events(is_store=False)
+            load_hwm = self._poll_load_events()
             completed_loads = [
                 event_idx
                 for event_idx in self._pending_load_event_indices
@@ -325,22 +292,9 @@ class SimpleCPUOffloadWorker:
             for event_idx in completed_loads:
                 self._pending_load_event_indices.discard(event_idx)
                 self._submitted_load_event_indices.discard(event_idx)
-                finished_recving.update(metadata.load_event_to_reqs.get(event_idx, []))
                 finished_recving.update(
                     metadata.preempt_load_event_to_reqs.get(event_idx, [])
                 )
-
-        if self._pending_store_event_indices:
-            store_hwm = self._poll_stream_events(is_store=True)
-            completed_stores = [
-                event_idx
-                for event_idx in self._pending_store_event_indices
-                if event_idx <= store_hwm
-            ]
-            for event_idx in completed_stores:
-                self._pending_store_event_indices.discard(event_idx)
-                self._submitted_store_event_indices.discard(event_idx)
-                self._completed_store_events[event_idx] = 1
 
         return None, finished_recving or None
 
@@ -348,7 +302,7 @@ class SimpleCPUOffloadWorker:
         """Return completed store events since the previous call.
 
         The scheduler aggregates this metadata across workers/ranks. A store
-        event is committed to the CPU prefix cache only after all expected
+        event becomes available to recompute requests only after all expected
         workers have reported completion.
         """
         if not self._completed_store_events:

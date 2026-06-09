@@ -1984,6 +1984,14 @@ class NPUModelRunner(GPUModelRunner):
             if new_token_ids and all(not token_ids for token_ids in new_token_ids):
                 scheduler_output = deepcopy(scheduler_output)
                 scheduler_output.scheduled_cached_reqs.new_token_ids = []
+
+        if has_kv_transfer_group():
+            kv_connector_metadata = scheduler_output.kv_connector_metadata
+            assert kv_connector_metadata is not None
+            # Preemption stores must run before _update_states() zeroes newly
+            # allocated blocks that may reuse the same physical KV cache IDs.
+            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():

@@ -14,31 +14,13 @@ INVALID_JOB_ID = -1
 
 @dataclass
 class SimpleCPUOffloadMetadata(KVConnectorMetadata):
-    """
-    Metadata passed from scheduler to worker for CPU offload operations.
-
-    The worker receives flat block lists keyed by a monotonic event_idx.
-    Job->req_id translation is handled by the scheduler-side manager
-    (via inverse maps), so the worker never knows about request identities.
-    """
-
-    # Load event per step. INVALID_JOB_ID means no blocks to load this step.
-    load_event: int = INVALID_JOB_ID
-    load_gpu_blocks: list[int] = field(default_factory=list)
-    load_cpu_blocks: list[int] = field(default_factory=list)
-    # Reverse map: load_event->req_ids, for tracking requests with finished load events
-    load_event_to_reqs: dict[int, list[str]] = field(default_factory=dict)
-
-    # Store event per step. INVALID_JOB_ID means no blocks to store this step.
-    store_event: int = INVALID_JOB_ID
-    store_gpu_blocks: list[int] = field(default_factory=list)
-    store_cpu_blocks: list[int] = field(default_factory=list)
+    """Recompute offload transfers passed from scheduler to worker."""
 
     # Whether any requests were preempted this step and need flush pending transfers.
     need_flush: bool = False
 
-    # Preemption store event. These blocks are keyed by request_id on the
-    # scheduler side and may include a final partial block without a hash.
+    # Store blocks of newly preempted requests before their GPU blocks can
+    # be reused. The list may include a final partial block without a hash.
     preempt_store_event: int = INVALID_JOB_ID
     preempt_store_gpu_blocks: list[int] = field(default_factory=list)
     preempt_store_cpu_blocks: list[int] = field(default_factory=list)
