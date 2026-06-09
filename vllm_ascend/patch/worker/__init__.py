@@ -81,5 +81,5 @@ if _V2_MODEL_RUNNER_SUPPORTED:
 if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
 import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
-import vllm_ascend.patch.worker.patch_bailing_moe_linear # type: ignore # noqa 
+import vllm_ascend.patch.worker.patch_bailing_moe_linear  # type: ignore # noqa
 import vllm_ascend.patch.worker.patch_glm4v  # noqa
