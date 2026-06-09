@@ -21,7 +21,7 @@ test_cases:
       - "--port"
       - "$SERVER_PORT"
       - "--max-num-seqs"
-      - "32"
+      - "128"
       - "--quantization"
       - "ascend"
       - "--max-model-len"
