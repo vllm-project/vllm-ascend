@@ -709,7 +709,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ]
 
         prefill_slot_mapping = self.slot_mapping[
-            compressed_tokens_start : compressed_tokens_end + compressed_tokens_start
+            compressed_tokens_start : compressed_tokens_start + compressed_tokens_end
         ]
 
         assert self.start_pos_prefill is not None
@@ -958,7 +958,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ]
 
         slot_mapping = DeviceOperator.pad_dsa_decode_slot_mapping(
-            self.slot_mapping[:compressed_tokens_start], self.num_decode_tokens, self.compressor_ratio, self.num_decodes
+            self.slot_mapping[:compressed_tokens_start],
+            self.num_decode_tokens,
+            self.compressor_ratio,
+            self.num_decodes,
         )
 
         assert self.start_pos_decode is not None

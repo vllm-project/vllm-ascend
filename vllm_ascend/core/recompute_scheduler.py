@@ -22,6 +22,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, fields
 
+from vllm_ascend.core.kv_cache_block_copy import attach_kv_cache_block_copy_pairs
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.distributed.kv_events import KVEventBatch
@@ -754,6 +755,8 @@ class RecomputeScheduler(Scheduler):
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
 
+        kv_cache_block_copy_pairs = self.kv_cache_manager.take_block_copy_pairs() or None
+
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -772,6 +775,7 @@ class RecomputeScheduler(Scheduler):
             new_block_ids_to_zero=new_block_ids_to_zero,
             recomputed_reqs=recomputed_reqs,
         )
+        attach_kv_cache_block_copy_pairs(scheduler_output, kv_cache_block_copy_pairs)
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store

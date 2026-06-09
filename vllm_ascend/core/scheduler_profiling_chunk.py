@@ -24,6 +24,7 @@ import inspect
 import time
 
 from vllm.config import VllmConfig
+from vllm_ascend.core.kv_cache_block_copy import attach_kv_cache_block_copy_pairs
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -719,6 +720,8 @@ class ProfilingChunkScheduler(Scheduler):
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
 
+        kv_cache_block_copy_pairs = self.kv_cache_manager.take_block_copy_pairs() or None
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -732,6 +735,7 @@ class ProfilingChunkScheduler(Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
+        attach_kv_cache_block_copy_pairs(scheduler_output, kv_cache_block_copy_pairs)
 
         if self.connector is not None:
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)

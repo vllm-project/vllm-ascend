@@ -117,6 +117,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.core.kv_cache_block_copy import extract_kv_cache_block_copy_pairs
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -600,8 +601,17 @@ class NPUModelRunner(GPUModelRunner):
         max_tokens_across_dp = int(num_tokens_across_dp.max().item())
         synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
 
-        # Create a tensor for num_tokens_after_padding
-        if allow_dp_padding or is_draft_model:
+        # DP padding for graph replay must be decided from the synchronized
+        # runtime mode. In mixed prefill-decode, decode ranks may locally choose
+        # a decode graph while prefill ranks choose eager; the synced mode is
+        # NONE, so padding decode ranks to the prefill length would make ranks
+        # run different logical batches.
+        should_dp_pad = (
+            synced_cudagraph_mode != CUDAGraphMode.NONE
+            or allow_dp_padding
+            or is_draft_model
+        )
+        if should_dp_pad:
             num_tokens_after_padding = torch.tensor(
                 [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
             )
@@ -631,7 +641,94 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
-        return super()._update_states(scheduler_output)
+        kv_cache_block_copy_pairs = extract_kv_cache_block_copy_pairs(scheduler_output)
+        deferred = super()._update_states(scheduler_output)
+        self._copy_kv_cache_blocks(kv_cache_block_copy_pairs)
+        return deferred
+
+    def _copy_kv_cache_blocks(
+        self,
+        copy_pairs: list[tuple[int, int, int, int, int]] | None,
+    ) -> None:
+        if not copy_pairs:
+            return
+
+        pairs_by_group: dict[int, list[tuple[int, int, int, int]]] = {}
+        for pair in copy_pairs:
+            if len(pair) == 4:
+                group_id, src_block_id, dst_block_id, compressed_slots = pair
+                original_slots = compressed_slots
+            else:
+                group_id, src_block_id, dst_block_id, compressed_slots, original_slots = pair
+            pairs_by_group.setdefault(group_id, []).append(
+                (src_block_id, dst_block_id, compressed_slots, original_slots)
+            )
+
+        seen_cache_ids: set[int] = set()
+        for group_id, pairs in pairs_by_group.items():
+            for attn_group in self.attn_groups[group_id]:
+                for layer_name in attn_group.layer_names:
+                    if layer_name in self.runner_only_attn_layers:
+                        continue
+                    layer = self.compilation_config.static_forward_context[layer_name]
+                    kv_cache = layer.kv_cache[0]
+                    cache_id = id(kv_cache)
+                    if cache_id in seen_cache_ids:
+                        continue
+                    seen_cache_ids.add(cache_id)
+                    self._copy_kv_cache_one_layer(kv_cache, pairs)
+
+    def _copy_kv_cache_one_layer(
+        self,
+        kv_cache,
+        pairs: list[tuple[int, int, int, int]],
+    ) -> None:
+        if isinstance(kv_cache, torch.Tensor):
+            self._copy_kv_cache_tensor(
+                kv_cache, [(src, dst, original) for src, dst, _, original in pairs]
+            )
+            return
+
+        # DSv4 DSA packs original-window KV and compressed/indexer KV into the
+        # same per-layer page. Original-window tensors need the full 32-token
+        # prefix block, while compressed/indexer tensors must zero slots beyond
+        # the compressed prefix length to avoid stale future-prefix KV.
+        is_dsa_packed_cache = len(kv_cache) >= 3
+        compressed_tensor_indices = {0, 2, 4, 5}
+        for idx, tensor in enumerate(kv_cache):
+            if tensor is None:
+                continue
+            # On A5 the indexer full cache is an overlapping view of the
+            # indexer k/scale cache. Copying/zeroing it after the component
+            # views can corrupt the copied prefix, so preserve the component
+            # views only; later indexer scatter will rewrite the full view for
+            # newly generated slots.
+            if is_dsa_packed_cache and idx == 6:
+                continue
+            tensor_pairs = []
+            for src, dst, compressed, original in pairs:
+                valid_slots = (
+                    compressed
+                    if is_dsa_packed_cache and idx in compressed_tensor_indices
+                    else original
+                )
+                tensor_pairs.append((src, dst, valid_slots))
+            self._copy_kv_cache_tensor(tensor, tensor_pairs)
+
+    @staticmethod
+    def _copy_kv_cache_tensor(
+        tensor: torch.Tensor,
+        pairs: list[tuple[int, int, int]],
+    ) -> None:
+        # Compressed DSA cache tensors use shape (2, num_blocks, block, ...);
+        # regular K/V caches use (num_blocks, block, ...).
+        for src_block_id, dst_block_id, valid_slots in pairs:
+            if tensor.ndim >= 2 and tensor.shape[0] == 2:
+                tensor[:, dst_block_id, :valid_slots] = tensor[:, src_block_id, :valid_slots]
+                tensor[:, dst_block_id, valid_slots:].zero_()
+            else:
+                tensor[dst_block_id, :valid_slots] = tensor[src_block_id, :valid_slots]
+                tensor[dst_block_id, valid_slots:].zero_()
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -2688,7 +2785,7 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
-                allow_dp_padding=(cudagraph_mode != CUDAGraphMode.NONE) or enable_sp(self.vllm_config),
+                allow_dp_padding=enable_sp(self.vllm_config),
             )
 
             # Extract DP padding if there is any

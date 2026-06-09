@@ -1245,6 +1245,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
+        if has_prefill:
+            valid_local_tokens = int(local_seq_lengths_query[-1].item())
+            if valid_local_tokens < attn_output.shape[0]:
+                attn_output[valid_local_tokens:].zero_()
         return attn_output
 
     def _restore_tp_head_layout(
