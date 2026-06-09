@@ -236,7 +236,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(self.platform.get_device_total_memory(0), 32768 * 1024 * 1024)
         mock_check_output.assert_called_once_with(
-            ["npu-smi", "info", "-t", "memory", "-i", "0", "-c", "0"],
+            ["npu-smi", "info", "-t", "memory", "-i", "0"],
             stderr=-3,
             text=True,
         )

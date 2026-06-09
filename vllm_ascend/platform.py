@@ -84,7 +84,7 @@ def _get_npu_smi_field(lines: list[str], key: str) -> str | None:
 def _get_npu_smi_hbm_capacity_mb(device_id: int) -> int | None:
     try:
         output = subprocess.check_output(
-            ["npu-smi", "info", "-t", "memory", "-i", str(device_id), "-c", "0"],
+            ["npu-smi", "info", "-t", "memory", "-i", str(device_id)],
             stderr=subprocess.DEVNULL,
             text=True,
         )
