@@ -1,9 +1,11 @@
 from contextlib import contextmanager
 
 import torch
-from vllm.logger import logger
 
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, weak_ref_workspaces
+from vllm_ascend.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @contextmanager

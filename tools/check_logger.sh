@@ -15,15 +15,16 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-# Check that vllm_ascend modules do not use init_logger(__name__).
+# Check that vllm_ascend modules do not use vllm.logger.init_logger(__name__).
 #
 # vllm's logging config registers a handler only for the "vllm" logger
-# namespace.  Any logger created via init_logger(__name__) inside a
-# vllm_ascend module ends up in the "vllm_ascend.*" namespace, which has
-# no handler, so every log call is silently dropped.
+# namespace.  Any logger created via vllm.logger.init_logger(__name__)
+# inside a vllm_ascend module ends up in the "vllm_ascend.*" namespace,
+# which has no handler, so every log call is silently dropped.
 #
-# The correct pattern is:
-#   from vllm.logger import logger
+# The correct patterns are:
+#   1. from vllm.logger import logger (if you don't need module identification)
+#   2. from vllm_ascend.logger import init_logger; logger = init_logger(__name__) (for vllm-ascend logger with prefix)
 #
 
 set -euo pipefail
@@ -37,32 +38,40 @@ VIOLATIONS=0
 for FILE in $(find "$PATCH_DIR" -type f -name "*.py" 2>/dev/null); do
     [[ -f "$FILE" ]] || continue
 
-    # Find lines that call init_logger(__name__)
-    while IFS= read -r MATCH; do
-        LINENUM=$(echo "$MATCH" | cut -d: -f1)
-        LINE=$(echo "$MATCH" | cut -d: -f2-)
-        if [[ $VIOLATIONS -eq 0 ]]; then
-            echo ""
-        fi
-        echo "  $FILE:$LINENUM: $LINE"
-        VIOLATIONS=$(( VIOLATIONS + 1 ))
-    done < <(grep -n 'init_logger[[:space:]]*([[:space:]]*__name__[[:space:]]*)' "$FILE" 2>/dev/null || true)
+    # Skip the logger.py file itself
+    [[ "$FILE" == *"logger.py" ]] && continue
+
+    # Check if this file uses from vllm.logger import init_logger
+    if grep -q 'from vllm.logger import init_logger' "$FILE" 2>/dev/null; then
+        # Find lines that call init_logger(__name__)
+        while IFS= read -r MATCH; do
+            LINENUM=$(echo "$MATCH" | cut -d: -f1)
+            LINE=$(echo "$MATCH" | cut -d: -f2-)
+            if [[ $VIOLATIONS -eq 0 ]]; then
+                echo ""
+            fi
+            echo "  $FILE:$LINENUM: $LINE"
+            VIOLATIONS=$(( VIOLATIONS + 1 ))
+        done < <(grep -n 'init_logger[[:space:]]*([[:space:]]*__name__[[:space:]]*)' "$FILE" 2>/dev/null || true)
+    fi
 done
 
 if [[ $VIOLATIONS -gt 0 ]]; then
     echo ""
-    echo "Found $VIOLATIONS violation(s): init_logger(__name__) must not be used in vllm_ascend modules."
+    echo "Found $VIOLATIONS violation(s): vllm.logger.init_logger(__name__) must not be used in vllm_ascend modules."
     echo ""
     echo "vllm's logging handler is registered only for the 'vllm' namespace."
-    echo "Loggers created with init_logger(__name__) inside vllm_ascend end up"
+    echo "Loggers created with vllm.logger.init_logger(__name__) inside vllm_ascend end up"
     echo "in the 'vllm_ascend.*' namespace, which has no handler — all log"
     echo "messages are silently dropped."
     echo ""
-    echo "Fix: replace"
-    echo "   from vllm.logger import init_logger"
-    echo "   logger = init_logger(__name__)"
-    echo "with"
+    echo "Fix options:"
+    echo "  Option 1 (simple):"
     echo "   from vllm.logger import logger"
+    echo ""
+    echo "  Option 2 (vllm-ascend logger with prefix):"
+    echo "   from vllm_ascend.logger import init_logger"
+    echo "   logger = init_logger(__name__)"
     exit 1
 fi
 

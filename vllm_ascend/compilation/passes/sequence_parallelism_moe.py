@@ -4,12 +4,14 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.compilation.passes.vllm_inductor_pass import PatternPrettyPrinter, VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
-from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.sequence_parallelism import (
     _SequenceParallelPatternHelper,
     get_sp_min_token_num,
 )
+from vllm_ascend.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class MiddleLayerAllgatherAddRMSNormPattern(_SequenceParallelPatternHelper):

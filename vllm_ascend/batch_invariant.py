@@ -21,8 +21,11 @@ import os
 import torch
 import torch_npu
 import vllm.envs as envs
-from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
+
+from vllm_ascend.logger import init_logger
+
+logger = init_logger(__name__)
 
 # in case recursive call in reduce_sum.
 torch_sum = torch.sum

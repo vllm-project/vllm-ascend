@@ -16,9 +16,12 @@
 
 import torch
 import torch_npu
-from vllm.logger import logger
+
+from vllm_ascend.logger import init_logger
 
 from .netloader_pg import destroy_stateless_process_group, stateless_init_process_group
+
+logger = init_logger(__name__)
 
 
 class P2PLoad:

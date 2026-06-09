@@ -336,7 +336,8 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        from vllm_ascend import platform
+        with self.assertLogs(logger="vllm_ascend.platform", level="WARNING") as cm:
+            from vllm_ascend import platform
 
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
@@ -365,7 +366,8 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        from vllm_ascend import platform
+        with self.assertLogs(logger="vllm_ascend.platform", level="INFO") as cm:
+            from vllm_ascend import platform
 
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
@@ -409,7 +411,8 @@ class TestNPUPlatform(TestBase):
 
         vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
-        from vllm_ascend import platform
+        with self.assertLogs(logger="vllm_ascend.platform", level="WARNING") as cm:
+            from vllm_ascend import platform
 
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
@@ -443,7 +446,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.model_config.enforce_eager = False
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
 
-        with self.assertLogs(logger="vllm", level="INFO") as cm:
+        with self.assertLogs(logger="vllm_ascend.platform", level="INFO") as cm:
             from vllm_ascend import platform
 
             importlib.reload(platform)

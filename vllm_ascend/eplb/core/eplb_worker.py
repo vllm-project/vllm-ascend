@@ -20,10 +20,12 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
-from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
+from vllm_ascend.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class EplbWorker:

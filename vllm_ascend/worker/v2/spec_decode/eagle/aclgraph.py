@@ -8,7 +8,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -27,8 +26,11 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
+from vllm_ascend.logger import init_logger
 from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+logger = init_logger(__name__)
 
 
 class PrefillEagleAclGraphManager(PrefillEagleCudaGraphManager):

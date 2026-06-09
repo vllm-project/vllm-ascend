@@ -25,7 +25,8 @@ from typing import Any
 
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
-from vllm.logger import logger
+
+from vllm_ascend.logger import init_logger
 
 
 def find_loaded_library(lib_name) -> str | None:
@@ -52,6 +53,8 @@ def find_loaded_library(lib_name) -> str | None:
     assert filename.rpartition(".so")[0].startswith(lib_name), f"Unexpected filename: {filename} for library {lib_name}"
     return path
 
+
+logger = init_logger(__name__)
 
 camem_available = False
 try:

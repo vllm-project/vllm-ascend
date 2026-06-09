@@ -21,9 +21,11 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
-from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
+from vllm_ascend.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class MulsAddPattern(BasePattern):

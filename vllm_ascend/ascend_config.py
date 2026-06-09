@@ -17,11 +17,14 @@ import json
 import os
 from typing import TYPE_CHECKING, Any
 
-from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+from vllm_ascend.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class AscendConfig:
