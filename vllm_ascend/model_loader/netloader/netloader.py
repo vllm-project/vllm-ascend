@@ -178,7 +178,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
         else:
             target_device = torch.device(device_config.device)
 
-            vllm_config_backup = deepcopy(vllm_config)
+            _quant_config = deepcopy(vllm_config.quant_config) if vllm_config.quant_config is not None else None
             model_config_backup = deepcopy(model_config)
 
             with set_default_torch_dtype(model_config.dtype):
@@ -220,7 +220,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 if model is None:
                     logger.warning("Netloader elastic loading fails, use load format DefaultModelLoader")
 
-                    vllm_config = vllm_config_backup
+                    vllm_config.quant_config = _quant_config
                     model_config = model_config_backup
 
                     del model
