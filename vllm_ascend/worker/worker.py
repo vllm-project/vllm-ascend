@@ -761,6 +761,18 @@ class NPUWorker(WorkerBase):
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
+            # Build KV-zero metadata outside the CuMem pool so the bookkeeping
+            # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
+            # allocator and are not discarded during sleep/wake cycles.
+            if (
+                kv_cache_config.needs_kv_cache_zeroing
+                and hasattr(self.model_runner, "_init_kv_zero_meta")
+                and self.vllm_config is not None
+                and self.vllm_config.speculative_config is not None
+                and self.vllm_config.speculative_config.num_speculative_tokens > 1
+            ):
+                self.model_runner._init_kv_zero_meta()
+
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
         if self.profiler_config is None or self.profiler_config.profiler is None:
