@@ -23,29 +23,32 @@ on:
 
 permissions:
   contents: read
-  actions: write
-  pull-requests: write
+  pull-requests: read
   issues: write
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 jobs:
-  authorize:
-    name: Check user authorization
+  authorize-and-parse:
+    name: Authorize and parse nightly cases
     runs-on: ubuntu-latest
     outputs:
-      test_cases: ${{ steps.resolve.outputs.test_cases }}
+      single_node_matrix: ${{ steps.parse.outputs.single_node_matrix }}
+      multi_node_matrix: ${{ steps.parse.outputs.multi_node_matrix }}
+      accuracy_matrix: ${{ steps.parse.outputs.accuracy_matrix }}
+      ops_matrix: ${{ steps.parse.outputs.ops_matrix }}
+      selected_cases_summary: ${{ steps.parse.outputs.selected_cases_summary }}
       branch: ${{ steps.resolve.outputs.branch }}
-      is_authorized: ${{ steps.auth.outputs.is_authorized }}
-      dispatch_a2: ${{ steps.resolve.outputs.dispatch_a2 }}
-      dispatch_a3: ${{ steps.resolve.outputs.dispatch_a3 }}
+      branch_tag: ${{ steps.branch.outputs.branch_tag }}
+      test_filter: ${{ steps.resolve.outputs.test_filter }}
+      request_id: ${{ github.run_id }}
       vllm_ascend_ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
+      has_cases: ${{ steps.count.outputs.has_cases }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          sparse-checkout: |
-            .github/workflows/scripts/resolve_nightly_tests.py
-          sparse-checkout-cone-mode: false
+      - name: Checkout base repository
+        uses: actions/checkout@v6
 
       - name: Check user authorization
         id: auth
@@ -55,7 +58,7 @@ jobs:
           ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
-          ROLE_NAME=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.role_name')
+          ROLE_NAME=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.role_name' 2>/dev/null || echo "none")
           case "$ROLE_NAME" in
             triage|write|maintain|admin)
               echo "User $ACTOR has $ROLE_NAME role, authorized."
@@ -82,24 +85,27 @@ jobs:
         if: steps.auth.outputs.is_authorized == 'false'
         run: exit 1
 
-      - name: Resolve test cases and branch
+      - name: Resolve arguments and PR ref
         id: resolve
-        if: steps.auth.outputs.is_authorized == 'true'
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           ALL_ARGS: ${{ github.event.client_payload.slash_command.args.all }}
           PR_URL: ${{ github.event.client_payload.github.payload.issue.pull_request.url }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          ISSUE_NUMBER: ${{ github.event.client_payload.github.payload.issue.number }}
         run: |
+          post_comment() {
+            gh api "repos/$REPO/issues/$ISSUE_NUMBER/comments" -f body="$1" --silent
+          }
+
           ALL_ARGS=$(echo "$ALL_ARGS" | xargs)
           if [ -z "$ALL_ARGS" ]; then
-            gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
-              -f body="[Bot]: \`/nightly\` without test names will not dispatch. Please specify test names, e.g. \`/nightly all\` or \`/nightly test_custom_op\`." \
-              --silent
+            post_comment "[Bot]: \`/nightly\` without test names will not dispatch. Please specify test names, e.g. \`/nightly all\` or \`/nightly test_custom_op\`."
             exit 1
           fi
 
           BRANCH="main"
-          TEST_CASES=""
+          TEST_FILTER=""
           NEXT_IS_BRANCH=0
           for WORD in $ALL_ARGS; do
             if [ "$NEXT_IS_BRANCH" = "1" ]; then
@@ -108,136 +114,231 @@ jobs:
             elif [ "$WORD" = "--branch" ]; then
               NEXT_IS_BRANCH=1
             else
-              if [ -z "$TEST_CASES" ]; then
-                TEST_CASES="$WORD"
+              if [ -z "$TEST_FILTER" ]; then
+                TEST_FILTER="$WORD"
               else
-                TEST_CASES="$TEST_CASES,$WORD"
+                TEST_FILTER="$TEST_FILTER,$WORD"
               fi
             fi
           done
 
-          if [ -z "$TEST_CASES" ]; then
-            gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
-              -f body="[Bot]: \`/nightly\` without test names will not dispatch. Please specify test names, e.g. \`/nightly all\` or \`/nightly test_custom_op\`." \
-              --silent
+          if [ "$NEXT_IS_BRANCH" = "1" ]; then
+            post_comment "[Bot]: nightly command failed: \`--branch\` requires a branch name."
+            exit 1
+          fi
+          if [ -z "$TEST_FILTER" ]; then
+            post_comment "[Bot]: \`/nightly\` without test names will not dispatch. Please specify test names, e.g. \`/nightly all\` or \`/nightly test_custom_op\`."
             exit 1
           fi
 
-
-          echo "test_cases=$TEST_CASES" >> "$GITHUB_OUTPUT"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-
-          PR_BRANCH=$(gh api "$PR_URL" --jq '.head.ref')
           HEAD_REPO=$(gh api "$PR_URL" --jq '.head.repo.full_name')
           PR_SHA=$(gh api "$PR_URL" --jq '.head.sha')
-          echo "vllm_ascend_ref=$PR_SHA" >> "$GITHUB_OUTPUT"
 
-          if [ "$TEST_CASES" = "all" ]; then
-            echo "dispatch_a2=true" >> "$GITHUB_OUTPUT"
-            echo "dispatch_a3=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Parse test matrices from the PR branch's workflow YAML files
-          pip install pyyaml -q 2>/dev/null
-
-          A2_RAW=$(gh api "repos/$HEAD_REPO/contents/.github/workflows/schedule_nightly_test_a2.yaml?ref=$PR_BRANCH" --jq '.content' 2>/dev/null || echo "")
-          export A2_RAW
-          A3_RAW=$(gh api "repos/$HEAD_REPO/contents/.github/workflows/schedule_nightly_test_a3.yaml?ref=$PR_BRANCH" --jq '.content' 2>/dev/null || echo "")
-          export A3_RAW
-          A2_ACC_GROUPS=$(gh api "repos/$HEAD_REPO/contents/tests/e2e/models/configs/accuracy_groups_a2.json?ref=$PR_BRANCH" --jq '.content' 2>/dev/null || echo "")
-          export A2_ACC_GROUPS
-          export TEST_CASES
-
-          python3 .github/workflows/scripts/resolve_nightly_tests.py
-
-  dispatch-a2:
-    name: Trigger Nightly-A2
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.dispatch_a2 == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      a2_run_id: ${{ steps.dispatch_a2.outputs.a2_run_id }}
-    steps:
-      - name: Dispatch nightly-a2 workflow
-        id: dispatch_a2
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
-          gh workflow run schedule_nightly_test_a2.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
-            -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
-          sleep 8
-          A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a2.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "a2_run_id=$A2_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
-
-  dispatch-a3:
-    name: Trigger Nightly-A3
-    needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.dispatch_a3 == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      a3_run_id: ${{ steps.dispatch_a3.outputs.a3_run_id }}
-    steps:
-      - name: Dispatch nightly-a3 workflow
-        id: dispatch_a3
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
-          gh workflow run schedule_nightly_test_a3.yaml \
-            --repo "$REPO" \
-            --ref main \
-            -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
-            -f skip_build_image=true \
-            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
-          sleep 8
-          A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
-            --jq '.workflow_runs[0].id')
-          echo "a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
-
-  post-links:
-    name: Post nightly workflow links
-    needs: [authorize, dispatch-a2, dispatch-a3]
-    if: always() && needs.authorize.outputs.is_authorized == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Build comment body
-        id: body
-        run: |
-          BODY="nightly command triggered."
-          if [[ "${{ needs.dispatch-a2.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Nightly-A2: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a2.outputs.a2_run_id }})"
-          fi
-          if [[ "${{ needs.dispatch-a3.result }}" == "success" ]]; then
-            BODY="$BODY
-          - Nightly-A3: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a3.outputs.a3_run_id }})"
-          fi
           {
-            echo "body<<EOF"
-            echo "$BODY"
-            echo "EOF"
+            echo "branch=$BRANCH"
+            echo "test_filter=$TEST_FILTER"
+            echo "head_repo=$HEAD_REPO"
+            echo "vllm_ascend_ref=$PR_SHA"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Post workflow URLs
+      - name: Resolve branch tag
+        id: branch
+        run: |
+          branch_tag=$(echo "${{ steps.resolve.outputs.branch }}" | tr '/' '-')
+          echo "branch_tag=${branch_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR source tree
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.resolve.outputs.head_repo }}
+          ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
+          path: pr-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install parser dependencies
+        run: pip install pyyaml regex
+
+      - name: Parse PR nightly schedule config
+        id: parse
+        working-directory: pr-source
+        run: |
+          python3 ../.github/workflows/scripts/parse_schedule_config.py \
+            --config .github/workflows/scripts/schedule_config.yaml \
+            --runner-label .github/workflows/scripts/runner_label.json \
+            --event-name workflow_dispatch \
+            --schedule-name nightly-main \
+            --test-filter "${{ steps.resolve.outputs.test_filter }}"
+
+      - name: Count selected cases
+        id: count
+        env:
+          SINGLE_NODE_MATRIX: ${{ steps.parse.outputs.single_node_matrix }}
+          MULTI_NODE_MATRIX: ${{ steps.parse.outputs.multi_node_matrix }}
+          ACCURACY_MATRIX: ${{ steps.parse.outputs.accuracy_matrix }}
+          OPS_MATRIX: ${{ steps.parse.outputs.ops_matrix }}
+        run: |
+          total=$(jq -n \
+            --argjson single "$SINGLE_NODE_MATRIX" \
+            --argjson multi "$MULTI_NODE_MATRIX" \
+            --argjson accuracy "$ACCURACY_MATRIX" \
+            --argjson ops "$OPS_MATRIX" \
+            '($single | length) + ($multi | length) + ($accuracy | length) + ($ops | length)')
+          echo "selected_count=${total}" >> "$GITHUB_OUTPUT"
+          if [ "$total" -gt 0 ]; then
+            echo "has_cases=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cases=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post no matched cases comment
+        if: steps.count.outputs.has_cases == 'false'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
-          body: ${{ steps.body.outputs.body }}
+          body: |
+            [Bot]: nightly command found no cases for `${{ steps.resolve.outputs.test_filter }}` in `nightly-main`.
+          reactions: confused
+
+      - name: Fail if no cases matched
+        if: steps.count.outputs.has_cases == 'false'
+        run: exit 1
+
+  post-started:
+    name: Post nightly workflow link
+    needs: [authorize-and-parse]
+    if: needs.authorize-and-parse.outputs.has_cases == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post workflow URL
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            nightly command triggered.
+            - Workflow run: [Periodic PR Nightly](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - Tests: `${{ needs.authorize-and-parse.outputs.test_filter }}`
+            - Image branch: `${{ needs.authorize-and-parse.outputs.branch }}`
+            - PR ref: `${{ needs.authorize-and-parse.outputs.vllm_ascend_ref }}`
           reactions: rocket
+
+  multi-node-tests:
+    name: multi-node / ${{ matrix.test_config.name }}
+    needs: [authorize-and-parse]
+    if: >-
+      needs.authorize-and-parse.result == 'success' &&
+      needs.authorize-and-parse.outputs.multi_node_matrix != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config: ${{ fromJSON(needs.authorize-and-parse.outputs.multi_node_matrix) }}
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: ${{ matrix.test_config.chip }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ needs.authorize-and-parse.outputs.branch_tag }}-${{ matrix.test_config.chip }}
+      config_path: ${{ matrix.test_config.config_path }}
+      multi_node_type: ${{ matrix.test_config.multi_node_type }}
+      extra_components: ${{ matrix.test_config.extra_components }}
+      size: ${{ matrix.test_config.size }}
+      name: ${{ matrix.test_config.name }}
+      should_run: true
+      ascend_log_prefix: /root/.cache/ascend-logs/${{ needs.authorize-and-parse.outputs.branch_tag }}
+      vllm_ascend_branch: ${{ needs.authorize-and-parse.outputs.branch }}
+      request_id: ${{ needs.authorize-and-parse.outputs.request_id }}
+      vllm_ascend_ref: ${{ needs.authorize-and-parse.outputs.vllm_ascend_ref }}
+    secrets:
+      KUBECONFIG_B64: ${{ matrix.test_config.chip == 'a2' && secrets.KUBECONFIG_HK_001_INTERNAL_B64 || secrets.KUBECONFIG_B64 }}
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+
+  single-node-tests:
+    name: single-node / ${{ matrix.test_config.name }}
+    needs: [authorize-and-parse, multi-node-tests]
+    if: >-
+      always() &&
+      needs.authorize-and-parse.result == 'success' &&
+      needs.authorize-and-parse.outputs.single_node_matrix != '[]' &&
+      (needs.multi-node-tests.result == 'success' || needs.multi-node-tests.result == 'skipped')
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        test_config: ${{ fromJSON(needs.authorize-and-parse.outputs.single_node_matrix) }}
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      runner: ${{ matrix.test_config.runner }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ needs.authorize-and-parse.outputs.branch_tag }}-${{ matrix.test_config.chip }}
+      config_path: ${{ matrix.test_config.config_path }}
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+      should_run: true
+      vllm_ascend_branch: ${{ needs.authorize-and-parse.outputs.branch }}
+      request_id: ${{ needs.authorize-and-parse.outputs.request_id }}
+      vllm_ascend_ref: ${{ needs.authorize-and-parse.outputs.vllm_ascend_ref }}
+    secrets:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+
+  accuracy-tests:
+    name: accuracy / ${{ matrix.test_config.name }}
+    needs: [authorize-and-parse]
+    if: >-
+      needs.authorize-and-parse.result == 'success' &&
+      needs.authorize-and-parse.outputs.accuracy_matrix != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config: ${{ fromJSON(needs.authorize-and-parse.outputs.accuracy_matrix) }}
+    uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
+    with:
+      runner: ${{ matrix.test_config.runner }}
+      config_paths: ${{ toJson(matrix.test_config.config_paths) }}
+      model_filter: all
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ needs.authorize-and-parse.outputs.branch_tag }}-${{ matrix.test_config.chip }}
+      is_run: true
+      upload: false
+      request_id: ${{ needs.authorize-and-parse.outputs.request_id }}
+      vllm_ascend_ref: ${{ needs.authorize-and-parse.outputs.vllm_ascend_ref }}
+
+  ops-tests:
+    name: ops / ${{ matrix.test_config.name }}
+    needs: [authorize-and-parse]
+    if: >-
+      needs.authorize-and-parse.result == 'success' &&
+      needs.authorize-and-parse.outputs.ops_matrix != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config: ${{ fromJSON(needs.authorize-and-parse.outputs.ops_matrix) }}
+    uses: ./.github/workflows/_e2e_periodic_ops.yaml
+    with:
+      runner: ${{ matrix.test_config.runner }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ needs.authorize-and-parse.outputs.branch_tag }}-${{ matrix.test_config.chip }}
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+      should_run: true
+      vllm_ascend_branch: ${{ needs.authorize-and-parse.outputs.branch }}
+      request_id: ${{ needs.authorize-and-parse.outputs.request_id }}
+      vllm_ascend_ref: ${{ needs.authorize-and-parse.outputs.vllm_ascend_ref }}
+
+  merge-benchmark-artifacts:
+    name: Merge benchmark artifacts
+    needs: [authorize-and-parse, single-node-tests, multi-node-tests, accuracy-tests, ops-tests]
+    if: >-
+      always() &&
+      needs.authorize-and-parse.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge all benchmark result artifacts
+        continue-on-error: true
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: pr-nightly-test-results
+          pattern: nightly-test-benchmark-results-*
+          compression-level: 0
+          delete-merged: true

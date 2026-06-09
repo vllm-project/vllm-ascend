@@ -150,7 +150,7 @@ If the request succeeds, you can see a response similar to the following:
 
 ## Accuracy Evaluation
 
-The repository already contains an end-to-end accuracy baseline for this model in `tests/e2e/models/configs/llava-onevision-qwen2-0.5b-ov-hf.yaml`.
+The repository already contains an end-to-end accuracy baseline for this model in `tests/e2e/schedule/accuracy/one_card/a2/llava-onevision-qwen2-0.5b-ov-hf.yaml`.
 
 | dataset | platform | metric | value |
 |----- | ----- | ----- | ----- |

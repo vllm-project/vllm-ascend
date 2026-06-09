@@ -1,0 +1,133 @@
+# ==========================================
+# Qwen3-30B-A3B-W8A8 accuracy (eagle3 + Mooncake KV-transfer)
+# Converted from the former
+# tests/e2e/schedule/accuracy/four_card/test_qwen3_30b_acc.py
+# into the single_node YAML framework. TP1 and TP4 run as two cases.
+# ==========================================
+
+# Shared envs (each case merges with <<: *envs so it gets its own copy; the TP4
+# case additionally enables FlashComm1). Ports set to DEFAULT_PORT are replaced
+# with free ports by the config loader.
+_envs: &envs
+  PYTHONHASHSEED: "0"
+  ASCEND_CONNECT_TIMEOUT: "10000"
+  ASCEND_TRANSFER_TIMEOUT: "10000"
+  ASCEND_BUFFER_POOL: "4:8"
+  VLLM_USE_V1: "1"
+  OMP_PROC_BIND: "false"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_BUFFSIZE: "1024"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_ASCEND_ENABLE_NZ: "2"
+  MOONCAKE_CONFIG_PATH: "mooncake.json"
+  SERVER_PORT: "DEFAULT_PORT"
+  MOONCAKE_PORT: "DEFAULT_PORT"
+  MOONCAKE_METRICS_PORT: "DEFAULT_PORT"
+
+_mooncake: &mooncake
+  config:
+    local_hostname: "localhost"
+    metadata_server: "P2PHANDSHAKE"
+    protocol: "ascend"
+    device_name: ""
+    master_server_address: "127.0.0.1:$MOONCAKE_PORT"
+    global_segment_size: 30000000000
+
+_prompts: &prompts
+  - "Janet's ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?"
+
+# Run the gsm8k-lite accuracy benchmark twice (warm-up + measure), mirroring the
+# original .py which called run_aisbench_cases twice.
+_acc_case: &acc_case
+  case_type: accuracy
+  dataset_path: vllm-ascend/gsm8k-lite
+  request_conf: vllm_api_general_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+  max_out_len: 32768
+  batch_size: 32
+  baseline: 95
+  threshold: 5
+
+_benchmarks: &benchmarks
+  acc_warmup: *acc_case
+  acc: *acc_case
+
+test_cases:
+  - name: "Qwen3-30B-A3B-W8A8-eagle3-mooncake-TP1"
+    model: "vllm-ascend/Qwen3-30B-A3B-W8A8"
+    envs:
+      <<: *envs
+    prompts: *prompts
+    api_keyword_args:
+      max_tokens: 10
+    # Two completion warm-up requests before the benchmark.
+    test_content:
+      - "completion"
+      - "completion"
+    mooncake: *mooncake
+    server_cmd:
+      - "--trust-remote-code"
+      - "--max-num-seqs"
+      - "100"
+      - "--max-model-len"
+      - "37364"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--tensor-parallel-size"
+      - "1"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--distributed_executor_backend"
+      - "mp"
+      - "--quantization"
+      - "ascend"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--speculative-config"
+      - '{"method": "eagle3", "model": "vllm-ascend/Qwen3-a3B_eagle3", "num_speculative_tokens": 3}'
+      - "--kv-transfer-config"
+      - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"register_buffer": true, "use_layerwise": false, "mooncake_rpc_port": "0"}}'
+    benchmarks: *benchmarks
+
+  - name: "Qwen3-30B-A3B-W8A8-eagle3-mooncake-TP4"
+    model: "vllm-ascend/Qwen3-30B-A3B-W8A8"
+    envs:
+      <<: *envs
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+    prompts: *prompts
+    api_keyword_args:
+      max_tokens: 10
+    test_content:
+      - "completion"
+      - "completion"
+    mooncake: *mooncake
+    server_cmd:
+      - "--trust-remote-code"
+      - "--max-num-seqs"
+      - "100"
+      - "--max-model-len"
+      - "37364"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--distributed_executor_backend"
+      - "mp"
+      - "--quantization"
+      - "ascend"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--speculative-config"
+      - '{"method": "eagle3", "model": "vllm-ascend/Qwen3-a3B_eagle3", "num_speculative_tokens": 3}'
+      - "--kv-transfer-config"
+      - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"register_buffer": true, "use_layerwise": false, "mooncake_rpc_port": "0"}}'
+    benchmarks: *benchmarks

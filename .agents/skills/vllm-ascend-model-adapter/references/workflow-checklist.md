@@ -237,7 +237,7 @@ Confirm:
 
 ### Test config generation
 
-- Generate `tests/e2e/models/configs/<ModelName>.yaml` using accuracy results from evaluation.
+- Generate `tests/e2e/schedule/accuracy/<resource_dir>/<chip>/<ModelName>.yaml` (e.g. `one_card/a2/`) using accuracy results from evaluation.
 - Must include: `model_name` (HF path), `hardware` (e.g. "Atlas A2 Series"), `tasks` (list with `name` and `metrics` containing `name` + `value`), `num_fewshot`.
 - Follow the schema of existing configs (e.g. `Qwen3-8B.yaml`).
 

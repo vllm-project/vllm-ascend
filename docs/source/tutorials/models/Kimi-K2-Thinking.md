@@ -115,7 +115,7 @@ For an Atlas 800 A3 (64G*16) node, tensor-parallel-size should be at least 16.
 ```{model-code}
 :block_name: kimi_k2_thinking_single_node
 :converter_tag: single_node
-:test_case_path: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
+:test_case_path: tests/e2e/schedule/model/Kimi/one_node/Kimi-K2-Thinking.yaml
 ```
 
 Once your server is started, you can query the model with input prompts.

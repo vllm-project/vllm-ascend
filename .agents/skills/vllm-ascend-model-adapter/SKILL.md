@@ -111,7 +111,7 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 ### 7) Backport, generate artifacts, and commit in delivery repo
 
 - If implementation happened in `/vllm-workspace/*`, backport minimal final diff to current working repo.
-- Generate test config YAML at `tests/e2e/models/configs/<ModelName>.yaml` following the schema of existing configs (must include `model_name`, `hardware`, `tasks` with accuracy metrics, and `num_fewshot`). Use accuracy results from evaluation to populate metric values.
+- Generate test config YAML at `tests/e2e/schedule/accuracy/<resource_dir>/<chip>/<ModelName>.yaml` (e.g. `one_card/a2/`) following the schema of existing configs (must include `model_name`, `hardware`, `tasks` with accuracy metrics, and `num_fewshot`). Use accuracy results from evaluation to populate metric values.
 - Generate tutorial markdown at `docs/source/tutorials/models/<ModelName>.md` following the standard template (Introduction, Supported Features, Environment Preparation with docker tabs, Deployment with serve script, Functional Verification with curl example, Accuracy Evaluation, Performance). Fill in model-specific details: HF path, hardware requirements, TP size, max-model-len, served-model-name, sample curl, and accuracy table.
 - Update `docs/source/tutorials/models/index.md` to include the new tutorial.
 - Confirm test config YAML and tutorial doc are included in the staged files.
@@ -133,7 +133,7 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 - Key feature set is attempted and reported: ACLGraph / EP / flashcomm1 / MTP / multimodal.
 - Capacity baseline (`128k + bs16`) result is reported, or explicit reason why not feasible.
 - **Dummy stage evidence is present (if used), and real-weight stage evidence is present (mandatory).**
-- Test config YAML exists at `tests/e2e/models/configs/<ModelName>.yaml` and follows the established schema (`model_name`, `hardware`, `tasks`, `num_fewshot`).
+- Test config YAML exists at `tests/e2e/schedule/accuracy/<resource_dir>/<chip>/<ModelName>.yaml` and follows the established schema (`model_name`, `hardware`, `tasks`, `num_fewshot`).
 - Tutorial doc exists at `docs/source/tutorials/models/<ModelName>.md` and follows the standard template (Introduction, Supported Features, Environment Preparation, Deployment, Functional Verification, Accuracy Evaluation, Performance).
 - Tutorial index at `docs/source/tutorials/models/index.md` includes the new model entry.
 - Exactly one signed commit contains all code changes in current working repo.

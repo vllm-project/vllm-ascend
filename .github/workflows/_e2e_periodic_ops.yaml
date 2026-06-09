@@ -1,0 +1,112 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Lightweight reusable workflow for periodic ops tests.
+# Runs pytest against the specified test target (file or directory).
+
+name: 'e2e periodic ops test'
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: true
+        type: string
+        description: GitHub Actions runner label
+      image:
+        required: true
+        type: string
+        description: Docker image to use for the test container
+      tests:
+        required: true
+        type: string
+        description: pytest target(s) — a .py file, a directory, or a space-separated list of files (one per-chip group)
+      name:
+        required: true
+        type: string
+        description: human-readable test name used in job labels and logs
+      should_run:
+        required: true
+        type: boolean
+        description: set to false to skip this job (matrix-level gate)
+      vllm_ascend_branch:
+        required: true
+        type: string
+        description: branch ref used for checkout
+      request_id:
+        required: false
+        type: string
+        default: ''
+        description: non-empty when triggered by PR /nightly command
+      vllm_ascend_ref:
+        required: false
+        type: string
+        default: ''
+        description: PR commit SHA for PR-triggered checkout
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+        description: print resolved inputs and skip ops execution
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  dry-run:
+    name: dry-run / ${{ inputs.name }}
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.should_run && inputs.dry_run }}
+    steps:
+      - name: Print dry-run inputs
+        run: |
+          echo "workflow=e2e_periodic_ops"
+          echo "runner=${{ inputs.runner }}"
+          echo "image=${{ inputs.image }}"
+          echo "tests=${{ inputs.tests }}"
+          echo "name=${{ inputs.name }}"
+          echo "vllm_ascend_branch=${{ inputs.vllm_ascend_branch }}"
+
+  ops-test:
+    name: ${{ inputs.name }}
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.should_run && !inputs.dry_run }}
+    container:
+      image: ${{ inputs.image }}
+      options: --network host --shm-size 1g --device /dev/davinci_manager --device /dev/hisi_hdc --device /dev/devmm_svm
+      volumes:
+        - /usr/local/dcmi:/usr/local/dcmi
+        - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+        - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
+        - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info
+        - /etc/ascend_install.info:/etc/ascend_install.info
+
+    steps:
+      - name: Checkout vllm-ascend
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.request_id != '' && inputs.vllm_ascend_ref || inputs.vllm_ascend_branch }}
+
+      - name: Install vllm-ascend
+        run: pip install -e . --no-build-isolation
+
+      - name: Run ops tests
+        # 'tests' may be a single path or a space-separated list of files
+        # (a per-chip group expanded from a directory entry); leave it unquoted
+        # so the shell splits it into separate pytest arguments.
+        run: pytest -s ${{ inputs.tests }}

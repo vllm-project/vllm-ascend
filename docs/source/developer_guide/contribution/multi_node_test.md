@@ -8,7 +8,7 @@ The following picture shows the basic deployment view of the multi-node CI mecha
 
 ![alt text](../../assets/deployment.png)
 
-From the workflow perspective, we can see how the final test script is executed, The key point is that the shared files `tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2` and `tests/e2e/nightly/multi_node/scripts/run.sh` define the cluster template and pod entry script. Each node executes different logic according to the [LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/) environment variable, so that multiple nodes can form a distributed cluster to perform tasks. `run.sh` selects the pytest entrypoint from the config path: internal DP configs use `internal_dp/scripts/test_multi_node.py`, while external DP configs use `external_dp/scripts/test_external_dp.py`.
+From the workflow perspective, we can see how the final test script is executed, The key point is that the shared files `tests/e2e/schedule/scripts/multi_node/lws.yaml.jinja2` and `tests/e2e/schedule/scripts/multi_node/run.sh` define the cluster template and pod entry script. Each node executes different logic according to the [LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/) environment variable, so that multiple nodes can form a distributed cluster to perform tasks. `run.sh` selects the pytest entrypoint from the config path: internal DP configs use `internal_dp/test_multi_node.py`, while external DP configs use `external_dp/test_external_dp.py`.
 
 ![alt text](../../assets/workflow.png)
 
@@ -20,7 +20,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 2. Add config yaml
 
-    For the normal internal DP multi-node flow, add the config yaml to `tests/e2e/nightly/multi_node/internal_dp/config/`, like `DeepSeek-V3.yaml`. External DP cases use the separate `tests/e2e/nightly/multi_node/external_dp/config/` directory and should pass that directory through `config_base_path` in workflow or `CONFIG_BASE_PATH` locally.
+    For the normal internal DP multi-node flow, add the config yaml to `tests/e2e/schedule/scripts/multi_node/internal_dp/config/`, like `DeepSeek-V3.yaml`. External DP cases use the separate `tests/e2e/schedule/scripts/multi_node/external_dp/config/` directory and should pass that directory through `config_base_path` in workflow or `CONFIG_BASE_PATH` locally.
 
     Suppose you have **2 nodes** running a 1P1D setup (1 Prefillers + 1 Decoder):
 
@@ -74,51 +74,25 @@ From the workflow perspective, we can see how the final test script is executed,
         # fill with accuracy test kwargs
     ```
 
-3. Add the case to nightly workflow
+3. Register the case in the periodic CI
 
-Currently, the multi-node test workflow is defined in `.github/workflows/schedule_nightly_test_a3.yaml`.
+Multi-node cases are registered by **path** — there is no hand-edited workflow matrix.
+Place the config YAML under the model framework at the matching resource directory
+(`tests/e2e/schedule/model/<Family>/two_node/<Name>.yaml` for a 2-node case, or
+`.../four_node/<Name>.yaml` for 4-node), then add its path to the relevant section of
+`.github/workflows/scripts/schedule_config.yaml`:
 
     ```yaml
-    multi-node-tests:
-      name: multi-node
-      if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-      strategy:
-        fail-fast: false
-        max-parallel: 1
-        matrix:
-          test_config:
-            - name: multi-node-deepseek-pd
-              config_file_path: DeepSeek-V3.yaml
-              size: 2
-            - name: multi-node-qwen3-dp
-              config_file_path: Qwen3-235B-A22B.yaml
-              size: 2
-            - name: GLM5_1-W8A8-EP-external
-              config_file_path: GLM5_1-W8A8-EP-external.yaml
-              config_base_path: tests/e2e/nightly/multi_node/external_dp/config/
-              size: 4
-      uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-      with:
-        soc_version: a3
-        runner: linux-aarch64-a3-0
-        image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
-        replicas: 1
-        size: ${{ matrix.test_config.size }}
-        config_file_path: ${{ matrix.test_config.config_file_path }}
-        config_base_path: ${{ matrix.test_config.config_base_path || '' }}
-        name: ${{ matrix.test_config.name }}
-      secrets:
-        KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+    - tests/e2e/schedule/model/DeepSeek/two_node/DeepSeek-V3.yaml
+    - tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml
     ```
-  
-The matrix above defines all the parameters required to add a multi-machine use
-case. The parameters worth noting are `size`, `config_file_path`, and
-`config_base_path`. `size` defines the number of nodes required for your use
-case. `config_file_path` is the yaml file name, and `config_base_path` tells the
-loader which config directory to use. For internal DP cases, use an empty
-`config_base_path` so the loader uses its default internal DP config directory.
-For external DP cases, set it to
-`tests/e2e/nightly/multi_node/external_dp/config/`.
+
+For an **external DP** case, the filename **stem** must contain `external_dp` (e.g.
+`GLM5_1-W8A8-EP-external_dp.yaml`); otherwise the case routes as internal DP. The number
+of nodes (`size`) is inferred from the resource directory (`two_node` → 2, `four_node` →
+4), the chip from the filename/path, the runner from `runner_label.json`, and the
+internal/external DP route from the filename stem — none of these are specified by hand.
+See [Nightly CI Test](./nightly_ci_test.md) for the full routing rules.
 
 ## Run Multi-Node tests locally
 
@@ -156,7 +130,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   - name: CONFIG_YAML_PATH
                     value: DeepSeek-V3.yaml
                   - name: CONFIG_BASE_PATH
-                    value: tests/e2e/nightly/multi_node/internal_dp/config/
+                    value: tests/e2e/schedule/scripts/multi_node/internal_dp/config/
                   - name: WORKSPACE
                     value: "/vllm-workspace"
                   - name: FAIL_TAG
@@ -165,7 +139,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   - sh
                   - -c
                   - |
-                    bash /vllm-workspace/vllm-ascend/tests/e2e/nightly/multi_node/scripts/run.sh
+                    bash /vllm-workspace/vllm-ascend/tests/e2e/schedule/scripts/multi_node/run.sh
                 resources:
                   limits:
                     huawei.com/ascend-1980: 16
@@ -211,7 +185,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   - name: CONFIG_YAML_PATH
                     value: DeepSeek-V3.yaml
                   - name: CONFIG_BASE_PATH
-                    value: tests/e2e/nightly/multi_node/internal_dp/config/
+                    value: tests/e2e/schedule/scripts/multi_node/internal_dp/config/
                   - name: WORKSPACE
                     value: "/vllm-workspace"
                   - name: FAIL_TAG
@@ -220,7 +194,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                   - sh
                   - -c
                   - |
-                    bash /vllm-workspace/vllm-ascend/tests/e2e/nightly/multi_node/scripts/run.sh
+                    bash /vllm-workspace/vllm-ascend/tests/e2e/schedule/scripts/multi_node/run.sh
                 resources:
                   limits:
                     huawei.com/ascend-1980: 16
@@ -307,7 +281,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
     asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
     collected 1 item
 
-    tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py::test_multi_node [2025-12-30 11:01:01] INFO multi_node_config.py:294: Loading config yaml: tests/e2e/nightly/multi_node/internal_dp/config/DeepSeek-V3.yaml
+    tests/e2e/schedule/scripts/multi_node/internal_dp/test_multi_node.py::test_multi_node [2025-12-30 11:01:01] INFO multi_node_config.py:294: Loading config yaml: tests/e2e/schedule/scripts/multi_node/internal_dp/config/DeepSeek-V3.yaml
     [2025-12-30 11:01:01] INFO multi_node_config.py:348: Resolving cluster IPs via DNS...
     [2025-12-30 11:01:01] INFO multi_node_config.py:212: Node 0 envs: {'VLLM_USE_MODELSCOPE': 'True', 'OMP_PROC_BIND': 'False', 'OMP_NUM_THREADS': '100', 'HCCL_BUFFSIZE': '1024', 'SERVER_PORT': '8080', 'NUMEXPR_MAX_THREADS': '128', 'DISAGGREGATED_PREFILL_PROXY_SCRIPT': 'examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py', 'HCCL_IF_IP': '10.0.0.102', 'HCCL_SOCKET_IFNAME': 'eth0', 'GLOO_SOCKET_IFNAME': 'eth0', 'TP_SOCKET_IFNAME': 'eth0', 'LOCAL_IP': '10.0.0.102', 'NIC_NAME': 'eth0', 'MASTER_IP': '10.0.0.102'}
     [2025-12-30 11:01:01] INFO multi_node_config.py:159: Launching proxy: python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py --host 10.0.0.102 --port 6000 --prefiller-hosts 10.0.0.102 --prefiller-ports 8080 --decoder-hosts 10.0.0.138 --decoder-ports 8080
@@ -327,7 +301,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
 
 ### 2. Test without Kubernetes
 
-The same `tests/e2e/nightly/multi_node/scripts/run.sh` entrypoint can be used
+The same `tests/e2e/schedule/scripts/multi_node/run.sh` entrypoint can be used
 on prepared bare-metal or container hosts. Without LWS, set the values that
 Kubernetes normally injects yourself:
 
@@ -351,7 +325,7 @@ hosts are part of a committed test environment.
 Edit the internal DP config you want to run, for example:
 
 ```text
-tests/e2e/nightly/multi_node/internal_dp/config/DeepSeek-V3.yaml
+tests/e2e/schedule/scripts/multi_node/internal_dp/config/DeepSeek-V3.yaml
 ```
 
 Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
@@ -399,11 +373,11 @@ On node 1:
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
 export CONFIG_YAML_PATH=DeepSeek-V3.yaml
-export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/internal_dp/config/
+export CONFIG_BASE_PATH=tests/e2e/schedule/scripts/multi_node/internal_dp/config/
 export LWS_WORKER_INDEX=1
 
 cd $WORKSPACE/vllm-ascend
-bash tests/e2e/nightly/multi_node/scripts/run.sh
+bash tests/e2e/schedule/scripts/multi_node/run.sh
 ```
 
 On node 0:
@@ -412,11 +386,11 @@ On node 0:
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
 export CONFIG_YAML_PATH=DeepSeek-V3.yaml
-export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/internal_dp/config/
+export CONFIG_BASE_PATH=tests/e2e/schedule/scripts/multi_node/internal_dp/config/
 export LWS_WORKER_INDEX=0
 
 cd $WORKSPACE/vllm-ascend
-bash tests/e2e/nightly/multi_node/scripts/run.sh
+bash tests/e2e/schedule/scripts/multi_node/run.sh
 ```
 
 Internal DP logs are mainly printed to the terminal running `run.sh`. When
@@ -433,7 +407,7 @@ $LOG_PREFIX/node_<LWS_WORKER_INDEX>_plogs/
 Edit the external DP config you want to run. For example:
 
 ```text
-tests/e2e/nightly/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml
+tests/e2e/schedule/scripts/multi_node/external_dp/config/GLM5_1-W8A8-EP-external.yaml
 ```
 
 Add `cluster_hosts` as a top-level field, for example near `num_nodes` and
@@ -475,7 +449,7 @@ and AISBench, you only need the run-time exports in the next step.
 
 External DP uses the same shared `run.sh`. Set `CONFIG_BASE_PATH` to the
 external DP config directory so the script chooses
-`external_dp/scripts/test_external_dp.py`.
+`external_dp/test_external_dp.py`.
 
 Then start non-master nodes first, and start node 0 last. The following example
 uses `GLM5_1-W8A8-EP-external.yaml`, which is a 4-node disaggregated prefill
@@ -486,12 +460,12 @@ On node 1, node 2, and node 3, set the matching `LWS_WORKER_INDEX`:
 ```bash
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
-export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/external_dp/config/
+export CONFIG_BASE_PATH=tests/e2e/schedule/scripts/multi_node/external_dp/config/
 export CONFIG_YAML_PATH=GLM5_1-W8A8-EP-external.yaml
 export LWS_WORKER_INDEX=1  # Use 2 on node 2, and 3 on node 3.
 
 cd $WORKSPACE/vllm-ascend
-bash tests/e2e/nightly/multi_node/scripts/run.sh
+bash tests/e2e/schedule/scripts/multi_node/run.sh
 ```
 
 On node 0:
@@ -499,12 +473,12 @@ On node 0:
 ```bash
 export WORKSPACE=/vllm-workspace
 export IS_PR_TEST=false
-export CONFIG_BASE_PATH=tests/e2e/nightly/multi_node/external_dp/config/
+export CONFIG_BASE_PATH=tests/e2e/schedule/scripts/multi_node/external_dp/config/
 export CONFIG_YAML_PATH=GLM5_1-W8A8-EP-external.yaml
 export LWS_WORKER_INDEX=0
 
 cd $WORKSPACE/vllm-ascend
-bash tests/e2e/nightly/multi_node/scripts/run.sh
+bash tests/e2e/schedule/scripts/multi_node/run.sh
 ```
 
 For `GLM5_1-W8A8-EP-external.yaml`, node 0 and node 1 start prefiller ranks,
