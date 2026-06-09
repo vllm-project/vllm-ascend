@@ -8,15 +8,13 @@ import torch
 import torch.nn as nn
 import torch_npu  # noqa: F401
 import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
 from vllm.model_executor.offloader.prefetch import (
     ParamInfo,
     StaticBufferPool,
     _BaseParamOffloader,
 )
-
-logger = init_logger(__name__)
 
 
 class NPUPrefetchOffloader(BaseOffloader):
