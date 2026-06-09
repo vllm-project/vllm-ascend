@@ -12,6 +12,7 @@ Usage:
     python3 generate_cache_matrix.py
 """
 
+import argparse
 import json
 import os
 import subprocess
@@ -19,13 +20,13 @@ import sys
 from glob import glob
 from pathlib import Path
 
-import regex as re
-
 try:
     import yaml
 except ImportError:
     print("pyyaml is required: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def warn(msg: str) -> None:
@@ -44,7 +45,8 @@ def normalize_branch(branch: str) -> str:
     """
     for ch in "/:@ ":
         branch = branch.replace(ch, "-")
-    branch = re.sub(r"[^A-Za-z0-9._\-]", "", branch)
+    allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    branch = "".join(c for c in branch if c in allowed)
     return branch or "unknown-branch"
 
 
@@ -66,14 +68,25 @@ def os_type(df: str) -> str:
 
 def image_tag(df: str) -> str | None:
     """Read CANN image tag from a Dockerfile's FROM line."""
+    df_path = str(REPO_ROOT / df)
     try:
-        out = subprocess.check_output(["grep", "-m1", "^FROM", df], stderr=subprocess.DEVNULL).decode().strip()
+        out = subprocess.check_output(["grep", "-m1", "^FROM", df_path], stderr=subprocess.DEVNULL).decode().strip()
         return out.split(":")[-1]
     except (subprocess.CalledProcessError, FileNotFoundError, IndexError):
         return None
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate ninja cache build matrix")
+    parser.add_argument(
+        "--branch-filter",
+        metavar="BRANCH",
+        help="Only include entries whose branch_ref or normalized branch "
+        "matches this value (e.g. 'main').  When omitted, all "
+        "branches from the source config are included.",
+    )
+    args = parser.parse_args()
+
     image_registry = os.environ.get(
         "IMAGE_REGISTRY",
         "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann",
@@ -82,7 +95,7 @@ def main() -> None:
     # ── 1. discover Dockerfiles ──────────────────────────────────────────
     # Primary source: schedule_image_build_and_push.yaml
     dockerfiles: dict[str, bool] = {}
-    config_path = Path(".github/workflows/schedule_image_build_and_push.yaml")
+    config_path = REPO_ROOT / ".github/workflows/schedule_image_build_and_push.yaml"
     data = None
 
     if config_path.exists():
@@ -105,6 +118,7 @@ def main() -> None:
             "No Dockerfiles found in schedule_image_build_and_push.yaml; "
             "falling back to scanning root Dockerfile[suffix] pattern."
         )
+        os.chdir(str(REPO_ROOT))
         for f in sorted(glob("Dockerfile*")):
             if "buildwheel" not in f and ".github" not in f:
                 dockerfiles[f] = True
@@ -127,6 +141,19 @@ def main() -> None:
                         branches.append(br)
         except Exception as e:
             warn(f"Cannot read release branches from {config_path}: {e}")
+
+    # ── branch filter (--branch-filter) ─────────────────────────────────
+    if args.branch_filter:
+        raw_filter = args.branch_filter
+        normalized_filter = normalize_branch(raw_filter)
+        before = list(branches)
+        branches = [b for b in branches if b == raw_filter or normalize_branch(b) == normalized_filter]
+        if not branches:
+            print(
+                f"Error: --branch-filter '{raw_filter}' matched no branches. Candidates: {sorted(before)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # ── 3. arch → runner mapping ─────────────────────────────────────────
     # Only ARM64: consumers (_selected_tests.yaml) run exclusively on
