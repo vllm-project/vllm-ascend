@@ -48,7 +48,7 @@ def capture_elastic_logs(level=logging.DEBUG):
     log_capture_string = io.StringIO()
     handler = logging.StreamHandler(log_capture_string)
     handler.setLevel(level)
-    original_level = elastic.logger.level
+    original_level = elastic.logger.getEffectiveLevel()
     elastic.logger.setLevel(level)
     elastic.logger.addHandler(handler)
     try:
@@ -384,6 +384,9 @@ def test_server_cleanup(server_config):
     with patch("socket.socket") as mock_socket:
         server = ElasticServer(**server_config)
         del server
+        import gc
+
+        gc.collect()
         mock_socket.return_value.close.assert_called_once()
 
 
