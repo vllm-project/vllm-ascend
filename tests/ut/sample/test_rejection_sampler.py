@@ -4,6 +4,7 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.sample.rejection_sampler import (
+    _repair_empty_output_rows,
     expand_batch_to_tokens,
     expand_pytorch,
     rejection_greedy_sample_pytorch,
@@ -29,6 +30,58 @@ def mock_pin_memory(original_func):
 
 
 class TestAscendRejectionSampler(TestBase):
+    def test_repair_empty_output_rows(self):
+        output_token_ids = torch.tensor(
+            [
+                [-1, -1, -1, -1],
+                [7, -1, -1, -1],
+                [-1, -1, -1, -1],
+                [-1, -1, -1, -1],
+            ],
+            dtype=torch.int32,
+        )
+        num_draft_tokens = [2, 1, 1, 0]
+        cu_num_draft_tokens = torch.tensor([2, 3, 4, 4])
+        target_logits = torch.tensor(
+            [
+                [0.1, 0.2, 0.3],
+                [0.3, 0.2, 0.1],
+                [0.2, 0.3, 0.1],
+                [0.1, 0.9, 0.2],
+            ],
+        )
+        target_indices = torch.tensor(
+            [
+                [10, 11, 12],
+                [20, 21, 22],
+                [30, 31, 32],
+                [80, 88, 89],
+            ],
+        )
+        recovered_token_ids = torch.tensor([42, 43, 44, PLACEHOLDER_TOKEN_ID])
+        bonus_token_ids = torch.tensor([[100], [200], [300], [400]])
+
+        _repair_empty_output_rows(
+            output_token_ids,
+            num_draft_tokens,
+            cu_num_draft_tokens,
+            target_logits,
+            target_indices,
+            recovered_token_ids,
+            bonus_token_ids,
+        )
+
+        expected = torch.tensor(
+            [
+                [42, -1, -1, -1],
+                [7, -1, -1, -1],
+                [88, -1, -1, -1],
+                [400, -1, -1, -1],
+            ],
+            dtype=torch.int32,
+        )
+        assert torch.equal(output_token_ids, expected)
+
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))

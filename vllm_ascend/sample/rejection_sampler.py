@@ -387,6 +387,16 @@ def rejection_sample(
                     is_greedy,
                 )
         if sampling_metadata.all_greedy:
+            _repair_empty_output_rows(
+                output_token_ids,
+                num_draft_tokens,
+                cu_num_draft_tokens,
+                target_logits,
+                target_indices,
+                None,
+                bonus_token_ids,
+                target_token_ids=target_argmax,
+            )
             return output_token_ids
 
     # For random sampling with selected logits
@@ -613,7 +623,69 @@ def rejection_sample(
                     enable_reduce_sampling=False,
                 )
 
+    _repair_empty_output_rows(
+        output_token_ids,
+        num_draft_tokens,
+        cu_num_draft_tokens,
+        target_logits,
+        target_indices,
+        recovered_token_ids,
+        bonus_token_ids,
+    )
     return output_token_ids
+
+
+def _repair_empty_output_rows(
+    output_token_ids: torch.Tensor,
+    num_draft_tokens: list[int],
+    cu_num_draft_tokens: torch.Tensor,
+    target_logits: torch.Tensor,
+    target_indices: torch.Tensor | None,
+    recovered_token_ids: torch.Tensor | None,
+    bonus_token_ids: torch.Tensor,
+    target_token_ids: torch.Tensor | None = None,
+) -> None:
+    """Ensure every spec decode row returns at least one real token."""
+    batch_size = output_token_ids.shape[0]
+    if batch_size == 0:
+        return
+
+    device = output_token_ids.device
+    output_dtype = output_token_ids.dtype
+    empty_rows = (output_token_ids == PLACEHOLDER_TOKEN_ID).all(dim=1)
+    draft_counts = torch.tensor(num_draft_tokens, device=device, dtype=torch.long)
+    has_draft = draft_counts > 0
+    first_token_indices = (cu_num_draft_tokens.to(torch.long) - draft_counts).clamp(
+        min=0,
+        max=max(target_logits.shape[0] - 1, 0),
+    )
+
+    bonus_fallback = bonus_token_ids.squeeze(1).to(dtype=output_dtype)
+    if target_token_ids is not None and target_token_ids.shape[0] > 0:
+        target_fallback = target_token_ids[first_token_indices].to(dtype=output_dtype)
+    elif target_logits.shape[0] == 0:
+        target_fallback = bonus_fallback
+    else:
+        local_argmax = target_logits[first_token_indices].argmax(dim=-1)
+        if target_indices is None:
+            target_fallback = local_argmax
+        else:
+            target_fallback = target_indices[first_token_indices, local_argmax]
+        target_fallback = target_fallback.to(dtype=output_dtype)
+
+    fallback = target_fallback
+    if recovered_token_ids is not None and recovered_token_ids.shape[0] > 0:
+        recovered_indices = first_token_indices.clamp(max=recovered_token_ids.shape[0] - 1)
+        recovered_fallback = recovered_token_ids[recovered_indices].to(dtype=output_dtype)
+        fallback = torch.where(has_draft, recovered_fallback, bonus_fallback)
+
+    fallback = torch.where(
+        has_draft & (fallback == PLACEHOLDER_TOKEN_ID),
+        target_fallback,
+        fallback,
+    )
+    fallback = torch.where(has_draft, fallback, bonus_fallback)
+    output_token_ids[:, 0] = torch.where(empty_rows, fallback, output_token_ids[:, 0])
 
 
 def expand_batch_to_tokens(
