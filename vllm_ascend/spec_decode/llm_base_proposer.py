@@ -1266,7 +1266,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self._split_pcp_input(req_scheduled_tokens_p, input_ids_p, target_hidden_states_p)
                 )
                 num_tokens = num_tokens_d + num_tokens_p
-                target_positions = target_positions[:num_tokens]
+                if self.uses_mrope:
+                    target_positions = target_positions[:, :num_tokens]
+                else:
+                    target_positions = target_positions[:num_tokens]
                 self.input_ids[:num_tokens].copy_(torch.cat([input_ids_d, input_ids_p], dim=0))
                 target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
                 # 2. update sample_indices according to main model
