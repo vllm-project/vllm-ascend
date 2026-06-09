@@ -289,24 +289,24 @@
 #
 # ** 10b. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.outputs.ModelRunnerOutput`
-#   2. `vllm.v1.engine.core.EngineCore.post_step`
-#   3. `vllm.config.speculative.SpeculativeConfig._verify_args`
+#   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
 #    Why:
-#       PP batch_queue schedules newer batches before consuming older model
-#       outputs. The old `post_step -> update_draft_token_ids` path updates
-#       global Request state using the newer schedule state, which can attach
-#       MTP draft tokens to the wrong prefill/decode phase.
+#       Local Eagle/MTP drafters are loaded on the last PP stage rather than
+#       partitioned across all PP ranks. Upstream `ModelConfig.verify_with_parallel_config`
+#       validates against `pipeline_parallel_size`, which fails for these drafters
+#       since they run locally with effective PP=1.
 #    How：
-#       Carry drafter output as `ModelRunnerOutput.spec_token_ids`, skip the
-#       global post-step draft-token update only for PD P-node PP+MTP
-#       batch_queue mode, and validate local Eagle/MTP drafters as PP=1.
-#       D nodes keep the original DP+MTP post-step path.
+#       Monkey-patch `verify_with_parallel_config` to detect Eagle/MTP drafter
+#       models (by `model_type` and `architectures`) when `runner="draft"` and
+#       `pipeline_parallel_size > 1`. For such configs, call the original verify
+#       with a patched `pipeline_parallel_size=1` copy, preserving normal target-model
+#       validation for non-drafter models.
 #    Related PR (if no, explain why):
 #       Backport of local vLLM PP+MTP branch changes.
 #    Future Plan:
-#       Remove this patch once the runtime vLLM version contains the upstream
-#       PP+MTP output/config/post-step fixes.
+#       Remove this patch once upstream vLLM's `ModelConfig.verify_with_parallel_config`
+#       supports local drafter models with PP > 1, or moves the PP validation to a
+#       separate hook that can be overridden per-model-type.
 #
 # ** 11. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -774,21 +774,25 @@
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
 # ** 19b. File: worker/model_runner_v1.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `NPUModelRunner._update_states`
+#   1. `NPUModelRunner._check_and_update_cudagraph_mode`
 #    Why:
-#       In KV-load-failure recompute, async scheduling can rewind a cached
-#       request's computed-token count. If the request still carries the
-#       previous draft length, the parent state update can index stale
-#       speculative-token state.
+#       The upstream `GPUModelRunner._check_and_update_cudagraph_mode` initializes
+#       drafter cudagraph keys unconditionally, but in PP mode only the last rank
+#       loads the drafter. The previous hacky workaround temporarily set
+#       `self.speculative_config = None` to bypass super()'s drafter init, then
+#       restored it and called a separate `_maybe_initialize_drafter_cudagraph_keys`
+#       helper. This state-mutation pattern is fragile and hard to maintain.
 #    How：
-#       Reset `prev_num_draft_len` when the scheduler reports fewer computed
-#       tokens than the runner's local request state before delegating to the
-#       parent `_update_states`.
+#       Directly inline the upstream cudagraph mode resolution logic with Ascend-specific
+#       additions: wrap `resolve_cudagraph_mode_and_sizes` with `update_pass_config` for
+#       `enable_sp`, add PP last-rank guard for drafter initialization, and call
+#       `set_graph_params`/`set_draft_graph_params` for ACL graph params. Remove the
+#       `_maybe_initialize_drafter_cudagraph_keys` helper entirely.
 #    Related PR (if no, explain why):
-#       No, vllm-ascend-specific KV recompute guard.
+#       No, cleaner PP+MTP support without speculative_config state mutation.
 #    Future Plan:
-#       Remove this wrapper once the minimum supported runtime vLLM handles
-#       async recompute rewind without stale draft-token state.
+#       Remove this override once upstream exposes a hook for drafter cudagraph key
+#       initialization that respects PP rank boundaries.
 # ** 20. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`

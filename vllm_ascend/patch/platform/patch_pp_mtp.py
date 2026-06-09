@@ -30,84 +30,9 @@ from functools import wraps
 from vllm.logger import logger
 
 _PATCHED = False
-_ORIGINAL_ENGINE_POST_STEP = None
-_ORIGINAL_MODEL_CONFIG_VERIFY = None
-
-
-def _patch_model_runner_output() -> None:
-    from vllm.v1 import outputs as outputs_mod
-
-    model_runner_output_cls = outputs_mod.ModelRunnerOutput
-    fields = getattr(model_runner_output_cls, "__dataclass_fields__", {})
-    if "spec_token_ids" not in fields:
-        model_runner_output_cls.spec_token_ids = None
-        original_init = model_runner_output_cls.__init__
-        if getattr(original_init, "_vllm_ascend_pp_mtp_patched", False):
-            return
-
-        @wraps(original_init)
-        def _patched_init(self, *args, spec_token_ids=None, **kwargs):
-            original_init(self, *args, **kwargs)
-            self.spec_token_ids = spec_token_ids
-
-        _patched_init._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
-        model_runner_output_cls.__init__ = _patched_init
-
-    empty_output = outputs_mod.EMPTY_MODEL_RUNNER_OUTPUT
-    if not hasattr(empty_output, "spec_token_ids"):
-        empty_output.spec_token_ids = None
-
-
-def _is_mtp_speculative_config(vllm_config) -> bool:
-    speculative_config = getattr(vllm_config, "speculative_config", None)
-    method = getattr(speculative_config, "method", None)
-    return method is not None and "mtp" in str(method).lower()
-
-
-def _is_pd_prefill_pp_mtp(vllm_config) -> bool:
-    if vllm_config is None or not _is_mtp_speculative_config(vllm_config):
-        return False
-
-    parallel_config = getattr(vllm_config, "parallel_config", None)
-    if getattr(parallel_config, "pipeline_parallel_size", 1) <= 1:
-        return False
-
-    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-    return (
-        kv_transfer_config is not None
-        and getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
-    )
-
-
-def _patch_engine_core() -> None:
-    global _ORIGINAL_ENGINE_POST_STEP
-
-    from vllm.v1.engine.core import EngineCore
-
-    if getattr(EngineCore.post_step, "_vllm_ascend_pp_mtp_patched", False):
-        return
-
-    _ORIGINAL_ENGINE_POST_STEP = EngineCore.post_step
-
-    @wraps(_ORIGINAL_ENGINE_POST_STEP)
-    def _patched_post_step(self, model_executed: bool) -> None:
-        if (
-            getattr(self, "batch_queue", None) is not None
-            and not getattr(self, "async_scheduling", False)
-            and getattr(self, "use_spec_decode", False)
-            and model_executed
-            and _is_pd_prefill_pp_mtp(getattr(self, "vllm_config", None))
-        ):
-            return
-        return _ORIGINAL_ENGINE_POST_STEP(self, model_executed)
-
-    _patched_post_step._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
-    EngineCore.post_step = _patched_post_step
 
 
 def _patch_model_config_validation() -> None:
-    global _ORIGINAL_MODEL_CONFIG_VERIFY
-
     from typing import get_args
 
     from vllm.config.model import ModelConfig
@@ -117,7 +42,6 @@ def _patch_model_config_validation() -> None:
     if getattr(original_verify, "_vllm_ascend_pp_mtp_patched", False):
         return
 
-    _ORIGINAL_MODEL_CONFIG_VERIFY = original_verify
     mtp_model_types = set(get_args(MTPModelTypes))
 
     @wraps(original_verify)
@@ -154,9 +78,6 @@ def _apply_patch() -> None:
     if _PATCHED:
         return
     _PATCHED = True
-
-    _patch_model_runner_output()
-    _patch_engine_core()
     _patch_model_config_validation()
 
 

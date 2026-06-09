@@ -2444,15 +2444,6 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
-        if self.routed_experts_initialized and vllm_version_is("0.21.0"):
-            issue_routing_d2h_copy(
-                input_batch_req_ids=self.input_batch.req_ids,
-                num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
-                positions=self.positions,
-                positions_cpu=self._positions_cpu,
-            )
-
-        routed_experts_dict = None
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
             if self.routed_experts_initialized:
@@ -3699,13 +3690,20 @@ class NPUModelRunner(GPUModelRunner):
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
         # TODO: refactor the logic of attention
-        # Initialize drafter attention group initialization
-        if self.speculative_config and (
-            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
-        ) and get_pp_group().is_last_rank:
-            assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+            )
+        ):
+            assert isinstance(
+                self.drafter,
+                AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer,
+            )
             block_size = (self.kernel_block_sizes[0] if isinstance(
-            self.kernel_block_sizes, list) else self.kernel_block_sizes)
+                self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group() and not is_profiling:
@@ -4773,7 +4771,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if (
             self.speculative_config
-            and get_pp_group().is_last_rank
+            and self.drafter is not None
             and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_extract_hidden_states()
@@ -4781,9 +4779,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer
-                | AscendDflashProposer
-                | AscendExtractHiddenStatesProposer,
+                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
@@ -4794,6 +4790,10 @@ class NPUModelRunner(GPUModelRunner):
             for desc in descs
         })
 
+        # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
+        # we set the graph params right before initializing the keys.
+        # Profiling still runs real graph warmup/capture paths, so the NPU-side
+        # graph params must exist there as well.
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
