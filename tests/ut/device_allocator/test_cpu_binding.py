@@ -485,11 +485,25 @@ class TestCpuAlloc(unittest.TestCase):
     @patch("vllm_ascend.cpu_binding.execute_command")
     def test_allocate(self, _mock_execute_command, _mock_get_device_type):
         self.cpu_alloc.device_info.running_npu_list = [0]
+        self.cpu_alloc.device_info.allowed_cpus = []
+        self.cpu_alloc.build_global_slice_cpu_pool()
+        self.assertEqual(self.cpu_alloc.npu_cpu_pool, {})
+
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_allocate(self, _mock_execute_command):
+        self.cpu_alloc.device_info.running_npu_list = [0]
+        self.cpu_alloc.npu_cpu_pool = {0: list(range(24))}
+        self.cpu_alloc.allocate()
+        self.assertEqual(self.cpu_alloc.assign_main[0], list(range(2, 14)))
+        self.assertEqual(self.cpu_alloc.assign_acl[0], [14])
+        self.assertEqual(self.cpu_alloc.assign_rel[0], [15])
+        self.assertEqual(self.cpu_alloc.assign_memcache[0], list(range(16, 24)))
         self.cpu_alloc.npu_cpu_pool = {0: [0, 1, 2, 3, 4]}
         self.cpu_alloc.allocate()
         self.assertEqual(self.cpu_alloc.assign_main[0], [2])
         self.assertEqual(self.cpu_alloc.assign_acl[0], [3])
         self.assertEqual(self.cpu_alloc.assign_rel[0], [4])
+        self.assertEqual(self.cpu_alloc.assign_memcache[0], [])
         self.cpu_alloc.npu_cpu_pool = {0: [0, 1]}
         with self.assertRaises(RuntimeError):
             self.cpu_alloc.allocate()

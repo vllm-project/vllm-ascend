@@ -43,6 +43,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
     post_process_after_loading_for_shard_weight_series,
@@ -1249,6 +1250,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         value: torch.Tensor,
         kv_c_and_k_pe_cache: tuple[torch.Tensor],
         attn_metadata: AscendMLAMetadata,
+        layer_name
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
         assert len(kv_c_and_k_pe_cache) > 1
@@ -1286,6 +1288,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths_q,
             "actual_seq_lengths_kv": actual_seq_lengths_kv,
         }
+        wait_for_kv_layer_from_connector(layer_name)
+        record_attention_compute_start()
 
         if self.head_padding > 0:
             query = torch.cat((q_nope, q_pe), dim=-1)
@@ -1676,8 +1680,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
-        if has_prefill:
-            wait_for_kv_layer_from_connector(layer_name)
+        # if has_prefill:
+        # wait_for_kv_layer_from_connector(layer_name)
         # Preprocess for decode tokens
         if self.is_kv_producer and not self.is_kv_both:
             attn_metadata.reshape_cache_event = torch.npu.Event()
@@ -1761,6 +1765,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
+            # TODO prefill kv offload need to remove
+            wait_for_kv_layer_from_connector(layer_name)
+            record_attention_compute_start()
             output_decode = self._forward_decode(
                 decode_preprocess_res.ql_nope,
                 decode_preprocess_res.q_pe,
@@ -1785,6 +1792,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_preprocess_res.value,
                 kv_cache,
                 attn_metadata,
+                layer_name
             )
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill

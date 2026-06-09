@@ -3,10 +3,15 @@
 import math
 from collections import defaultdict
 
+import vllm
 import vllm.v1.core.kv_cache_utils
+import vllm.v1.engine.core  # noqa: F401
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
+from vllm.v1.core.kv_cache_utils import (
+    _approximate_gcd,
+    may_override_num_blocks,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -253,6 +258,4 @@ vllm.v1.core.kv_cache_utils._get_kv_cache_config_deepseek_v4 = _get_kv_cache_con
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 
 # Also patch the reference used by engine/core.py which imports the function directly.
-import vllm.v1.engine.core  # noqa: E402
-
 vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
