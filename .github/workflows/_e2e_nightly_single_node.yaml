@@ -147,8 +147,9 @@ jobs:
         if: ${{ inputs.request_id != '' }}
         shell: bash -l {0}
         run: |
-          cp -r /tmp/aisbench-backup /vllm-workspace/vllm-ascend/benchmark
-          cd /vllm-workspace/vllm-ascend/benchmark
+          cd /vllm-workspace/vllm-ascend
+          git clone -b v3.1-20260609-master https://github.com/AISBench/benchmark.git
+          cd benchmark
           pip install pytest asyncio pytest-asyncio
           pip install -e . -r requirements/api.txt -r requirements/extra.txt
           python3 -m pip cache purge
