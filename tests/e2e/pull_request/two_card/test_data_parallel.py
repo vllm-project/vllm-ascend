@@ -59,6 +59,7 @@ def test_qwen3_inference_dp2(model, max_tokens):
         "--node-rank",
         "0",
         "--trust-remote-code",
+        "--enforce-eager",
     ]
 
     if model in moe_models:
