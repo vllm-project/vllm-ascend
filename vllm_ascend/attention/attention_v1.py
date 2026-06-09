@@ -61,6 +61,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
@@ -1090,6 +1091,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode = 4
             else:
                 sparse_mode = 3
+            record_attention_compute_start()
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
                 key,
@@ -1109,6 +1111,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
+            record_attention_compute_start()
             if not attn_metadata.causal:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
@@ -1270,6 +1273,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and using_paged_attention(num_tokens, self.vllm_config)
             and self.sliding_window is None
         ):
+            record_attention_compute_start()
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)

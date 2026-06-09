@@ -59,6 +59,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
@@ -999,9 +1000,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 # Scenario of Enabling PCP or PCP&DCP
                 # prepare qkv and compute the head part // overlap the communication of all gather q
                 data_head, data_tail = self._forward_prefill_cp_pre(prefill_query, key, value, attn_metadata)
+                record_attention_compute_start()
                 output_head, lse_head = self._forward_prefill_cp_attn(data_head, True, attn_metadata)
             else:
                 # Scenario of Enabling DCP Individually
+                record_attention_compute_start()
                 attn_output_prefill, attn_lse_prefill = torch.ops.npu.npu_fused_infer_attention_score(
                     prefill_query,
                     key,
@@ -1022,6 +1025,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             if has_chunked_context:
                 torch.npu.current_stream().wait_stream(cp_chunkedprefill_comm_stream())
                 # computation of context
+                record_attention_compute_start()
                 context_output = self._compute_prefill_context(prefill_query_all, kv_cache, attn_metadata)
                 # Note(qcs): (output, lse) -> [Seq, Head_num, Head_dim+1] -> [Head_num, Head_dim+1, Seq]
                 local_context_output = torch.cat(context_output, dim=-1).permute([1, 2, 0]).contiguous()
@@ -1033,6 +1037,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             if self.pcp_size > 1:
                 # compute the tail part and reorg output&lse // overlap the communication of output
+                record_attention_compute_start()
                 output_tail, lse_tail = self._forward_prefill_cp_attn(data_tail, False, attn_metadata)
 
                 attn_output_prefill, attn_lse_prefill = self._forward_prefill_cp_post(

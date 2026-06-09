@@ -55,6 +55,9 @@ from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+    get_shared_layer_transfer_events,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -224,6 +227,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         enable_c8_quant: bool,
         resharding_stream: torch.npu.Stream,
         callback_func: Callable[..., None] = lambda x: None,
+        layer_transfer_finished_events = None
     ):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.engine = engine
@@ -262,6 +266,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.enable_c8_quant = enable_c8_quant
         self.ready_event = ready_event
         self.callback_func = callback_func
+        self.layer_transfer_finished_events = layer_transfer_finished_events
 
     def run(self):
         local_rank = get_world_group().local_rank
@@ -439,6 +444,8 @@ class KVCacheSendingLayerThread(threading.Thread):
 
     def _transfer_kv_cache(self, send_task: SendTask):
         layer_name = send_task.layer_name
+        if self.layer_transfer_finished_events is not None:
+            assert not self.layer_transfer_finished_events[send_task.layer_idx].is_set()
         layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
         key = send_task.k_cache
         value = send_task.v_cache
@@ -518,7 +525,8 @@ class KVCacheSendingLayerThread(threading.Thread):
                                 self.failed_reqs.discard(req_id)
                             else:
                                 self.callback_func(req_id, req_meta, layer_group_idx, trans_flag=True)
-
+        if self.layer_transfer_finished_events is not None:
+            self.layer_transfer_finished_events[send_task.layer_idx].set()
 
 class KVCacheRecvingLayerThread(threading.Thread):
     def __init__(
@@ -702,6 +710,9 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeLayerwiseConnectorWorker(vllm_config, kv_cache_config, str(self.engine_id))
+            self.connector_worker.layer_transfer_finished_events = (
+                getattr(vllm_config, "layer_transfer_finished_events", None)
+            )
 
     ############################################################
     # Scheduler Side Methods
@@ -1310,6 +1321,10 @@ class MooncakeLayerwiseConnectorWorker:
                 enable_c8_quant=self.enable_c8_quant,
                 resharding_stream=self.resharding_stream,
                 callback_func=self.send_done_send_signal,
+                layer_transfer_finished_events=(
+                    self.layer_transfer_finished_events
+                    or get_shared_layer_transfer_events()
+                )
             )
             self.kv_send_layer_thread.start()
             ready_event.wait()
