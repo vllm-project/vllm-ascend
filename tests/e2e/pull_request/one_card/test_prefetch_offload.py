@@ -111,28 +111,20 @@ def test_uva_offload_functional_call(disable_pin_memory):
     old_pin = os.environ.get("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY")
     try:
         os.environ["VLLM_WEIGHT_OFFLOADING_DISABLE_UVA"] = "1"
-        os.environ["VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY"] = (
-            str(int(disable_pin_memory))
-        )
+        os.environ["VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY"] = str(int(disable_pin_memory))
         runner_kwargs = {
             "model_name": MODEL,
             "max_model_len": 512,
             "enforce_eager": True,
             "cpu_offload_gb": 1,
         }
-        compare_logprobs(
-            runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT
-        )
+        compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
     finally:
         if old_uva is None:
             os.environ.pop("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", None)
         else:
             os.environ["VLLM_WEIGHT_OFFLOADING_DISABLE_UVA"] = old_uva
         if old_pin is None:
-            os.environ.pop(
-                "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", None
-            )
+            os.environ.pop("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", None)
         else:
-            os.environ[
-                "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY"
-            ] = old_pin
+            os.environ["VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY"] = old_pin
