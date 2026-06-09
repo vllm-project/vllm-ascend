@@ -342,7 +342,7 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            self.assertLogs(logger="vllm_ascend.platform", level="INFO") as cm,
+            self.assertLogs(logger="vllm", level="INFO") as cm,
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -371,7 +371,7 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            self.assertLogs(logger="vllm_ascend.platform", level="INFO") as cm,
+            self.assertLogs(logger="vllm", level="INFO") as cm,
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -415,7 +415,7 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            self.assertLogs(logger="vllm_ascend.platform", level="WARNING") as cm,
+            self.assertLogs(logger="vllm", level="WARNING") as cm,
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -443,7 +443,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.model_config.enforce_eager = False
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
 
-        with self.assertLogs(logger="vllm_ascend.platform", level="INFO") as cm:
+        with self.assertLogs(logger="vllm", level="INFO") as cm:
             from vllm_ascend import platform
 
             importlib.reload(platform)
