@@ -539,14 +539,10 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
-    def _mark_failed_recv_request(self, request_id: str, local_block_ids: list[int]) -> None:
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            if isinstance(local_block_ids, (list, tuple)):
-                flat = [bid for group in local_block_ids for bid in group]
-            else:
-                flat = local_block_ids
-            self.invalid_block_ids.update(flat)
+            self.invalid_block_ids.update(local_block_ids[0])
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -1595,7 +1591,7 @@ class MooncakeConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
-        self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.total_layers = vllm_config.model_config.get_total_num_hidden_layers()
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
@@ -1711,28 +1707,15 @@ class MooncakeConnectorWorker:
 
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] = {}
         num_attn_module = 2 if self.vllm_config.model_config.hf_text_config.model_type == "longcat_flash" else 1
-        all_base_indices = set()
-        for group_spec in self.kv_cache_config.kv_cache_groups:
-            for layer_name in group_spec.layer_names:
-                if "mtp" not in layer_name:
-                    all_base_indices.add(extract_layer_index(layer_name, num_attn_module))
-
-        max_base_idx = max(all_base_indices) if all_base_indices else self.total_layers - 1
-        global_next_mtp = max(self.total_layers, max_base_idx + 1)
+        next_mtp_layer_idx = self.total_layers
         for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-            next_mtp_layer_idx = global_next_mtp
             layer_indices = []
             for layer_name in group_spec.layer_names:
                 if "mtp" in layer_name:
                     layer_idx = next_mtp_layer_idx
                     next_mtp_layer_idx += 1
                 else:
-                    extracted = extract_layer_index(layer_name, num_attn_module)
-                    if extracted in layer_indices:
-                        layer_idx = next_mtp_layer_idx
-                        next_mtp_layer_idx += 1
-                    else:
-                        layer_idx = extracted
+                    layer_idx = extract_layer_index(layer_name, num_attn_module)
                 layer_indices.append(layer_idx)
             kv_group2layeridx[group_id] = (self._serialize_kv_group_spec(group_spec), layer_indices)
         return kv_group2layeridx
@@ -1808,12 +1791,11 @@ class MooncakeConnectorWorker:
         # layer indices: {group_id: (group_spec, [layer_idx0, layer_idx1, ...])}.
         self.kv_group2layeridx = self._build_kv_group2layeridx()
         has_mamba_group = self._has_mamba_group()
-        layer_name_to_idx: dict[str, int] = {}
-        for _, (group_spec, layer_indices) in self.kv_group2layeridx.items():
-            for layer_name, assigned_idx in zip(group_spec["layer_names"], layer_indices):
-                if layer_name in layer_name_to_idx:
-                    continue
-                layer_name_to_idx[layer_name] = assigned_idx
+        layer_name_to_idx = {
+            layer_name: layer_idx
+            for _, (group_spec, layer_indices) in self.kv_group2layeridx.items()
+            for layer_name, layer_idx in zip(group_spec["layer_names"], layer_indices)
+        }
         metadata_layers = max(layer_name_to_idx.values(), default=-1) + 1
         # Per-layer registered KV cache base addresses:
         # [layer_idx][cache_idx] -> data_ptr of one cache tensor, e.g. K/V.
