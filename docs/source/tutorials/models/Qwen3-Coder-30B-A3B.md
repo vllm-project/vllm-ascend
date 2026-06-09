@@ -154,17 +154,10 @@ vllm serve your_model_path \
     --gpu-memory-utilization 0.95
 ```
 
-:::{note}
-
-- Replace `your_model_path` with the actual model path (e.g., Modelscope ID or local path).
-- For an Atlas A2 with 64 GB NPU memory, `--tensor-parallel-size` should be at least 2.
-- `--enable-expert-parallel` enables Expert Parallelism, which is required for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP.
-- Qwen3-Coder-30B-A3B natively supports 256K token context length. Adjust `--max-model-len` based on your use case and available memory.
-- If the model is not a quantized model, remove the `--quantization ascend` parameter.
-
-:::
-
 **Key Parameter Description:**
+
+> Replace `your_model_path` with the actual model path (e.g., ModelScope ID or local path).
+> Qwen3-Coder-30B-A3B natively supports 256K token context length. Adjust `--max-model-len` based on your use case and available memory.
 
 | Parameter | Description |
 |-----------|-------------|
