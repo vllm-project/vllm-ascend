@@ -80,6 +80,7 @@ class NPUModelRunner310(NPUModelRunner):
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
+        logger.info_once("Weight layout uses FRACTAL_NZ.")
         self.sampler = AscendSampler310()
         if getattr(self, "rejection_sampler", None) is not None:
             self.rejection_sampler = RejectionSampler(self.sampler)
@@ -87,6 +88,20 @@ class NPUModelRunner310(NPUModelRunner):
             # 310P ngram requires decode-only graph shapes to be built with q_len=1.
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.
             self.cudagraph_dispatcher.uniform_decode_query_len = _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN
+            logger.info_once("Ngram speculative decoding uses uniform_decode_query_len=1 for graph capture.")
+
+    def _update_states(self, scheduler_output: SchedulerOutput):
+        deferred = super()._update_states(scheduler_output)
+        if scheduler_output.finished_req_ids:
+            # condense() rewrites block_table.np (move_row). Drain the previous
+            # step's ACL graph replay on the NPU stream before the condensed
+            # CPU layout is uploaded and read as attn_metadata.block_tables.
+            # Main-line Ascend relies on the end-of-_prepare_inputs Triton
+            # slot-mapping kernel (reads block_table.gpu) for stream ordering;
+            # 310P uses CPU NumPy for slot_mapping and needs this barrier on
+            # layout-change steps only.
+            torch.npu.current_stream().synchronize()
+        return deferred
 
     @contextmanager
     def temporary_modify_uniform_decode_query_len(self):
@@ -579,6 +594,7 @@ class NPUModelRunner310(NPUModelRunner):
         self,
         attention_backends,
         kv_cache_groups,
+        is_profiling=False,
     ) -> None:
         # 910B does not need this branch because runner/dispatcher query_len are
         # naturally consistent there. 310P ngram needs temporary alignment.
@@ -598,10 +614,13 @@ class NPUModelRunner310(NPUModelRunner):
         """
         # 310P limitation: KV transfer is not supported
         if self.vllm_config.kv_transfer_config is not None:
+            logger.error("KV cache transfer is not supported.")
             raise ValueError("KV cache transfer is not supported for 310P.")
         if self.use_sparse:
+            logger.error("Deepseek Sparse Attention is not supported.")
             raise ValueError("Deepseek Sparse Attention is not supported for 310P.")
         if self.model_config.use_mla:
+            logger.error("MLAAttention is not supported.")
             raise ValueError("MLAAttention is not supported for 310P.")
         # Initialize the memory buffer for KV cache
         kv_caches = self._allocate_kv_cache_tensors(kv_cache_config)
@@ -809,24 +828,22 @@ class NPUModelRunner310(NPUModelRunner):
         Args:
             kv_cache_config: The KV cache configuration.
         """
-        block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-            if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
-        ]
-
         # Generate kernel_block_sizes that matches each block_size
         # For attention backends that support virtual block splitting,
         # use the supported block sizes from the backend
         # For other backends (like Mamba), use [0] (no splitting)
+        block_sizes = []
         self.kernel_block_sizes = []
+        kv_cache_specs = []
         for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
-            elif isinstance(kv_cache_spec, AttentionSpec):
+            kv_cache_specs.append(kv_cache_spec)
+            block_sizes.append(kv_cache_spec.block_size)
+            if isinstance(kv_cache_spec, AttentionSpec):
                 try:
                     attn_groups = self.attn_groups[kv_cache_group_id]
                     backend = attn_groups[0].backend
@@ -845,14 +862,13 @@ class NPUModelRunner310(NPUModelRunner):
 
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
-        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
-                continue
-            max_num_blocks_per_req = cdiv(max_model_len, block_sizes[i] * get_total_cp_world_size())
-            if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+        total_cp_world_size = get_total_cp_world_size()
+        for kv_cache_spec in kv_cache_specs:
+            max_num_blocks_per_req = cdiv(max_model_len, kv_cache_spec.block_size * total_cp_world_size)
+            if isinstance(kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
                     max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
-                ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
+                ) + kv_cache_spec.num_speculative_blocks
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
             max_num_blocks.append(max_num_blocks_per_req)
 
@@ -868,7 +884,7 @@ class NPUModelRunner310(NPUModelRunner):
             )
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
-                max_model_len=max(self.model_config.max_model_len, self.max_encoder_len),
+                max_model_len=max_model_len,
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
                 pin_memory=self.pin_memory,
@@ -885,4 +901,5 @@ class NPUModelRunner310(NPUModelRunner):
                 kernel_block_sizes=self.kernel_block_sizes,
                 max_num_blocks_per_req=max_num_blocks,
                 kv_cache_groups=kv_cache_config.kv_cache_groups,
+                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             )

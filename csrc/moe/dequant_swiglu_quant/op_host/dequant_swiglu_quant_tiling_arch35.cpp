@@ -69,7 +69,7 @@ constexpr int64_t QUANT_OFFSET_FACTOR_FOR_NOT_FULL = 10;
 constexpr int64_t SPECIAL_GROUP_NUM_64 = 64; // groupIndex存在时走特殊分核的group条件
 constexpr int64_t SPECIAL_GROUP_NUM_32 = 32; // groupIndex不存在时走特殊分核的group条件
 constexpr int64_t SPECIAL_GROUP_NUM_16 = 16; // 走特殊分核场景的分组条件
-constexpr float CLAMP_LIMIT_DEFAULT= 7.0;
+constexpr float CLAMP_LIMIT_DEFAULT= 0.0;
 constexpr float GLU_ALPHA_DEFAULT = 1.702;
 constexpr float GLU_BIAS_DEFAULT = 1.0;
 static const gert::Shape g_vec_1_shape = {1};
@@ -710,10 +710,10 @@ ge::graphStatus DequantSwigluQuantV35DskTiling::GetAttr()
               return ge::GRAPH_FAILED);
   auto* attrClampLimit = attrs->GetAttrPointer<float>(ATTR_CLAMP_LIMIT_INDEX);
   clampLimit_ = (attrClampLimit == nullptr) ? CLAMP_LIMIT_DEFAULT : *attrClampLimit;
-  OP_CHECK_IF(!(std::isfinite(clampLimit_) && clampLimit_ > 0.0),
+  OP_CHECK_IF(!(clampLimit_ >= 0.0),
               OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                   context_->GetNodeName(), "clamp_limit",
-                  std::to_string(clampLimit_).c_str(), "clamp_limit should be positive finite"),
+                  std::to_string(clampLimit_).c_str(), "clamp_limit should be non-negative"),
               return ge::GRAPH_FAILED);
   auto* attrGluAlpha = attrs->GetAttrPointer<float>(ATTR_GLU_ALPHA_INDEX);
   gluAlpha_ = (attrGluAlpha == nullptr) ? GLU_ALPHA_DEFAULT : *attrGluAlpha;

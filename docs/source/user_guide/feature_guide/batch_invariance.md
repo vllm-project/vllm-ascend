@@ -24,7 +24,7 @@ We will support other NPUs in the future.
 ## Software Requirements
 
 Batch invariance requires a custom operator library for Atlas A2 inference products.
-We will release the customed operator library in future versions.
+We will release the customized operator library in future versions.
 
 ## Enabling Batch Invariance
 

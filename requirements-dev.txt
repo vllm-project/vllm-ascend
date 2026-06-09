@@ -21,5 +21,5 @@ scipy
 soundfile
 pytest_mock
 mindstudio-probe>=8.3.0
-xlite==0.1.0rc7
+xlite==0.1.0rc10.dev210
 uc-manager

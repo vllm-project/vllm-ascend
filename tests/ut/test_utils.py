@@ -19,7 +19,6 @@ from unittest import mock
 
 import pytest
 import torch
-from vllm.config import CompilationConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
@@ -274,23 +273,6 @@ class TestUtils(TestBase):
         with self.assertRaises(ValueError) as context:
             utils.get_max_hidden_layers(NoLayerConfig())
         self.assertIn("num_hidden_layers", str(context.exception))
-
-    def test_update_aclgraph_sizes(self):
-        test_compilation_config = CompilationConfig(cudagraph_capture_sizes=[i for i in range(150)])
-        model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
-        test_model_config = ModelConfig(model=model_path, enforce_eager=True)
-        test_parallel_config = ParallelConfig()
-        test_vllm_config = VllmConfig(
-            model_config=test_model_config,
-            compilation_config=test_compilation_config,
-            parallel_config=test_parallel_config,
-        )
-        utils.update_aclgraph_sizes(test_vllm_config)
-        os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
-        utils.update_aclgraph_sizes(test_vllm_config)
-        del os.environ["HCCL_OP_EXPANSION_MODE"]
-
-        self.assertEqual(0, len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
 
     @mock.patch("vllm.model_executor.custom_op.CustomOp")
     @mock.patch("vllm_ascend.ops.activation.AscendQuickGELU")

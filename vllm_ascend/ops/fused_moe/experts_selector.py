@@ -280,7 +280,7 @@ def _select_experts_with_fusion_ops(
             tid2eid=tid2eid_ones,
             k_group=topk_group,
             group_count=num_expert_group,
-            routed_scaling_factor=1.0,
+            routed_scaling_factor=routed_scaling_factor,
             eps=1e-20,
             group_select_mode=1,
             # The hash custom op currently rejects renorm != 0. Apply
@@ -289,11 +289,6 @@ def _select_experts_with_fusion_ops(
             norm_type=2,
             out_flag=False,
         )
-        # Match DeepSeek V4 routing: normalize sqrtsoftplus top-k weights
-        # before applying the routed scale. DSV4 non-AITER callers pass 1.0
-        # here and scale the routed output later with muls_add_triton.
-        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
-        topk_weights = topk_weights * routed_scaling_factor
         return topk_weights, topk_ids
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:

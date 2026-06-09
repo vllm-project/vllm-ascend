@@ -56,7 +56,7 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
-from tests.e2e.nightly.multi_node.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
+from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from vllm_ascend.ascend_config import clear_ascend_config
 
 # TODO: remove this part after the patch merged into vllm, if
@@ -1450,7 +1450,11 @@ DataParallelVllmRunner = DPVllmRunner
 
 class HfRunner:
     def get_default_device(self):
-        return "cpu" if current_platform.is_cpu() else current_platform.device_type
+        if current_platform.is_cpu():
+            return "cpu"
+        else:
+            torch.npu.set_compile_mode(jit_compile=False)
+            return current_platform.device_type
 
     def wrap_device(self, x: _T, device: str | None = None) -> _T:
         if x is None or isinstance(x, (bool,)):

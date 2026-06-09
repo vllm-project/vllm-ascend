@@ -40,6 +40,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
         mock_profiler.stop.assert_called_once()
 
     @patch("vllm_ascend.profiler.torch_npu_profiler.envs_ascend")
+    @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
     @patch("torch_npu.profiler._ExperimentalConfig")
     @patch("torch_npu.profiler.profile")
     @patch("torch_npu.profiler.tensorboard_trace_handler")
@@ -56,11 +57,13 @@ class TestTorchNPUProfilerWrapper(TestBase):
         mock_trace_handler,
         mock_profile,
         mock_experimental_config,
+        mock_get_ascend_config,
         mock_envs_ascend,
     ):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 
         mock_envs_ascend.MSMONITOR_USE_DAEMON = 0
+        mock_get_ascend_config.side_effect = RuntimeError("Ascend config is not initialized")
 
         profiler_config = ProfilerConfig(
             profiler="torch",

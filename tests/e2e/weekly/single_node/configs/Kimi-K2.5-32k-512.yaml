@@ -24,7 +24,6 @@ _server_cmd: &server_cmd
   - "4"
   - "--port"
   - "$SERVER_PORT"
-  - "--async-scheduling"
   - "--quantization"
   - "ascend"
   - "--trust-remote-code"

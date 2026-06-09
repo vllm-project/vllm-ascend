@@ -218,3 +218,7 @@ csrc/third_party/
 
 # claude code skills
 .claude/skills/*
+
+.codegraph/
+
+.vllm_ascend/

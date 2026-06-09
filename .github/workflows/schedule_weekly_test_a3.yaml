@@ -126,6 +126,12 @@ jobs:
           - name: DeepSeek-V3_2-W8A8-EP_weekly
             config_file_path: DeepSeek-V3_2-W8A8-EP_weekly.yaml
             size: 2
+          - name: DeepSeek-V3-W8A8_weekly
+            config_file_path: DeepSeek-V3.yaml
+            size: 2
+          - name: multi-node-glm4.7-w8a8c8-layerwise
+            config_file_path: GLM-4.7-W8A8C8-Mooncake-Layerwise.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -136,7 +142,7 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/multi_node/configs/
+      config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ github.sha }}
       should_run: >-
@@ -186,19 +192,27 @@ jobs:
           - name: GLM-5_1-W8A8_A3_weekly
             os: linux-aarch64-a3-16
             config_file_path: GLM-5_1-W8A8_A3_weekly.yaml
+          - name: glm-5-w4a8
+            os: linux-aarch64-a3-16
+            config_file_path: GLM-5.yaml
+          - name: qwen2-5-vl-7b-epd
+            os: linux-aarch64-a3-4
+            config_file_path: Qwen2.5-VL-7B-Instruct-EPD.yaml
+          - name: MiniMax-M2.5-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: MiniMax-M2.5-W8A8-A3.yaml
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/single_node/configs
+      config_base_path: tests/e2e/weekly/single_node/configs/
       name: ${{ matrix.test_config.name }}
       should_run: >-
         ${{
           needs.setup-vars.outputs.filter == 'all' ||
           contains(needs.setup-vars.outputs.filter, format(',{0},', matrix.test_config.name))
         }}
-
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0

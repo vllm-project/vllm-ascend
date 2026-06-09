@@ -74,7 +74,7 @@ constexpr int BIAS_DTYPE_INT32 = 3;
 
 constexpr int DIM_SIZE_2 = 2;
 
-constexpr float CLAMP_LIMIT_DEFAULT= 7.0;
+constexpr float CLAMP_LIMIT_DEFAULT= 0.0;
 constexpr float GLU_ALPHA_DEFAULT = 1.702;
 constexpr float GLU_BIAS_DEFAULT = 1.0;
 
@@ -383,6 +383,11 @@ ge::graphStatus DequantSwigluQuantDskTiling::GetAttr() {
                   OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                       context_->GetNodeName(), "swigluMode",
                       std::to_string(swigluMode_).c_str(), "swigluMode only support 0 or 1"),
+                  return ge::GRAPH_FAILED);
+  OP_CHECK_IF(!(clampLimit_ >= 0.0),
+                  OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                      context_->GetNodeName(), "clamp_limit",
+                      std::to_string(clampLimit_).c_str(), "clamp_limit should be non-negative"),
                   return ge::GRAPH_FAILED);
 
   return ge::GRAPH_SUCCESS;

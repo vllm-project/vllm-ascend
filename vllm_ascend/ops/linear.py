@@ -41,7 +41,12 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import enable_sp, maybe_trans_nz
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    enable_sp,
+    get_ascend_device_type,
+    maybe_trans_nz,
+)
 
 
 def unquantized_gemm(
@@ -75,6 +80,9 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+        # must use fp32 to avoid accuracy degradation in dsv4.
+        if getattr(layer, "precast_fp32_weight", False):
+            layer.weight_fp32 = maybe_trans_nz(layer.weight.data.to(torch.float32))
         if "conv1d" not in layer.prefix:
             layer.weight.data = maybe_trans_nz(layer.weight.data)
 
@@ -446,11 +454,37 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        super().weight_loader(param, loaded_weight)
-        if "wo_a" in self.prefix:
-            self.weight.data = (
-                self.weight.data.view(self.n_local_groups, self.o_lora_rank, -1).transpose(2, 1).contiguous()
-            )
+        if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:
+            if self.weight.ndim == 2:
+                super().weight_loader(param, loaded_weight)
+                self.weight.data = (
+                    self.weight.data.view(self.n_local_groups, self.o_lora_rank, -1).transpose(2, 1).contiguous()
+                )
+            else:
+                # In RL update flows, wo_a can be loaded again after being
+                # transformed into [n_local_groups, hidden_size, o_lora_rank].
+                shard_size = self.n_local_groups * self.o_lora_rank
+                start_idx = self.tp_rank * shard_size
+                if loaded_weight.shape[0] != shard_size:
+                    loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
+                loaded_weight = (
+                    loaded_weight.view(
+                        self.n_local_groups,
+                        self.o_lora_rank,
+                        -1,
+                    )
+                    .transpose(2, 1)
+                    .contiguous()
+                )
+
+                if loaded_weight.shape != self.weight.shape:
+                    raise ValueError(
+                        f"Unexpected wo_a weight shape {tuple(loaded_weight.shape)}, "
+                        f"expected {tuple(self.weight.shape)}"
+                    )
+                self.weight.data.copy_(loaded_weight)
+        else:
+            super().weight_loader(param, loaded_weight)
 
 
 class AscendReplicatedLinear(ReplicatedLinear):

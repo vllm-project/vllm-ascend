@@ -15,7 +15,7 @@ on:
         required: false
         type: string
         description: base image for pods
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12"
       config_file_path:
         required: true
         type: string
@@ -63,6 +63,11 @@ on:
         type: string
         default: ''
         description: branch name used as prefix in artifact names to distinguish dual-branch test runs
+      request_id:
+        required: false
+        type: string
+        default: ''
+        description: non-empty when triggered by PR /nightly command
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -99,7 +104,7 @@ jobs:
     steps:
       - name: Decode kubeconfig
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [ -n "${{ inputs.request_id }}" ]; then
             if [ "${{ inputs.soc_version }}" = "a3" ]; then
               # NOTE: This is too hack, we should find a better way to manage kubeconfig for pr tests.
               cp /root/.cache/.kube/kubeconfig.yaml "$KUBECONFIG"
@@ -193,7 +198,7 @@ jobs:
           config_file_path="${{ inputs.config_file_path }}"
           config_base_path="${{ inputs.config_base_path }}"
           fail_tag="FAIL_TAG_${{ inputs.config_file_path }}"
-          is_pr_test="${{ github.event_name == 'pull_request' }}"
+          is_pr_test="${{ inputs.request_id != '' }}"
           vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
           vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
           runner="${{ inputs.soc_version }}"
@@ -368,6 +373,7 @@ jobs:
           DEST="/tmp/collected-logs"
           PLOG_PATH=/root/ascend/log
           KUBE_LOG_PATH=/var/log
+          EXT_LOG_PATH=/external-dp
           for i in $(seq 0 $((size - 1))); do
             if [ "${i}" -eq 0 ]; then
               POD="${LWS_NAME}-0"
@@ -381,6 +387,12 @@ jobs:
             SRC="${LOG_PREFIX}/node_${i}_plogs"
             if [ -d "$SRC" ]; then
               cp -r "$SRC"/. "${DEST}/node${i}/${PLOG_PATH}/" 2>/dev/null || true
+            fi
+            # External DP packs per-rank raw logs into a single archive per node.
+            EXT_SRC="${LOG_PREFIX}/node_${i}_external_dp_logs.tar.gz"
+            if [ -f "$EXT_SRC" ]; then
+              mkdir -p "${DEST}/node${i}/${EXT_LOG_PATH}"
+              cp "$EXT_SRC" "${DEST}/node${i}/${EXT_LOG_PATH}/" 2>/dev/null || true
             fi
           done
 

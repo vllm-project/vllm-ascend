@@ -24,9 +24,9 @@ namespace ge {
  * @li x: A 4D tensor which rotary position embedding is applied, format supports ND, and data type must be float16,
  * float or bfloat16.
  * @li cos: A 4D tensor which is "cos" in rotary position embedding, format supports ND, data type must be the same as
- * "x", and shape must be the same as "sin".
+ * "x" or float32, and shape must be the same as "sin".
  * @li sin: A 4D tensor which is "sin" in rotary position embedding, format supports ND, data type must be the same as
- * "x", and shape must be the same as "cos".
+ * "cos".
  * @par Outputs:
  * y: A 4D tensor which is the result of rotary position embedding, format supports ND, data type must be the same as
  * "x", and shape must be the same as "x".
@@ -51,10 +51,10 @@ namespace ge {
  * (1, S, 1, D) or (B, 1, 1, D).
  */
 REG_OP(InplacePartialRotaryMul)
-    .INPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16}))
-    .INPUT(cos, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16}))
-    .INPUT(sin, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16}))
-    .OUTPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16}))
+    .INPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT16, DT_BFLOAT16}))
+    .INPUT(cos, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT, DT_FLOAT}))
+    .INPUT(sin, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT, DT_FLOAT}))
+    .OUTPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT16, DT_BFLOAT16}))
     .ATTR(mode, Int, 0)
     .ATTR(partial_slice, ListInt, {0, 0})
     .OP_END_FACTORY_REG(InplacePartialRotaryMul)
