@@ -19,6 +19,9 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    LoadSpec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     LookupKeyClient,
@@ -161,7 +164,6 @@ class TestKVPoolScheduler(unittest.TestCase):
     def test_update_state_after_alloc_zero_external(self, mock_client_cls):
         config = self._make_config(block_size=16)
         scheduler = KVPoolScheduler(config, use_layerwise=False)
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import LoadSpec
 
         scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=False)
 

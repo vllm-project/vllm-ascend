@@ -485,13 +485,6 @@ class TestCpuAlloc(unittest.TestCase):
     @patch("vllm_ascend.cpu_binding.execute_command")
     def test_allocate(self, _mock_execute_command, _mock_get_device_type):
         self.cpu_alloc.device_info.running_npu_list = [0]
-        self.cpu_alloc.device_info.allowed_cpus = []
-        self.cpu_alloc.build_global_slice_cpu_pool()
-        self.assertEqual(self.cpu_alloc.npu_cpu_pool, {})
-
-    @patch("vllm_ascend.cpu_binding.execute_command")
-    def test_allocate(self, _mock_execute_command):
-        self.cpu_alloc.device_info.running_npu_list = [0]
         self.cpu_alloc.npu_cpu_pool = {0: list(range(24))}
         self.cpu_alloc.allocate()
         self.assertEqual(self.cpu_alloc.assign_main[0], list(range(2, 14)))
