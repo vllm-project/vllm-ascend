@@ -407,12 +407,25 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
     if "benchmark_comparisons" in config.test_content:
         run_benchmark_comparisons(config, result)
 
+def get_installed_version(package_name):
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "show", package_name],
+            capture_output=True, text=True, check=True
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("Version:"):
+                version = line.split(":", 1)[1].strip()
+                logger.info(f"{package_name} ---------- version: {version}")
+                return version
+    except subprocess.CalledProcessError:
+        print(f"{package_name} ---------- not installed")
+    return None
 
 import shutil
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
-    # TODO: remove this part after the transformers version upgraded
     workspace = "/vllm-workspace/vllm-ascend"
     benchmark_dir = os.path.join(workspace, "benchmark")
 
@@ -438,6 +451,8 @@ async def test_single_node(config: SingleNodeConfig) -> None:
     subprocess.call(pip_install_editable)
     pip_cache_purge = [sys.executable, "-m", "pip", "cache", "purge"]
     subprocess.call(pip_cache_purge)
+
+    get_installed_version("ais-bench-benchmark")
 
     if config.special_dependencies:
         for k, v in config.special_dependencies.items():
