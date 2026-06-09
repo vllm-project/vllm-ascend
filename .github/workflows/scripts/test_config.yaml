@@ -363,6 +363,13 @@
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
 
+- name: patch_mamba_utils_310p
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/patch/worker/patch_mamba_utils.py
+  tests:
+    - tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py::test_qwen3_5_dense_prefix_mamba_cache_tp1_fp16
+
 # Profiler
 - name: profiler
   optional: true
