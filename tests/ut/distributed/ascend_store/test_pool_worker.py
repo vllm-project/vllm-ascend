@@ -724,8 +724,9 @@ class TestKVPoolWorkerStaticHelpers(unittest.TestCase):
         self.assertFalse(KVPoolWorker._uses_mamba_kv_cache(False, None))
 
     def test_as_cache_tuple_tensor(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
         import torch
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
         t = torch.zeros(10)
         result = KVPoolWorker._as_cache_tuple(t)
@@ -733,8 +734,9 @@ class TestKVPoolWorkerStaticHelpers(unittest.TestCase):
         self.assertIs(result[0], t)
 
     def test_as_cache_tuple_list(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
         import torch
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
         t1 = torch.zeros(10)
         t2 = torch.ones(10)
@@ -1250,8 +1252,6 @@ class TestKVPoolWorkerInferGroupMethods(unittest.TestCase):
         config.cache_config.block_size = 16
         config.kv_events_config = None
 
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
         worker = KVPoolWorker(config, use_layerwize=False)
         self.assertEqual(worker.group_uses_align_state, [False])
 
@@ -1302,8 +1302,6 @@ class TestKVPoolWorkerInferGroupMethods(unittest.TestCase):
         config.kv_transfer_config.kv_connector_extra_config = {"backend": "mooncake"}
         config.cache_config.block_size = 16
         config.kv_events_config = None
-
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
         worker = KVPoolWorker(config, use_layerwize=False)
         # group_id out of range returns first element
