@@ -103,9 +103,6 @@ class EplbUpdator:
         self.eplb_process.planner_q.put(1)
 
     def forward_before(self):
-        # If EPLB is restricted to a specific PP stage and this is not it, skip
-        if self.eplb_config.eplb_pp_stage != -1 and self.pp_rank != self.eplb_config.eplb_pp_stage:
-            return
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.get_update_info_flag():
             self.update_info_all = self.eplb_process.block_update_q.get()
@@ -129,10 +126,6 @@ class EplbUpdator:
                 self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self):
-        # If EPLB is restricted to a specific PP stage and this is not it, skip
-        if self.eplb_config.eplb_pp_stage != -1 and self.pp_rank != self.eplb_config.eplb_pp_stage:
-            return
-
         if self.wakeup_eplb_worker_flag():
             with record_function_or_nullcontext("EPLB gather moe load"):
                 self.compute_and_set_moe_load()
