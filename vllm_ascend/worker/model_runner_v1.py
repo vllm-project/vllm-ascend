@@ -52,7 +52,11 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionMetadata,
+)
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
@@ -2440,7 +2444,15 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
+        if self.routed_experts_initialized and vllm_version_is("0.21.0"):
+            issue_routing_d2h_copy(
+                input_batch_req_ids=self.input_batch.req_ids,
+                num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                positions=self.positions,
+                positions_cpu=self._positions_cpu,
+            )
 
+        routed_experts_dict = None
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
             if self.routed_experts_initialized:
@@ -4730,29 +4742,50 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_groups: list[KVCacheGroupSpec],
         is_profiling: bool = False,
     ) -> None:
-        speculative_config = self.speculative_config
-        skip_parent_drafter_init = (
-            speculative_config is not None
-            and not get_pp_group().is_last_rank
-            and (
-                speculative_config.use_eagle()
-                or speculative_config.uses_extract_hidden_states()
-            )
-        )
-        try:
-            if skip_parent_drafter_init:
-                self.speculative_config = None
-            with update_pass_config(self):
-                super()._check_and_update_cudagraph_mode(
-                    attention_backends,
-                    kv_cache_groups,
-                    is_profiling=is_profiling,
-                )
-        finally:
-            if skip_parent_drafter_init:
-                self.speculative_config = speculative_config
+        min_cg_support = AttentionCGSupport.ALWAYS
+        min_cg_attn_backend = None
 
-        self._maybe_initialize_drafter_cudagraph_keys()
+        for attn_backend_set, kv_cache_group in zip(
+            attention_backends, kv_cache_groups
+        ):
+            for attn_backend in attn_backend_set:
+                builder_cls = attn_backend.get_builder_cls()
+                cg_support = builder_cls.get_cudagraph_support(
+                    self.vllm_config, kv_cache_group.kv_cache_spec
+                )
+                if cg_support.value < min_cg_support.value:
+                    min_cg_support = cg_support
+                    min_cg_attn_backend = attn_backend.__name__
+
+        with update_pass_config(self):
+            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                min_cg_support,
+                min_cg_attn_backend,
+                self.uniform_decode_query_len,
+                self.parallel_config.tensor_parallel_size,
+                self.kv_cache_config,
+                self.max_num_reqs,
+                is_profiling=is_profiling,
+            )
+            self.cudagraph_dispatcher.initialize_cudagraph_keys(
+                cudagraph_mode, self.uniform_decode_query_len
+            )
+
+        if (
+            self.speculative_config
+            and get_pp_group().is_last_rank
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_extract_hidden_states()
+            )
+        ):
+            assert isinstance(
+                self.drafter,
+                AscendEagleProposer
+                | AscendDflashProposer
+                | AscendExtractHiddenStatesProposer,
+            )
+            self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
@@ -4761,10 +4794,6 @@ class NPUModelRunner(GPUModelRunner):
             for desc in descs
         })
 
-        # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
-        # we set the graph params right before initializing the keys.
-        # Profiling still runs real graph warmup/capture paths, so the NPU-side
-        # graph params must exist there as well.
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
@@ -4791,34 +4820,6 @@ class NPUModelRunner(GPUModelRunner):
         torch.accelerator.empty_cache()
 
         return result
-
-    def _maybe_initialize_drafter_cudagraph_keys(self) -> None:
-        if not self.speculative_config:
-            return
-        if not (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_extract_hidden_states()
-        ):
-            return
-        if not get_pp_group().is_last_rank:
-            return
-
-        assert isinstance(
-            self.drafter,
-            AscendEagleProposer
-            | AscendDflashProposer
-            | AscendExtractHiddenStatesProposer,
-        )
-        drafter_dispatcher = getattr(self.drafter, "cudagraph_dispatcher", None)
-        if getattr(drafter_dispatcher, "keys_initialized", False):
-            return
-
-        cudagraph_mode = getattr(
-            self.cudagraph_dispatcher,
-            "cudagraph_mode",
-            self.compilation_config.cudagraph_mode,
-        )
-        self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""

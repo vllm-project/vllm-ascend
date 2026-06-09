@@ -34,9 +34,8 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs
+from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
@@ -76,16 +75,6 @@ class ProfilingChunkScheduler(Scheduler):
             mm_registry=mm_registry,
             include_finished_set=include_finished_set,
             log_stats=log_stats,
-        )
-
-        pp_size = self.vllm_config.parallel_config.pipeline_parallel_size
-        self.max_num_running_reqs = self.scheduler_config.max_num_seqs * pp_size
-        self.max_num_per_batch = self.scheduler_config.max_num_seqs
-        kv_transfer_config = getattr(self.vllm_config, "kv_transfer_config", None)
-        self.is_mtp_kv_consumer = (
-            getattr(self.vllm_config, "speculative_config", None) is not None
-            and kv_transfer_config is not None
-            and getattr(kv_transfer_config, "is_kv_consumer", False)
         )
 
         from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
@@ -237,44 +226,6 @@ class ProfilingChunkScheduler(Scheduler):
             return float(result[0])
         return None
 
-    def update_from_output(
-        self,
-        scheduler_output: SchedulerOutput,
-        model_runner_output: ModelRunnerOutput,
-    ) -> dict[int, EngineCoreOutputs]:
-        engine_core_outputs = super().update_from_output(
-            scheduler_output,
-            model_runner_output,
-        )
-        spec_token_ids = getattr(model_runner_output, "spec_token_ids", None)
-        if spec_token_ids:
-            # Backport PP+MTP output alignment: in PP batch_queue mode, a newer
-            # batch may be scheduled before this older output is consumed. Use
-            # this output's generated tokens to decide whether its draft tokens
-            # belong to a decode step, instead of reading live Request phase
-            # flags that may already reflect a later schedule step. Remove this
-            # block when upstream vLLM carries ModelRunnerOutput.spec_token_ids.
-            sampled_token_ids = getattr(model_runner_output, "sampled_token_ids", None)
-            for req_id in scheduler_output.num_scheduled_tokens:
-                request = self.requests.get(req_id)
-                if request is None or request.is_finished():
-                    continue
-
-                req_index = model_runner_output.req_id_to_index[req_id]
-                new_token_ids = sampled_token_ids[req_index] if sampled_token_ids else []
-                if not new_token_ids:
-                    if request.spec_token_ids:
-                        request.spec_token_ids = []
-                    continue
-
-                next_spec_token_ids = spec_token_ids[req_index]
-                if self.structured_output_manager.should_advance(request):
-                    metadata = request.structured_output_request
-                    assert metadata is not None and metadata.grammar is not None
-                    next_spec_token_ids = metadata.grammar.validate_tokens(next_spec_token_ids)
-                request.spec_token_ids = next_spec_token_ids
-        return engine_core_outputs
-
     # ------------------------------------------------------------------
     # schedule() override
     # ------------------------------------------------------------------
@@ -322,9 +273,6 @@ class ProfilingChunkScheduler(Scheduler):
         while req_index < len(self.running) and token_budget > 0 and time_budget > 0:
             # <<< PROFILING CHUNK <<<
             request = self.running[req_index]
-            current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
-            if current_batch_size == self.max_num_per_batch:
-                break
 
             if (
                 request.num_output_placeholders > 0
@@ -383,7 +331,7 @@ class ProfilingChunkScheduler(Scheduler):
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(request, num_new_tokens)
 
-            if num_new_tokens <= 0:
+            if num_new_tokens == 0:
                 req_index += 1
                 continue
 
@@ -485,8 +433,7 @@ class ProfilingChunkScheduler(Scheduler):
             # >>> PROFILING CHUNK >>>
             while (self.waiting or self.skipped_waiting) and token_budget > 0 and time_budget > 0:
                 # <<< PROFILING CHUNK <<<
-                current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
-                if len(self.running) == self.max_num_running_reqs or current_batch_size == self.max_num_per_batch:
+                if len(self.running) == self.max_num_running_reqs:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -568,10 +515,7 @@ class ProfilingChunkScheduler(Scheduler):
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
                 else:
-                    if self.is_mtp_kv_consumer:
-                        num_new_tokens = request.num_tokens_with_spec - num_computed_tokens
-                    else:
-                        num_new_tokens = request.num_tokens - num_computed_tokens
+                    num_new_tokens = request.num_tokens - num_computed_tokens
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
@@ -667,18 +611,6 @@ class ProfilingChunkScheduler(Scheduler):
                     step_skipped_waiting.prepend_request(request)
                     request.num_computed_tokens = num_computed_tokens
                     continue
-
-                # Speculative decode related. In MTP KV-consumer mode, waiting
-                # requests may already carry placeholder draft tokens that need
-                # to be scheduled together with the prefill tokens.
-                if (self.is_mtp_kv_consumer or not self.vllm_config.kv_transfer_config) and request.spec_token_ids:
-                    num_scheduled_spec_tokens = num_new_tokens + num_computed_tokens - request.num_tokens
-                    if num_scheduled_spec_tokens > 0:
-                        del request.spec_token_ids[num_scheduled_spec_tokens:]
-                        scheduled_spec_decode_tokens[request_id] = request.spec_token_ids
-                    else:
-                        # Prefill request: spec tokens not applicable yet.
-                        request.spec_token_ids = []
 
                 self.running.append(request)
                 if self.log_stats:
