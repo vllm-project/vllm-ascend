@@ -104,14 +104,13 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
     mem_used_by_capture = capture_mem_before.value - capture_mem_after.value
     # Empirical observation: capturing ACL graphs for Qwen3-0.6B uses ~0.20 GiB of NPU memory.
     # DeepSeek-V2-Lite-W8A8 uses ~0.68 GiB of NPU memory
-    # FULL_AND_PIECEWISE captures one FULL decode path and one PIECEWISE mixed-batch path,
-    # so allow up to 2x the historical PIECEWISE-only baseline plus runtime variance.
     if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
         baseline_capture_mem = 0.68
         capture_mem_tolerance = 1.5
     else:
         baseline_capture_mem = 0.20
         capture_mem_tolerance = 1.3
+    # FULL_AND_PIECEWISE captures both a full decode path and a piecewise mixed-batch path
     max_capture_mem_gib = baseline_capture_mem * 2 * capture_mem_tolerance
     max_mem_expected = max_capture_mem_gib * (1024**3)
     assert captured_graph_mem.value < max_mem_expected, (
