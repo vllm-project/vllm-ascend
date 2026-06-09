@@ -56,14 +56,10 @@ def apply_grammar_bitmask(
     num_masks = grammar_bitmask.shape[0]
     assert num_masks == len(mapping)
 
-    bitmask_tensor = torch.from_numpy(grammar_bitmask).to(
-        logits.device, non_blocking=True
-    )
+    bitmask_tensor = torch.from_numpy(grammar_bitmask).to(logits.device, non_blocking=True)
     index_tensor = None
     if len(mapping) != logits.shape[0]:
-        index_tensor = torch.tensor(
-            mapping, dtype=torch.int32, device=logits.device
-        )
+        index_tensor = torch.tensor(mapping, dtype=torch.int32, device=logits.device)
 
     xgr.apply_token_bitmask_inplace(logits, bitmask_tensor, indices=index_tensor)
 
