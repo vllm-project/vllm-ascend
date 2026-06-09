@@ -19,7 +19,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -1279,7 +1278,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
 
-
             if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
                 dsa_k_cache_idx = 1
                 dsa_k_scale_cache_idx = 2
@@ -1298,14 +1296,16 @@ class AscendSFAImpl(MLAAttentionImpl):
                 )
             else:
                 torch_npu.npu_scatter_nd_update_(
-                    kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
+                    kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
+                    slot_mapping.view(-1, 1),
+                    k_li.view(-1, k_li.shape[-1]),
                 )  # b, s, n, d
             if self.use_sparse_c8_indexer:
                 if get_ascend_device_type() == AscendDeviceType.A5:
                     assert len(kv_cache) == 3
                 else:
                     assert len(kv_cache) == 4
-                if k_li_scale is not None :
+                if k_li_scale is not None:
                     if self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim:
                         torch.ops._C_ascend.store_kv_block(
                             k_li_scale,
@@ -1321,7 +1321,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
-                    
+
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
 
