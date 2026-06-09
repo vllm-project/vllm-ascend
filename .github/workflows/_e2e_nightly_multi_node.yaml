@@ -63,6 +63,11 @@ on:
         type: string
         default: ''
         description: branch name used as prefix in artifact names to distinguish dual-branch test runs
+      request_id:
+        required: false
+        type: string
+        default: ''
+        description: non-empty when triggered by PR /nightly command
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -99,7 +104,7 @@ jobs:
     steps:
       - name: Decode kubeconfig
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [ -n "${{ inputs.request_id }}" ]; then
             if [ "${{ inputs.soc_version }}" = "a3" ]; then
               # NOTE: This is too hack, we should find a better way to manage kubeconfig for pr tests.
               cp /root/.cache/.kube/kubeconfig.yaml "$KUBECONFIG"
@@ -193,7 +198,7 @@ jobs:
           config_file_path="${{ inputs.config_file_path }}"
           config_base_path="${{ inputs.config_base_path }}"
           fail_tag="FAIL_TAG_${{ inputs.config_file_path }}"
-          is_pr_test="${{ github.event_name == 'pull_request' }}"
+          is_pr_test="${{ inputs.request_id != '' }}"
           vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
           vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
           runner="${{ inputs.soc_version }}"

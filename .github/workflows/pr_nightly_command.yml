@@ -35,19 +35,30 @@ jobs:
       test_cases: ${{ steps.resolve.outputs.test_cases }}
       branch: ${{ steps.resolve.outputs.branch }}
       is_authorized: ${{ steps.auth.outputs.is_authorized }}
+      dispatch_a2: ${{ steps.resolve.outputs.dispatch_a2 }}
+      dispatch_a3: ${{ steps.resolve.outputs.dispatch_a3 }}
+      vllm_ascend_ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          sparse-checkout: |
+            .github/workflows/scripts/resolve_nightly_tests.py
+          sparse-checkout-cone-mode: false
+
       - name: Check user authorization
         id: auth
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
-          PERMISSION=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission')
-          case "$PERMISSION" in
+          ROLE_NAME=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.role_name')
+          case "$ROLE_NAME" in
             triage|write|maintain|admin)
-              echo "User $ACTOR has $PERMISSION permission, authorized."
+              echo "User $ACTOR has $ROLE_NAME role, authorized."
               echo "is_authorized=true" >> "$GITHUB_OUTPUT"
               ;;
             *)
@@ -56,26 +67,15 @@ jobs:
               ;;
           esac
 
-      - name: Post workflow URL
-        if: steps.auth.outputs.is_authorized == 'true'
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
-          body: |
-            nightly command triggered. See [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
-          reactions: rocket
-
       - name: Post unauthorized comment
         if: steps.auth.outputs.is_authorized == 'false'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
-            nightly command failed: you do not have permission. Only users with triage+ permission can trigger /nightly.
+            [Bot]: nightly command failed: you do not have permission. Only users with triage+ permission can trigger /nightly.
           reactions: confused
 
       - name: Fail if unauthorized
@@ -85,12 +85,17 @@ jobs:
       - name: Resolve test cases and branch
         id: resolve
         if: steps.auth.outputs.is_authorized == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ALL_ARGS: ${{ github.event.client_payload.slash_command.args.all }}
+          PR_URL: ${{ github.event.client_payload.github.payload.issue.pull_request.url }}
         run: |
-          ALL_ARGS=$(echo '${{ github.event.client_payload.slash_command.args.all }}' | xargs)
+          ALL_ARGS=$(echo "$ALL_ARGS" | xargs)
           if [ -z "$ALL_ARGS" ]; then
-            echo "test_cases=all" >> "$GITHUB_OUTPUT"
-            echo "branch=main" >> "$GITHUB_OUTPUT"
-            exit 0
+            gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
+              -f body="[Bot]: \`/nightly\` without test names will not dispatch. Please specify test names, e.g. \`/nightly all\` or \`/nightly test_custom_op\`." \
+              --silent
+            exit 1
           fi
 
           BRANCH="main"
@@ -111,49 +116,128 @@ jobs:
             fi
           done
 
-          # If --branch was the last word (no branch name given), ignore it
-          if [ "$NEXT_IS_BRANCH" = "1" ]; then
-            NEXT_IS_BRANCH=0
+          if [ -z "$TEST_CASES" ]; then
+            gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
+              -f body="[Bot]: \`/nightly\` without test names will not dispatch. Please specify test names, e.g. \`/nightly all\` or \`/nightly test_custom_op\`." \
+              --silent
+            exit 1
           fi
 
-          if [ -z "$TEST_CASES" ]; then
-            TEST_CASES="all"
-          fi
+
           echo "test_cases=$TEST_CASES" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          PR_BRANCH=$(gh api "$PR_URL" --jq '.head.ref')
+          HEAD_REPO=$(gh api "$PR_URL" --jq '.head.repo.full_name')
+          PR_SHA=$(gh api "$PR_URL" --jq '.head.sha')
+          echo "vllm_ascend_ref=$PR_SHA" >> "$GITHUB_OUTPUT"
+
+          if [ "$TEST_CASES" = "all" ]; then
+            echo "dispatch_a2=true" >> "$GITHUB_OUTPUT"
+            echo "dispatch_a3=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Parse test matrices from the PR branch's workflow YAML files
+          pip install pyyaml -q 2>/dev/null
+
+          A2_RAW=$(gh api "repos/$HEAD_REPO/contents/.github/workflows/schedule_nightly_test_a2.yaml?ref=$PR_BRANCH" --jq '.content' 2>/dev/null || echo "")
+          export A2_RAW
+          A3_RAW=$(gh api "repos/$HEAD_REPO/contents/.github/workflows/schedule_nightly_test_a3.yaml?ref=$PR_BRANCH" --jq '.content' 2>/dev/null || echo "")
+          export A3_RAW
+          A2_ACC_GROUPS=$(gh api "repos/$HEAD_REPO/contents/tests/e2e/models/configs/accuracy_groups_a2.json?ref=$PR_BRANCH" --jq '.content' 2>/dev/null || echo "")
+          export A2_ACC_GROUPS
+          export TEST_CASES
+
+          python3 .github/workflows/scripts/resolve_nightly_tests.py
 
   dispatch-a2:
     name: Trigger Nightly-A2
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.dispatch_a2 == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      a2_run_id: ${{ steps.dispatch_a2.outputs.a2_run_id }}
     steps:
       - name: Dispatch nightly-a2 workflow
+        id: dispatch_a2
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_nightly_test_a2.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}'
+            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
+            -f request_id="$REQUEST_ID" \
+            -f skip_build_image=true \
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+          sleep 8
+          A2_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a2.yaml/runs?per_page=1" \
+            --jq '.workflow_runs[0].id')
+          echo "a2_run_id=$A2_RUN_ID" >> "$GITHUB_OUTPUT"
           echo "Dispatched Nightly-A2 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
 
   dispatch-a3:
     name: Trigger Nightly-A3
     needs: [authorize]
-    if: needs.authorize.outputs.is_authorized == 'true'
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.dispatch_a3 == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      a3_run_id: ${{ steps.dispatch_a3.outputs.a3_run_id }}
     steps:
       - name: Dispatch nightly-a3 workflow
+        id: dispatch_a3
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_nightly_test_a3.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
-            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}'
+            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
+            -f request_id="$REQUEST_ID" \
+            -f skip_build_image=true \
+            -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}'
+          sleep 8
+          A3_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_test_a3.yaml/runs?per_page=1" \
+            --jq '.workflow_runs[0].id')
+          echo "a3_run_id=$A3_RUN_ID" >> "$GITHUB_OUTPUT"
           echo "Dispatched Nightly-A3 with test_cases='${{ needs.authorize.outputs.test_cases }}', branch='${{ needs.authorize.outputs.branch }}'"
+
+  post-links:
+    name: Post nightly workflow links
+    needs: [authorize, dispatch-a2, dispatch-a3]
+    if: always() && needs.authorize.outputs.is_authorized == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build comment body
+        id: body
+        run: |
+          BODY="nightly command triggered."
+          if [[ "${{ needs.dispatch-a2.result }}" == "success" ]]; then
+            BODY="$BODY
+          - Nightly-A2: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a2.outputs.a2_run_id }})"
+          fi
+          if [[ "${{ needs.dispatch-a3.result }}" == "success" ]]; then
+            BODY="$BODY
+          - Nightly-A3: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a3.outputs.a3_run_id }})"
+          fi
+          {
+            echo "body<<EOF"
+            echo "$BODY"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post workflow URLs
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: ${{ steps.body.outputs.body }}
+          reactions: rocket

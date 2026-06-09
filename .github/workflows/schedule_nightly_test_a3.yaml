@@ -36,6 +36,21 @@ on:
         required: false
         default: 'all'
         type: string
+      request_id:
+        description: 'Unique request ID from the triggering workflow for run identification'
+        required: false
+        default: ''
+        type: string
+      skip_build_image:
+        description: 'Skip build-image job (used when triggered by /nightly command)'
+        required: false
+        default: 'false'
+        type: string
+      vllm_ascend_ref:
+        description: 'PR commit SHA for PR-triggered tests'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -50,7 +65,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-a3
+  group: ascend-nightly-${{ github.ref }}-a3${{ github.event.inputs.request_id && format('-{0}', github.event.inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -124,7 +139,9 @@ jobs:
 
   build-image:
     name: Build nightly-a3 image
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
     strategy:
       matrix:
         vllm_ascend_branch: >-
@@ -167,7 +184,8 @@ jobs:
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      request_id: ${{ inputs.request_id || '' }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -234,7 +252,8 @@ jobs:
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      request_id: ${{ inputs.request_id || '' }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -324,6 +343,8 @@ jobs:
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
+      request_id: ${{ inputs.request_id || '' }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
 
   multi-card-tests:
     name: single-node
@@ -377,6 +398,8 @@ jobs:
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
+      request_id: ${{ inputs.request_id || '' }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
     secrets:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
@@ -393,7 +416,7 @@ jobs:
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into nightly-a3.zip
-    needs: [parse-trigger, single-node-tests, multi-node-tests, double-node-tests]
+    needs: [parse-trigger, single-node-tests, multi-node-tests, double-node-tests, multi-card-tests]
     if: >-
       always() &&
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
