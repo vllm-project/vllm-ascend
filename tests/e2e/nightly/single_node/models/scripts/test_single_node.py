@@ -408,12 +408,17 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
         run_benchmark_comparisons(config, result)
 
 
+import shutil
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
     # TODO: remove this part after the transformers version upgraded
     workspace = "/vllm-workspace/vllm-ascend"
     benchmark_dir = os.path.join(workspace, "benchmark")
+
+    if os.path.exists(benchmark_dir):
+        shutil.rmtree(benchmark_dir)  # 等价于 rm -rf
+
     os.chdir(workspace)
     clone_cmd = [
         "git", "clone", "-b", "v3.1-20260609-master",
