@@ -19,13 +19,11 @@
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
-
 QWEN3_5_PREFIX_MAMBA_PROMPT = (
     "You are reading a compact synthetic operations ledger. "
     "Use only the rows below when answering the final question.\n"
     + "\n".join(
-        f"Row {i}: route R{i:03d} moves cargo from zone {i % 11} to zone {(i * 7) % 13}; "
-        f"priority is {i % 5}."
+        f"Row {i}: route R{i:03d} moves cargo from zone {i % 11} to zone {(i * 7) % 13}; priority is {i % 5}."
         for i in range(64)
     )
     + "\n"
