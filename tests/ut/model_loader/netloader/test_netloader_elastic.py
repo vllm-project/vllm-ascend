@@ -48,7 +48,16 @@ def capture_elastic_logs(level=logging.DEBUG):
     log_capture_string = io.StringIO()
     handler = logging.StreamHandler(log_capture_string)
     handler.setLevel(level)
-    original_level = elastic.logger.getEffectiveLevel()
+    # Use getattr to safely get the level, avoiding getEffectiveLevel() which
+    # may raise AttributeError when the logger's parent chain contains objects
+    # without a 'level' attribute (can happen after dictConfig resets in Python 3.12)
+    original_level = getattr(elastic.logger, 'level', logging.NOTSET)
+    if original_level == logging.NOTSET:
+        # If level is NOTSET, try getEffectiveLevel with a fallback
+        try:
+            original_level = elastic.logger.getEffectiveLevel()
+        except AttributeError:
+            original_level = logging.WARNING
     elastic.logger.setLevel(level)
     elastic.logger.addHandler(handler)
     try:
