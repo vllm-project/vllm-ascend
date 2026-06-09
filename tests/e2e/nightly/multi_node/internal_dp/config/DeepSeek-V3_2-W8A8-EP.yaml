@@ -21,8 +21,6 @@ env_common: &env_common
   HCCL_INTRA_PCIE_ENABLE: 1
   HCCL_INTRA_ROCE_ENABLE: 0
 
-special_dependencies:
-  transformers: "5.9.0"
 
 disaggregated_prefill:
   enabled: true

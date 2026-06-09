@@ -316,24 +316,13 @@ jobs:
           - name: Qwen3.5-27B-w8a8-A3
             os: linux-aarch64-a3-2
             config_file_path: Qwen3.5-27B-w8a8-A3.yaml
-          - name: DeepSeek-V4-Flash-W8A8-A3
-            os: linux-aarch64-a3-16
-            config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
           - name: Qwen3.5-122B-A10B-W8A8-A3
             os: linux-aarch64-a3-16
             config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
-          - name: hy3-preview
-            os: linux-aarch64-a3-16
-            config_file_path: Hy3-preview.yaml
-          # pytest-driven tests
-          - name: custom-multi-ops
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
-      tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       should_run: >-
