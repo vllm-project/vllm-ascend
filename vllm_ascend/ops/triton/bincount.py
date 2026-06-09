@@ -106,8 +106,7 @@ def get_token_bin_counts_and_mask_triton(
         assert n_rows == num_seqs, f"tokens rows must match num_seqs: tokens.shape[0]={n_rows}, num_seqs={num_seqs}"
     n_rows = num_seqs if num_seqs is not None else n_rows
 
-    # seq_len == 0 is valid for empty decode history; return directly.
-    if n_cols == 0:
+    if n_rows == 0 or n_cols == 0:
         bin_counts = torch.zeros((n_rows, vocab_size), dtype=torch.int32, device=tokens.device)
         return bin_counts, bin_counts > 0
 
