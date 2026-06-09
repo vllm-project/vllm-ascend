@@ -483,8 +483,8 @@ class FlashTree:
                 crf=current_replicas_f,
                 ri=remaind_idx,
                 rrf=remaind_replicas_f,
-                nar=num_available_replicas: get_score(
-                    _lpt_deployment, X_row, deployed_replicas, ci, crf[mid], ri, rrf[nar - mid]
+                nar=num_available_replicas: (  # noqa: E501
+                    get_score(_lpt_deployment, X_row, deployed_replicas, ci, crf[mid], ri, rrf[nar - mid])
                 ),
             )
 

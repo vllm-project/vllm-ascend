@@ -28,12 +28,10 @@ class Backend(ABC):
         return self.exists(keys)
 
     def batch_get_key_info(self, keys: list[str]):
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support batch_get_key_info")
+        raise NotImplementedError(f"{type(self).__name__} does not support batch_get_key_info")
 
     def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support batch_alloc")
+        raise NotImplementedError(f"{type(self).__name__} does not support batch_alloc")
 
     @abstractmethod
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):

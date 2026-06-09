@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import math
 import threading
+from collections.abc import Generator
 
 import torch
 from vllm import envs
@@ -38,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     KeyMetadata,
     LayerBlockRange,
     LayerLoadTask,
+    LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
     get_block_hashes,

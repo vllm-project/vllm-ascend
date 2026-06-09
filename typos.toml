@@ -50,6 +50,7 @@ tme = "tme"
 dout = "dout"
 Pn = "Pn"
 arange = "arange"
+Wrk = "Wrk"
 
 [type.py]
 extend-glob = []
