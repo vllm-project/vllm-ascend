@@ -105,6 +105,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 - **CANN**: Remains at 9.0.0 (unchanged from v0.20.2rc1).
 - **PyTorch / torch_npu**: 2.10.0 (unchanged from v0.20.2rc1).
 - **triton-ascend**: 3.2.1 (unchanged from v0.20.2rc1).
+- **Mooncake**: v0.3.8.post1 (unchanged from v0.20.2rc1).
 
 ### Breaking Changes and Migration Notes
 
