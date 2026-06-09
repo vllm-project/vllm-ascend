@@ -1010,6 +1010,34 @@ class AscendSFAImpl(MLAAttentionImpl):
             same_ratio.item(),
         )
 
+    def _debug_compare_sfa_prolog_v3_q_down_proj(
+        self,
+        hidden_states: torch.Tensor,
+        q_c_raw_ref: torch.Tensor,
+        q_c_ref: torch.Tensor,
+    ) -> None:
+        assert self.q_a_layernorm is not None
+
+        try:
+            token_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states.contiguous())
+            q_c_raw = torch_npu.npu_quant_matmul(
+                token_x,
+                self.weight_dq,
+                self.dequant_scale_w_dq.view(-1),
+                pertoken_scale=pertoken_scale.view(-1),
+                output_dtype=hidden_states.dtype,
+            )
+            q_c_norm = self.q_a_layernorm(q_c_raw)
+        except Exception:
+            logger.exception(
+                "[SFA prolog debug][%s] failed to run q down-proj reference matmul",
+                self.layer_name,
+            )
+            return
+
+        self._debug_sfa_prolog_v3_tensor_diff("q_c_raw_quant_matmul", q_c_raw_ref, q_c_raw)
+        self._debug_sfa_prolog_v3_tensor_diff("q_c_quant_matmul_norm", q_c_ref, q_c_norm)
+
     def _debug_compare_sfa_prolog_v3_preprocess(
         self,
         hidden_states: torch.Tensor,
@@ -1029,11 +1057,12 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         with torch.no_grad():
             qkv_lora_ref = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c_ref, kv_no_split_ref = qkv_lora_ref.split(
+            q_c_raw_ref, kv_no_split_ref = qkv_lora_ref.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c_ref = self.q_a_layernorm(q_c_ref)
+            q_c_ref = self.q_a_layernorm(q_c_raw_ref)
+            self._debug_compare_sfa_prolog_v3_q_down_proj(hidden_states, q_c_raw_ref, q_c_ref)
             ql_nope_ref, q_pe_ref = self._q_proj_and_k_up_proj(q_c_ref)
             q_pe_ref = self.rope_single(q_pe_ref, cos, sin)
 
