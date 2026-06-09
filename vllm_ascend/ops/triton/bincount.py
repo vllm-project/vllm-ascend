@@ -110,8 +110,12 @@ def get_token_bin_counts_and_mask_triton(
         assert n_rows == num_seqs, f"tokens rows must match num_seqs: tokens.shape[0]={n_rows}, num_seqs={num_seqs}"
     n_rows = num_seqs if num_seqs is not None else n_rows
 
-    # seq_len == 0 is valid for empty decode history; return directly.
-    if n_cols == 0:
+    # Guard against empty input tensors to avoid division by zero in grid calculation.
+    # This can happen in DP sharding scenarios where a rank may receive no draft tokens
+    # (e.g., when sum(local_num_draft_tokens) == 0 but local_batch > 0).
+    # n_rows == 0: empty batch (no tokens to count)
+    # n_cols == 0: empty sequence (valid for empty decode history)
+    if n_rows == 0 or n_cols == 0:
         bin_counts = torch.zeros((n_rows, vocab_size), dtype=torch.int32, device=tokens.device)
         return bin_counts, bin_counts > 0
 
