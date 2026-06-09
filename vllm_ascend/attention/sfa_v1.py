@@ -7,7 +7,8 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -58,6 +59,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     get_weight_prefetch_method,
     maybe_trans_nz,
+    parse_layer_idx,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -420,7 +422,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
         self.q_b_proj = kwargs["q_b_proj"]
+        self.vllm_config = get_current_vllm_config()
+        self.layer_name = kwargs.get("layer_name")
         self.skip_topk = kwargs.get("skip_topk", False)
+        if self.skip_topk:
+            pp_group = get_pp_group()
+            if pp_group.world_size > 1:
+                pp_start_layer, _ = get_pp_indices(
+                    self.vllm_config.model_config.hf_config.num_hidden_layers,
+                    pp_group.rank_in_group,
+                    pp_group.world_size,
+                )
+                # The IndexCache buffer is not shared across PP stages.
+                self.skip_topk = parse_layer_idx(self.layer_name or "") != pp_start_layer
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
 
         ascend_config = get_ascend_config()
@@ -433,7 +447,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         assert self.indexer is not None, "Indexer is required for DSA."
 
         self.local_num_heads = self.num_heads
-        self.vllm_config = get_current_vllm_config()
         self.use_index_cache = self.skip_topk or getattr(
             self.vllm_config.model_config.hf_config,
             "use_index_cache",
@@ -442,7 +455,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
-        self.layer_name = kwargs.get("layer_name")
 
         # indexer param
         self.n_head: int = self.indexer.n_head  # 64
