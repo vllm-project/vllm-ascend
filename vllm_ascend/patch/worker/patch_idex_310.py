@@ -14,12 +14,12 @@ vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets = prepare_chunk_o
 # Patch _warmup_prefill_kernels to no-op on 310P: triton.next_power_of_2 does
 # not exist in the triton version used on 310P CI, and NPU does not use these
 # CUDA warmup kernel anyway.
-if vllm_version_is("0.20.2"):
+if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
         GatedDeltaNetAttention,
     )
 
-    GatedDeltaNetAttention._warmup_prefill_kernels = lambda self, mixed_qkv: None  # type: ignore[method-assign]
+    GatedDeltaNetAttention._warmup_prefill_kernels = lambda self, qkv_or_qkvz, v_dim: None  # type: ignore[method-assign]
     GatedDeltaNetAttention._forward_core = AscendGatedDeltaNetAttention310._forward_core
     GatedDeltaNetAttention.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 else:

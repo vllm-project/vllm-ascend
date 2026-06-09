@@ -63,13 +63,11 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.ensure_mxfp4_moe_available")
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_ep_group")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm, mock_ep, mock_ensure):
+    def setUp(self, mock_ascend, mock_vllm, mock_ensure):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
-        mock_ep.return_value = Mock()
         mock_ensure.return_value = None
         self.scheme = AscendW4A4MXFP4DynamicFusedMoEMethod()
 

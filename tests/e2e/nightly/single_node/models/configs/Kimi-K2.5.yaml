@@ -62,7 +62,7 @@ _benchmarks: &benchmarks
     top_k: -1
     repetition_penalty: 1.0
     batch_size: 32
-    baseline: 87
+    baseline: 95
     threshold: 5
   perf:
     case_type: performance

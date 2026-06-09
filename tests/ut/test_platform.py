@@ -24,6 +24,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.compilation_config = MagicMock()
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
+        mock_vllm_config.model_config.is_encoder_decoder = False
         mock_vllm_config.parallel_config = MagicMock()
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
@@ -31,7 +32,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.speculative_config = None
         mock_vllm_config.additional_config = {}
         mock_vllm_config.compilation_config.pass_config.enable_sp = False
-        mock_vllm_config.compilation_config.cudagraph_mode = None
+        mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         return mock_vllm_config
 
     @staticmethod
@@ -291,12 +292,11 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch("vllm_ascend.utils.update_aclgraph_sizes")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("os.environ", {})
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_basic_config_update(
-        self, mock_init_recompute, mock_soc_version, mock_update_acl, mock_init_ascend, mock_auto_detect
+        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
     ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -336,14 +336,16 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        with self.assertLogs(logger="vllm", level="WARNING") as cm:
-            from vllm_ascend import platform
+        from vllm_ascend import platform
 
-            importlib.reload(platform)
-            self.platform = platform.NPUPlatform()
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
 
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
-                self.platform.check_and_update_config(vllm_config)
+        with (
+            self.assertLogs(logger="vllm", level="INFO") as cm,
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
         self.assertTrue("Model config is missing" in cm.output[0])
 
@@ -363,16 +365,21 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        with self.assertLogs(logger="vllm", level="INFO") as cm:
-            from vllm_ascend import platform
+        from vllm_ascend import platform
 
-            importlib.reload(platform)
-            self.platform = platform.NPUPlatform()
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
 
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
-                self.platform.check_and_update_config(vllm_config)
+        with (
+            self.assertLogs(logger="vllm", level="INFO") as cm,
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
-        self.assertTrue("Compilation disabled, using eager mode by default" in cm.output[0])
+        self.assertTrue(
+            any("Compilation disabled, using eager mode by default" in log for log in cm.output),
+            cm.output,
+        )
 
         self.assertEqual(
             vllm_config.compilation_config.mode,
@@ -402,14 +409,16 @@ class TestNPUPlatform(TestBase):
 
         vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
-        with self.assertLogs(logger="vllm", level="WARNING") as cm:
-            from vllm_ascend import platform
+        from vllm_ascend import platform
 
-            importlib.reload(platform)
-            self.platform = platform.NPUPlatform()
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
 
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
-                self.platform.check_and_update_config(vllm_config)
+        with (
+            self.assertLogs(logger="vllm", level="WARNING") as cm,
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
             self.assertTrue("NPU does not support" in cm.output[0])
 

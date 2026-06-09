@@ -26,14 +26,14 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.utils import is_310p, vllm_version_is
 
-if vllm_version_is("0.20.2"):
-    from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention as _GDNBaseCls
-
-    _GDN_PATCH_TARGET = _GDNBaseCls
+if vllm_version_is("0.21.0"):
+    from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
+        GatedDeltaNetAttention as _GDNBaseCls,
+    )
 else:
     from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 
-    _GDN_PATCH_TARGET = _GDNBaseCls
+_GDN_PATCH_TARGET = _GDNBaseCls
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
@@ -159,7 +159,4 @@ if is_310p():
 else:
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
-    if vllm_version_is("0.20.2"):
-        _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels_v0202
-    else:
-        _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
+    _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels

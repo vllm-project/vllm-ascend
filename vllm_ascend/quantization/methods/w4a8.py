@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_tensor_model_parallel_world_size
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -95,8 +95,6 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
         self.new_quant_version = quant_version == "1.0.0"
-
-        from vllm.distributed import get_tensor_model_parallel_world_size
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -347,7 +345,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.W4A8
 
     def __init__(self):
-        self.ep_group = get_ep_group()
         self.supports_eplb = True
 
         vllm_config = get_current_vllm_config()
@@ -362,7 +359,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             self.weight_strategy = vllm_config.quant_config.quant_description.get("weight_strategy", "group")
 
-        self.tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else self.ep_group.world_size
+        self.tp_size = (
+            1 if vllm_config.parallel_config.enable_expert_parallel else get_tensor_model_parallel_world_size()
+        )
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         if self.new_quant_version and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
@@ -553,9 +552,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         topk_weights = topk_weights.to(x.dtype)
 
         if self.dynamic_eplb:
-            w1 = layer.w13_weight_list
+            w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
             w1_scale = layer.w13_weight_scale_list
-            w2 = layer.w2_weight_list
+            w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
             w2_scale = layer.w2_weight_scale_list
             w1_scale_bias = layer.w13_scale_bias_list
             w2_scale_bias = layer.w2_scale_bias_list
@@ -753,8 +752,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
         if self.dynamic_eplb:
-            layer.w13_weight_list = [weight.clone().view(torch.int32) for weight in layer.w13_weight.data.unbind(dim=0)]
-            layer.w2_weight_list = [weight.clone().view(torch.int32) for weight in layer.w2_weight.data.unbind(dim=0)]
+            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
             layer.w13_weight_scale_list = [weight.clone() for weight in layer.w13_weight_scale.data.unbind(dim=0)]
             layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
             layer.w13_scale_bias_list = (

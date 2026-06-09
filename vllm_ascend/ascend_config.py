@@ -57,8 +57,8 @@ class AscendConfig:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens
             if max_batched < self.profiling_chunk_config.min_chunk:
                 logger.warning(
-                    "max_num_batched_tokens (%d) is smaller than "
-                    "profiling_chunk_config.min_chunk (%d). "
+                    "max_num_batched_tokens is smaller than profiling_chunk_config.min_chunk. "
+                    "max_num_batched_tokens=%d, min_chunk=%d. "
                     "Clamping min_chunk to %d to avoid it being silently ignored.",
                     max_batched,
                     self.profiling_chunk_config.min_chunk,
@@ -238,16 +238,7 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-        # Disable Sparse C8 for A5
-        # A5 has not been fully validated for this path and may carry hidden risks.
-        # TODO(rjg-lyh): Enable A5 support after sufficient validation.
-        self.enable_sparse_c8 = (
-            additional_config.get("enable_sparse_c8", False)
-            and use_sparse
-            and get_ascend_device_type() != AscendDeviceType.A5
-        )
+        self.enable_sparse_c8 = additional_config.get("enable_sparse_c8", False) and use_sparse
         self.c8_enable_reshape_optim = self.enable_sparse_c8 and additional_config.get(
             "c8_enable_reshape_optim", False
         )
@@ -264,6 +255,10 @@ class AscendConfig:
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
+
+        # Whether to use NPU device group for DP metadata all_reduce.
+        # "True": use NPU device group, "False" (default): use CPU group.
+        self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)
 
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
@@ -341,21 +336,24 @@ class AscendConfig:
         if not isinstance(quant_description, dict):
             return set(), set()
 
+        QUANT_SUFFIXES = (".indexer.quant_type", ".indexer.wq_b_weight")
+        VALID_QUANT_TYPES = ("INT8_DYNAMIC", "W8A8_MXFP8")
+
         layer_ids: set[int] = set()
         layer_names: set[str] = set()
-        suffix = ".indexer.quant_type"
         from vllm.model_executor.models.utils import extract_layer_index
 
         for key, value in quant_description.items():
-            if not isinstance(key, str) or not key.endswith(suffix):
+            if not isinstance(key, str):
                 continue
-            if value != "INT8_DYNAMIC":
+            matched_suffix = next((s for s in QUANT_SUFFIXES if key.endswith(s)), None)
+            if matched_suffix is None or value not in VALID_QUANT_TYPES:
                 continue
-            layer_name = key[: -len(suffix)].rstrip(".")
+            layer_name = key[: -len(matched_suffix)].rstrip(".")
             if not layer_name:
                 continue
             layer_names.add(layer_name)
-            layer_ids.update({extract_layer_index(layer_name)})
+            layer_ids.add(extract_layer_index(layer_name))
         return layer_ids, layer_names
 
     def is_sparse_c8_layer(self, layer_name: str | None) -> bool:
@@ -396,8 +394,8 @@ class AscendConfig:
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
                 logger.debug(
-                    "set compile_ranges_split_points to "
-                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                    "Set compile_ranges_split_points to %s for matmul and allreduce fusion",
+                    new_compile_ranges_split_points,
                 )
 
         else:
@@ -409,8 +407,8 @@ class AscendConfig:
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
                 logger.debug(
-                    "set compile_ranges_split_points to "
-                    "{new_compile_ranges_split_points} for matmul and allreduce fusion"
+                    "Set compile_ranges_split_points to %s for matmul and allreduce fusion",
+                    new_compile_ranges_split_points,
                 )
 
             if len(new_compile_ranges_split_points) > len(self._get_compile_ranges(vllm_config.compilation_config)):
@@ -465,8 +463,15 @@ class FinegrainedTPConfig:
             self.olora_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
+            # If it is a dense model, then expert parallel is not needed,
+            # and data parallel is also not needed. If the data parallel size is set
+            # to greater than 1 in the model launch configuration, its value will be changed to 1 later.
+            # This will cause an issue when lmhead parallel is enabled, as the lmhead
+            # cannot be split into the data parallel communication group, leading to an error.
+            if module_tp_size > 0 and not vllm_config.model_config.is_moe:
+                raise AssertionError("The lmhead parallel feature can be enabled only for MOE models.")
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
-                raise AssertionError("module tp sizes must divide data_parallel_size")
+                raise AssertionError("lmhead_tensor_parallel_size must divide by data_parallel_size.")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
@@ -561,8 +566,8 @@ class XliteGraphConfig:
                 )
             if vllm_config.cache_config.block_size != 128:
                 logger.warning(
-                    "Current cache block size is %s, which may not be optimal or compatible with xlite graph mode. "
-                    "The recommended block size for xlite graph mode is 128.",
+                    "Current cache block size may not be optimal for xlite graph mode. "
+                    "current_block_size=%d, recommended_block_size=128.",
                     vllm_config.cache_config.block_size,
                 )
 
@@ -712,7 +717,7 @@ def init_ascend_config(vllm_config):
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
     else:
-        logger.warning("Ascend config instance is not fully initialized; skip singleton cache update.")
+        logger.warning("Ascend config instance is not fully initialized. action: skip singleton cache update. ")
     return new_config
 
 
