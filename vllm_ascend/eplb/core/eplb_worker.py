@@ -161,19 +161,15 @@ class EplbWorker:
 
             for idx in range(len(dst_rank_indices)):
                 dst_rank_id = dst_rank_indices[idx].item()
-                global_expert_id = experts_to_recv[idx].item()
-                # Read the actual local expert ID (slot value) for the plan,
-                # so downstream can index expert_param_per_layer correctly.
-                local_expert_id = updated_expert_maps_this_layer[dst_rank_id, global_expert_id].item()
+                expert_id = experts_to_recv[idx].item()
                 if dst_rank_id not in expert_recv_info_this_layer:
                     expert_recv_info_this_layer[dst_rank_id] = []
 
-                if not torch.isin(torch.tensor(global_expert_id), experts_to_send).any():
-                    # if expert_id are not sent out from any npu, it will be copied
-                    # from one npu holding this expert
-                    candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:, global_expert_id] != -1)[0]
+                if not torch.isin(torch.tensor(expert_id), experts_to_send).any():
+                    # if expert_id are not sent out from any npu, it will be copied from one npu holding this expert
+                    candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:, expert_id] != -1)[0]
                 else:
-                    candidate_src_rank_indices = src_rank_indices[experts_to_send == global_expert_id]
+                    candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
 
                 # TODO: improve selection criterion of NPU sending expert_id,
                 # considering intra-node or inter-node...
@@ -181,9 +177,8 @@ class EplbWorker:
                 if src_rank_id not in expert_send_info_this_layer:
                     expert_send_info_this_layer[src_rank_id] = []
 
-                # Use local_expert_id (slot value) in the plan for downstream
-                expert_send_info_this_layer[src_rank_id].append((dst_rank_id, local_expert_id))
-                expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, local_expert_id))
+                expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
+                expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
 
             yield (
                 expert_send_info_this_layer,
