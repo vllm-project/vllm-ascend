@@ -84,7 +84,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install dependencies
-        run: pip install pyyaml
+        run: pip install pyyaml regex
 
       - name: Resolve branch ref and tag
         id: branches

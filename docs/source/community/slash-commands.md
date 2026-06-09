@@ -31,56 +31,9 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 | `two_card` | A3 2-card |
 | Others (e.g. `one_card`) | A2 single card |
 
-> Only test paths under `tests/e2e/pull_request/` are supported. Tests in `tests/e2e/schedule/` or `tests/e2e/doctests/` are not accepted by `/e2e`. Use `/nightly` for nightly tests.
+> Only test paths under `tests/e2e/pull_request/` are supported. Tests in `tests/e2e/schedule/` or `tests/e2e/doctests/` are not accepted by `/e2e`. Periodic (nightly / weekly) tests run via the [Periodic-Test workflow](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_periodic_test.yaml) — see [Nightly CI Test](../developer_guide/contribution/nightly_ci_test.md).
 
 Tests are run against both the community vLLM version and the latest release.
-
-### `/nightly`
-
-Trigger specific nightly test cases on A2 and A3. Supports both PR and issue comments. Test case names correspond to the `test_config.name` entries defined in `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
-
-**Usage:**
-
-| Syntax | Scope |
-|---|---|
-| `/nightly <test_cases>` | Runs on `main` branch |
-| `/nightly <test_cases> --branch <branch>` | Runs on the specified branch |
-
-Use `--branch <name>` to specify a target branch. Without `--branch`, all arguments are treated as test cases (separated by commas or spaces) and the branch defaults to `main`.
-
-> **Note**: When commenting on a PR, the tests run on the PR branch automatically in the triggered workflow; the `--branch` flag is primarily used in issue comments.
-
-**Common test case names (A2):**
-
-`test_custom_op`, `test_custom_op_multi_card`, `qwen3-vl-32b-instruct-w8a8`, `qwen3-32b-int8`, `MiniMax-M2.5-w8a8-QuaRot-A2`, `Qwen3.5-27B-w8a8-A2`, `Qwen3.5-397B-A17B-w4a8-mtp`, `accuracy-group`
-
-**Common test case names (A3):**
-
-`multi-node-deepseek-v3.2-W8A8-EP`, `mtpx-deepseek-r1-0528-w8a8`, `deepseek-r1-0528-w8a8`, `kimi-k2-thinking`, `qwen3-vl-235b-a22b-instruct-w8a8`, `custom-multi-ops`, ...
-
-**Examples:**
-
-```text
-# Run a single test case on main branch
-/nightly qwen3-vl-32b-instruct-w8a8
-
-# Run on a specific release branch
-/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.21.0
-
-# Run all tests on a specific branch
-/nightly all --branch my-feature-branch
-
-# Run multiple test cases (comma-separated)
-/nightly test_custom_op,multi-node-deepseek-v3.2-W8A8-EP
-
-# Run multiple test cases (space-separated, also works)
-/nightly test_custom_op accuracy-group
-
-# Run accuracy group tests (branch defaults to main)
-/nightly accuracy-group
-```
-
-This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
 
 ### `/rerun`
 
@@ -105,7 +58,6 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 |---|---|---|
 | `/e2e` | ✅ | ❌ |
 | `/rerun` | ✅ | ❌ |
-| `/nightly` | ✅ | ✅ |
 
 ## Permission
 
@@ -113,6 +65,5 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 |---|---|
 | `/e2e` | PR author, or users with triage+ permission on the repository |
 | `/rerun` | PR author, or users with triage+ permission on the repository |
-| `/nightly` | Users with triage+ permission on the repository only |
 
 Permission is verified via the GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`).

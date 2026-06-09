@@ -21,6 +21,7 @@ Run with:
     pytest .github/workflows/scripts/tests/test_parse_schedule_config.py -v
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -30,18 +31,20 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from parse_schedule_config import (  # noqa: E402
-    ROUTERS,
-    AccuracyRouter,
-    ModelMultiNodeRouter,
-    ModelSingleNodeRouter,
-    OpsRouter,
+    AccuracyFramework,
+    BaseFramework,
+    ModelFramework,
+    OpsFramework,
     PeriodicCase,
+    _build_frameworks,
+    _dedupe_cases,
+    _derive_name,
     _detect_chip,
     _detect_multi_node_type,
+    _find_framework,
     _matches_filter,
-    _parse_entry,
-    _parse_to_case,
-    _validate_accuracy_config,
+    _normalize_path,
+    main,
 )
 
 # ---------------------------------------------------------------------------
@@ -66,11 +69,23 @@ RUNNER_MAP: dict[tuple[str, int], str] = {
 
 
 def parse(path: str) -> PeriodicCase:
-    return _parse_to_case(path, RUNNER_MAP)
+    cases = parse_entry(path)
+    assert len(cases) == 1
+    return cases[0]
 
 
 def parse_entry(path: str) -> list[PeriodicCase]:
-    return _parse_entry(path, RUNNER_MAP)
+    frameworks = _build_frameworks(RUNNER_MAP)
+    framework = _find_framework(_normalize_path(path), frameworks)
+    return framework.expand(path)
+
+
+def matrix_item(case: PeriodicCase, output_name: str) -> dict:
+    framework = _find_framework(case.path, _build_frameworks(RUNNER_MAP))
+    grouped = framework.group([case])
+    items = grouped[output_name]
+    assert len(items) == 1
+    return items[0]
 
 
 # Repo root, so directory tests resolve relative paths regardless of CWD.
@@ -79,6 +94,148 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 
 def _list_yaml(rel_dir: str) -> list[Path]:
     return sorted((_REPO_ROOT / rel_dir).rglob("*.yaml"))
+
+
+def _read_github_output(path: Path) -> dict[str, object]:
+    outputs = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, value = line.split("=", 1)
+        outputs[key] = json.loads(value)
+    return outputs
+
+
+class TestCaseNames:
+    def test_derive_name_preserves_filename_stem(self):
+        assert _derive_name("tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8.yaml") == (
+            "DeepSeek-V3.2-W8A8"
+        )
+        assert _derive_name("tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml") == (
+            "GLM5_1-W8A8-EP-external_dp"
+        )
+
+    def test_dedupe_records_duplicate_names(self):
+        first = parse("tests/e2e/schedule/model/Qwen/one_card/Duplicate.yaml")
+        duplicate = parse("tests/e2e/schedule/model/GLM/two_card/Duplicate.yaml")
+        unique = parse("tests/e2e/schedule/model/Qwen/one_card/Unique.yaml")
+
+        deduped, duplicates = _dedupe_cases([first, duplicate, unique])
+
+        assert deduped == [first, unique]
+        assert duplicates == {"Duplicate": [first, duplicate]}
+
+    def test_main_prints_duplicate_warning_in_summary(self, tmp_path, monkeypatch, capsys):
+        config = tmp_path / "schedule_config.yaml"
+        config.write_text(
+            "\n".join(
+                [
+                    "periodic_tests:",
+                    "  - name: manual",
+                    "    files:",
+                    "      - tests/e2e/schedule/model/Qwen/one_card/Duplicate.yaml",
+                    "      - tests/e2e/schedule/model/GLM/two_card/Duplicate.yaml",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        runner_label = tmp_path / "runner_label.json"
+        runner_label.write_text(
+            """
+{
+  "runner-a3-1": {"chip": "a3", "npu_num": 1},
+  "runner-a3-2": {"chip": "a3", "npu_num": 2}
+}
+""",
+            encoding="utf-8",
+        )
+        output_path = tmp_path / "github_output"
+        monkeypatch.setenv("GITHUB_OUTPUT", str(output_path))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "parse_schedule_config.py",
+                "--config",
+                str(config),
+                "--runner-label",
+                str(runner_label),
+                "--event-name",
+                "workflow_dispatch",
+            ],
+        )
+
+        main()
+
+        err = capsys.readouterr().err
+        assert "WARNING: duplicate test case names detected; kept the first occurrence:" in err
+        assert "kept: tests/e2e/schedule/model/Qwen/one_card/Duplicate.yaml" in err
+        assert "duplicate: tests/e2e/schedule/model/GLM/two_card/Duplicate.yaml" in err
+
+
+class TestMainOutputCompatibility:
+    def test_main_writes_all_output_fields(self, tmp_path, monkeypatch):
+        config = tmp_path / "schedule_config.yaml"
+        config.write_text(
+            "\n".join(
+                [
+                    "periodic_tests:",
+                    "  - name: manual",
+                    "    files:",
+                    "      - tests/e2e/schedule/model/Qwen/four_card/Qwen3-32B-Int8-A2.yaml",
+                    "      - tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml",
+                    "      - tests/e2e/schedule/accuracy/one_card/a2/Qwen3-8B.yaml",
+                    "      - tests/e2e/schedule/ops/one_card/test_fused_moe.py",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        runner_label = tmp_path / "runner_label.json"
+        runner_label.write_text(
+            """
+{
+  "runner-a2-1": {"chip": "a2", "npu_num": 1},
+  "runner-a2-4": {"chip": "a2", "npu_num": 4},
+  "runner-a3-0": {"chip": "a3", "npu_num": 0},
+  "runner-a3-2": {"chip": "a3", "npu_num": 2}
+}
+""",
+            encoding="utf-8",
+        )
+        output_path = tmp_path / "github_output"
+        monkeypatch.setenv("GITHUB_OUTPUT", str(output_path))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "parse_schedule_config.py",
+                "--config",
+                str(config),
+                "--runner-label",
+                str(runner_label),
+                "--event-name",
+                "workflow_dispatch",
+            ],
+        )
+
+        main()
+
+        outputs = _read_github_output(output_path)
+        assert set(outputs) == {
+            "single_node_matrix",
+            "multi_node_matrix",
+            "accuracy_matrix",
+            "ops_matrix",
+            "image_build_targets",
+            "selected_cases_summary",
+        }
+        assert len(outputs["single_node_matrix"]) == 1
+        assert len(outputs["multi_node_matrix"]) == 1
+        assert len(outputs["accuracy_matrix"]) == 1
+        assert len(outputs["ops_matrix"]) == 1
+        assert outputs["image_build_targets"] == ["a2", "a3"]
+        assert outputs["multi_node_matrix"][0]["multi_node_type"] == "external_dp"
+        assert outputs["multi_node_matrix"][0]["size"] == 2
 
 
 @pytest.fixture
@@ -107,7 +264,6 @@ class TestModelOneNode:
         case = parse("tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8.yaml")
         assert case.framework == "model"
         assert case.route == "single_node"
-        assert case.family == "DeepSeek"
 
     def test_resource(self):
         case = parse("tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8.yaml")
@@ -123,14 +279,14 @@ class TestModelOneNode:
         case = parse("tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8.yaml")
         assert case.runner == "linux-aarch64-a3-16"
 
-    def test_router_match(self):
-        case = parse("tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8.yaml")
-        assert ModelSingleNodeRouter().match(case)
-        assert not ModelMultiNodeRouter().match(case)
+    def test_framework_match(self):
+        path = "tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8.yaml"
+        framework = _find_framework(path, _build_frameworks(RUNNER_MAP))
+        assert isinstance(framework, ModelFramework)
 
     def test_matrix_item(self):
         case = parse("tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8.yaml")
-        item = ModelSingleNodeRouter().to_matrix_item(case)
+        item = matrix_item(case, "single_node_matrix")
         assert item["config_path"] == "tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8.yaml"
         assert item["chip"] == "a3"
         assert item["runner"] == "linux-aarch64-a3-16"
@@ -165,7 +321,7 @@ class TestModelFourCardA2:
 
 
 # ---------------------------------------------------------------------------
-# 3. model two_node external_dp -> multi_node + external
+# 3. model two_node external_dp -> multi_node + external_dp
 # ---------------------------------------------------------------------------
 class TestModelTwoNodeExternalDp:
     def test_framework_and_route(self):
@@ -175,40 +331,41 @@ class TestModelTwoNodeExternalDp:
 
     def test_multi_node_type_external(self):
         case = parse("tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml")
-        assert case.multi_node_type == "external"
+        assert case.multi_node_type == "external_dp"
 
     def test_size(self):
         case = parse("tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml")
         assert case.size == 2
 
-    def test_router_match(self):
-        case = parse("tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml")
-        assert ModelMultiNodeRouter().match(case)
+    def test_framework_match(self):
+        path = "tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml"
+        framework = _find_framework(path, _build_frameworks(RUNNER_MAP))
+        assert isinstance(framework, ModelFramework)
 
     def test_matrix_item(self):
         case = parse("tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml")
-        item = ModelMultiNodeRouter().to_matrix_item(case)
-        assert item["multi_node_type"] == "external"
+        item = matrix_item(case, "multi_node_matrix")
+        assert item["multi_node_type"] == "external_dp"
         assert item["size"] == 2
 
 
 # ---------------------------------------------------------------------------
-# 4. model two_node without external_dp -> multi_node + internal
+# 4. model two_node without external_dp -> multi_node + internal_dp
 # ---------------------------------------------------------------------------
 class TestModelTwoNodeInternal:
     def test_multi_node_type_internal(self):
         case = parse("tests/e2e/schedule/model/DeepSeek/two_node/DeepSeek-V3_2-W8A8-A3-dual-nodes.yaml")
-        assert case.multi_node_type == "internal"
+        assert case.multi_node_type == "internal_dp"
 
     def test_external_without_dp_is_internal(self):
-        # Filename contains "external" but NOT "external_dp" -> internal
+        # Filename contains "external" but NOT "external_dp" -> internal_dp
         type_ = _detect_multi_node_type("tests/e2e/schedule/model/GLM/two_node/GLM5-W8A8-external.yaml")
-        assert type_ == "internal"
+        assert type_ == "internal_dp"
 
     def test_external_dp_in_stem_only(self):
         # "external_dp" must be in the file stem, not a subdirectory
         type_ = _detect_multi_node_type("tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml")
-        assert type_ == "external"
+        assert type_ == "external_dp"
 
 
 # ---------------------------------------------------------------------------
@@ -231,17 +388,14 @@ class TestAccuracyDirectConfig:
         case = parse(_ACC_FILE)
         assert case.runner == "linux-aarch64-a2b3-1"
 
-    def test_router_match(self):
-        case = parse(_ACC_FILE)
-        assert AccuracyRouter().match(case)
-        assert not ModelSingleNodeRouter().match(case)
+    def test_framework_match(self):
+        framework = _find_framework(_ACC_FILE, _build_frameworks(RUNNER_MAP))
+        assert isinstance(framework, AccuracyFramework)
 
     def test_config_paths_set_no_model_list(self):
         case = parse(_ACC_FILE)
-        assert case.config_paths == [_ACC_FILE]
-        assert case.config_path is None
-        assert case.tests is None
-        item = AccuracyRouter().to_matrix_item(case)
+        assert case.case_path == [_ACC_FILE]
+        item = matrix_item(case, "accuracy_matrix")
         assert item["config_paths"] == [_ACC_FILE]
         assert "model_list" not in item
 
@@ -266,12 +420,12 @@ class TestAccuracyDirectoryExpansion:
         assert case.chip == "a2"
         assert case.runner == "linux-aarch64-a2b3-1"
         # all real a2 configs are bundled into one job
-        assert len(case.config_paths) == len(_list_yaml(_ACC_A2_DIR))
-        assert all(p.endswith(".yaml") for p in case.config_paths)
+        assert len(case.case_path) == len(_list_yaml(_ACC_A2_DIR))
+        assert all(p.endswith(".yaml") for p in case.case_path)
 
     def test_matrix_item_has_config_paths_no_model_list(self):
         case = parse_entry(_ACC_A2_DIR)[0]
-        item = AccuracyRouter().to_matrix_item(case)
+        item = matrix_item(case, "accuracy_matrix")
         assert "model_list" not in item
         assert isinstance(item["config_paths"], list) and item["config_paths"]
 
@@ -282,26 +436,7 @@ class TestAccuracyDirectoryExpansion:
         assert chips == ["a2", "a3"]
         for c in cases:
             assert c.framework == "accuracy"
-            assert all(f"/{c.chip}/" in p for p in c.config_paths)
-
-
-# ---------------------------------------------------------------------------
-# 5c. Old model-list group YAML must be rejected (validation)
-# ---------------------------------------------------------------------------
-class TestAccuracyConfigValidation:
-    def test_list_group_yaml_rejected(self, tmp_path):
-        p = tmp_path / "accuracy-group-1-a2.yaml"
-        p.write_text("- Qwen3-8B\n- Qwen2-Audio-7B-Instruct\n", encoding="utf-8")
-        with pytest.raises(ValueError, match="must be a YAML dict"):
-            _validate_accuracy_config(str(p))
-
-    def test_dict_config_accepted(self, tmp_path):
-        p = tmp_path / "Qwen3-8B.yaml"
-        p.write_text("model_name: Qwen/Qwen3-8B\nmodel_type: vllm\n", encoding="utf-8")
-        _validate_accuracy_config(str(p))  # no raise
-
-    def test_missing_file_skipped(self, tmp_path):
-        _validate_accuracy_config(str(tmp_path / "does-not-exist.yaml"))  # no raise
+            assert all(f"/{c.chip}/" in p for p in c.case_path)
 
 
 # ---------------------------------------------------------------------------
@@ -315,12 +450,12 @@ class TestOpsOneCard:
 
     def test_tests_field_set(self):
         case = parse("tests/e2e/schedule/ops/one_card/test_fused_moe.py")
-        assert case.tests == "tests/e2e/schedule/ops/one_card/test_fused_moe.py"
+        assert case.case_path == "tests/e2e/schedule/ops/one_card/test_fused_moe.py"
 
-    def test_router_match(self):
-        case = parse("tests/e2e/schedule/ops/one_card/test_fused_moe.py")
-        assert OpsRouter().match(case)
-        assert not ModelSingleNodeRouter().match(case)
+    def test_framework_match(self):
+        path = "tests/e2e/schedule/ops/one_card/test_fused_moe.py"
+        framework = _find_framework(path, _build_frameworks(RUNNER_MAP))
+        assert isinstance(framework, OpsFramework)
 
     def test_ops_a2_from_filename(self):
         case = parse("tests/e2e/schedule/ops/four_card/test_matmul_allreduce_add_rmsnorm_a2.py")
@@ -336,28 +471,7 @@ class TestOpsOneCard:
 
 
 # ---------------------------------------------------------------------------
-# 7. Numeric resource directory -> error
-# ---------------------------------------------------------------------------
-class TestNumericResourceError:
-    def test_1_card_fails(self):
-        with pytest.raises(ValueError, match="Numeric resource directory"):
-            parse("tests/e2e/schedule/model/DeepSeek/1_card/DeepSeek-V3.yaml")
-
-    def test_2_node_fails(self):
-        with pytest.raises(ValueError, match="Numeric resource directory"):
-            parse("tests/e2e/schedule/model/Qwen/2_node/Qwen3.yaml")
-
-    def test_4_card_fails(self):
-        with pytest.raises(ValueError, match="Numeric resource directory"):
-            parse("tests/e2e/schedule/ops/4_card/test_foo.py")
-
-    def test_8_card_fails(self):
-        with pytest.raises(ValueError, match="Numeric resource directory"):
-            parse("tests/e2e/schedule/model/Qwen/8_card/Qwen3.yaml")
-
-
-# ---------------------------------------------------------------------------
-# 8. tests/e2e/accuracy path -> error
+# 7. tests/e2e/accuracy path -> error
 # ---------------------------------------------------------------------------
 class TestOldAccuracyPathError:
     def test_old_accuracy_path_fails(self):
@@ -365,12 +479,12 @@ class TestOldAccuracyPathError:
             parse("tests/e2e/accuracy/one_card/accuracy-group-1-a2.yaml")
 
     def test_non_schedule_path_fails(self):
-        with pytest.raises(ValueError, match="tests/e2e/schedule"):
+        with pytest.raises(ValueError, match="No framework matched"):
             parse("tests/e2e/pull_request/one_card/test_foo.yaml")
 
 
 # ---------------------------------------------------------------------------
-# 9. Path outside tests/e2e/schedule -> error
+# 8. Path outside tests/e2e/schedule -> error
 # ---------------------------------------------------------------------------
 class TestInvalidPathError:
     def test_absolute_like_path_fails(self):
@@ -380,6 +494,10 @@ class TestInvalidPathError:
     def test_missing_resource_dir_fails(self):
         with pytest.raises(ValueError, match="No resource directory"):
             parse("tests/e2e/schedule/model/DeepSeek/DeepSeek-V3.yaml")
+
+    def test_directory_missing_resource_dir_fails(self):
+        with pytest.raises(ValueError, match="No resource directory"):
+            parse_entry("tests/e2e/schedule/model/DeepSeek/")
 
     def test_accuracy_node_resource_fails(self):
         with pytest.raises(ValueError, match="card resources"):
@@ -393,27 +511,28 @@ class TestModelDirectoryLayer:
     def test_user_example_routes(self):
         case = parse("tests/e2e/schedule/model/Kimi/one_node/Kimi-K2.5.yaml")
         assert case.framework == "model"
-        assert case.family == "Kimi"
         assert case.route == "single_node"
         assert case.resource_dir == "one_node"
 
-    def test_family_is_segment_after_model(self):
+    def test_resource_segment_under_model_routes(self):
         case = parse("tests/e2e/schedule/model/DeepSeek/two_node/DeepSeek-V3.1-BF16.yaml")
-        assert case.family == "DeepSeek"
         assert case.route == "multi_node"
+        assert case.resource_dir == "two_node"
 
     def test_bare_family_without_model_layer_fails(self):
         # Old layout (no model/ layer) is no longer accepted.
-        with pytest.raises(ValueError, match="Unknown framework directory"):
+        with pytest.raises(ValueError, match="No framework matched"):
             parse("tests/e2e/schedule/Kimi/one_node/Kimi-K2.5.yaml")
 
-    def test_model_without_family_fails(self):
-        with pytest.raises(ValueError, match="must include a family"):
-            parse("tests/e2e/schedule/model/one_node/Kimi-K2.5.yaml")
+    def test_model_without_family_routes(self):
+        case = parse("tests/e2e/schedule/model/one_node/Kimi-K2.5.yaml")
+        assert case.framework == "model"
+        assert case.route == "single_node"
+        assert case.resource_dir == "one_node"
 
 
 # ---------------------------------------------------------------------------
-# 10. test_filter matching
+# 9. test_filter matching
 # ---------------------------------------------------------------------------
 class TestFilterMatching:
     def _case(self, path: str) -> PeriodicCase:
@@ -504,15 +623,15 @@ class TestOps310p:
 
     def test_310p_matrix_item(self):
         case = parse("tests/e2e/schedule/ops/one_card/test_recurrent_gated_delta_rule_v310.py")
-        item = OpsRouter().to_matrix_item(case)
+        item = matrix_item(case, "ops_matrix")
         assert item["chip"] == "310p"
         assert item["runner"] == "linux-aarch64-310p-1"
 
 
 # ---------------------------------------------------------------------------
-# Router registry: every case matches exactly one router
+# Framework registry: every raw path matches exactly one framework
 # ---------------------------------------------------------------------------
-class TestRouterRegistry:
+class TestFrameworkRegistry:
     CASES = [
         "tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.2-W8A8.yaml",
         "tests/e2e/schedule/model/Qwen/four_card/Qwen3-32B-Int8-A2.yaml",
@@ -523,13 +642,29 @@ class TestRouterRegistry:
         "tests/e2e/schedule/ops/one_node/",
     ]
 
-    def test_each_case_matches_exactly_one_router(self):
+    def test_each_entry_matches_exactly_one_framework(self):
+        frameworks = _build_frameworks(RUNNER_MAP)
         for path in self.CASES:
-            for case in parse_entry(path):
-                matched = [r for r in ROUTERS if r.match(case)]
-                assert len(matched) == 1, (
-                    f"Path {path!r} (case {case.name!r}) matched {len(matched)} routers: {[r.name for r in matched]}"
-                )
+            matched = [fw for fw in frameworks if fw.match(path)]
+            assert len(matched) == 1, f"Path {path!r} matched {len(matched)} frameworks: {[fw.name for fw in matched]}"
+            for case in matched[0].expand(path):
+                assert case.framework == matched[0].name
+
+    def test_find_framework_rejects_unknown_path(self):
+        with pytest.raises(ValueError, match="No framework matched"):
+            _find_framework("tests/e2e/schedule/benchmark/one_card/foo.yaml", _build_frameworks(RUNNER_MAP))
+
+    def test_find_framework_rejects_multiple_matches(self):
+        class ShadowModelFramework(BaseFramework):
+            name = "shadow_model"
+            output_names = ("ops_matrix",)
+
+            def match(self, path: str) -> bool:
+                return path.startswith("tests/e2e/schedule/model/")
+
+        frameworks = [ModelFramework(RUNNER_MAP), ShadowModelFramework(RUNNER_MAP)]
+        with pytest.raises(ValueError, match="Multiple frameworks matched"):
+            _find_framework("tests/e2e/schedule/model/Qwen/one_card/foo.yaml", frameworks)
 
 
 # ---------------------------------------------------------------------------
@@ -549,15 +684,15 @@ class TestDirectoryExpansion:
     def test_310p_group_contains_v310_file(self):
         cases = parse_entry("tests/e2e/schedule/ops/one_card/")
         p310 = next(c for c in cases if c.chip == "310p")
-        assert "test_recurrent_gated_delta_rule_v310.py" in p310.tests
+        assert any("test_recurrent_gated_delta_rule_v310.py" in path for path in p310.case_path)
         assert p310.runner == "linux-aarch64-310p-1"
 
     def test_a3_group_runner_and_multifile(self):
         cases = parse_entry("tests/e2e/schedule/ops/one_card/")
         a3 = next(c for c in cases if c.chip == "a3")
-        assert a3.runner == "linux-aarch64-a3-1"
+        assert a3.runner == "linux-aarch64-a3-2"
         # a3 group bundles many files as a space-separated pytest target list
-        assert len(a3.tests.split()) > 1
+        assert len(a3.case_path) > 1
 
     def test_trailing_slash_and_bare_dir_equivalent(self):
         with_slash = parse_entry("tests/e2e/schedule/ops/one_card/")
@@ -567,4 +702,4 @@ class TestDirectoryExpansion:
     def test_single_file_entry_returns_one_case(self):
         cases = parse_entry("tests/e2e/schedule/ops/one_card/test_fused_moe.py")
         assert len(cases) == 1
-        assert cases[0].tests == "tests/e2e/schedule/ops/one_card/test_fused_moe.py"
+        assert cases[0].case_path == "tests/e2e/schedule/ops/one_card/test_fused_moe.py"

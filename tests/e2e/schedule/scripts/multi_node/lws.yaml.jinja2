@@ -26,7 +26,7 @@ spec:
               - name: CONFIG_YAML_PATH
                 value: {{ config_yaml_path | default("tests/e2e/schedule/scripts/multi_node/internal_dp/config/DeepSeek-V3.yaml") }}
               - name: MULTI_NODE_TYPE
-                value: "{{ multi_node_type | default("internal") }}"
+                value: "{{ multi_node_type | default("internal_dp") }}"
               - name: EXTRA_COMPONENTS_REQUIRED
                 value: "{{ extra_components_required | default("false") }}"
               - name: LOG_PREFIX
@@ -101,7 +101,7 @@ spec:
               - name: CONFIG_YAML_PATH
                 value: {{ config_yaml_path | default("tests/e2e/schedule/scripts/multi_node/internal_dp/config/DeepSeek-V3.yaml") }}
               - name: MULTI_NODE_TYPE
-                value: "{{ multi_node_type | default("internal") }}"
+                value: "{{ multi_node_type | default("internal_dp") }}"
               - name: EXTRA_COMPONENTS_REQUIRED
                 value: "{{ extra_components_required | default("false") }}"
               - name: LOG_PREFIX

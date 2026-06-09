@@ -12,11 +12,18 @@ INTERNAL_DP_TEST_PATH="tests/e2e/schedule/scripts/multi_node/internal_dp/test_mu
 EXTERNAL_DP_TEST_PATH="tests/e2e/schedule/scripts/multi_node/external_dp/test_external_dp.py"
 
 if [ -z "${MULTI_NODE_TEST_PATH:-}" ]; then
-    if [ "${MULTI_NODE_TYPE:-internal}" = "external" ]; then
-        MULTI_NODE_TEST_PATH="$EXTERNAL_DP_TEST_PATH"
-    else
-        MULTI_NODE_TEST_PATH="$INTERNAL_DP_TEST_PATH"
-    fi
+    case "${MULTI_NODE_TYPE:-internal_dp}" in
+        external_dp)
+            MULTI_NODE_TEST_PATH="$EXTERNAL_DP_TEST_PATH"
+            ;;
+        internal_dp)
+            MULTI_NODE_TEST_PATH="$INTERNAL_DP_TEST_PATH"
+            ;;
+        *)
+            echo "Unsupported MULTI_NODE_TYPE: ${MULTI_NODE_TYPE}" >&2
+            exit 1
+            ;;
+    esac
 fi
 
 # Configuration

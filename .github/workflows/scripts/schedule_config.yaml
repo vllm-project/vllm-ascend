@@ -37,7 +37,7 @@
 # explicit a2/a3/310p directory for accuracy configs.
 # Accuracy configs are real executable YAML files (not model-list groups); a
 # directory entry is grouped into one job per chip (config_paths list).
-# External DP: filename stem must contain external_dp -> external routing.
+# External DP: filename stem must contain external_dp -> external_dp routing.
 
 periodic_tests:
 
@@ -66,7 +66,7 @@ periodic_tests:
       - tests/e2e/schedule/model/Qwen/two_node/Qwen3-VL-235B-disagg-pd.yaml
       - tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-A3-dual-nodes.yaml
 
-      # A3 two-node external DP (filename contains external_dp -> external routing)
+      # A3 two-node external DP (filename contains external_dp -> external_dp routing)
       - tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml
 
       # -------------------------------------------------------------------

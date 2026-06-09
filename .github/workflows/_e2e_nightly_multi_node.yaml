@@ -24,8 +24,8 @@ on:
       multi_node_type:
         required: false
         type: string
-        default: internal
-        description: "'internal' or 'external' — selects test_multi_node.py vs test_external_dp.py via MULTI_NODE_TYPE env var"
+        default: internal_dp
+        description: "'internal_dp' or 'external_dp' — selects test_multi_node.py vs test_external_dp.py via MULTI_NODE_TYPE env var"
       extra_components:
         required: false
         type: boolean

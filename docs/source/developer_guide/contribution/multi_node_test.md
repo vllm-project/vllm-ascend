@@ -74,51 +74,25 @@ From the workflow perspective, we can see how the final test script is executed,
         # fill with accuracy test kwargs
     ```
 
-3. Add the case to nightly workflow
+3. Register the case in the periodic CI
 
-Currently, the multi-node test workflow is defined in `.github/workflows/schedule_nightly_test_a3.yaml`.
+Multi-node cases are registered by **path** — there is no hand-edited workflow matrix.
+Place the config YAML under the model framework at the matching resource directory
+(`tests/e2e/schedule/model/<Family>/two_node/<Name>.yaml` for a 2-node case, or
+`.../four_node/<Name>.yaml` for 4-node), then add its path to the relevant section of
+`.github/workflows/scripts/schedule_config.yaml`:
 
     ```yaml
-    multi-node-tests:
-      name: multi-node
-      if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-      strategy:
-        fail-fast: false
-        max-parallel: 1
-        matrix:
-          test_config:
-            - name: multi-node-deepseek-pd
-              config_file_path: DeepSeek-V3.yaml
-              size: 2
-            - name: multi-node-qwen3-dp
-              config_file_path: Qwen3-235B-A22B.yaml
-              size: 2
-            - name: GLM5_1-W8A8-EP-external
-              config_file_path: GLM5_1-W8A8-EP-external.yaml
-              config_base_path: tests/e2e/schedule/scripts/multi_node/external_dp/config/
-              size: 4
-      uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-      with:
-        soc_version: a3
-        runner: linux-aarch64-a3-0
-        image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
-        replicas: 1
-        size: ${{ matrix.test_config.size }}
-        config_file_path: ${{ matrix.test_config.config_file_path }}
-        config_base_path: ${{ matrix.test_config.config_base_path || '' }}
-        name: ${{ matrix.test_config.name }}
-      secrets:
-        KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+    - tests/e2e/schedule/model/DeepSeek/two_node/DeepSeek-V3.yaml
+    - tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml
     ```
-  
-The matrix above defines all the parameters required to add a multi-machine use
-case. The parameters worth noting are `size`, `config_file_path`, and
-`config_base_path`. `size` defines the number of nodes required for your use
-case. `config_file_path` is the yaml file name, and `config_base_path` tells the
-loader which config directory to use. For internal DP cases, use an empty
-`config_base_path` so the loader uses its default internal DP config directory.
-For external DP cases, set it to
-`tests/e2e/schedule/scripts/multi_node/external_dp/config/`.
+
+For an **external DP** case, the filename **stem** must contain `external_dp` (e.g.
+`GLM5_1-W8A8-EP-external_dp.yaml`); otherwise the case routes as internal DP. The number
+of nodes (`size`) is inferred from the resource directory (`two_node` → 2, `four_node` →
+4), the chip from the filename/path, the runner from `runner_label.json`, and the
+internal/external DP route from the filename stem — none of these are specified by hand.
+See [Nightly CI Test](./nightly_ci_test.md) for the full routing rules.
 
 ## Run Multi-Node tests locally
 

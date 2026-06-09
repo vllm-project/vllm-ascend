@@ -1,980 +1,920 @@
-# Periodic CI Refactoring Execution Plan
+# Single-File Framework-Oriented Refactoring Plan for parse_schedule_config.py
 
-## 1. Goal
+## 1. Background
 
-Refactor the current nightly / weekly CI into a unified periodic CI routing system.
+The current `parse_schedule_config.py` is responsible for:
 
-The target architecture is:
+1. Selecting the schedules that should run from `schedule_config.yaml`;
+2. Reading test entries from `schedule.files`;
+3. Inferring framework, resource type, chip type, and runner from paths;
+4. Parsing paths into `PeriodicCase`;
+5. Converting `PeriodicCase` objects into GitHub Actions matrices through routers;
+6. Producing the following outputs:
+   - `single_node_matrix`
+   - `multi_node_matrix`
+   - `accuracy_matrix`
+   - `ops_matrix`
+   - `image_build_targets`
+   - `selected_cases_summary`
+
+The current code already has the concept of routers, for example:
+
+```python
+class AccuracyRouter(BaseRouter):
+    ...
+
+class OpsRouter(BaseRouter):
+    ...
+
+class ModelSingleNodeRouter(BaseRouter):
+    ...
+
+class ModelMultiNodeRouter(BaseRouter):
+    ...
+```
+
+However, these routers only convert already-parsed `PeriodicCase` objects into matrix items.
+
+The real issue is that the common parser still knows too much about framework-specific rules, for example:
+
+```python
+def _detect_framework(path: str) -> str:
+    ...
+```
+
+```python
+def _detect_route(framework: str, resource_type: str, resource_num: int) -> str:
+    ...
+```
+
+```python
+def _expand_directory(dir_path: str, runner_map: dict[tuple[str, int], str]) -> list[PeriodicCase]:
+    ...
+```
+
+These functions still hardcode concepts such as:
+
+```text
+model
+accuracy
+ops
+single_node
+multi_node
+accuracy_matrix
+ops_matrix
+```
+
+As a result, if we add a new framework in the future, such as:
+
+```text
+benchmark
+serving
+perf
+external_dp_v2
+accuracy_v2
+```
+
+we would need to modify the common parser, route detection, directory expansion, routers, and main output flow. This creates unnecessary coupling.
+
+The goal of this refactoring is: **do not split the file, do not change `schedule_config.yaml`, and do not change workflow output fields. Only move framework-specific logic into dedicated Framework classes.**
+
+---
+
+## 2. Refactoring Goals
+
+### 2.1 Core Goal
+
+Change the current flow from:
 
 ```text
 schedule_config.yaml
-  -> parse_schedule_config.py
-  -> unified PeriodicCase list
-  -> framework routers
-  -> framework-specific matrices
-  -> reusable workflow / pytest execution
+  -> raw paths
+  -> common parser detects framework / route / directory expansion
+  -> PeriodicCase
+  -> Router converts cases into matrices
+  -> GITHUB_OUTPUT
 ```
 
-The refactoring should support all current nightly test types:
+to:
 
 ```text
-model tests
-accuracy tests
-ops tests
-single-node tests
-multi-node internal tests
-multi-node external tests
+schedule_config.yaml
+  -> raw paths
+  -> Framework.match(path)
+  -> Framework.expand(raw)
+  -> Framework.group(cases)
+  -> merge all framework outputs
+  -> GITHUB_OUTPUT
 ```
 
-The workflow should no longer hardcode large test matrices.  
-New cases should be added by placing files under `tests/e2e/schedule/` and registering them in `schedule_config.yaml`.
+In other words:
+
+```text
+The schedule layer only selects raw entries to run;
+the framework layer identifies, expands, and groups its own cases;
+main only handles orchestration, deduplication, filtering, merging, and output.
+```
+
+### 2.2 Design Principles
+
+This refactoring should follow these principles:
+
+1. Keep everything in a single file;
+2. Use one class for each framework;
+3. The main flow should not know the internal rules of model / accuracy / ops;
+4. Each framework should be responsible for:
+   - `match(path)`
+   - `expand(raw)`
+   - `group(cases)`
+5. Keep output fields compatible;
+6. Keep `schedule_config.yaml` compatible;
+7. Keep `runner_label.json` compatible;
+8. Keep the existing directory conventions and behavior compatible.
 
 ---
 
-## 1A. Review Findings & Resolutions
+## 3. Non-Goals
 
-This plan was hardened after a review (see `modify.md`). Each finding below is now a
-binding requirement, and its resolution is reflected in the sections that follow.
+This refactoring will not do the following:
 
-| # | Finding (from review) | Resolution | Status |
-|---|---|---|---|
-| 1 | Parser was a `_classify()` scope-splitter, not `PeriodicCase` + routers | Parser builds a `PeriodicCase` per file, then dispatches through a `ROUTERS` registry (§6, §13) | Done |
-| 2 | Workflow consumed `ops_matrix` but parser never emitted it (`fromJSON('')` crash) | Parser **always** writes all four matrices, empty as `[]` (§15) | Done |
-| 3 | Ops had no independent route; entries were dict-style with inline `chip`/`name` | `OpsRouter` emits `ops_matrix`; config entries are plain paths (§10.3, §14.2) | Done |
-| 4 | accuracy still lived under `tests/e2e/accuracy/` and was matched loosely | Files moved to `tests/e2e/schedule/accuracy/`; parser **rejects** `tests/e2e/accuracy/` and requires the `tests/e2e/schedule/` prefix (§7, §21) | Done |
-| 5 | `external_dp` detected by a directory part | Detected **only** by filename stem containing `external_dp`; the `external_dp/` directory is deleted (§11) | Done |
-| 6 | `build-image` passed `branch_tag` as the checkout branch | `build-image` passes `branch_ref`; `branch_tag` is used only for image tag / artifact names (§18) | Done |
-| 7 | `selected_cases_summary` was consumed but never produced | Parser emits `selected_cases_summary` (name, framework, route, chip, runner, path, multi_node_type) (§15) | Done |
-| 8 | Parser accepted `chip` / `npu_num` / `extra_components` overrides | Parser accepts **plain path strings only**; everything is inferred. `extra_components` is fixed to `false` this version (§5) | Done |
-| 9 | `_e2e_periodic_ops.yaml` had a broken multi-line `run:` | Install/run steps use valid single-line / block scalars; container + checkout mirror the model e2e setup (§20) | Done |
-| 10 | Runner rule table was incomplete (e.g. `four_node + a2`) | `_NPU_NUM` enumerates every `(resource_type, chip, resource_num)`, including `four_node + a2 -> 0` (LWS) (§12) | Done |
-| 11 | Per-model configs in `tests/e2e/models/configs/` should not be symlinked | The group `model_list` YAMLs moved to `tests/e2e/schedule/accuracy/`. **Superseded by §1D:** `tests/e2e/models/` (configs *and* the test harness) has since been physically moved/deleted — the harness now lives at `tests/e2e/schedule/scripts/accuracy/` and the workflow reads from there. | Superseded by §1D |
+1. It will not split the code into:
+   - `frameworks/model.py`
+   - `frameworks/accuracy.py`
+   - `frameworks/ops.py`
+2. It will not change the `schedule_config.yaml` format;
+3. It will not explicitly add a framework field to the schedule YAML;
+4. It will not move chip/resource metadata fully into YAML;
+5. It will not change the output fields consumed by GitHub Actions workflows;
+6. It will not modify test execution scripts;
+7. It will not change the `tests` field from string to list;
+8. It will not introduce a plugin registration mechanism;
+9. It will not refactor `runner_label.json`.
 
-Self-optimizations applied beyond the review:
-
-```text
-- Removed orphaned source files left by the move (old tests/e2e/accuracy/ tree
-  and the old GLM external_dp/ config) so no duplicate/dead config remains.
-- accuracy group YAMLs are plain top-level lists of model names; the parser
-  accepts both a bare list and the legacy {model_list: [...]} mapping (§14.1).
-- All file I/O in the parser is UTF-8 explicit (Windows-safe for model YAMLs
-  that contain non-ASCII characters).
-```
+These can be considered future improvements, but they should not be included in this round to avoid making the PR too large.
 
 ---
 
-## 1B. Script Layout Migration & Routing Round
+## 4. Overall Design
 
-A follow-up review ("Script Layout Without `common/`") added these requirements,
-all now implemented:
+### 4.1 Keep Common Utilities
 
-| # | Requirement | Resolution | Status |
-|---|---|---|---|
-| 1 | No `common/` directories; shared files in nearest parent | Scripts consolidated under `tests/e2e/schedule/scripts/`; shared helpers placed directly in `multi_node/` etc. — no `common/` (§3A) | Done |
-| 2 | Move periodic execution scripts out of `tests/e2e/nightly/...` | All scripts moved; old `tests/e2e/nightly/` tree deleted (§3A) | Done |
-| 3 | Update all references (workflows, imports, path/template constants) | Module paths, run.sh test paths, lws default config path, both reusable workflows, and doc comments updated; repo grep for `nightly` is clean in code (§3A) | Done |
-| 4 | 310p supported like a2/a3 via filename/dir token | `310p` is a first-class chip, checked before a2/a3 (§9, §12) | Done |
-| 5 | Directory entries expanded before routing | ops + accuracy dirs → per-chip groups; model dirs → per-file (§10.4; accuracy grouping refined in round 3) | Done |
-| 6 | Move `test_recurrent_gated_delta_rule_v310.py` to the right place | Now at `tests/e2e/schedule/ops/one_card/` (ops case home) | Done |
-| 7 | Invariants intact: external_dp by filename, accuracy YAML = config, PeriodicCase + Router | Unchanged and re-verified by the test suite | Done |
+The following functions are common utilities and can remain as shared helpers:
 
----
-
-## 1C. Direct Accuracy YAML Integration Round
-
-A third review ("Direct Accuracy YAML Integration") replaced the indirect
-model-list accuracy flow with direct config paths. All implemented:
-
-| # | Requirement | Resolution | Status |
-|---|---|---|---|
-| 1 | Real accuracy YAMLs live under `accuracy/<resource>/<chip>/` | Configs copied from `tests/e2e/models/configs/`; chip is the explicit `a2/a3/310p` dir (§3, §2-migration) | Done |
-| 2 | Parser emits `config_paths`, not `model_list` | `PeriodicCase.config_paths`; `AccuracyRouter` outputs `config_paths`; `model_list` + `_load_model_list()` removed (§6, §14.1) | Done |
-| 3 | accuracy `.yaml`→`config_paths=[path]`, `.py`→`tests`, else error | Implemented in `_parse_to_case` (§14.1) | Done |
-| 4 | Accuracy directory grouped by chip (not per-file) | `_expand_directory` groups accuracy files by chip into one case per chip (§10.4) | Done |
-| 5 | Old list-based group YAML rejected | `_validate_accuracy_config()` raises on non-dict YAML; group files deleted (§14.1) | Done |
-| 6 | Workflow runs `pytest --config <config_path>` directly | `_e2e_nightly_single_node_models.yaml` consumes `config_paths`; effective-config-paths + per-config run + stem-based summary; `model_list` input removed | Done |
-| 7 | schedule_config.yaml registers dirs/files, not groups | accuracy entries are `accuracy/<resource>/<chip>/` dirs | Done |
-
-The old path (`group YAML -> model_list -> tests/e2e/models/configs/${model}.yaml`)
-no longer exists. (Superseded by §1D: the `tests/e2e/models/` source tree has since
-been deleted and the accuracy harness moved under
-`tests/e2e/schedule/scripts/accuracy/`.)
-
----
-
-## 1D. Accuracy Framework Consolidation & Cleanup Round
-
-A fourth round consolidated the accuracy test framework under
-`tests/e2e/schedule/` and removed residue left by the earlier rounds. This round
-intentionally expands the §2 scope (which had deferred "accuracy execution logic"):
-the accuracy harness is now a first-class member of the schedule scripts tree.
-
-| # | Change | Resolution | Status |
-|---|---|---|---|
-| 1 | `test_qwen3_30b_acc.py` was a hand-written pytest accuracy case | Converted to a single_node YAML at `model/Qwen/four_card/Qwen3-30B-A3B-W8A8-eagle3-mooncake.yaml`; runs via `test_single_node.py` (TP1 + TP4 cases) | Done |
-| 2 | single_node framework lacked a Mooncake sidecar | `single_node_config.py` gained a `mooncake` field + generalized `DEFAULT_PORT` assignment; `test_single_node.py` wraps the server in `MooncakeLauncher` via `ExitStack` and writes `mooncake.json` | Done |
-| 3 | single_node loader could not resolve a full-path `CONFIG_YAML_PATH` | `_load_yaml` uses the path directly when it resolves, else joins `CONFIG_BASE_PATH` (mirrors multi_node `load_yaml_mapping`) | Done |
-| 4 | accuracy harness still lived at `tests/e2e/models/` | Moved `test_{lm_eval,asr,rm}_eval_correctness.py` + `conftest.py` + `report_template.md` to `tests/e2e/schedule/scripts/accuracy/`; `_e2e_nightly_single_node_models.yaml` repointed | Done |
-| 5 | `.py`-accuracy → `tests` route was unused | Removed from `_parse_to_case` (accuracy is YAML-only now), dropped `tests` from `AccuracyRouter`, removed the `tests` input + pytest step from the accuracy workflow | Done |
-| 6 | residual / dead trees | Deleted `tests/e2e/models/` (configs already mirrored in `accuracy/`), `tests/e2e/weekly/single_node/configs/` (5 superseded YAMLs), and the empty `model/Qwen/one_card/` | Done |
-| 7 | docs + model-adapter skill pointed at old paths | Repointed accuracy-config refs to `schedule/accuracy/<resource>/<chip>/`, harness refs to `schedule/scripts/accuracy/`, and stale `tests/e2e/nightly/...` multi_node/single_node doc refs to `schedule/scripts/...` | Done |
-
-The 4 configs that lived only in `tests/e2e/models/configs/` (`gemma-3-4b-it`,
-`internlm3-8b-instruct`, `Qwen2.5-Math-RM-72B`, `Qwen3-ASR-1.7B`) plus
-`accuracy.txt` / `accuracy_groups_a2.json` were dropped (unregistered anywhere);
-the 18 active configs were verified **byte-identical** to their `schedule/accuracy/`
-copies before deletion. The zh `multi_node_test.po` translation is left for i18n
-regeneration from the updated `.md`.
-
----
-
-## 2. Scope
-
-This task refactors the CI scheduling and routing layer.
-
-Do refactor:
-
-```text
-.github/workflows/schedule_periodic_test.yaml
-.github/workflows/scripts/schedule_config.yaml
-.github/workflows/scripts/parse_schedule_config.py
-tests/e2e/schedule/ directory layout
+```python
+_load_runner_map()
+_resolve_runner()
+_detect_resource()
+_detect_chip()
+_derive_name()
+_is_directory_entry()
+_list_dir_files()
+_group_by_chip()
+_select_schedules()
+_dedupe_cases()
+_matches_filter()
 ```
 
-Do not refactor:
+These functions should only provide basic shared capabilities. They should not contain framework-specific business logic.
 
-```text
-existing single-node test framework
-existing multi-node test framework
-existing LWS execution logic
-existing internal / external DP runtime logic
-existing accuracy execution logic
-existing model test implementation
+For example:
+
+```python
+_detect_resource()
 ```
 
-Ops may get its own lightweight reusable workflow if needed.
-
----
-
-## 3. Target Directory Layout
-
-All periodic CI cases must be placed under:
-
-```text
-tests/e2e/schedule/
-```
-
-Expected layout — the three frameworks (`model`, `accuracy`, `ops`) sit at the same
-depth so the framework is always the 4th path segment:
-
-```text
-tests/e2e/schedule/
-  model/
-    DeepSeek/
-      one_card/
-      two_card/
-      four_card/
-      eight_card/
-      one_node/
-      two_node/
-      four_node/
-
-    Qwen/
-      one_card/
-      two_card/
-      four_card/
-      eight_card/
-      one_node/
-      two_node/
-      four_node/
-
-    GLM/
-      ...   (same resource_dir set)
-
-    Kimi/ MiniMax/ Hy/ ...
-
-  accuracy/
-    one_card/
-      a2/   <Model>.yaml ...   (real executable accuracy configs)
-      a3/   <Model>.yaml ...
-      310p/ <Model>-310p.yaml ...
-    two_card/
-      a2/ ...
-    four_card/
-      a2/ ...
-
-  ops/
-    one_card/
-    two_card/
-    four_card/
-    eight_card/
-    one_node/
-```
-
-Examples:
-- model:    `tests/e2e/schedule/model/Kimi/one_node/Kimi-K2.5.yaml`
-- accuracy: `tests/e2e/schedule/accuracy/one_card/a2/Qwen3-8B.yaml`
-
-Accuracy configs are real executable YAMLs (not model-list groups); chip is the
-explicit `a2/a3/310p` directory. A directory entry is grouped into one job per chip
-(`config_paths` list). See §1C and §14.1.
-
-Important rules:
-
-```text
-1. Model cases must be under tests/e2e/schedule/model/<model_family>/<resource_dir>/.
-2. The <model_family> segment must not be a resource directory name.
-3. accuracy must be under tests/e2e/schedule/accuracy/.
-4. ops must be under tests/e2e/schedule/ops/.
-5. Do not use tests/e2e/accuracy/.
-6. The bare layout tests/e2e/schedule/<Family>/ (without the model/ layer) is rejected.
-```
-
----
-
-## 3A. Execution Script Layout (no `common/`)
-
-The periodic execution scripts (runners, configs, helpers) live under a single
-`scripts/` tree, separate from the case files. Shared helpers go in the **nearest
-suitable parent directory** — there are **no `common/` directories**.
-
-```text
-tests/e2e/schedule/scripts/
-  __init__.py
-  multi_node/
-    __init__.py
-    utils.py
-    benchmark_results.py
-    lws.yaml.jinja2
-    run.sh
-    internal_dp/
-      __init__.py
-      multi_node_config.py
-      test_multi_node.py
-      utils.py
-    external_dp/
-      __init__.py
-      external_dp_config.py
-      runtime.py
-      test_external_dp.py
-      utils.py
-      config/
-        template.md
-  single_node/
-    __init__.py
-    single_node_config.py
-    test_single_node.py
-    GUIDE_AND_TEMPLATE.md
-  accuracy/                       (added in §1D — accuracy harness home)
-    __init__.py
-    conftest.py
-    test_lm_eval_correctness.py
-    test_asr_eval_correctness.py
-    test_rm_eval_correctness.py
-    report_template.md
-```
-
-Migration rules:
-
-```text
-1. Move scripts from tests/e2e/nightly/... (and weekly/accuracy) into
-   tests/e2e/schedule/scripts/, collapsing the per-tier scripts/ subdirectories.
-2. Do NOT create scripts/common/ or scripts/multi_node/common/.
-3. Update every reference after the move:
-   - workflow paths   (_e2e_nightly_multi_node.yaml, _e2e_nightly_single_node.yaml)
-   - python imports   (tests.e2e.nightly.* -> tests.e2e.schedule.scripts.*)
-   - path constants   (run.sh test paths, *_config.py base paths)
-   - template paths   (lws.yaml.jinja2 default config path)
-4. schedule/ stays a namespace package (no __init__.py); scripts/ and its
-   subpackages are regular packages (with __init__.py), mirroring the old
-   nightly(ns)/multi_node(pkg)/scripts(pkg) shape shifted under schedule.
-```
-
-Module-path mapping applied:
-
-```text
-tests.e2e.nightly.multi_node.scripts                -> tests.e2e.schedule.scripts.multi_node
-tests.e2e.nightly.multi_node.internal_dp.scripts    -> tests.e2e.schedule.scripts.multi_node.internal_dp
-tests.e2e.nightly.multi_node.external_dp.scripts    -> tests.e2e.schedule.scripts.multi_node.external_dp
-tests.e2e.nightly.single_node.models.scripts        -> tests.e2e.schedule.scripts.single_node
-```
-
-Case files vs. scripts: `tests/e2e/schedule/{model,accuracy,ops}/` hold the **case
-files** registered in `schedule_config.yaml`; `tests/e2e/schedule/scripts/` holds the
-**execution infrastructure**. The ops pytest conftest lives with the ops cases at
-`tests/e2e/schedule/ops/conftest.py`. The 310p kernel test moved to its ops case home
-`tests/e2e/schedule/ops/one_card/test_recurrent_gated_delta_rule_v310.py`.
-
----
-
-## 4. Resource Directory Rules
-
-Only English-form resource directories are supported.
-
-Valid directories:
+should only detect resource directories such as:
 
 ```text
 one_card
 two_card
 four_card
 eight_card
-
 one_node
 two_node
 four_node
 ```
 
-Invalid directories:
+```python
+_detect_chip()
+```
+
+should only infer chip type from a path:
 
 ```text
-1_card
-2_card
-4_card
-8_card
-1_node
-2_node
-4_node
+a2
+a3
+310p
 ```
-
-The parser must not support numeric forms.  
-If a numeric form is found, it should fail with a clear error.
-
----
-
-## 5. schedule_config.yaml
-
-Path:
-
-```text
-.github/workflows/scripts/schedule_config.yaml
-```
-
-It is the single registry for periodic CI cases.
-
-Example:
-
-```yaml
-periodic_tests:
-  - name: nightly-main
-    cron: "45 15 * * *"
-    files:
-      - tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.yaml
-      - tests/e2e/schedule/model/GLM/two_node/GLM5-W8A8-external_dp.yaml
-      - tests/e2e/schedule/model/Qwen/four_card/Qwen3-A2.yaml
-      - tests/e2e/schedule/accuracy/one_card/accuracy-group-a2.yaml
-      - tests/e2e/schedule/ops/one_card/test_custom_op_a2.py
-
-  - name: weekly-main
-    cron: "45 15 * * 1"
-    files:
-      - tests/e2e/schedule/model/DeepSeek/four_node/DeepSeek-V3-weekly.yaml
-      - tests/e2e/schedule/accuracy/four_card/qwen-accuracy-a2.yaml
-
-  - name: manual
-    cron: workflow_dispatch
-    files:
-      - tests/e2e/schedule/model/DeepSeek/one_node/DeepSeek-V3.yaml
-      - tests/e2e/schedule/ops/one_card/test_custom_op_a2.py
-```
-
-Rules:
-
-```text
-1. cron uses UTC time.
-2. name is only for readability and logging.
-3. files should be plain paths.
-4. Avoid adding execution details into schedule_config.yaml.
-```
-
-Do not put these fields into normal entries:
-
-```text
-chip
-npu_num
-runner
-framework
-route
-multi_node_type
-extra_components
-```
-
-These should be inferred from path, filename, and runner_label.json.
-
-**Hardened (review finding #8):** the parser accepts a plain path **string** per
-entry and nothing else. Dict-style entries (`- tests: ...`, `chip:`, `name:`) are
-no longer supported. `extra_components` is fixed to `false` in this version; if a
-case ever needs it, add it as an inferred property or a new router field rather
-than a free-form override in `schedule_config.yaml`.
-
----
-
-## 6. Unified PeriodicCase
-
-Every entry from `schedule_config.yaml` should first be parsed into a unified data class or dictionary.
-
-Recommended structure:
 
 ```python
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Literal, Optional
-
-Framework = Literal["model", "accuracy", "ops"]
-Route = Literal["single_node", "multi_node", "accuracy", "ops"]
-Chip = Literal["a2", "a3"]
-ResourceType = Literal["card", "node"]
-MultiNodeType = Literal["internal", "external"]
-
-@dataclass(frozen=True)
-class PeriodicCase:
-    name: str
-    path: str
-    path_obj: Path
-
-    framework: Framework
-    route: Route
-
-    chip: Chip
-    resource_type: ResourceType
-    resource_num: int
-    resource_dir: str
-
-    runner: str
-
-    family: Optional[str] = None
-    multi_node_type: Optional[MultiNodeType] = None
-
-    config_path: Optional[str] = None        # single YAML (model single/multi-node)
-    config_paths: Optional[list[str]] = None  # direct accuracy config YAMLs
-    tests: Optional[str] = None
-
-    size: Optional[str] = None
-    replicas: Optional[str] = None
-
-    raw: Optional[dict] = None
+_resolve_runner()
 ```
 
-Note: `model_list` was removed in the direct-accuracy round (§1C). Accuracy cases now
-carry `config_paths`; the accuracy YAMLs are real executable configs, not model-name
-lists.
-
-All later routing should operate on `PeriodicCase`, not raw strings.
-
----
-
-## 7. Framework Detection
-
-Framework must be inferred from the 4th path segment:
-
-```text
-tests/e2e/schedule/model/<family>/... -> model (family = 5th segment)
-tests/e2e/schedule/accuracy/...       -> accuracy
-tests/e2e/schedule/ops/...            -> ops
-```
-
-Any other 4th segment is an error. A bare `tests/e2e/schedule/<family>/` (without the
-`model/` layer) is rejected, and the family segment must not be a resource-dir name.
-
-Examples:
-
-```text
-tests/e2e/schedule/accuracy/one_card/xxx-a2.yaml
-  -> framework = accuracy
-
-tests/e2e/schedule/ops/one_card/test_xxx_a2.py
-  -> framework = ops
-
-tests/e2e/schedule/model/DeepSeek/one_node/xxx.yaml
-  -> framework = model
-  -> family = DeepSeek
-
-tests/e2e/schedule/model/Kimi/one_node/Kimi-K2.5.yaml
-  -> framework = model
-  -> family = Kimi
-
-tests/e2e/schedule/Kimi/one_node/Kimi-K2.5.yaml
-  -> ERROR (missing model/ layer)
-```
-
----
-
-## 8. Resource Detection
-
-Use the following mapping:
-
-```python
-RESOURCE_DIRS = {
-    "one_card": ("card", 1),
-    "two_card": ("card", 2),
-    "four_card": ("card", 4),
-    "eight_card": ("card", 8),
-    "one_node": ("node", 1),
-    "two_node": ("node", 2),
-    "four_node": ("node", 4),
-}
-```
-
-Rules:
-
-```text
-1. Each case path must contain exactly one valid resource directory.
-2. If no resource directory is found, fail.
-3. If more than one resource directory is found, fail.
-4. Numeric forms such as 1_card or 2_node must fail.
-```
-
----
-
-## 9. Chip Detection
-
-Chip should be inferred from path or filename.
-
-Rules:
-
-```text
-path or filename contains 310 / 310p / v310 -> 310p
-path or filename contains a2 / A2           -> a2
-path or filename contains a3 / A3           -> a3
-otherwise -> default to a3
-```
-
-Recommended regex behavior:
-
-```text
-Match 310 / 310p / v310 only as a separated token (checked first).
-Match a2 / A2 only as a separated token.
-Match a3 / A3 only as a separated token.
-```
-
-**Hardened:** 310p is a first-class chip (review requirement: "310p is supported like
-a2/a3 through filename or directory token detection"). It is checked before a2/a3 and
-matched by `(?<![A-Za-z0-9])v?310p?(?![A-Za-z0-9])`, so `_310`, `310p`, and `v310`
-tokens all resolve to 310p while `310B` inside a model name does not.
-
-Examples:
-
-```text
-Qwen3-A2.yaml                          -> a2
-Qwen3_a2.yaml                          -> a2
-DeepSeek-V3.yaml                       -> a3
-DeepSeek-V3-A3.yaml                    -> a3
-test_causal_conv1d_310.py              -> 310p
-test_recurrent_gated_delta_rule_v310.py -> 310p
-ops/310p/one_card/test_foo.py          -> 310p (directory token)
-```
-
----
-
-## 10. Route Rules
-
-### 10.1 Model Framework
-
-Model cases are routed as follows:
-
-```text
-model + one_card   -> single_node
-model + two_card   -> single_node
-model + four_card  -> single_node
-model + eight_card -> single_node
-
-model + one_node   -> single_node
-model + two_node   -> multi_node
-model + four_node  -> multi_node
-```
-
-### 10.2 Accuracy Framework
-
-Accuracy cases are routed as follows:
-
-```text
-tests/e2e/schedule/accuracy/<num>_card/*.yaml -> accuracy
-```
-
-First version should only support card-based accuracy cases.
-
-If this appears:
-
-```text
-tests/e2e/schedule/accuracy/one_node/
-```
-
-the parser should fail.
-
-### 10.3 Ops Framework
-
-Ops cases are routed as follows:
-
-```text
-tests/e2e/schedule/ops/<num>_card/*.py -> ops
-tests/e2e/schedule/ops/<num>_card/     -> ops
-tests/e2e/schedule/ops/one_node/*.py   -> ops
-tests/e2e/schedule/ops/one_node/       -> ops
-```
-
-Ops should not be mixed into the model single-node matrix.  
-Ops should have its own `ops_matrix` and its own job or reusable workflow.
-
-### 10.4 Directory Entries & Expansion
-
-`schedule_config.yaml` supports both **file** and **directory** entries; directory
-entries are **expanded before routing** (an entry is a directory if it ends with `/`,
-exists as a directory, or has no file extension).
-
-```text
-ops directory       -> group the contained test_*.py files by detected chip;
-                       emit ONE ops case per chip. tests = space-separated file
-                       list, runner resolved from (chip, resource). Recurses into
-                       subdirs (e.g. ops/one_card/triton/).
-accuracy directory  -> group the contained *.yaml configs by detected chip;
-                       emit ONE accuracy case per chip. config_paths = the chip's
-                       files, name = "<resource_dir>-<chip>" (§1C, §14.1).
-model directory     -> expand per file (each *.yaml routes independently as its
-                       own config_path), since each config drives one run.
-```
-
-Examples (per-chip grouping):
-
-```text
-tests/e2e/schedule/ops/one_card/  ->
-  one-card-a3   (chip a3,   runner linux-aarch64-a3-1,   tests = many test_*.py)
-  one-card-310p (chip 310p, runner linux-aarch64-310p-1, tests = the *_310 / *_v310 files)
-
-tests/e2e/schedule/accuracy/one_card/a2/  ->
-  one_card-a2   (chip a2, runner linux-aarch64-a2b3-1, config_paths = the a2 configs)
-```
-
-The reusable ops workflow runs `pytest -s ${tests}` (unquoted) so a space-separated
-group list splits into separate pytest arguments. The accuracy workflow iterates
-`config_paths` and runs `pytest --config <config_path>` per file. A directory with no
-routable files fails with a clear error.
-
----
-
-## 11. Multi-node Internal / External Rules
-
-This rule only applies to:
-
-```text
-framework = model
-route = multi_node
-```
-
-External DP detection:
-
-```text
-filename contains external_dp -> external
-otherwise -> internal
-```
-
-Important:
-
-```text
-1. Match external_dp, not external.
-2. Do not use external as the keyword.
-3. Do not depend on an external_dp directory.
-4. Only check the filename (stem).
-```
-
-**Hardened (review finding #5):** detection uses the file **stem** only —
-`"external_dp" in Path(path).stem`. The old `two_node/external_dp/` directory has
-been deleted and is never consulted. The migrated file is
-`tests/e2e/schedule/model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml`.
-
-Examples:
-
-```text
-GLM5-W8A8-external_dp.yaml -> external
-GLM5-W8A8-external.yaml    -> internal
-GLM5-W8A8.yaml             -> internal
-```
-
----
-
-## 12. Runner Selection
-
-Runner should be selected using:
+should only resolve a runner from:
 
 ```text
 chip + resource_type + resource_num
 ```
 
-If `runner_label.json` currently maps by `chip + npu_num`, convert resource information into `npu_num`.
+### 4.2 Move Framework-Specific Logic Down
 
-Recommended mapping:
-
-```text
-one_card   -> npu_num = 1
-two_card   -> npu_num = 2
-four_card  -> npu_num = 4
-eight_card -> npu_num = 8
-
-one_node + a3 -> npu_num = 16
-one_node + a2 -> npu_num = 8
-
-two_node / four_node -> LWS orchestration runner
-```
-
-Expected runner behavior:
-
-```text
-one_card + a3 -> linux-aarch64-a3-1
-two_card + a3 -> linux-aarch64-a3-2
-four_card + a3 -> linux-aarch64-a3-4
-eight_card + a3 -> linux-aarch64-a3-8
-one_node + a3 -> linux-aarch64-a3-16
-
-one_card + a2 -> linux-aarch64-a2b3-1
-two_card + a2 -> linux-aarch64-a2b3-2
-four_card + a2 -> linux-aarch64-a2b3-4
-one_node + a2 -> linux-aarch64-a2b3-8
-
-one_card + 310p  -> linux-aarch64-310p-1
-two_card + 310p  -> linux-aarch64-310p-2
-four_card + 310p -> linux-aarch64-310p-4
-
-two_node / four_node -> LWS runner, for example linux-aarch64-a3-0
-```
-
-Do not hardcode runner labels directly in workflow matrix entries.  
-Resolve them in the parser from `runner_label.json`.
-
-**Hardened (review finding #10):** the parser keys runner resolution on a complete
-`(resource_type, chip, resource_num) -> npu_num` table, with no implicit fallbacks
-for multi-node. Every supported combination is enumerated explicitly:
+The following functions should be removed or no longer used by `main`:
 
 ```python
-_NPU_NUM = {
-    ("card", "a3", 1): 1,  ("card", "a3", 2): 2,  ("card", "a3", 4): 4,  ("card", "a3", 8): 8,
-    ("node", "a3", 1): 16, ("node", "a3", 2): 0,  ("node", "a3", 4): 0,
-    ("card", "a2", 1): 1,  ("card", "a2", 2): 2,  ("card", "a2", 4): 4,  ("card", "a2", 8): 8,
-    ("node", "a2", 1): 8,  ("node", "a2", 2): 0,  ("node", "a2", 4): 0,   # four_node + a2 explicit
-}
+_detect_framework()
+_detect_route()
+_parse_to_case()
+_expand_directory()
+_parse_entry()
 ```
 
-`npu_num = 0` resolves to an LWS / CPU orchestration runner. `(a2, 0)` maps to
-`linux-amd64-cpu-8-hk` via `_SPECIAL_RUNNERS`; `(a3, 0)` maps to `linux-aarch64-a3-0`
-from `runner_label.json`. An unknown combination raises a clear error instead of
-silently defaulting.
+The replacement relationship should be:
+
+```text
+_detect_framework()  -> Framework.match(path)
+_detect_route()      -> ModelFramework / AccuracyFramework / OpsFramework internal logic
+_parse_to_case()     -> Framework._case_from_file()
+_expand_directory()  -> Framework.expand(raw)
+_parse_entry()       -> main finds framework and calls framework.expand(raw)
+```
 
 ---
 
-## 13. Router Architecture
+## 5. Core Data Structure
 
-Do not implement routing as one large chain of scattered if/else blocks.
+### 5.1 Keep PeriodicCase
 
-Use the following structure:
-
-```text
-raw file entries
-  -> PeriodicCase list
-  -> framework routers
-  -> framework-specific matrices
-```
-
-Recommended router interface:
+Keep the existing `PeriodicCase` to minimize refactoring risk:
 
 ```python
-class BaseRouter:
+@dataclass(frozen=True)
+class PeriodicCase:
     name: str
-    output_name: str
-
-    def match(self, case: PeriodicCase) -> bool:
-        raise NotImplementedError
-
-    def to_matrix_item(self, case: PeriodicCase) -> dict:
-        raise NotImplementedError
+    path: str
+    framework: str
+    route: str
+    chip: str
+    resource_type: str
+    resource_num: int
+    resource_dir: str
+    runner: str
+    multi_node_type: str | None = None
+    config_path: str | None = None
+    config_paths: list | None = None
+    tests: str | None = None
+    size: int | None = None
 ```
 
-Required routers:
+Different frameworks only use part of these fields, but keeping the existing structure reduces the impact on later output logic.
 
-```text
-AccuracyRouter
-OpsRouter
-ModelSingleNodeRouter
-ModelMultiNodeRouter
-```
+### 5.2 Add BaseFramework
 
-Router registry:
+Introduce `BaseFramework` to replace the core responsibility of the current `BaseRouter`.
+
+Recommended interface:
 
 ```python
-ROUTERS = [
-    AccuracyRouter(),
-    OpsRouter(),
-    ModelSingleNodeRouter(),
-    ModelMultiNodeRouter(),
-]
+class BaseFramework:
+    name: str
+    output_names: tuple[str, ...]
+
+    def __init__(self, runner_map: dict[tuple[str, int], str]):
+        self.runner_map = runner_map
+
+    def match(self, path: str) -> bool:
+        raise NotImplementedError
+
+    def expand(self, raw: Any) -> list[PeriodicCase]:
+        raise NotImplementedError
+
+    def group(self, cases: list[PeriodicCase]) -> dict[str, list[dict]]:
+        raise NotImplementedError
+```
+
+Use:
+
+```python
+output_names: tuple[str, ...]
+```
+
+instead of:
+
+```python
+output_name: str
+```
+
+because `ModelFramework` produces two matrices:
+
+```text
+single_node_matrix
+multi_node_matrix
+```
+
+If one framework were only allowed to output one matrix, we would have to split it again into:
+
+```text
+ModelSingleNodeFramework
+ModelMultiNodeFramework
+```
+
+That would conflict with the goal of using one class to handle one framework.
+
+---
+
+## 6. Framework Design
+
+## 6.1 ModelFramework
+
+### Responsibilities
+
+`ModelFramework` is responsible for:
+
+1. Matching entries under `tests/e2e/schedule/model/`;
+2. Expanding model directories;
+3. Parsing each YAML file into a `PeriodicCase`;
+4. Deciding whether the case belongs to single-node or multi-node;
+5. Detecting whether `multi_node_type` is internal_dp or external_dp;
+6. Producing:
+   - `single_node_matrix`
+   - `multi_node_matrix`
+
+### Existing Rules to Preserve
+
+```text
+model + card resource       -> single_node_matrix
+model + one_node            -> single_node_matrix
+model + two_node/four_node  -> multi_node_matrix
+
+filename stem contains external_dp -> external_dp
+otherwise                         -> internal_dp
+```
+
+### Implementation Sketch
+
+```python
+class ModelFramework(BaseFramework):
+    name = "model"
+    output_names = ("single_node_matrix", "multi_node_matrix")
+
+    def match(self, path: str) -> bool:
+        norm = str(path).replace("\\", "/").rstrip("/")
+        return norm.startswith("tests/e2e/schedule/model/")
+
+    def expand(self, raw: Any) -> list[PeriodicCase]:
+        path = str(raw).strip().replace("\\", "/").rstrip("/")
+
+        if _is_directory_entry(raw, path):
+            files = _list_dir_files(path, framework="model")
+            if not files:
+                raise ValueError(f"Directory entry {path!r} contains no model yaml files.")
+            return [self._case_from_file(f) for f in files]
+
+        return [self._case_from_file(path)]
+
+    def _case_from_file(self, path: str) -> PeriodicCase:
+        resource_dir, resource_type, resource_num = _detect_resource(path)
+        chip = _detect_chip(path)
+        runner = _resolve_runner(chip, resource_type, resource_num, self.runner_map)
+        name = _derive_name(path)
+
+        if resource_type == "card" or resource_num == 1:
+            route = "single_node"
+            multi_node_type = None
+            size = None
+        else:
+            route = "multi_node"
+            multi_node_type = self._detect_multi_node_type(path)
+            size = resource_num
+
+        return PeriodicCase(
+            name=name,
+            path=path,
+            framework=self.name,
+            route=route,
+            chip=chip,
+            resource_type=resource_type,
+            resource_num=resource_num,
+            resource_dir=resource_dir,
+            runner=runner,
+            config_path=path,
+            multi_node_type=multi_node_type,
+            size=size,
+        )
+
+    def _detect_multi_node_type(self, path: str) -> str:
+        stem = Path(path.replace("\\", "/")).stem
+        return "external_dp" if "external_dp" in stem else "internal_dp"
+
+    def group(self, cases: list[PeriodicCase]) -> dict[str, list[dict]]:
+        single_node = []
+        multi_node = []
+
+        for case in cases:
+            if case.route == "single_node":
+                single_node.append({
+                    "name": case.name,
+                    "chip": case.chip,
+                    "runner": case.runner,
+                    "config_path": case.config_path or "",
+                    "tests": "",
+                    "extra_components": False,
+                })
+            elif case.route == "multi_node":
+                multi_node.append({
+                    "name": case.name,
+                    "chip": case.chip,
+                    "runner": case.runner,
+                    "config_path": case.config_path or "",
+                    "multi_node_type": case.multi_node_type or "internal_dp",
+                    "extra_components": False,
+                    "size": case.size or case.resource_num,
+                })
+            else:
+                raise ValueError(f"Unknown model route: {case.route}")
+
+        multi_node.sort(key=lambda e: -e.get("size", 0))
+
+        return {
+            "single_node_matrix": single_node,
+            "multi_node_matrix": multi_node,
+        }
 ```
 
 ---
 
-## 14. Router Output
+## 6.2 AccuracyFramework
 
-### 14.1 AccuracyRouter
+### Responsibilities
 
-Match:
+`AccuracyFramework` is responsible for:
 
-```python
-case.framework == "accuracy"
-```
+1. Matching entries under `tests/e2e/schedule/accuracy/`;
+2. Supporting only card resources;
+3. Requiring file entries to be yaml/yml files;
+4. Expanding directory entries recursively into yaml/yml files;
+5. Grouping directory entries by chip;
+6. Producing:
+   - `accuracy_matrix`
 
-Output example (direct accuracy config paths — §1C):
-
-```json
-{
-  "name": "one_card-a2",
-  "chip": "a2",
-  "runner": "linux-aarch64-a2b3-1",
-  "config_paths": [
-    "tests/e2e/schedule/accuracy/one_card/a2/Qwen3-8B.yaml",
-    "tests/e2e/schedule/accuracy/one_card/a2/Qwen3-8B-W8A8.yaml"
-  ],
-  "tests": ""
-}
-```
-
-Accuracy parsing rules (per `_parse_to_case` / `_expand_directory`):
+### Existing Rules to Preserve
 
 ```text
-single .yaml file -> config_paths = [path]   (validated as a dict config)
-other extension   -> ValueError              (accuracy is YAML-only; see §1D)
-directory entry   -> group the contained *.yaml by detected chip;
-                     one case per chip, config_paths = the chip's files,
-                     name = "<resource_dir>-<chip>" (e.g. one_card-a2)
+accuracy + card resource -> accuracy_matrix
+accuracy + node resource -> error
+
+file entry      -> config_paths = [path]
+directory entry -> group by chip, one matrix item per chip
 ```
 
-(The `.py`-accuracy → `tests` route was removed in §1D — no accuracy `.py` cases
-remain.)
-
-`AccuracyRouter.to_matrix_item` emits:
+### Implementation Sketch
 
 ```python
-"config_paths": case.config_paths or ([case.config_path] if case.config_path else []),
-```
+class AccuracyFramework(BaseFramework):
+    name = "accuracy"
+    output_names = ("accuracy_matrix",)
 
-No `model_list` is produced.
+    def match(self, path: str) -> bool:
+        norm = str(path).replace("\\", "/").rstrip("/")
+        return norm.startswith("tests/e2e/schedule/accuracy/")
 
-**Validation (`_validate_accuracy_config`):** accuracy YAMLs must be a dict (a real
-executable config). A bare model-name list (the old group format) raises
-`ValueError: "... must be a YAML dict. Old model-list group YAML is no longer
-supported."` so stale group files cannot be silently mistaken for configs. Validation
-is skipped only when the file is absent (the parser may run before a path materializes).
+    def expand(self, raw: Any) -> list[PeriodicCase]:
+        path = str(raw).strip().replace("\\", "/").rstrip("/")
 
-**Migration (resolves the former finding #11):** the real configs were **copied** from
-`tests/e2e/models/configs/<model>.yaml` into
-`tests/e2e/schedule/accuracy/<resource_dir>/<chip>/<model>.yaml`, and the old
-`accuracy-group-*.yaml` files were deleted. The indirect path
-(`group YAML -> model_list -> tests/e2e/models/configs/${model}.yaml`) is gone; the
-execution workflow now runs `pytest --config <config_path>` directly. **§1D update:**
-the `tests/e2e/models/` source tree was subsequently deleted and the accuracy harness
-(`test_*_eval_correctness.py`, `conftest.py`, `report_template.md`) moved to
-`tests/e2e/schedule/scripts/accuracy/`.
+        if _is_directory_entry(raw, path):
+            files = _list_dir_files(path, framework="accuracy")
+            if not files:
+                raise ValueError(f"Directory entry {path!r} contains no accuracy yaml files.")
+            return self._cases_from_directory(path, files)
 
-### 14.2 OpsRouter
+        if not path.endswith((".yaml", ".yml")):
+            raise ValueError(f"Accuracy entries must be YAML configs: {path}")
 
-Match:
+        return [self._case_from_files(path, [path])]
 
-```python
-case.framework == "ops"
-```
+    def _case_from_files(self, path: str, files: list[str]) -> PeriodicCase:
+        resource_dir, resource_type, resource_num = _detect_resource(path)
+        if resource_type != "card":
+            raise ValueError("Accuracy framework only supports card resources.")
 
-Output example:
+        chip = _detect_chip(path)
+        runner = _resolve_runner(chip, resource_type, resource_num, self.runner_map)
 
-```json
-{
-  "name": "test_custom_op_a2",
-  "chip": "a2",
-  "runner": "linux-aarch64-a2b3-1",
-  "resource_type": "card",
-  "resource_num": 1,
-  "tests": "tests/e2e/schedule/ops/one_card/test_custom_op_a2.py"
-}
-```
+        return PeriodicCase(
+            name=_derive_name(path),
+            path=path,
+            framework=self.name,
+            route="accuracy",
+            chip=chip,
+            resource_type=resource_type,
+            resource_num=resource_num,
+            resource_dir=resource_dir,
+            runner=runner,
+            config_paths=files,
+        )
 
-### 14.3 ModelSingleNodeRouter
+    def _cases_from_directory(self, dir_path: str, files: list[str]) -> list[PeriodicCase]:
+        resource_dir, resource_type, resource_num = _detect_resource(dir_path)
+        if resource_type != "card":
+            raise ValueError("Accuracy framework only supports card resources.")
 
-Match:
+        groups = _group_by_chip(files)
+        cases = []
 
-```python
-case.framework == "model" and case.route == "single_node"
-```
+        for chip in sorted(groups):
+            group_files = sorted(groups[chip])
+            runner = _resolve_runner(chip, resource_type, resource_num, self.runner_map)
 
-Output example:
+            cases.append(PeriodicCase(
+                name=f"{resource_dir}-{chip}",
+                path=dir_path,
+                framework=self.name,
+                route="accuracy",
+                chip=chip,
+                resource_type=resource_type,
+                resource_num=resource_num,
+                resource_dir=resource_dir,
+                runner=runner,
+                config_paths=group_files,
+            ))
 
-```json
-{
-  "name": "Qwen3-235B-A22B-W8A8",
-  "chip": "a3",
-  "runner": "linux-aarch64-a3-16",
-  "resource_type": "node",
-  "resource_num": 1,
-  "config_path": "tests/e2e/schedule/model/Qwen/one_node/Qwen3-235B-A22B-W8A8.yaml"
-}
-```
+        return cases
 
-### 14.4 ModelMultiNodeRouter
-
-Match:
-
-```python
-case.framework == "model" and case.route == "multi_node"
-```
-
-Output example:
-
-```json
-{
-  "name": "GLM5-W8A8-external_dp",
-  "chip": "a3",
-  "runner": "linux-aarch64-a3-0",
-  "resource_type": "node",
-  "resource_num": 2,
-  "size": "2",
-  "replicas": "1",
-  "multi_node_type": "external",
-  "config_path": "tests/e2e/schedule/model/GLM/two_node/GLM5-W8A8-external_dp.yaml"
-}
-```
-
-For multi-node:
-
-```text
-two_node  -> size = 2
-four_node -> size = 4
+    def group(self, cases: list[PeriodicCase]) -> dict[str, list[dict]]:
+        return {
+            "accuracy_matrix": [
+                {
+                    "name": case.name,
+                    "chip": case.chip,
+                    "runner": case.runner,
+                    "config_paths": case.config_paths or [],
+                }
+                for case in cases
+            ]
+        }
 ```
 
 ---
 
-## 15. parse_schedule_config.py Flow
+## 6.3 OpsFramework
 
-The parser should follow this flow:
+### Responsibilities
+
+`OpsFramework` is responsible for:
+
+1. Matching entries under `tests/e2e/schedule/ops/`;
+2. Supporting Python file entries;
+3. Supporting directory entries;
+4. Recursively expanding directory entries into `test_*.py`;
+5. Grouping directory entries by chip;
+6. Producing:
+   - `ops_matrix`
+
+### Existing Rules to Preserve
 
 ```text
-1. Load schedule_config.yaml.
-2. Load runner_label.json.
-3. Select matching schedule group by cron or workflow_dispatch input.
-4. Expand files.
-5. Parse each file into PeriodicCase.
-6. Apply test_filter.
-7. Run framework routers.
-8. Generate matrices.
-9. Generate image_build_targets.
-10. Generate selected_cases_summary.
-11. Write outputs to GITHUB_OUTPUT.
+ops + any resource -> ops_matrix
+
+file entry      -> tests = path
+directory entry -> group by chip, tests = " ".join(group_files)
 ```
 
-Suggested CLI:
+### Implementation Sketch
 
-```bash
-python3 .github/workflows/scripts/parse_schedule_config.py \
-  --config .github/workflows/scripts/schedule_config.yaml \
-  --runner-label .github/workflows/scripts/runner_label.json \
-  --event-name "${{ github.event_name }}" \
-  --cron "${{ github.event.schedule }}" \
-  --schedule-name "${{ inputs.schedule_name }}" \
-  --test-filter "${{ inputs.test_filter }}"
+```python
+class OpsFramework(BaseFramework):
+    name = "ops"
+    output_names = ("ops_matrix",)
+
+    def match(self, path: str) -> bool:
+        norm = str(path).replace("\\", "/").rstrip("/")
+        return norm.startswith("tests/e2e/schedule/ops/")
+
+    def expand(self, raw: Any) -> list[PeriodicCase]:
+        path = str(raw).strip().replace("\\", "/").rstrip("/")
+
+        if _is_directory_entry(raw, path):
+            files = _list_dir_files(path, framework="ops")
+            if not files:
+                raise ValueError(f"Directory entry {path!r} contains no ops test files.")
+            return self._cases_from_directory(path, files)
+
+        return [self._case_from_file(path)]
+
+    def _case_from_file(self, path: str) -> PeriodicCase:
+        resource_dir, resource_type, resource_num = _detect_resource(path)
+        chip = _detect_chip(path)
+        runner = _resolve_runner(chip, resource_type, resource_num, self.runner_map)
+
+        return PeriodicCase(
+            name=_derive_name(path),
+            path=path,
+            framework=self.name,
+            route="ops",
+            chip=chip,
+            resource_type=resource_type,
+            resource_num=resource_num,
+            resource_dir=resource_dir,
+            runner=runner,
+            tests=path,
+        )
+
+    def _cases_from_directory(self, dir_path: str, files: list[str]) -> list[PeriodicCase]:
+        resource_dir, resource_type, resource_num = _detect_resource(dir_path)
+        groups = _group_by_chip(files)
+        base_name = _derive_name(dir_path)
+        cases = []
+
+        for chip in sorted(groups):
+            group_files = sorted(groups[chip])
+            runner = _resolve_runner(chip, resource_type, resource_num, self.runner_map)
+
+            cases.append(PeriodicCase(
+                name=f"{base_name}-{chip}",
+                path=dir_path,
+                framework=self.name,
+                route="ops",
+                chip=chip,
+                resource_type=resource_type,
+                resource_num=resource_num,
+                resource_dir=resource_dir,
+                runner=runner,
+                tests=" ".join(group_files),
+            ))
+
+        return cases
+
+    def group(self, cases: list[PeriodicCase]) -> dict[str, list[dict]]:
+        return {
+            "ops_matrix": [
+                {
+                    "name": case.name,
+                    "chip": case.chip,
+                    "runner": case.runner,
+                    "tests": case.tests or "",
+                }
+                for case in cases
+            ]
+        }
 ```
 
-Expected outputs:
+---
+
+## 7. Framework Registration
+
+Add `_build_frameworks()`:
+
+```python
+def _build_frameworks(runner_map: dict[tuple[str, int], str]) -> list[BaseFramework]:
+    return [
+        ModelFramework(runner_map),
+        AccuracyFramework(runner_map),
+        OpsFramework(runner_map),
+    ]
+```
+
+When adding a new framework later, only this registration function needs to be updated:
+
+```python
+def _build_frameworks(runner_map: dict[tuple[str, int], str]) -> list[BaseFramework]:
+    return [
+        ModelFramework(runner_map),
+        AccuracyFramework(runner_map),
+        OpsFramework(runner_map),
+        BenchmarkFramework(runner_map),
+    ]
+```
+
+The main flow should not need new model / accuracy / ops if-else branches.
+
+---
+
+## 8. Framework Matching
+
+Add `_find_framework()`:
+
+```python
+def _find_framework(path: str, frameworks: list[BaseFramework]) -> BaseFramework:
+    matched = [fw for fw in frameworks if fw.match(path)]
+
+    if not matched:
+        raise ValueError(f"No framework matched path {path!r}.")
+
+    if len(matched) > 1:
+        names = [fw.name for fw in matched]
+        raise ValueError(f"Multiple frameworks matched path {path!r}: {names}")
+
+    return matched[0]
+```
+
+This guarantees:
+
+1. Unknown frameworks fail fast;
+2. Multiple matches fail fast;
+3. `main` does not need to know framework names.
+
+---
+
+## 9. main Flow Refactoring
+
+### 9.1 Current main Problem
+
+The current main flow is roughly:
+
+```text
+select schedules
+  -> _parse_entry(raw, runner_map)
+  -> _parse_to_case / _expand_directory
+  -> dedupe
+  -> filter
+  -> ROUTERS route to matrix
+  -> output
+```
+
+The problem is that:
+
+```text
+_parse_entry
+_parse_to_case
+_expand_directory
+ROUTERS
+```
+
+still couple the common parser with framework-specific logic.
+
+### 9.2 New main Flow
+
+Recommended new flow:
+
+```python
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True, help="Path to schedule_config.yaml")
+    parser.add_argument("--runner-label", help="Path to runner_label.json (default: same dir as config)")
+    parser.add_argument("--event-name", default="workflow_dispatch")
+    parser.add_argument("--cron", default="")
+    parser.add_argument("--schedule-name", default="")
+    parser.add_argument("--test-filter", default="all")
+    args = parser.parse_args()
+
+    with open(args.config, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    runner_label_path = Path(args.runner_label) if args.runner_label else Path(args.config).parent / "runner_label.json"
+    runner_map = _load_runner_map(runner_label_path)
+    frameworks = _build_frameworks(runner_map)
+
+    schedules = _select_schedules(config, args.event_name, args.cron, args.schedule_name)
+    if not schedules:
+        print(
+            f"No schedules matched event={args.event_name!r} cron={args.cron!r} "
+            f"schedule_name={args.schedule_name!r}",
+            file=sys.stderr,
+        )
+
+    all_cases: list[PeriodicCase] = []
+    errors: list[str] = []
+
+    for schedule in schedules:
+        for raw in schedule.get("files", []):
+            path = str(raw).strip().replace("\\", "/").rstrip("/")
+            try:
+                framework = _find_framework(path, frameworks)
+                all_cases.extend(framework.expand(raw))
+            except Exception as exc:
+                errors.append(f"  {raw!r}: {exc}")
+
+    if errors:
+        print("Errors parsing schedule entries:", file=sys.stderr)
+        for e in errors:
+            print(e, file=sys.stderr)
+        sys.exit(1)
+
+    all_cases, duplicate_cases = _dedupe_cases(all_cases)
+
+    test_filter = args.test_filter.strip()
+    if test_filter:
+        all_cases = [c for c in all_cases if _matches_filter(c, test_filter)]
+
+    cases_by_framework: dict[str, list[PeriodicCase]] = {
+        fw.name: [] for fw in frameworks
+    }
+
+    for case in all_cases:
+        cases_by_framework[case.framework].append(case)
+
+    outputs: dict[str, list[dict]] = {}
+    for fw in frameworks:
+        for output_name in fw.output_names:
+            outputs[output_name] = []
+
+    for fw in frameworks:
+        grouped = fw.group(cases_by_framework[fw.name])
+        for output_name, items in grouped.items():
+            if output_name not in outputs:
+                raise ValueError(f"Framework {fw.name!r} returned unknown output {output_name!r}.")
+            outputs[output_name].extend(items)
+
+    image_targets = sorted({c.chip for c in all_cases})
+
+    summary = _build_summary(all_cases, outputs, duplicate_cases)
+    _write_outputs(outputs, image_targets, summary)
+```
+
+With this structure, `main` only orchestrates the process and no longer contains branches such as:
+
+```python
+if framework == "model":
+    ...
+
+if framework == "accuracy":
+    ...
+
+if framework == "ops":
+    ...
+```
+
+---
+
+## 10. Output Logic Encapsulation
+
+To keep `main` clean, move summary generation and GitHub output writing into two helper functions.
+
+### 10.1 _build_summary()
+
+```python
+def _build_summary(
+    all_cases: list[PeriodicCase],
+    outputs: dict[str, list[dict]],
+    duplicate_cases: dict[str, list[PeriodicCase]],
+) -> str:
+    summary_lines = ["=== Selected test cases ==="]
+
+    for c in all_cases:
+        loc = c.config_path or c.tests or c.path
+        summary_lines.append(
+            f"  [{c.framework:8s}] [{c.route:11s}] [{c.chip}] "
+            f"[{c.runner:30s}] {c.name} ({loc})"
+        )
+
+    summary_lines.append(
+        f"\nTotals: "
+        f"{len(outputs.get('single_node_matrix', []))} single-node, "
+        f"{len(outputs.get('multi_node_matrix', []))} multi-node, "
+        f"{len(outputs.get('accuracy_matrix', []))} accuracy, "
+        f"{len(outputs.get('ops_matrix', []))} ops"
+    )
+
+    if duplicate_cases:
+        summary_lines.append("\nWARNING: duplicate test case names detected; kept the first occurrence:")
+        for name in sorted(duplicate_cases):
+            cases = duplicate_cases[name]
+            summary_lines.append(f"  {name}:")
+            summary_lines.append(f"    kept: {cases[0].path}")
+            for case in cases[1:]:
+                summary_lines.append(f"    duplicate: {case.path}")
+
+    return "\n".join(summary_lines)
+```
+
+### 10.2 _write_outputs()
+
+```python
+def _write_outputs(
+    outputs: dict[str, list[dict]],
+    image_targets: list[str],
+    summary: str,
+) -> None:
+    print(summary, file=sys.stderr)
+
+    output_path = os.environ.get("GITHUB_OUTPUT", "")
+
+    lines = [
+        f"single_node_matrix={json.dumps(outputs.get('single_node_matrix', []))}",
+        f"multi_node_matrix={json.dumps(outputs.get('multi_node_matrix', []))}",
+        f"accuracy_matrix={json.dumps(outputs.get('accuracy_matrix', []))}",
+        f"ops_matrix={json.dumps(outputs.get('ops_matrix', []))}",
+        f"image_build_targets={json.dumps(image_targets)}",
+        f"selected_cases_summary={json.dumps(summary)}",
+    ]
+
+    if output_path:
+        with open(output_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    else:
+        print("\n=== Outputs ===")
+        for output_name in (
+            "single_node_matrix",
+            "multi_node_matrix",
+            "accuracy_matrix",
+            "ops_matrix",
+        ):
+            items = outputs.get(output_name, [])
+            print(f"\n{output_name} ({len(items)} entries):")
+            print(json.dumps(items, indent=2))
+        print(f"\nimage_build_targets: {image_targets}")
+```
+
+The output fields must remain compatible:
 
 ```text
 single_node_matrix
@@ -987,541 +927,510 @@ selected_cases_summary
 
 ---
 
-## 16. workflow_dispatch Filtering
+## 11. Behavior Compatibility Requirements
 
-`test_filter` should support:
+The refactored implementation must preserve the following behavior.
+
+### 11.1 model file entry
+
+Input:
 
 ```text
-all
-DeepSeek
-Qwen
-accuracy
-ops
-GLM5-W8A8-external_dp
-GLM5-W8A8-external_dp.yaml
-tests/e2e/schedule/model/GLM/two_node/GLM5-W8A8-external_dp.yaml
+tests/e2e/schedule/model/one_card/foo.yaml
 ```
 
-Recommended matching order:
+Output target:
 
 ```text
-1. all
-2. full path exact match
-3. filename exact match
-4. filename stem exact match
-5. path segment match
-6. substring match
+single_node_matrix
+```
+
+### 11.2 model directory entry
+
+Input:
+
+```text
+tests/e2e/schedule/model/one_card/
+```
+
+Behavior:
+
+```text
+Recursively find *.yaml / *.yml
+Each yaml file becomes one PeriodicCase
+All cases go to single_node_matrix
+```
+
+### 11.3 model multi-node
+
+Input:
+
+```text
+tests/e2e/schedule/model/two_node/foo.yaml
+tests/e2e/schedule/model/four_node/foo_external_dp.yaml
+```
+
+Behavior:
+
+```text
+two_node/four_node -> multi_node_matrix
+filename contains external_dp -> multi_node_type = external_dp
+otherwise -> internal_dp
+```
+
+### 11.4 accuracy file entry
+
+Input:
+
+```text
+tests/e2e/schedule/accuracy/one_card/foo.yaml
+```
+
+Output:
+
+```json
+{
+  "name": "foo",
+  "chip": "a3",
+  "runner": "...",
+  "config_paths": ["tests/e2e/schedule/accuracy/one_card/foo.yaml"]
+}
+```
+
+### 11.5 accuracy directory entry
+
+Input:
+
+```text
+tests/e2e/schedule/accuracy/one_card/
+```
+
+Behavior:
+
+```text
+Recursively find *.yaml / *.yml
+Group by chip
+One matrix item per chip
+```
+
+### 11.6 ops file entry
+
+Input:
+
+```text
+tests/e2e/schedule/ops/one_card/test_foo.py
+```
+
+Output:
+
+```json
+{
+  "name": "test_foo",
+  "chip": "a3",
+  "runner": "...",
+  "tests": "tests/e2e/schedule/ops/one_card/test_foo.py"
+}
+```
+
+### 11.7 ops directory entry
+
+Input:
+
+```text
+tests/e2e/schedule/ops/one_card/
+```
+
+Behavior:
+
+```text
+Recursively find test_*.py
+Group by chip
+One matrix item per chip
+tests = " ".join(group_files)
 ```
 
 ---
 
-## 17. schedule_periodic_test.yaml
+## 12. Error Handling Strategy
 
-Main workflow:
+### 12.1 No framework matched
+
+If a path does not start with one of the following prefixes:
 
 ```text
-.github/workflows/schedule_periodic_test.yaml
+tests/e2e/schedule/model/
+tests/e2e/schedule/accuracy/
+tests/e2e/schedule/ops/
 ```
 
-Triggers:
+fail fast with:
+
+```text
+No framework matched path '...'
+```
+
+### 12.2 Multiple frameworks matched
+
+This should not normally happen, but it should still be guarded:
+
+```text
+Multiple frameworks matched path '...': ['xxx', 'yyy']
+```
+
+### 12.3 Missing resource directory
+
+If a path does not contain one of:
+
+```text
+one_card
+two_card
+four_card
+eight_card
+one_node
+two_node
+four_node
+```
+
+keep the existing error behavior:
+
+```text
+No resource directory in path ...
+```
+
+### 12.4 Multiple resource directories
+
+Keep the existing error behavior:
+
+```text
+Multiple resource directories in path ...
+```
+
+### 12.5 accuracy uses node resource
+
+Keep failing with:
+
+```text
+Accuracy framework only supports card resources.
+```
+
+### 12.6 Directory entry contains no routable files
+
+Keep failing with:
+
+```text
+Directory entry '...' contains no routable files.
+```
+
+---
+
+## 13. Unit Test Plan
+
+Update or add tests to ensure the refactoring does not change behavior.
+
+### 13.1 Framework match tests
+
+Test targets:
+
+```text
+ModelFramework.match()
+AccuracyFramework.match()
+OpsFramework.match()
+_find_framework()
+```
+
+Coverage:
+
+1. model path only matches ModelFramework;
+2. accuracy path only matches AccuracyFramework;
+3. ops path only matches OpsFramework;
+4. unknown path raises an error;
+5. multiple framework matches raise an error, which can be tested with a fake framework.
+
+### 13.2 ModelFramework expand tests
+
+Coverage:
+
+1. `one_card yaml -> single_node`;
+2. `two_card yaml -> single_node`;
+3. `one_node yaml -> single_node`;
+4. `two_node yaml -> multi_node`;
+5. `four_node yaml -> multi_node`;
+6. `external_dp filename -> multi_node_type = external_dp`;
+7. `normal multi-node filename -> internal_dp`;
+8. `model directory entry -> each yaml becomes one case`.
+
+### 13.3 AccuracyFramework expand tests
+
+Coverage:
+
+1. `accuracy yaml file -> single-element config_paths`;
+2. `accuracy directory -> group by chip`;
+3. `accuracy node resource -> error`;
+4. `non-yaml file -> error`;
+5. `empty directory -> error`.
+
+### 13.4 OpsFramework expand tests
+
+Coverage:
+
+1. `ops py file -> tests = path`;
+2. `ops directory -> recursively find test_*.py`;
+3. `ops directory -> group by chip`;
+4. `empty directory -> error`.
+
+### 13.5 main output compatibility test
+
+Create a schedule config containing:
 
 ```yaml
-on:
-  schedule:
-    - cron: "45 15 * * *"
-    - cron: "45 15 * * 1"
-
-  workflow_dispatch:
-    inputs:
-      vllm_ascend_branch:
-        required: true
-        default: main
-      schedule_name:
-        required: false
-        default: manual
-      test_filter:
-        required: false
-        default: all
+periodic_tests:
+  - name: manual
+    files:
+      - tests/e2e/schedule/model/one_card/foo.yaml
+      - tests/e2e/schedule/model/two_node/bar_external_dp.yaml
+      - tests/e2e/schedule/accuracy/one_card/acc.yaml
+      - tests/e2e/schedule/ops/one_card/test_ops.py
 ```
 
-Do not include:
+Verify that the output contains:
 
 ```text
-pull_request
-nightly-test label
-PR comment trigger
+single_node_matrix
+multi_node_matrix
+accuracy_matrix
+ops_matrix
+image_build_targets
+selected_cases_summary
 ```
 
-Jobs:
+Also verify that each matrix item remains compatible with the previous behavior.
 
-```text
-parse-config
-build-image
-single-node-tests
-multi-node-tests
-accuracy-tests
-ops-tests
-summary
-```
+### 13.6 test_filter tests
+
+Preserve the existing semantics:
+
+1. Exact full path match;
+2. Exact filename match;
+3. Exact stem match;
+4. Path segment match;
+5. Name/path substring match;
+6. `all` matches everything.
 
 ---
 
-## 18. Branch Ref and Branch Tag
+## 14. Recommended Implementation Steps
 
-Do not normalize the branch before checkout.
+### Step 1: Introduce BaseFramework
 
-Keep two values:
+Add:
+
+```python
+class BaseFramework:
+    ...
+```
+
+Do not remove the old routers immediately.
+
+### Step 2: Implement ModelFramework
+
+Migrate model logic, including:
 
 ```text
-branch_ref -> original branch name for checkout
-branch_tag -> normalized branch name for image tag / artifact name
+single_node
+multi_node
+internal_dp
+external_dp
+model directory expansion
 ```
 
-Example:
+Add or update corresponding unit tests.
+
+### Step 3: Implement AccuracyFramework
+
+Migrate accuracy logic, including:
 
 ```text
-branch_ref = releases/v0.20.2rc
-branch_tag = releases-v0.20.2rc
+yaml file entry
+directory entry
+chip grouping
+card-only validation
 ```
 
-Use:
+Add or update corresponding unit tests.
+
+### Step 4: Implement OpsFramework
+
+Migrate ops logic, including:
 
 ```text
-branch_ref for actions/checkout
-branch_tag for image tag
+py file entry
+directory entry
+test_*.py discovery
+chip grouping
 ```
 
-**Hardened (review finding #6):** `build-image` passes `branch_ref` (not
-`branch_tag`) into `_nightly_image_build.yaml`. That reusable workflow uses the input
-as the `actions/checkout` `ref:` and **normalizes it internally** (`/` -> `-`) to form
-the image tag `nightly-ci-<branch_tag>-<chip>`. The test jobs reference the same
-`nightly-ci-<branch_tag>-<chip>` using `parse-config.outputs.branch_tag`, so tags
-match while checkout still targets a real branch (e.g. `releases/v0.20.2rc`). Passing
-`branch_tag` to checkout would break on any branch containing a `/`.
+Add or update corresponding unit tests.
 
----
+### Step 5: Replace the main flow
 
-## 19. Image Build Rules
-
-`image_build_targets` should be derived from selected cases.
-
-Examples:
+Change main from:
 
 ```text
-selected cases contain only a2 -> build a2 image only
-selected cases contain only a3 -> build a3 image only
-selected cases contain both    -> build both
+_parse_entry -> ROUTERS
 ```
 
-The workflow should not build unnecessary images for filtered manual runs.
-
----
-
-## 20. Ops Workflow
-
-Add a lightweight reusable workflow if needed:
+to:
 
 ```text
-.github/workflows/_e2e_periodic_ops.yaml
+_find_framework -> framework.expand -> framework.group
 ```
 
-Inputs:
+### Step 6: Clean up old logic
 
-```yaml
-runner:
-  required: true
-  type: string
+Remove or stop using:
 
-image:
-  required: true
-  type: string
-
-tests:
-  required: true
-  type: string
-
-name:
-  required: true
-  type: string
-
-should_run:
-  required: true
-  type: boolean
-
-vllm_ascend_branch:
-  required: true
-  type: string
+```python
+_detect_framework()
+_detect_route()
+_parse_to_case()
+_expand_directory()
+_parse_entry()
+BaseRouter
+AccuracyRouter
+OpsRouter
+ModelSingleNodeRouter
+ModelMultiNodeRouter
+ROUTERS
 ```
 
-Execution should run the requested pytest target:
+If the PR becomes too large, it is acceptable to stop using the old logic in the first round and remove it in a later cleanup PR.
+
+### Step 7: Local validation
+
+Run at least:
 
 ```bash
-pytest -s "${{ inputs.tests }}"
+python .github/workflows/scripts/parse_schedule_config.py \
+  --config .github/workflows/scripts/schedule_config.yaml \
+  --runner-label .github/workflows/scripts/runner_label.json \
+  --event-name workflow_dispatch \
+  --schedule-name manual \
+  --test-filter all
 ```
 
-Ops should not be routed through the model single-node workflow.
-
-**Hardened (review finding #9):** every `run:` step must be valid YAML — a single
-line or a `|` block scalar, never a wrapped command split across bare lines:
-
-```yaml
-- name: Install vllm-ascend
-  run: pip install -e . --no-build-isolation
-
-- name: Run ops tests
-  run: pytest -s "${{ inputs.tests }}"
-```
-
-The ops job runs inside the nightly image with the NPU device mounts and an
-`actions/checkout@v6` of `inputs.vllm_ascend_branch`, mirroring the model e2e setup so
-CANN / torch_npu / ascend-toolkit env are available. `should_run` gates the job at the
-matrix level.
+Compare the JSON output before and after the refactoring.
 
 ---
 
-## 21. Validation Rules
+## 15. Review Focus
 
-The parser must fail early with clear messages for invalid entries.
+When submitting the PR, highlight the following points:
 
-Required validation:
-
-```text
-1. Every file must be under tests/e2e/schedule/.
-2. tests/e2e/accuracy/ is invalid.
-3. Numeric resource directories such as 1_card are invalid.
-4. Each path must contain exactly one supported resource directory.
-5. Model and accuracy entries must be YAML files.
-6. Ops entries can be Python files or directories.
-7. accuracy only supports card resources in the first version.
-8. external_dp routing applies only to model multi-node cases.
-9. Every selected case must match exactly one router.
-10. Empty matrices should be allowed and should skip corresponding jobs.
-```
+1. This PR does not change `schedule_config.yaml`;
+2. This PR does not change GitHub Actions output fields;
+3. This PR does not change existing model / accuracy / ops routing rules;
+4. This PR only moves framework-specific parsing, routing, and grouping logic into dedicated classes;
+5. Adding a new framework later only requires adding a new class and registering it;
+6. `main` no longer needs to know the internal rules of model / accuracy / ops.
 
 ---
 
-## 22. Migration Plan
+## 16. Future Extension Example
 
-### Phase 1: Directory Migration
-
-```text
-1. Move accuracy configs from tests/e2e/accuracy/ to tests/e2e/schedule/accuracy/.
-2. Move ops periodic tests to tests/e2e/schedule/ops/.
-3. Move model families under the model/ layer:
-   tests/e2e/schedule/<Family>/  ->  tests/e2e/schedule/model/<Family>/
-   so configs live at tests/e2e/schedule/model/<family>/<resource_dir>/.
-4. Rename external DP files so their filename contains external_dp.
-```
-
-Example:
+If we add a benchmark framework later, with paths such as:
 
 ```text
-Before:
-tests/e2e/schedule/model/GLM/two_node/external_dp/GLM5-external.yaml
-
-After:
-tests/e2e/schedule/model/GLM/two_node/GLM5-external_dp.yaml
+tests/e2e/schedule/benchmark/one_card/*.yaml
 ```
 
-### Phase 2: schedule_config.yaml Cleanup
+we only need to add:
 
-```text
-1. Use only plain path entries in files.
-2. Remove chip, npu_num, runner, framework, route, multi_node_type, extra_components.
-3. Keep only name, cron, files.
+```python
+class BenchmarkFramework(BaseFramework):
+    name = "benchmark"
+    output_names = ("benchmark_matrix",)
+
+    def match(self, path: str) -> bool:
+        return path.replace("\\", "/").rstrip("/").startswith(
+            "tests/e2e/schedule/benchmark/"
+        )
+
+    def expand(self, raw: Any) -> list[PeriodicCase]:
+        ...
+
+    def group(self, cases: list[PeriodicCase]) -> dict[str, list[dict]]:
+        ...
 ```
 
-### Phase 3: Parser Refactoring
+Then register it:
 
-```text
-1. Add PeriodicCase.
-2. Add framework detection.
-3. Add resource detection.
-4. Add chip detection.
-5. Add runner resolution.
-6. Add route detection.
-7. Add routers.
-8. Output four matrices:
-   - single_node_matrix
-   - multi_node_matrix
-   - accuracy_matrix
-   - ops_matrix
+```python
+def _build_frameworks(runner_map: dict[tuple[str, int], str]) -> list[BaseFramework]:
+    return [
+        ModelFramework(runner_map),
+        AccuracyFramework(runner_map),
+        OpsFramework(runner_map),
+        BenchmarkFramework(runner_map),
+    ]
 ```
 
-### Phase 4: Workflow Refactoring
-
-```text
-1. Add ops_matrix output to parse-config job.
-2. Add ops-tests job.
-3. Keep single-node job consuming only single_node_matrix.
-4. Keep multi-node job consuming only multi_node_matrix.
-5. Keep accuracy job consuming only accuracy_matrix.
-6. Separate branch_ref and branch_tag.
-7. Print selected_cases_summary.
-8. Skip empty matrices without failure.
-```
-
-### Phase 5: Tests
-
-Add parser unit tests.
-
-Suggested path:
-
-```text
-.github/workflows/scripts/tests/test_parse_schedule_config.py
-```
-
-Test cases:
-
-```text
-1. model one_node -> single_node
-2. model four_card A2 -> single_node + a2
-3. model two_node external_dp -> multi_node + external
-4. model two_node external -> multi_node + internal
-5. accuracy one_card -> accuracy
-6. ops one_card -> ops
-7. 1_card -> error
-8. tests/e2e/accuracy -> error
-9. file outside tests/e2e/schedule -> error
-10. test_filter by family / filename / stem / full path
-```
+No changes should be needed in `main`.
 
 ---
 
-## 23. Acceptance Criteria
+## 17. Expected Benefits
 
-The refactor is complete when:
+After this refactoring, the file structure will look like:
 
 ```text
-1. schedule_periodic_test.yaml is the unified periodic CI entry.
-2. schedule_config.yaml is the unified registry for periodic cases.
-3. All selected entries are first converted into PeriodicCase.
-4. accuracy, ops, model single-node, and model multi-node are grouped by routers.
-5. one_card / two_card / four_card / eight_card / one_node / two_node / four_node are correctly recognized.
-6. Numeric resource forms are rejected.
-7. a2 / a3 are inferred from path or filename, defaulting to a3.
-8. runner labels are resolved through runner_label.json.
-9. tests/e2e/schedule/accuracy/ routes to accuracy.
-10. tests/e2e/schedule/ops/ routes to ops.
-11. model card and one_node cases route to single-node.
-12. model two_node and four_node cases route to multi-node.
-13. multi-node files containing external_dp route to external.
-14. files containing only external do not route to external.
-15. Empty matrices skip cleanly.
-16. Workflow logs show selected cases, framework, route, chip, runner, and config path.
-17. New frameworks can be added by adding a directory rule, a router, and a workflow job.
+parse_schedule_config.py
+  - common helpers
+  - PeriodicCase
+  - BaseFramework
+  - ModelFramework
+  - AccuracyFramework
+  - OpsFramework
+  - schedule selection
+  - dedupe/filter
+  - output writer
+  - main
 ```
+
+Benefits:
+
+1. Still a single file, so review cost remains low;
+2. Framework logic is centralized and easier to understand;
+3. The main flow becomes simpler and no longer contains framework-specific if-else branches;
+4. Adding a new framework does not require modifying the whole pipeline;
+5. Workflow output compatibility is preserved, reducing risk;
+6. Existing path conventions are preserved, reducing migration cost;
+7. Future frameworks such as benchmark, serving, perf, external_dp_v2, and accuracy_v2 can be added naturally.
 
 ---
 
-## 24. Final Agent Instruction
+## 18. Acceptance Criteria
 
-```text
-Please continue modifying the nightly_refactor branch.
+After the refactoring, the implementation should satisfy:
 
-The goal is to implement a unified PeriodicCase + Framework Router architecture for periodic CI.
-
-Do not treat this as a simple single_node_matrix / multi_node_matrix parser.
-All entries from schedule_config.yaml must first become PeriodicCase objects or dictionaries.
-Then each framework must filter the unified case list through its own router.
-
-Required frameworks:
-1. accuracy
-2. ops
-3. model single-node
-4. model multi-node
-
-All periodic test cases must live under tests/e2e/schedule/.
-
-Directory rules (framework is always the 4th path segment):
-- tests/e2e/schedule/model/<model_family>/<resource_dir>/*.yaml
-- tests/e2e/schedule/accuracy/<resource_dir>/*.yaml
-- tests/e2e/schedule/ops/<resource_dir>/*.py or directory
-
-Supported resource_dir values:
-- one_card
-- two_card
-- four_card
-- eight_card
-- one_node
-- two_node
-- four_node
-
-Do not support numeric forms such as 1_card, 2_card, 1_node, or 2_node.
-
-accuracy must be under:
-tests/e2e/schedule/accuracy/
-
-Do not use:
-tests/e2e/accuracy/
-
-External DP rule:
-- Only applies to model multi-node cases.
-- Filename contains external_dp -> external.
-- Otherwise -> internal.
-- Do not match external.
-- Do not rely on an external_dp directory.
-
-Chip rule:
-- Path or filename contains a2/A2 -> a2.
-- Path or filename contains a3/A3 -> a3.
-- Default -> a3.
-
-Route rule:
-- model + one_card/two_card/four_card/eight_card -> single_node
-- model + one_node -> single_node
-- model + two_node/four_node -> multi_node
-- accuracy + *_card -> accuracy
-- ops + *_card or one_node -> ops
-
-Runner rule:
-- Resolve runner through runner_label.json.
-- Do not hardcode runner labels in workflow matrices.
-
-Workflow requirements:
-1. schedule_periodic_test.yaml should keep only schedule and workflow_dispatch triggers.
-2. parse-config outputs:
-   - single_node_matrix
-   - multi_node_matrix
-   - accuracy_matrix
-   - ops_matrix
-   - image_build_targets
-   - selected_cases_summary
-3. Add or keep jobs:
-   - build-image
-   - single-node-tests
-   - multi-node-tests
-   - accuracy-tests
-   - ops-tests
-4. Empty matrices should skip cleanly.
-5. Separate branch_ref and branch_tag:
-   - branch_ref is used for checkout.
-   - branch_tag is used for image tags and artifact names.
-
-Migration requirements:
-1. Move old tests/e2e/accuracy/ entries to tests/e2e/schedule/accuracy/.
-2. Move periodic ops entries to tests/e2e/schedule/ops/.
-3. Rename external DP files so the filename contains external_dp.
-4. Clean schedule_config.yaml so files are plain paths.
-5. Remove old parser logic that depends on an external_dp directory.
-6. Remove support for tests/e2e/accuracy/.
-7. Remove support for numeric resource directories.
-
-Add parser unit tests covering:
-1. model one_node -> single_node
-2. model four_card A2 -> single_node + a2
-3. model two_node external_dp -> multi_node + external
-4. model two_node external -> multi_node + internal
-5. accuracy one_card -> accuracy
-6. ops one_card -> ops
-7. 1_card -> error
-8. tests/e2e/accuracy -> error
-9. invalid path outside tests/e2e/schedule -> error
-10. test_filter matching by family, filename, stem, and full path
-
-The final design must allow future frameworks to be added by adding a new directory rule, a new router, and a new workflow job, without rewriting existing routing logic.
-```
-
----
-
-## 25. Implementation Status
-
-The plan above is fully implemented on `nightly_refactor`. Manifest of delivered changes:
-
-```text
-.github/workflows/scripts/parse_schedule_config.py
-  - PeriodicCase dataclass; _parse_to_case() builds one case per plain path entry
-  - _detect_resource / _detect_framework / _detect_route / _detect_chip /
-    _detect_multi_node_type (filename stem) / _resolve_runner
-  - BaseRouter + AccuracyRouter, OpsRouter, ModelSingleNodeRouter,
-    ModelMultiNodeRouter; ROUTERS registry; each case matches exactly one router
-  - Always emits single_node_matrix, multi_node_matrix, accuracy_matrix,
-    ops_matrix, image_build_targets, selected_cases_summary (empty -> [])
-  - Strict validation: rejects numeric dirs, tests/e2e/accuracy/, non-schedule
-    paths, accuracy node resources, missing/duplicate resource dirs
-  - UTF-8 explicit I/O; --runner-label CLI flag
-
-.github/workflows/scripts/schedule_config.yaml
-  - Plain path strings only; ops/accuracy paths under tests/e2e/schedule/;
-    external_dp encoded in filename
-
-.github/workflows/schedule_periodic_test.yaml
-  - parse-config emits ops_matrix + selected_cases_summary; prints summary
-  - branch_ref (checkout) and branch_tag (image tag) separated;
-    build-image receives branch_ref
-  - ops-tests job consumes ops_matrix via _e2e_periodic_ops.yaml
-  - empty matrices skip via '!= []' guards
-
-  - 310p is a first-class chip (checked before a2/a3); directory entries are
-    expanded before routing (ops + accuracy -> per-chip groups; model -> per-file)
-  - accuracy: config_paths (not model_list); _validate_accuracy_config rejects
-    old list-based group YAMLs; _load_model_list removed
-
-.github/workflows/_e2e_periodic_ops.yaml
-  - lightweight reusable ops workflow; valid run: steps; NPU mounts; checkout
-  - runs `pytest -s ${tests}` unquoted so per-chip group file lists split into args
-
-.github/workflows/_e2e_nightly_single_node_models.yaml
-  - accuracy by direct config_paths: config_paths input (model_list removed),
-    effective-config-paths step, per-config `pytest --config`, stem-based summary,
-    config_paths-based concurrency + stable job name
-  - §1D: test scripts read from tests/e2e/schedule/scripts/accuracy/; the unused
-    `tests` input + "Run pytest accuracy test" (.py) step removed
-
-.github/workflows/scripts/tests/test_parse_schedule_config.py
-  - 75 tests, all green; covers chip edge cases (incl. 310p), directory expansion
-    (ops + accuracy), direct accuracy config_paths, accuracy chip-grouping,
-    old-group-YAML validation failure, router-registry exclusivity
-
-Accuracy framework consolidation & cleanup (round 4 — see §1D)
-  - test_qwen3_30b_acc.py -> single_node YAML
-       model/Qwen/four_card/Qwen3-30B-A3B-W8A8-eagle3-mooncake.yaml (TP1 + TP4);
-       single_node gained a `mooncake` sidecar (MooncakeLauncher + mooncake.json)
-       and full-path CONFIG_YAML_PATH resolution
-  - accuracy harness moved tests/e2e/models/{test_*_eval_correctness.py,conftest.py,
-       report_template.md} -> tests/e2e/schedule/scripts/accuracy/
-  - .py-accuracy route removed (parser + AccuracyRouter `tests` key + workflow step);
-    accuracy is YAML-only
-  - deleted tests/e2e/models/ (18 active configs verified identical to accuracy/
-    copies; 4 unscheduled + accuracy.txt/json dropped), tests/e2e/weekly/, and the
-    empty model/Qwen/one_card/
-  - docs + model-adapter skill repointed to schedule/accuracy + schedule/scripts;
-    stale tests/e2e/nightly/... multi_node/single_node doc refs repointed
-
-Direct accuracy YAML integration (round 3)
-  - real configs copied tests/e2e/models/configs/<model>.yaml
-       -> tests/e2e/schedule/accuracy/<resource>/<chip>/<model>.yaml
-  - old accuracy-group-*.yaml deleted; schedule_config registers the chip dirs
-  - parser/router/workflow emit + consume config_paths; model_list path removed end-to-end
-
-Script layout migration (round 2 — no common/)
-  - tests/e2e/nightly/{multi_node,single_node,310p}/ execution scripts
-       -> tests/e2e/schedule/scripts/{multi_node,multi_node/internal_dp,
-          multi_node/external_dp,single_node}/  (scripts/ subdirs collapsed)
-  - ops conftest -> tests/e2e/schedule/ops/conftest.py (with the ops cases)
-  - test_recurrent_gated_delta_rule_v310.py -> tests/e2e/schedule/ops/one_card/
-  - old tests/e2e/nightly/ tree deleted; all imports/paths/templates repointed;
-    no scripts/common/ directories
-
-Migration completed (round 1)
-  - tests/e2e/accuracy/  -> tests/e2e/schedule/accuracy/ (old tree deleted)
-  - model families moved under the model/ layer:
-       tests/e2e/schedule/{DeepSeek,GLM,Hy,Kimi,MiniMax,Qwen}/
-         -> tests/e2e/schedule/model/<Family>/
-       framework is now always the 4th path segment (model/accuracy/ops)
-  - GLM two_node/external_dp/GLM5_1-W8A8-EP-external.yaml
-       -> model/GLM/two_node/GLM5_1-W8A8-EP-external_dp.yaml (old dir deleted)
-  - accuracy group YAMLs rewritten as plain top-level lists
-
-Resolved
-  - Former finding #11 is resolved: accuracy configs are now copied directly into
-    tests/e2e/schedule/accuracy/<resource>/<chip>/ and consumed via config_paths;
-    the workflow no longer reads tests/e2e/models/configs/${model}.yaml by name.
-    §1D: tests/e2e/models/ was deleted outright and the harness moved to
-    tests/e2e/schedule/scripts/accuracy/.
-  - Former open decision is resolved: tests/e2e/weekly/single_node/configs/ (5 YAMLs,
-    superseded by schedule/model configs and unreferenced by code) was deleted in §1D.
-
-Run the suite:
-  pytest .github/workflows/scripts/tests/test_parse_schedule_config.py -v
-```
+1. `parse_schedule_config.py` is still a single file;
+2. The following classes exist:
+   - `BaseFramework`
+   - `ModelFramework`
+   - `AccuracyFramework`
+   - `OpsFramework`
+3. `main` no longer contains model / accuracy / ops business-specific branching logic;
+4. `main` only handles:
+   - reading config;
+   - selecting schedules;
+   - finding the matching framework;
+   - calling `framework.expand`;
+   - deduplication;
+   - filtering;
+   - calling `framework.group`;
+   - merging outputs;
+   - writing `GITHUB_OUTPUT`;
+5. Output fields remain unchanged;
+6. Existing `schedule_config.yaml` does not need to be modified;
+7. Existing workflows do not need to be modified;
+8. Existing model / accuracy / ops behavior remains unchanged;
+9. Unit tests cover framework matching, expansion, grouping, and main output compatibility.

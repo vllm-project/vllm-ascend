@@ -33,7 +33,6 @@ jobs:
           commands: |
             e2e
             rerun
-            nightly
           permission: none
           issue-type: both
           dispatch-type: repository
@@ -48,10 +47,5 @@ jobs:
                 "command": "rerun",
                 "permission": "none",
                 "issue_type": "pull-request"
-              },
-              {
-                "command": "nightly",
-                "permission": "none",
-                "issue_type": "both"
               }
             ]
