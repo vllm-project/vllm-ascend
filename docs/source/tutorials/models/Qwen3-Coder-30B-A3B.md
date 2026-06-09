@@ -158,19 +158,24 @@ vllm serve your_model_path \
 
 > Replace `your_model_path` with the actual model path (e.g., ModelScope ID or local path).
 > Qwen3-Coder-30B-A3B natively supports 256K token context length. Adjust `--max-model-len` based on your use case and available memory.
+> The startup command above shows a basic configuration. Additional parameters used in performance-optimized scenarios (see Section 9.1) are also listed below for reference.
 
 | Parameter | Description |
 |-----------|-------------|
-| `--served-model-name qwen3-coder` | The model name exposed by the service, used as the `model` field in API calls. |
-| `--tensor-parallel-size 4` | Tensor parallelism degree. For Atlas A2 64G, at least 2 is required; 4 is recommended for optimal performance. |
-| `--enable-expert-parallel` | Enables Expert Parallelism, which is required for MoE models to distribute experts across NPUs. |
-| `--max-model-len 32768` | Maximum context length. Adjust based on your use case and available NPU memory. Larger values increase KV cache usage. |
-| `--quantization ascend` | Enables W8A8 quantization inference. Remove this parameter when using the BF16 model. |
-| `--distributed_executor_backend "mp"` | Uses the multi-process distributed backend for parallel execution. |
-| `--no-enable-prefix-caching` | Disables prefix caching. Recommended for general scenarios to reduce memory overhead. |
 | `--async-scheduling True` | Enables asynchronous scheduling to improve concurrent request processing. |
 | `--compilation-config` | FullGraph optimization that captures and replays the entire decode graph, reducing scheduling latency. |
+| `--distributed_executor_backend "mp"` | Uses the multi-process distributed backend for parallel execution. |
+| `--enable-expert-parallel` | Enables Expert Parallelism, which is required for MoE models to distribute experts across NPUs. |
 | `--gpu-memory-utilization 0.95` | Proportion of NPU memory allocated for the KV cache. Higher values increase cache capacity but risk OOM. |
+| `--max-model-len 32768` | Maximum context length. Adjust based on your use case and available NPU memory. Larger values increase KV cache usage. |
+| `--max-num-batched-tokens` | Maximum tokens processed in a single batch. Balances prefill chunking with memory usage. |
+| `--max-num-seqs` | Maximum number of concurrent requests. Adjust based on workload and available KV cache memory. |
+| `--no-enable-prefix-caching` | Disables prefix caching. Recommended for general scenarios to reduce memory overhead. |
+| `--quantization ascend` | Enables W8A8 quantization inference. Remove this parameter when using the BF16 model. |
+| `--served-model-name qwen3-coder` | The model name exposed by the service, used as the `model` field in API calls. |
+| `--speculative-config` | Speculative decoding configuration. Uses eagle3 draft model to reduce decode latency. |
+| `--tensor-parallel-size 4` | Tensor parallelism degree. For Atlas A2 64G, at least 2 is required; 4 is recommended for optimal performance. |
+| `--trust-remote-code` | Allows custom model code to be executed from remote repositories. Required for Modelscope models. |
 
 **Service Verification:**
 
