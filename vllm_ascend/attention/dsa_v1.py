@@ -369,16 +369,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)
+            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.spec_slot_mapping = [
-                torch.zeros(
-                    self.slot_mapping_shape, dtype=torch.int32, device=self.device
-                )
+                torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
                 for _ in range(spec_token_num)
             ]
             self.decode_threshold += spec_token_num
@@ -432,9 +430,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self._zero_i32 = torch.tensor([0], device=self.device, dtype=torch.int32)
         # Note(qcs): we use two dimension slot_mapping for kvcache with shape
         # [block_nums, block_size, head_num, head_dim]
-        self.slot_mapping = torch.zeros(
-            self.slot_mapping_shape, dtype=torch.int32, device=self.device
-        )
+        self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
 
     @classmethod
     def get_cudagraph_support(
