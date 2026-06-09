@@ -100,16 +100,16 @@ If you prefer not to use the Docker image, you can build from source:
 
 1. Clone the repository:
 
-```bash
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-```
+   ```bash
+   git clone https://github.com/vllm-project/vllm-ascend.git
+   cd vllm-ascend
+   ```
 
-1. Install in development mode:
+2. Install in development mode:
 
-```bash
-pip install -e .
-```
+   ```bash
+   pip install -e .
+   ```
 
 **Installation Verification:**
 
@@ -163,6 +163,21 @@ vllm serve your_model_path \
 - If the model is not a quantized model, remove the `--quantization ascend` parameter.
 
 :::
+
+**Key Parameter Description:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `--served-model-name qwen3-coder` | The model name exposed by the service, used as the `model` field in API calls. |
+| `--tensor-parallel-size 4` | Tensor parallelism degree. For Atlas A2 64G, at least 2 is required; 4 is recommended for optimal performance. |
+| `--enable-expert-parallel` | Enables Expert Parallelism, which is required for MoE models to distribute experts across NPUs. |
+| `--max-model-len 32768` | Maximum context length. Adjust based on your use case and available NPU memory. Larger values increase KV cache usage. |
+| `--quantization ascend` | Enables W8A8 quantization inference. Remove this parameter when using the BF16 model. |
+| `--distributed_executor_backend "mp"` | Uses the multi-process distributed backend for parallel execution. |
+| `--no-enable-prefix-caching` | Disables prefix caching. Recommended for general scenarios to reduce memory overhead. |
+| `--async-scheduling True` | Enables asynchronous scheduling to improve concurrent request processing. |
+| `--compilation-config` | FullGraph optimization that captures and replays the entire decode graph, reducing scheduling latency. |
+| `--gpu-memory-utilization 0.95` | Proportion of NPU memory allocated for the KV cache. Higher values increase cache capacity but risk OOM. |
 
 **Service Verification:**
 
@@ -218,15 +233,15 @@ For details, please refer to [Using AISBench](../../developer_guide/evaluation/u
 Using the `openai_humaneval` dataset as an example, run the accuracy evaluation in online mode:
 
 1. For `lm_eval` installation, please refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md).
-1. Run `lm_eval`:
+2. Run `lm_eval`:
 
-```shell
-lm_eval \
-  --model local-completions \
-  --model_args model=/root/.cache/Qwen/Qwen3-Coder-30B-A3B-Instruct,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
-  --tasks openai_humaneval \
-  --output_path ./
-```
+   ```shell
+   lm_eval \
+     --model local-completions \
+     --model_args model=/root/.cache/Qwen/Qwen3-Coder-30B-A3B-Instruct,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+     --tasks openai_humaneval \
+     --output_path ./
+   ```
 
 ## 8 Performance
 
@@ -279,7 +294,7 @@ vllm bench serve \
 | Low Latency | Single-Node | 4 | 4 | 1 | 32 | 100 | 37364 | Off | On | On | On |
 | Long Context | Single-Node | 4 | 4 | 1 | 32 | 14 | 135000 | Off | On | On | On |
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples below.
+> For detailed parameter descriptions, please refer to the deployment examples in Section 5.
 
 **Low Latency Configuration:**
 
