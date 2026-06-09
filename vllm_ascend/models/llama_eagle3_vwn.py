@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
-from transformers import LlamaConfig
-
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -13,7 +11,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.llama_eagle3 import (
     Eagle3LlamaForCausalLM,
+)
+from vllm.model_executor.models.llama_eagle3 import (
     LlamaDecoderLayer as Eagle3LlamaDecoderLayer,
+)
+from vllm.model_executor.models.llama_eagle3 import (
     LlamaModel as Eagle3LlamaModel,
 )
 from vllm.model_executor.models.utils import get_draft_quant_config, maybe_prefix
@@ -21,9 +23,14 @@ from vllm.model_executor.models.utils import get_draft_quant_config, maybe_prefi
 
 def _linear(inp, out, vc, qc, pfx):
     return ReplicatedLinear(
-        input_size=inp, output_size=out, bias=False,
+        input_size=inp,
+        output_size=out,
+        bias=False,
         params_dtype=vc.model_config.dtype,
-        quant_config=qc, prefix=pfx, return_bias=False)
+        quant_config=qc,
+        prefix=pfx,
+        return_bias=False,
+    )
 
 
 class PreVwnLayerV1(nn.Module):
@@ -36,17 +43,14 @@ class PreVwnLayerV1(nn.Module):
         self.input_layernorm = RMSNorm(hs, eps=cfg.rms_norm_eps)
         self.hidden_norm = RMSNorm(hs, eps=cfg.rms_norm_eps)
         self.fc = _linear(2 * hs, hs, vllm_config, quant_config, maybe_prefix(prefix, "fc"))
-        self.upward = _linear(hs // m, wd // m, vllm_config, quant_config,
-                              maybe_prefix(prefix, "upward"))
+        self.upward = _linear(hs // m, wd // m, vllm_config, quant_config, maybe_prefix(prefix, "upward"))
 
     def forward(self, embeds, hidden_states):
-        x = self.fc(torch.cat([self.input_layernorm(embeds),
-                               self.hidden_norm(hidden_states)], dim=-1))
+        x = self.fc(torch.cat([self.input_layernorm(embeds), self.hidden_norm(hidden_states)], dim=-1))
         return self.upward(x.view(-1, self.hidden_size // self.m)).view(-1, self.wider_dim)
 
 
 class VwnLlamaDecoderLayer(Eagle3LlamaDecoderLayer):
-
     def __init__(self, vllm_config, prefix="", config=None, layer_idx=0):
         super().__init__(vllm_config, prefix=prefix, config=config, layer_idx=layer_idx)
         cfg = config or vllm_config.model_config.hf_config
@@ -57,24 +61,25 @@ class VwnLlamaDecoderLayer(Eagle3LlamaDecoderLayer):
 
         if layer_idx == 0:
             self.self_attn.qkv_proj = QKVParallelLinear(
-                hs, self.self_attn.head_dim,
-                self.self_attn.total_num_heads, self.self_attn.total_num_kv_heads,
-                bias=getattr(cfg, "attention_bias", False), quant_config=qc,
-                prefix=maybe_prefix(prefix, "self_attn.qkv_proj"))
+                hs,
+                self.self_attn.head_dim,
+                self.self_attn.total_num_heads,
+                self.self_attn.total_num_kv_heads,
+                bias=getattr(cfg, "attention_bias", False),
+                quant_config=qc,
+                prefix=maybe_prefix(prefix, "self_attn.qkv_proj"),
+            )
 
         mp = maybe_prefix
-        self.pre_vwn_layer = PreVwnLayerV1(vllm_config, mp(prefix, "layers.pre_vwn_layer"),
-                                           cfg, qc)
-        self.downward_and_forgot = _linear(wd // m, (hs + wd) // m, vllm_config, qc,
-                                           mp(prefix, "downward_and_forgot"))
+        self.pre_vwn_layer = PreVwnLayerV1(vllm_config, mp(prefix, "layers.pre_vwn_layer"), cfg, qc)
+        self.downward_and_forgot = _linear(wd // m, (hs + wd) // m, vllm_config, qc, mp(prefix, "downward_and_forgot"))
         self.pre_attention_layernorm = RMSNorm(hs, eps=cfg.rms_norm_eps)
-        self.upward_after_attn = _linear(hs // m, wd // m, vllm_config, qc,
-                                         mp(prefix, "upward_after_attn"))
+        self.upward_after_attn = _linear(hs // m, wd // m, vllm_config, qc, mp(prefix, "upward_after_attn"))
         self.downward_and_forgot_after_attn = _linear(
-            wd // m, (hs + wd) // m, vllm_config, qc, mp(prefix, "downward_and_forgot"))
+            wd // m, (hs + wd) // m, vllm_config, qc, mp(prefix, "downward_and_forgot")
+        )
         self.post_attention_layernorm = RMSNorm(hs, eps=cfg.rms_norm_eps)
-        self.upward_after_mlp = _linear(hs // m, wd // m, vllm_config, qc,
-                                        mp(prefix, "upward_after_mlp"))
+        self.upward_after_mlp = _linear(hs // m, wd // m, vllm_config, qc, mp(prefix, "upward_after_mlp"))
         self.downward = _linear(wd // m, hs // m, vllm_config, qc, mp(prefix, "downward"))
 
     def forward(self, positions, embeds, hidden_states, residual):
@@ -84,27 +89,22 @@ class VwnLlamaDecoderLayer(Eagle3LlamaDecoderLayer):
             # Attention
             out = self.downward_and_forgot(wider.view(-1, wd // m)).view(-1, hs + wd)
             hidden, res = out.split([hs, wd], dim=-1)
-            hidden = self.self_attn(
-                positions=positions,
-                hidden_states=self.pre_attention_layernorm(hidden))
+            hidden = self.self_attn(positions=positions, hidden_states=self.pre_attention_layernorm(hidden))
             wider = self.upward_after_attn(hidden.view(-1, hs // m)).view(-1, wd) + res
             # MLP
-            out = self.downward_and_forgot_after_attn(
-                wider.view(-1, wd // m)).view(-1, hs + wd)
+            out = self.downward_and_forgot_after_attn(wider.view(-1, wd // m)).view(-1, hs + wd)
             hidden, res = out.split([hs, wd], dim=-1)
-            wider = self.upward_after_mlp(
-                self.mlp(self.post_attention_layernorm(hidden)).view(-1, hs // m)
-                ).view(-1, wd) + res
+            wider = (
+                self.upward_after_mlp(self.mlp(self.post_attention_layernorm(hidden)).view(-1, hs // m)).view(-1, wd)
+                + res
+            )
             # Downward
             hidden_states = self.downward(wider.view(-1, wd // m)).view(-1, hs)
         return hidden_states, residual
 
 
-@support_torch_compile(
-    dynamic_arg_dims={"input_ids": 0, "positions": -1,
-                      "hidden_states": 0, "input_embeds": 0})
+@support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": -1, "hidden_states": 0, "input_embeds": 0})
 class VwnLlamaModel(Eagle3LlamaModel):
-
     def __init__(self, *, vllm_config, start_layer_id=0, prefix=""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -124,10 +124,12 @@ class VwnLlamaModel(Eagle3LlamaModel):
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
-        self.layers = nn.ModuleList([
-            VwnLlamaDecoderLayer(vc, maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
-                                 self.config, layer_idx=i)
-            for i in range(self.config.num_hidden_layers)])
+        self.layers = nn.ModuleList(
+            [
+                VwnLlamaDecoderLayer(vc, maybe_prefix(prefix, f"layers.{i + start_layer_id}"), self.config, layer_idx=i)
+                for i in range(self.config.num_hidden_layers)
+            ]
+        )
         if self.use_aux_hidden_state:
             if hasattr(self.config, "target_hidden_size"):
                 fc_input_size = self.config.target_hidden_size * 3
@@ -160,13 +162,12 @@ class VwnLlamaModel(Eagle3LlamaModel):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
-                positions=positions, embeds=input_embeds,
-                hidden_states=hidden_states, residual=residual)
+                positions=positions, embeds=input_embeds, hidden_states=hidden_states, residual=residual
+            )
         return self.norm(hidden_states, residual), hidden_states
 
 
 class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
-
     def __init__(self, *, vllm_config, prefix=""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -177,8 +178,7 @@ class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
         n = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.config.target_layer_count = n
 
-        self.model = VwnLlamaModel(vllm_config=vllm_config, prefix="model",
-                                   start_layer_id=n)
+        self.model = VwnLlamaModel(vllm_config=vllm_config, prefix="model", start_layer_id=n)
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.lm_head = ParallelLMHead(
@@ -188,7 +188,8 @@ class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(
-            self.config.draft_vocab_size, scale=logit_scale,
+            self.config.draft_vocab_size,
+            scale=logit_scale,
         )
         self.draft_id_to_target_id = nn.Parameter(
             torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
@@ -202,8 +203,7 @@ class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
                 "mask_hidden",
                 torch.zeros(
                     1,
-                    (3 if self.model.use_aux_hidden_state else 1)
-                    * self.config.hidden_size,
+                    (3 if self.model.use_aux_hidden_state else 1) * self.config.hidden_size,
                 ),
                 persistent=False,
             )
