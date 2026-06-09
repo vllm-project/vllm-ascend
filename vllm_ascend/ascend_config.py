@@ -268,6 +268,10 @@ class AscendConfig:
         self.sparse_json = self.hamming_sparse["sparse_json_location"]
         self._check_enable_hamming_sparse()
 
+        # Enable Block Verify and Entropy Verify in Rejection Sampler
+        rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
+        self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
+
     @staticmethod
     def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
         if config_key in additional_config:
@@ -623,6 +627,74 @@ class ProfilingChunkConfig:
             raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
         if self.min_chunk <= 0:
             raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
+
+
+class RejectionSamplerConfig:
+    """Configuration for Block Verify and Entropy Verify in Rejection Sampler.
+
+    Block Verify improves acceptance rate by evaluating all draft tokens
+    as a block using cumulative probability products. Entropy Verify
+    adjusts the acceptance threshold based on the entropy of the target
+    distribution, allowing higher acceptance for high-entropy (uncertain)
+    tokens and stricter rejection for low-entropy (confident) tokens.
+
+    Usage (online)::
+
+        vllm serve <model> --additional-config \
+            '{"rejection_sampler_config": {"enable_block_verify": true, \
+            "enable_entropy_verify": true, "posterior_threshold": 0.95, \
+            "posterior_alpha": 0.4}}'
+
+    Usage (offline)::
+
+        llm = LLM(
+            model,
+            additional_config={
+                "rejection_sampler_config": {
+                    "enable_block_verify": true,
+                    "enable_entropy_verify": true,
+                    "posterior_threshold": 0.95,
+                    "posterior_alpha": 0.4,
+                }
+            },
+        )
+    """
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+        self.enable_block_verify: bool = config.get("enable_block_verify", False)
+        self.enable_entropy_verify: bool = config.get("enable_entropy_verify", False)
+        self.posterior_threshold: float = config.get("posterior_threshold", 0.95)
+        self.posterior_alpha: float = config.get("posterior_alpha", 0.4)
+        self._validate()
+
+    def _validate(self):
+        if not isinstance(self.enable_block_verify, bool):
+            raise ValueError(
+                f"rejection_sampler_config.enable_block_verify must be a bool, "
+                f"got {type(self.enable_block_verify).__name__}"
+            )
+        if not isinstance(self.enable_entropy_verify, bool):
+            raise ValueError(
+                f"rejection_sampler_config.enable_entropy_verify must be a bool, "
+                f"got {type(self.enable_entropy_verify).__name__}"
+            )
+        if not isinstance(self.posterior_threshold, (int, float)):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_threshold must be a float, "
+                f"got {type(self.posterior_threshold).__name__}"
+            )
+        if not isinstance(self.posterior_alpha, (int, float)):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_alpha must be a float, got {type(self.posterior_alpha).__name__}"
+            )
+        if not (0 < self.posterior_threshold <= 1):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_threshold must be in (0, 1], got {self.posterior_threshold}"
+            )
+        if self.posterior_alpha < 0:
+            raise ValueError(f"rejection_sampler_config.posterior_alpha must be >= 0, got {self.posterior_alpha}")
 
 
 class EplbConfig:
