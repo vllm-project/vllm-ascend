@@ -59,12 +59,26 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
     def __init__(
         self,
-        target_scheme_map: dict[str, Any],
-        ignore: list[str],
-        quant_format: str,
+        target_scheme_map: dict[str, Any] | None = None,
+        ignore: list[str] | None = None,
+        quant_format: str | None = None,
         config: dict[str, Any] | None = None,
     ):
         super().__init__()
+
+        if target_scheme_map is None or ignore is None or quant_format is None:
+            logger.error(
+                "The model you are trying to load does not contain a valid "
+                "compressed-tensors quantization configuration. "
+                "Please ensure the model was quantized with compressed-tensors, "
+                "or remove '--quantization' if loading an unquantized float model."
+            )
+            raise ValueError(
+                "The model does not contain a valid compressed-tensors quantization configuration. "
+                "Please ensure the model was quantized with compressed-tensors, "
+                "or remove '--quantization' if loading an unquantized float model."
+            )
+
         self.ignore = ignore
         self.quant_format = quant_format
         # Map from [target -> scheme]
