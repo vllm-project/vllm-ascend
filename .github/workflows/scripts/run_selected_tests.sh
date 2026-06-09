@@ -24,6 +24,77 @@ pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
 
 mkdir -p "${pytest_log_dir}"
 
+get_docs_conf_value() {
+  local key="$1"
+  python3 - "${key}" <<'PY'
+import ast
+import sys
+
+key = sys.argv[1]
+with open("docs/source/conf.py", encoding="utf-8") as f:
+    tree = ast.parse(f.read(), filename="docs/source/conf.py")
+
+for node in tree.body:
+    if not isinstance(node, ast.Assign):
+        continue
+    if not any(isinstance(target, ast.Name) and target.id == "myst_substitutions"
+               for target in node.targets):
+        continue
+    values = ast.literal_eval(node.value)
+    print(values[key])
+    break
+else:
+    raise KeyError(key)
+PY
+}
+
+sync_vllm_ref_for_e2e_command() {
+  # The caller workflow can come from the default branch and pass a stale vLLM
+  # matrix. After the PR ref is checked out, align the installed vLLM with this
+  # branch's docs/source/conf.py before running selected tests.
+  if [ ! -d "vllm-empty/.git" ]; then
+    echo "Skip vLLM ref sync: vllm-empty checkout not found."
+    return
+  fi
+
+  local main_commit
+  local main_tag
+  local current_commit
+  local current_tag
+  local target_ref
+
+  main_commit="$(get_docs_conf_value main_vllm_commit)"
+  main_tag="$(get_docs_conf_value main_vllm_tag)"
+  current_commit="$(git -C vllm-empty rev-parse HEAD)"
+  current_tag="$(git -C vllm-empty describe --tags --exact-match HEAD 2>/dev/null || true)"
+
+  if [ -n "${current_tag}" ]; then
+    target_ref="${main_tag}"
+  else
+    target_ref="${main_commit}"
+  fi
+
+  if [ "${current_commit}" = "${main_commit}" ] || [ "${current_tag}" = "${main_tag}" ]; then
+    echo "vLLM is already aligned for /e2e: ${current_tag:-${current_commit}}"
+    return
+  fi
+
+  echo "Align /e2e vLLM ref from ${current_tag:-${current_commit}} to ${target_ref}"
+  if [[ "${target_ref}" =~ ^v[0-9] ]]; then
+    git -C vllm-empty fetch --force --depth 1 origin "refs/tags/${target_ref}:refs/tags/${target_ref}"
+  else
+    git -C vllm-empty fetch --force --depth 1 origin "${target_ref}" \
+      || git -C vllm-empty fetch --force --depth 512 origin main
+  fi
+  git -C vllm-empty checkout --force "${target_ref}"
+
+  (
+    cd vllm-empty
+    VLLM_TARGET_DEVICE=empty uv pip install --force-reinstall .
+  )
+  pip uninstall -y triton || true
+}
+
 print_test_info() {
   echo -e "\033[1;34m=== TEST INFO ===\033[0m"
   echo -e "  \033[33mDevice:\033[0m ${npu_type}"
@@ -104,6 +175,7 @@ run_pytest_batch() {
   fi
 }
 
+sync_vllm_ref_for_e2e_command
 print_test_info
 
 if [ "${npu_type}" = "cpu" ]; then
