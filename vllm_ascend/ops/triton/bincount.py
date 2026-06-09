@@ -45,20 +45,17 @@ def token_bin_counts_and_mask_kernel(
 ):
     """Count token occurrences per batch row.
 
-    1D grid: each program iterates over its share of linearized
-    (batch_idx, seq_block_id) blocks to stay within the Triton-Ascend
-    grid-size limit (65535).
+    1D grid with grid-stride loop: each program processes blocks at
+    stride=num_programs to stay within the Triton-Ascend coreDim
+    limit (65535) while distributing work evenly across cores.
     """
     pid = tl.program_id(axis=0)
     num_progs = tl.num_programs(axis=0)
 
     vocab_start_idx = tp_rank * vocab_size
     n_seq_blocks = tl.cdiv(seq_len, SEQ_BLOCK)
-    blocks_per_prog = (total_blocks + num_progs - 1) // num_progs
-    start_block = pid * blocks_per_prog
-    end_block = tl.minimum(start_block + blocks_per_prog, total_blocks)
 
-    for linear_block in tl.range(start_block, end_block):
+    for linear_block in tl.range(pid, total_blocks, num_progs):
         batch_idx = linear_block // n_seq_blocks
         seq_block_id = linear_block - batch_idx * n_seq_blocks
         seq_start = seq_block_id * SEQ_BLOCK
@@ -75,12 +72,10 @@ def token_bin_counts_and_mask_kernel(
         )
 
         local_token = token - vocab_start_idx
-        token_in_range = (pos_mask & (token >= vocab_start_idx)
-                          & (local_token < vocab_size))
+        token_in_range = pos_mask & (token >= vocab_start_idx) & (local_token < vocab_size)
 
         safe_local_token = tl.where(token_in_range, local_token, 0)
-        count_ptr = (batch_counts_start
-                     + safe_local_token * counts_vocab_stride)
+        count_ptr = batch_counts_start + safe_local_token * counts_vocab_stride
         tl.atomic_add(count_ptr, 1, mask=token_in_range)
 
 
