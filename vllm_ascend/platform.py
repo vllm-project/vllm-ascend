@@ -348,6 +348,7 @@ class NPUPlatform(Platform):
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
             raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
+    
     @classmethod
     def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
@@ -359,6 +360,7 @@ class NPUPlatform(Platform):
                 f"prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}. "
                 "Please set either --data-parallel-size 1 or --prefill-context-parallel-size 1."
             )
+
     @classmethod
     def _validate_draft_decode_context_parallel_config(
         cls,
