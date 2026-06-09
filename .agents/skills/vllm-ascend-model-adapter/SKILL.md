@@ -12,10 +12,18 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 ## Read order
 
 1. Start with `references/workflow-checklist.md`.
-2. Read `references/multimodal-ep-aclgraph-lessons.md` (feature-first checklist).
-3. If startup/inference fails, read `references/troubleshooting.md`.
-4. If checkpoint is fp8-on-NPU, read `references/fp8-on-npu-lessons.md`.
-5. Before handoff, read `references/deliverables.md`.
+2. Read `references/model-layer-baseline.md` after model classification and build a layer-by-layer compatibility matrix first.
+3. Read `references/model-adapter-and-weight-loading-baseline.md` after the layer matrix.
+4. If the model is multimodal or processor behavior is suspicious, read `references/processor-and-multimodal-baseline.md`.
+5. If the model is a routed-expert MoE LLM, read `references/moe-fused-analysis.md` to establish the current `vllm-ascend` MoE capability baseline before deciding what must be adapted in router, experts, shared experts, or EP paths.
+6. If the model uses non-standard attention or attention-related adaptation is likely, read `references/attention-v1-analysis.md` to establish the current `vllm-ascend` attention capability baseline before deciding what must be adapted.
+7. Read `references/operator-compatibility-baseline.md` before operator gating or any Ascend-op retry.
+8. Read `references/framework-integration-baseline.md` when the likely failure is beyond model files and may involve scheduler/worker/sampler/backend integration.
+9. If checkpoint or runtime path is quantized, read `references/quantization-baseline.md`.
+10. Read `references/multimodal-ep-aclgraph-lessons.md` (feature-first checklist).
+11. If startup/inference fails, read `references/troubleshooting.md`.
+12. If checkpoint is fp8-on-NPU, read `references/fp8-on-npu-lessons.md`.
+13. Before handoff, read `references/deliverables.md`.
 
 ## Scripts
 
@@ -49,6 +57,7 @@ chmod +x .agents/skills/vllm-ascend-model-adapter/scripts/*.sh
 - **Never introduce modeling files or patches into `vllm-ascend`**. All model adaptation code belongs in `/vllm-workspace/vllm`. If a model cannot function on Ascend without adding modeling code to `vllm-ascend`, stop — raise a GitHub issue to analyze the root cause instead.
 - Final deliverable commit must be one single signed commit in the current working repo (`git commit -sm ...`).
 - Keep final docs in Chinese and compact.
+- **Accuracy baseline rule**: when the skill needs to declare, compare, or document model accuracy, use the evaluation score published on ModelScope for the corresponding model with the same parameter scale as the primary reference baseline. Prefer `gsm8k` first; if ModelScope does not provide `gsm8k`, use another available public evaluation dataset score and state explicitly which dataset was used as the fallback baseline.
 - **Dummy-first is encouraged for speed, but dummy is NOT fully equivalent to real weights.**
 - **Never sign off adaptation using dummy-only evidence; real-weight gate is mandatory.**
 
@@ -175,9 +184,297 @@ echo "OK: model path verified at $MODEL_PATH"
 - Decide whether support already exists in `vllm/model_executor/models/registry.py`.
 - If the model is MoE, explicitly plan an EP-first validation path and only fall back to TP-only evidence when EP fails with a documented root cause.
 
+### 2.1) Build the model layer compatibility matrix first
+
+This step is mandatory for every model adaptation.
+
+Read:
+
+- `references/model-layer-baseline.md`
+
+Treat “layer” here as **model components** such as embedding, rope/position, attention, MLP, MoE, norm, lm_head, and multimodal projector/encoder if present.
+
+Current requirement: only two layer templates are standardized now:
+
+- `dense llm`
+- `moe llm`
+
+Choose the template based on `CLASSIFICATION_SUMMARY`.
+
+Required output before any specialized gap analysis:
+
+```markdown
+## Layer-by-Layer Compatibility Matrix
+
+| Layer | Current capability | Model requirement | Gap | Adaptation plan |
+| --- | --- | --- | --- | --- |
+| ...use the dense-llm or moe-llm template from `references/model-layer-baseline.md`... |
+```
+
+Rules:
+
+- Use the `dense llm` template for non-MoE decoder-only dense LLMs.
+- Use the `moe llm` template for routed-expert decoder-only LLMs.
+- Fill every row in the selected template.
+- `Current capability` must point to an existing repo path, known-good implementation, or existing backend assumption.
+- `Model requirement` must come from `config.json`, modeling code, checkpoint structure, or runtime evidence.
+- `Gap` must be concrete.
+- `Adaptation plan` must name the intended fix location or say the row is already covered and only needs validation.
+
+Do not skip from model classification directly to attention or operators. Use this matrix to decide which layer-specific analyses are actually needed.
+
+### 2.2) Analyze model adapter and weight loading first
+
+Run this step for every model adaptation, even if the eventual failure looks backend-related.
+
+Read:
+
+- `references/model-adapter-and-weight-loading-baseline.md`
+
+Required output before changing code:
+
+```markdown
+## Model Adapter Gap Analysis
+
+### 1. Current Capability
+- Existing registered architecture:
+- Reusable adapter path:
+- Existing weight loading assumptions:
+- Existing shard/remap support:
+
+### 2. Model Requirement
+- `architectures` / `model_type`:
+- Adapter structure needed:
+- Checkpoint key patterns:
+- TP / KV / norm / rope / scale loading needs:
+
+### 3. Gap
+- Registration gap:
+- Adapter gap:
+- Weight mapping gap:
+- Loader / shard gap:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal files to touch:
+- Validation focus:
+- Stop / escalate condition:
+```
+
+Do not treat an operator/backend failure as primary until this section makes it clear that model registration and weight loading are already aligned.
+
+### 2.3) Analyze processor and multimodal path
+
+Run this step when the model is VLM / Whisper-like, has processor files, or text-only and multimodal behavior diverge.
+
+Read:
+
+- `references/processor-and-multimodal-baseline.md`
+
+Required output when applicable:
+
+```markdown
+## Processor And Multimodal Gap Analysis
+
+### 1. Current Capability
+- Existing processor path:
+- Existing multimodal support assumption:
+- Known-good request types:
+- Existing transformers compatibility assumptions:
+
+### 2. Model Requirement
+- Processor classes from config:
+- Remote/local processing behavior:
+- Modalities required:
+- MM encoder / embedding path requirements:
+
+### 3. Gap
+- Processor API mismatch:
+- Multimodal dispatch mismatch:
+- Input formatting mismatch:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal files to touch:
+- Validation focus:
+- Stop / escalate condition:
+```
+
+### 2.4) Analyze MoE adaptation path first
+
+Run this step for every routed-expert decoder-only LLM, and also when the failure symptoms point to router / expert / EP behavior even if model classification is still ambiguous.
+
+Read:
+
+- `references/moe-fused-analysis.md`
+
+Treat this reference as the **current MoE capability baseline** of `vllm-ascend`, not just background reading. The purpose of this step is to compare:
+
+- what the current Ascend MoE backend already supports,
+- what the new model's MoE layer actually requires,
+- and where the mismatch falls: router, expert structure, shared expert, weight layout, runtime contract, or communication path.
+
+Build that comparison from two sources:
+
+1. **Existing capability baseline** from `references/moe-fused-analysis.md`
+2. **New model MoE features** inferred from:
+   - `config.json`,
+   - modeling code / remote code,
+   - checkpoint key patterns,
+   - observed runtime failure stage if the model already boots partially
+
+Use the comparison to answer these questions before changing code:
+
+1. Does the model's router map to current `select_experts(...)` capability: top-k, grouped top-k, `softmax`/`sigmoid`/`sqrtsoftplus`, correction bias, hash routing, no custom routing function?
+2. Does the model's expert MLP still map to the current `w13/gate_up -> swiglu -> w2/down` contract?
+3. Does the model use shared experts or residual/shared-MLP behavior that current `AscendFusedMoE` can already express?
+4. Should bring-up first target `ALLGATHER`, or does the model materially depend on `ALLTOALL` / `MC2` / `FUSED_MC2` behavior?
+5. Are the checkpoint layout and quant metadata already mappable to current `MoEWeights` / `MoERoutingParams` / `MoEQuantParams` contracts?
+
+Produce an explicit **MoE gap analysis** in your working notes before proceeding to Step 3.
+
+This is a required output, not an optional note. For every `moe llm` adaptation, write the following fixed section before changing code:
+
+```markdown
+## MoE Gap Analysis
+
+### 1. Current Capability
+- Router capability baseline:
+- Expert MLP baseline:
+- Shared expert baseline:
+- Communication baseline:
+- Quantization baseline:
+
+### 2. Model Requirement
+- Router/gate behavior:
+- Expert structure:
+- Shared expert / residual MLP behavior:
+- EP/TP/dispatch expectations:
+- Quant / weight-layout requirements:
+
+### 3. Gap
+- Router gap:
+- Expert-structure gap:
+- Weight-layout gap:
+- Communication/runtime-contract gap:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal files to touch:
+- First validation path:
+- Stop / escalate condition:
+```
+
+The `Adaptation Plan` must clearly say whether to:
+
+- wire the model into an already-supported Ascend MoE path,
+- change upstream vLLM model/framework code,
+- verify an existing `vllm-ascend` MoE path without backend changes,
+- or stop and escalate due to a backend capability gap.
+
+Do not start changing code until this comparison is concrete enough to explain why the current MoE backend should already work, or exactly what must be adapted.
+
+### 2.5) Analyze attention adaptation path first
+
+Run this step whenever the classification or model code suggests attention is relevant to the failure or adaptation scope, especially for:
+
+- standard decoder attention with custom masking or KV behavior,
+- sliding-window / sink / chunked-prefill / speculative decoding interactions,
+- shared-KV or paged-KV assumptions,
+- C8 / KV quantization,
+- attention metadata construction issues in `model_runner_v1`,
+- symptoms such as wrong output only during prefill/decode split, graph replay mismatch, or shape/layout errors in FIA operators.
+
+Read:
+
+- `references/attention-v1-analysis.md`
+
+Treat this reference as the **current attention capability baseline** of `vllm-ascend`, not just background reading. The goal of this step is to compare:
+
+- what the current backend already supports,
+- what the new model's attention path requires,
+- and what the mismatch implies for adaptation work.
+
+Build that comparison from two sources:
+
+1. **Existing capability baseline** from `references/attention-v1-analysis.md`
+2. **New model attention features** inferred from:
+   - `config.json`,
+   - modeling code / remote code,
+   - checkpoint key patterns,
+   - observed runtime failure stage if the model already boots partially
+
+Use the comparison to answer these questions before changing code:
+
+1. Which `AscendAttentionState` should this model primarily exercise: `PrefillNoCache`, `PrefillCacheHit`, `DecodeOnly`, `ChunkedPrefill`, or `SpecDecoding`?
+2. Is the expected path paged attention, FIA v1, FIA v2, `npu_fusion_attention` fallback, or a C8-specific path?
+3. Which attention properties does the new model require: full attention vs sliding window, sink tokens, speculative decode interaction, shared KV, paged KV assumptions, KV quantization, special mask semantics, unusual head dim, MLA/Mamba/hybrid split?
+4. Which metadata fields must be correct for this model: `block_table`, `slot_mapping`, `seq_lens*`, `actual_seq_lengths_q`, `query_start_loc`, `attn_mask`?
+5. Does the model's attention subtype imply an existing backend should already cover it, or is the failure likely caused by a mismatch between upstream vLLM changes and vllm-ascend's current attention assumptions?
+
+Produce an explicit **attention gap analysis** in your working notes before proceeding to Step 3.
+
+This is a required output, not an optional note. For every model adaptation that touches or may touch attention, write the following fixed section before changing code:
+
+```markdown
+## Attention Gap Analysis
+
+### 1. Current Capability
+- Backend coverage:
+- Supported state(s):
+- Expected operator path:
+- Supported metadata contract:
+- Relevant known-good patterns:
+
+### 2. Model Requirement
+- Attention type from `config.json`:
+- Attention behavior from modeling code:
+- KV/cache behavior:
+- Quantization / sink / sliding-window / spec-decode traits:
+- Expected runtime stage(s):
+
+### 3. Gap
+- Capability mismatch:
+- Metadata mismatch:
+- Operator/layout mismatch:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal code changes expected:
+- Validation focus:
+- Stop / escalate condition:
+```
+
+Fill it with concrete repo-specific content. Do not leave it generic.
+
+Minimum quality bar for this section:
+
+- `Current capability`: what `vllm-ascend` already supports for this attention shape/path
+- `Model requirement`: what the new model's attention implementation needs
+- `Gap`: the exact mismatch
+- `Likely adaptation`: where the fix belongs
+  - upstream model adapter / modeling code in `vllm`,
+  - upstream framework integration in `vllm`,
+  - existing `vllm-ascend` backend path already sufficient and only needs correct wiring,
+  - or backend limitation that should stop work and be escalated
+
+The `Adaptation Plan` must explicitly say whether the next step is:
+
+- no backend change, only model-side wiring;
+- upstream vLLM framework/model change;
+- verification of an already-supported `vllm-ascend` path;
+- or escalation because the current backend capability is insufficient.
+
+If the issue is clearly attention-path related, record the suspected execution path, affected metadata fields, and the adaptation plan before moving to Step 3. Do not start implementation until this section is complete.
+
 ### 3) Analyze new operators (Ascend compatibility gate)
 
 - Identify any new operators introduced in the model or its modeling code.
+- Before changing any operator call path or retrying an Ascend-specific op failure, read:
+  - `references/operator-compatibility-baseline.md`
 - Classify each new operator by type and draw the appropriate conclusion:
     - **Torch** (native PyTorch op): Functional on Ascend ✅; performance is uncertain — note in report.
     - **Triton** kernel: Functional correctness uncertain ⚠️; requires explicit verification on Ascend; accuracy also uncertain.
@@ -193,13 +490,110 @@ echo "OK: model path verified at $MODEL_PATH"
     - recommended path forward (e.g., replace with a Torch-native fallback or implement a custom Ascend op).
 - If every CUDA operator has a fallback and every Triton kernel passes verification, document fallback paths and continue.
 
+Required output for this step:
+
+```markdown
+## Operator Compatibility Gap Analysis
+
+### 1. Current Capability
+- Existing supported operator class:
+- Existing fallback expectations:
+- Existing Ascend doc-backed constraints:
+
+### 2. Model Requirement
+- New operators introduced:
+- Operator type per item:
+- Required dtype/layout/shape:
+- Expected fallback path:
+
+### 3. Gap
+- Unsupported operator:
+- Missing fallback:
+- Constraint mismatch:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal fallback or call-site change:
+- Validation focus:
+- Stop / escalate condition:
+```
+
 ### 4) Analyze framework-side code
 
+- Before deciding to patch `vllm-ascend` or a common vLLM runtime module, read:
+  - `references/framework-integration-baseline.md`
 - Identify vLLM framework modules changed to support the new model (e.g., scheduler, attention backend, sampler, weight loader, worker) — anything beyond the model file and operators.
 - For each changed module, check whether `vllm-ascend` already overrides or depends on it:
     - If the module is a **common vLLM module already covered by vllm-ascend**, check whether the existing vllm-ascend patch still applies correctly after the upstream change. If the patch needs updating, update it; otherwise no further action is needed.
     - If the module is **not covered by vllm-ascend** and contains Ascend-incompatible logic, add a minimal corresponding override under `/vllm-workspace/vllm-ascend`.
 - Keep framework-side patches minimal and scoped to the incompatible code paths only.
+
+Required output for this step when applicable:
+
+```markdown
+## Framework Integration Gap Analysis
+
+### 1. Current Capability
+- Existing vllm-ascend coverage:
+- Existing patch/override path:
+- Existing framework assumptions:
+
+### 2. Model Requirement
+- Upstream framework modules touched:
+- Runtime path exercised by this model:
+- Required framework behavior:
+
+### 3. Gap
+- Upstream drift:
+- Missing override:
+- Metadata / interface mismatch:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Existing patch to update vs new override:
+- Validation focus:
+- Stop / escalate condition:
+```
+
+### 4.5) Analyze quantization path
+
+Run this step whenever the checkpoint or runtime path is quantized, including fp8, KV quant, W8A8, compressed-tensors, or any scale-paired load pattern.
+
+Read:
+
+- `references/quantization-baseline.md`
+- `references/fp8-on-npu-lessons.md` when fp8 is involved
+
+Required output when applicable:
+
+```markdown
+## Quantization Gap Analysis
+
+### 1. Current Capability
+- Existing supported quant path:
+- Existing safe fallback path:
+- Existing KV quant / attention quant support:
+
+### 2. Model Requirement
+- Checkpoint quant format:
+- Runtime quant expectations:
+- KV/cache quant traits:
+- Scale / shard / dequant requirements:
+
+### 3. Gap
+- Loader quant gap:
+- Runtime kernel gap:
+- KV quant gap:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal quant handling change:
+- Validation focus:
+- Stop / escalate condition:
+```
 
 ### 5) Choose adaptation strategy (new-model capable)
 
@@ -313,7 +707,7 @@ Place tests under `/tmp/npu_unit_tests/` (ephemeral; not committed).
 - Then expand concurrency (e.g., 32/64) if requested or feasible.
 - If failure is confirmed as HBM exhaustion during load or first request, do not continue with `cpu-offload` experiments. Record the exact OOM evidence and conclude that more Ascend cards or larger HBM capacity are required.
 
-> **Note**: Accuracy evaluation and performance benchmarking are out of scope for this skill. They are handled by a dedicated separate skill. If requested, invoke that skill after completing this step.
+> **Note**: Accuracy evaluation and performance benchmarking are out of scope for this skill. They are handled by a dedicated separate skill. If requested, invoke that skill after completing this step. However, whenever this skill needs an accuracy reference in docs, YAML, or acceptance criteria, it must use the ModelScope baseline rule above: prefer the matching model-size `gsm8k` score, otherwise fall back to another available dataset score and record the dataset name.
 
 ### 9) Backport, generate artifacts, and commit in delivery repo
 

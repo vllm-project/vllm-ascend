@@ -126,7 +126,257 @@ The script reads `config.json` and outputs:
 
 The final `CLASSIFICATION_SUMMARY:` line is a JSON object for easy parsing.
 
+## 4.1) Layer-by-layer compatibility matrix
+
+Read:
+
+- `references/model-layer-baseline.md`
+
+This step is mandatory for every model adaptation.
+
+Write:
+
+```markdown
+## Layer-by-Layer Compatibility Matrix
+
+| Layer | Current capability | Model requirement | Gap | Adaptation plan |
+| --- | --- | --- | --- | --- |
+| ...use the dense-llm or moe-llm template from `references/model-layer-baseline.md`... |
+```
+
+Requirements:
+
+- Use the `dense llm` template for non-MoE decoder-only dense LLMs.
+- Use the `moe llm` template for routed-expert decoder-only LLMs.
+- Fill every row in the selected template.
+- `Current capability` must reference an existing implementation or backend path.
+- `Model requirement` must come from config/modeling/checkpoint/runtime evidence.
+- `Gap` must be explicit.
+- `Adaptation plan` must name the fix location or say the row only needs verification.
+
+Use this matrix to decide which later specialized analyses are required. Do not jump straight to attention-only reasoning.
+
+## 4.2) Model adapter and weight loading analysis
+
+Read:
+
+- `references/model-adapter-and-weight-loading-baseline.md`
+
+This step is mandatory for every model adaptation.
+
+Write:
+
+```markdown
+## Model Adapter Gap Analysis
+
+### 1. Current Capability
+- Existing registered architecture:
+- Reusable adapter path:
+- Existing weight loading assumptions:
+- Existing shard/remap support:
+
+### 2. Model Requirement
+- `architectures` / `model_type`:
+- Adapter structure needed:
+- Checkpoint key patterns:
+- TP / KV / norm / rope / scale loading needs:
+
+### 3. Gap
+- Registration gap:
+- Adapter gap:
+- Weight mapping gap:
+- Loader / shard gap:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal files to touch:
+- Validation focus:
+- Stop / escalate condition:
+```
+
+Do not escalate to backend/operator-first thinking until this section explains why model registration and weight loading are already aligned or exactly what is missing.
+
+## 4.3) Processor and multimodal analysis
+
+Run this step when the model is multimodal, has processor files, or text-only and multimodal behavior differ.
+
+Read:
+
+- `references/processor-and-multimodal-baseline.md`
+
+Write when applicable:
+
+```markdown
+## Processor And Multimodal Gap Analysis
+
+### 1. Current Capability
+- Existing processor path:
+- Existing multimodal support assumption:
+- Known-good request types:
+- Existing transformers compatibility assumptions:
+
+### 2. Model Requirement
+- Processor classes from config:
+- Remote/local processing behavior:
+- Modalities required:
+- MM encoder / embedding path requirements:
+
+### 3. Gap
+- Processor API mismatch:
+- Multimodal dispatch mismatch:
+- Input formatting mismatch:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal files to touch:
+- Validation focus:
+- Stop / escalate condition:
+```
+
+## 4.4) MoE adaptation analysis
+
+Run this step for every `moe llm`, and also when runtime symptoms point to router / expert / EP path issues.
+
+Read:
+
+- `references/moe-fused-analysis.md`
+
+Use the reference as the **current `vllm-ascend` MoE capability baseline**. Then compare that baseline with the new model's MoE requirements inferred from:
+
+- `config.json`,
+- modeling / remote code,
+- checkpoint key patterns,
+- and any partially observed runtime behavior.
+
+Pin down:
+
+1. Whether router/gate behavior matches current `select_experts(...)` support.
+2. Whether expert structure matches the current `w13/gate_up -> swiglu -> w2/down` contract.
+3. Whether shared expert / residual MLP behavior is already expressible.
+4. Which communication path should be the first validation target: `ALLGATHER`, `ALLTOALL`, `MC2`, or `FUSED_MC2`.
+5. Whether weight layout, routing metadata, and quant metadata can map to current `MoEWeights`, `MoERoutingParams`, and `MoEQuantParams`.
+
+Write down an explicit MoE gap analysis before continuing.
+
+This is a mandatory checkpoint for every `moe llm`. Use the following fixed template and fill it with concrete findings before any code changes:
+
+```markdown
+## MoE Gap Analysis
+
+### 1. Current Capability
+- Router capability baseline:
+- Expert MLP baseline:
+- Shared expert baseline:
+- Communication baseline:
+- Quantization baseline:
+
+### 2. Model Requirement
+- Router/gate behavior:
+- Expert structure:
+- Shared expert / residual MLP behavior:
+- EP/TP/dispatch expectations:
+- Quant / weight-layout requirements:
+
+### 3. Gap
+- Router gap:
+- Expert-structure gap:
+- Weight-layout gap:
+- Communication/runtime-contract gap:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal files to touch:
+- First validation path:
+- Stop / escalate condition:
+```
+
+## 4.5) Attention adaptation analysis
+
+Run this step before operator triage when the classification or failure symptoms point to attention-path work.
+
+Read:
+
+- `references/attention-v1-analysis.md`
+
+Mandatory trigger cases:
+
+- attention subtype is `standard`, `sliding-window`, or `hybrid` and the model introduces custom attention code;
+- prefill works but decode fails, or decode works but chunked-prefill/spec-decode fails;
+- failure involves FIA / paged attention / mask / `block_table` / `slot_mapping` / `query_start_loc` / `seq_lens`;
+- the model uses KV quantization, shared KV, sink tokens, or unusual cache behavior.
+
+Use the reference as the **current `vllm-ascend` attention capability baseline**. Then compare that baseline with the new model's attention requirements inferred from:
+
+- `config.json`,
+- modeling / remote code,
+- checkpoint key patterns,
+- and any partially observed runtime behavior.
+
+Pin down:
+
+1. Expected `AscendAttentionState`.
+2. Expected operator path: `_npu_paged_attention`, `npu_fused_infer_attention_score`, `npu_fused_infer_attention_score_v2`, `npu_fusion_attention`, or C8 path.
+3. New model attention properties: standard/sliding-window/hybrid, sink, chunked-prefill/spec-decode interaction, KV quantization, shared KV, paged KV assumptions, special mask semantics, unusual head dim.
+4. Expected metadata contract: `block_table`, `slot_mapping`, `seq_lens*`, `actual_seq_lengths_q`, `query_start_loc`, `attn_mask`.
+5. Whether the likely fix belongs in upstream vLLM model code, vLLM framework code, or an Ascend backend assumption.
+
+Write down an explicit attention gap analysis before continuing.
+
+This is a mandatory checkpoint. Use the following fixed template and fill it with concrete findings before any code changes:
+
+```markdown
+## Attention Gap Analysis
+
+### 1. Current Capability
+- Backend coverage:
+- Supported state(s):
+- Expected operator path:
+- Supported metadata contract:
+- Relevant known-good patterns:
+
+### 2. Model Requirement
+- Attention type from `config.json`:
+- Attention behavior from modeling code:
+- KV/cache behavior:
+- Quantization / sink / sliding-window / spec-decode traits:
+- Expected runtime stage(s):
+
+### 3. Gap
+- Capability mismatch:
+- Metadata mismatch:
+- Operator/layout mismatch:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal code changes expected:
+- Validation focus:
+- Stop / escalate condition:
+```
+
+Minimum required content:
+
+- `Current capability`
+- `Model requirement`
+- `Gap`
+- `Likely adaptation`
+
+The `Adaptation Plan` must clearly say whether to:
+
+- wire the model into an already-supported backend path,
+- change upstream vLLM model/framework code,
+- verify an existing `vllm-ascend` path without backend changes,
+- or stop and escalate due to a backend capability gap.
+
+Do not start changing code until this comparison is concrete enough to explain why the current backend should already work, or exactly what must be adapted.
+
 ## 5) Operator compatibility gate
+
+Read:
+
+- `references/operator-compatibility-baseline.md`
 
 Scan the model's new modeling code for custom operators:
 
@@ -153,7 +403,40 @@ If early-exit applies, the GitHub issue must include:
 - why no fallback exists,
 - recommended path (e.g., custom Ascend op in `vllm-ascend`).
 
+Write:
+
+```markdown
+## Operator Compatibility Gap Analysis
+
+### 1. Current Capability
+- Existing supported operator class:
+- Existing fallback expectations:
+- Existing Ascend doc-backed constraints:
+
+### 2. Model Requirement
+- New operators introduced:
+- Operator type per item:
+- Required dtype/layout/shape:
+- Expected fallback path:
+
+### 3. Gap
+- Unsupported operator:
+- Missing fallback:
+- Constraint mismatch:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal fallback or call-site change:
+- Validation focus:
+- Stop / escalate condition:
+```
+
 ## 6) Framework-side code analysis
+
+Read:
+
+- `references/framework-integration-baseline.md`
 
 Identify vLLM framework modules changed alongside the new model:
 
@@ -171,6 +454,72 @@ rg -rn "<module_name>" "$VLLM_ASCEND_SRC"/vllm_ascend/ 2>/dev/null || true
 
 - If covered by vllm-ascend → no action needed; change is inherited automatically.
 - If not covered and contains Ascend-incompatible logic → add minimal override under `$VLLM_ASCEND_SRC/vllm_ascend/`.
+
+Write when applicable:
+
+```markdown
+## Framework Integration Gap Analysis
+
+### 1. Current Capability
+- Existing vllm-ascend coverage:
+- Existing patch/override path:
+- Existing framework assumptions:
+
+### 2. Model Requirement
+- Upstream framework modules touched:
+- Runtime path exercised by this model:
+- Required framework behavior:
+
+### 3. Gap
+- Upstream drift:
+- Missing override:
+- Metadata / interface mismatch:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Existing patch to update vs new override:
+- Validation focus:
+- Stop / escalate condition:
+```
+
+## 6.2) Quantization analysis
+
+Run this step when the checkpoint or runtime path is quantized.
+
+Read:
+
+- `references/quantization-baseline.md`
+- `references/fp8-on-npu-lessons.md` when fp8 is involved
+
+Write when applicable:
+
+```markdown
+## Quantization Gap Analysis
+
+### 1. Current Capability
+- Existing supported quant path:
+- Existing safe fallback path:
+- Existing KV quant / attention quant support:
+
+### 2. Model Requirement
+- Checkpoint quant format:
+- Runtime quant expectations:
+- KV/cache quant traits:
+- Scale / shard / dequant requirements:
+
+### 3. Gap
+- Loader quant gap:
+- Runtime kernel gap:
+- KV quant gap:
+- Unknowns to verify:
+
+### 4. Adaptation Plan
+- Fix location:
+- Minimal quant handling change:
+- Validation focus:
+- Stop / escalate condition:
+```
 
 ## 7) New model onboarding checklist
 
