@@ -1360,6 +1360,7 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
 
     return reorgnized_batch_ids
 
+_ENIGINE_CORE_BLOCK_SIZE = None
 
 def refresh_block_size(vllm_config):
     """
@@ -1379,8 +1380,27 @@ def refresh_block_size(vllm_config):
         return
 
     if model_config.hf_config.model_type == "deepseek_v4":
-        # TODO(qcs): generalize the block_size
-        cache_config.block_size = 128
+        # NOTE(cmq): use _ENIGINE_CORE_BLOCK_SIZE as the cache_config.block_size
+        # is updated in the core process, but it will be updated to the minimized
+        # block_size among all the kvcache groups, which will leading to a wrong
+        # block_size in DeepSeek V4 scenario.
+        global _ENIGINE_CORE_BLOCK_SIZE
+
+        if _ENIGINE_CORE_BLOCK_SIZE is not None:
+            cache_config.block_size = _ENIGINE_CORE_BLOCK_SIZE
+            return
+
+        if cache_config.block_size is None:
+            cache_config.block_size = 32
+        elif cache_config.block_size not in [32, 64, 128]:
+            logger.warning(
+                "For deepseek_v4 model, block size should be 32, 64 or 128. "
+                "Setting block size to 32 for better performance."
+            )
+            cache_config.block_size = 32
+
+        _ENIGINE_CORE_BLOCK_SIZE = cache_config.block_size
+        return
 
     if model_config.is_hybrid:
         # Hybrid attention+mamba models rely on the model-specific sizing

@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.patch.platform.patch_kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
+from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
 if vllm_version_is("0.20.2"):
     from vllm.model_executor.layers import (
@@ -54,10 +55,10 @@ class AscendCompressorStateCache(CompressorStateCache):
         self.block_size = block_size
 
     def get_kv_cache_spec(self, vllm_config) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            page_size_padded = 16896 if self.state_dim == 2 * 256 and self.compress_ratio == 4 else 81920
+        if self.state_dim == 2 * 256 and self.compress_ratio == 4 :
+            page_size_padded = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][1][0]
         else:
-            page_size_padded = 16640 if self.state_dim == 2 * 256 and self.compress_ratio == 4 else 131072
+            page_size_padded = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][1][1]
 
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
             block_size=self.block_size,
@@ -92,7 +93,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
         return AscendMLAAttentionSpec(  # Only has one vector instead of K + V
-            block_size=128,
+            block_size=DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0],
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
@@ -126,7 +127,7 @@ class AscendDeepseekV4SWACache(DeepseekV4SWACache):
         # same page size. The C4A KV block shape [256//4, head_dim] = [64, head_dim]
         # determines the SWA block size of 64 tokens per block.
         # TODO(cmq): make SWA block size automatically determined and configurable.
-        self.block_size = 128
+        self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if get_ascend_device_type() in {AscendDeviceType.A5}:
