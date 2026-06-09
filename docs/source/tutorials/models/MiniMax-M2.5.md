@@ -30,8 +30,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 It is recommended to download the model weights to a shared directory, such as `/mnt/sfs_turbo/.cache/`. The current release automatically detects the MiniMax-M2 fp8 checkpoint, disables fp8 quantization kernels on NPU, and loads the weights by dequantizing to bf16. This behavior may be removed once public bf16 weights are available.
 
 ### 3.2 Verify Multi-node Communication (Optional)
-If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
 
+If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
 
 ## 4. Installation
 
@@ -123,6 +123,7 @@ docker run -itd -u 0 --ipc=host --privileged \
 # bash minimax25-docker-run.sh
 # docker exec -it minimax2_5 bash
 ```
+
 ### 4.2 Source Code Installation
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
@@ -130,8 +131,6 @@ In addition, if you don't want to use the docker image as above, you can also bu
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
-
-
 
 ## 5. Online Inference on Multi-NPU
 
