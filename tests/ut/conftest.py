@@ -103,7 +103,6 @@ if not _npu_available:
     sys.modules["torch_npu"].npu.current_device = MagicMock(return_value=0)
     sys.modules["torch_npu._inductor"] = MagicMock()
     sys.modules["torch_npu"]._npu_flash_attention = MagicMock()  # type: ignore[attr-defined]
-    sys.modules["torch_npu"]._npu_flash_attention_v3 = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"]._npu_paged_attention_splitfuse = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"]._npu_reshape_and_cache = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_moe_gating_top_k_softmax = MagicMock()  # type: ignore[attr-defined]

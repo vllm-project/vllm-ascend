@@ -18,10 +18,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend._310p.attention.attention_mask import (
-    AttentionMaskBuilder310,
-    FA_V3_COMPRESSED_MASK_SEQ_LEN,
-)
+from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder310
 
 
 class TestAttentionMaskBuilder310(TestBase):
@@ -32,12 +29,10 @@ class TestAttentionMaskBuilder310(TestBase):
     @patch("torch_npu.npu_format_cast")
     def test_get_attention_mask_310(self, mock_format_cast):
         mock_format_cast.side_effect = lambda x, y: x
+        self.attention_mask_builder.support_compressed_mask = False
         model_config = MagicMock()
         attn_mask = self.attention_mask_builder.get_attention_mask(causal=True, model_config=model_config)
-        self.assertEqual(
-            attn_mask.shape,
-            (1, FA_V3_COMPRESSED_MASK_SEQ_LEN // 16, FA_V3_COMPRESSED_MASK_SEQ_LEN, 16),
-        )
+        self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
         self.assertEqual(attn_mask[0][-1][0][-1], torch.tensor(float("-inf"), dtype=torch.float16))
 
     @patch("torch_npu.npu_format_cast")
