@@ -629,7 +629,7 @@ ge::graphStatus FusedSigmoidGatingDeltaRuleUpdateTiling::FinalizeVStepFromUb(int
             selected = profile;
         }
     }
-    
+
     OP_LOGD(context_->GetNodeName(), "selected profile: stateOutBufferNum=[%u], attnOutBufferNum=[%u], vStep=[%u], repeatTime=[%u], valid=[%d]",
             selected.stateOutBufferNum, selected.attnOutBufferNum, selected.vStep, selected.repeatTime, selected.valid);
 
@@ -705,4 +705,3 @@ IMPL_OP_OPTILING(FusedSigmoidGatingDeltaRuleUpdate)
     .Tiling(FusedSigmoidGatingDeltaRuleUpdateTilingFunc)
     .TilingParse<FusedSigmoidGatingDeltaRuleUpdateCompileInfo>(TilingPrepareForFusedSigmoidGatingDeltaRuleUpdate);
 } // namespace optiling
-

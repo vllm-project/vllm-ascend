@@ -86,7 +86,7 @@ public:
         this->Attr("scale_value").AttrType(OPTIONAL).Float(1.0);
         this->Attr("softplus_beta").AttrType(OPTIONAL).Float(1.0);
         this->Attr("softplus_threshold").AttrType(OPTIONAL).Float(20.0);
-        
+
         // ascend910b (A2): softsync.flag mitigates A2's weaker native sync.
         OpAICoreConfig aicConfig;
         aicConfig.DynamicCompileStaticFlag(true)

@@ -332,7 +332,7 @@ private:
             ReduceSumBaseline(dstTensor, srcTensor, rows);
             return;
         }
-        
+
         if ((alignK_ & (alignK_ - 1)) != 0) {
             ReduceSumBaseline(dstTensor, srcTensor, rows);
             return;

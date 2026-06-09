@@ -232,6 +232,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "indexer_compress_epilog_v2"
         "causal_conv1d"
         "recurrent_gated_delta_rule"
+        "fused_sigmoid_gating_delta_rule_update"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
     )

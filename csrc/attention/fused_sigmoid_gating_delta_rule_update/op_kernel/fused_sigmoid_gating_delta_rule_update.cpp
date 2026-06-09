@@ -20,7 +20,7 @@
 
 
 using namespace AscendC;
-using namespace matmul; 
+using namespace matmul;
 using namespace FusedSigmoidGatingDeltaRuleUpdate;
 
 
