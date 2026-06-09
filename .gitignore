@@ -222,3 +222,4 @@ csrc/third_party/
 .codegraph/
 
 .vllm_ascend/
+vllm_ascend/ops/mega_moe_w4a4_jit.so
