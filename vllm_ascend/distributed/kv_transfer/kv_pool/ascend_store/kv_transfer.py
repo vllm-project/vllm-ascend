@@ -23,7 +23,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerLoadTask,
     LayerMultiBlockReqMeta,
     LayerTransferTask,
-    PoolKey,
     ReqMeta,
     SharedBlockData,
     get_block_hashes,

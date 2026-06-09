@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 
 from vllm.logger import logger
+
 from vllm_ascend.cpu_binding import get_memcache_client_cpus
 
 

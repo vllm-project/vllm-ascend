@@ -90,8 +90,7 @@ class KVPoolScheduler:
             "consumer_is_to_put", False
         )
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
-        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "save_decode_cache", True)
+        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get("save_decode_cache", True)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
@@ -138,8 +137,7 @@ class KVPoolScheduler:
 
         self.page_size_bytes = page_size_bytes
         logger.info("KV pool page_size_bytes: %d", page_size_bytes)
-        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "backend", "mooncake")
+        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.backend_name = backend_name.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         backend = backend_map.get(self.backend_name)
@@ -150,15 +148,12 @@ class KVPoolScheduler:
         assert backend_path is not None and backend_class_name is not None
         backend_module = importlib.import_module(backend_path)
         backend_class = getattr(backend_module, backend_class_name)
-        self.store_scheduler = backend_class.create_scheduler_client(
-            vllm_config.parallel_config)
+        self.store_scheduler = backend_class.create_scheduler_client(vllm_config.parallel_config)
 
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.pp_rank = (
-            vllm_config.parallel_config.rank // self.tp_size
-        ) % self.pp_size
+        self.pp_rank = (vllm_config.parallel_config.rank // self.tp_size) % self.pp_size
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
@@ -171,15 +166,11 @@ class KVPoolScheduler:
         else:
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-        self.model_name = model_config.model.split('/')[-1]
+        self.model_name = model_config.model.split("/")[-1]
 
         # Keep this in sync with pool_worker.py because it affects GVA allocation size.
         num_layer_keys = self.num_layers if self.use_gva_layerwise else 1
-        keys_per_block_hash = (
-            self.pcp_size * self.dcp_size
-            * (self.tp_size // self.put_step)
-            * num_layer_keys
-        )
+        keys_per_block_hash = self.pcp_size * self.dcp_size * (self.tp_size // self.put_step) * num_layer_keys
         self.keys_per_block_hash = keys_per_block_hash
         self.client: LookupKeyClient | None = None
 
@@ -212,12 +203,9 @@ class KVPoolScheduler:
         if last_block_key and last_block_gva is None:
             keys_to_alloc.append(last_block_key)
         if keys_to_alloc:
-            new_gvas = self.store_scheduler.batch_alloc(
-                keys_to_alloc, [alloc_size] * len(keys_to_alloc))
+            new_gvas = self.store_scheduler.batch_alloc(keys_to_alloc, [alloc_size] * len(keys_to_alloc))
             if any(gva <= 0 for gva in new_gvas):
-                raise ValueError(
-                    f"Request {request_tracker.req_id}: batch_alloc failed, "
-                    f"gvas={new_gvas}")
+                raise ValueError(f"Request {request_tracker.req_id}: batch_alloc failed, gvas={new_gvas}")
 
             request_tracker.block_gvas.extend(new_gvas[:num_new_block_keys])
             request_tracker.block_keys.extend(keys_to_alloc[:num_new_block_keys])
@@ -258,12 +246,9 @@ class KVPoolScheduler:
 
         if missing_keys:
             alloc_size = self.page_size_bytes * self.keys_per_block_hash
-            new_gvas = self.store_scheduler.batch_alloc(
-                missing_keys, [alloc_size] * len(missing_keys))
+            new_gvas = self.store_scheduler.batch_alloc(missing_keys, [alloc_size] * len(missing_keys))
             if any(gva <= 0 for gva in new_gvas):
-                raise ValueError(
-                    f"Request {request_tracker.req_id}: batch_alloc failed, "
-                    f"gvas={new_gvas}")
+                raise ValueError(f"Request {request_tracker.req_id}: batch_alloc failed, gvas={new_gvas}")
             for index, gva in zip(missing_indices, new_gvas):
                 block_gvas[index] = gva
 
@@ -271,7 +256,7 @@ class KVPoolScheduler:
         request_tracker.block_gvas = block_gvas
         request_tracker.gva_block_offset = 0
 
-    def generate_keys(self, block_hashes, req_id='', has_last_block=False):
+    def generate_keys(self, block_hashes, req_id="", has_last_block=False):
         block_keys = []
         for block_hash in block_hashes:
             key = f"{self.model_name}@{block_hash.hex()}"
@@ -290,8 +275,7 @@ class KVPoolScheduler:
         kv_cache_group_id: int = 0,
     ) -> list[list[str]]:
         head_or_tp_ranks = self.tp_size // self.put_step
-        cache_family = self._get_group_family(
-            self.kv_cache_group_families, kv_cache_group_id)
+        cache_family = self._get_group_family(self.kv_cache_group_families, kv_cache_group_id)
         keys_by_block = []
         for block_hash in block_hashes:
             block_keys = []
@@ -315,9 +299,7 @@ class KVPoolScheduler:
                             )
                             if include_layers:
                                 block_keys.extend(
-                                    layer_key.to_string()
-                                    for layer_key in pool_key.split_layers(
-                                        self.num_layers)
+                                    layer_key.to_string() for layer_key in pool_key.split_layers(self.num_layers)
                                 )
                             else:
                                 block_keys.append(pool_key.to_string())
@@ -334,12 +316,8 @@ class KVPoolScheduler:
         num_blocks = token_len // self._block_size
         # In layerwise mode, always query from block 0 because the remote
         # pool stores per-layer data that may not match local prefix cache.
-        query_start_block = (
-            0 if self.use_layerwise
-            else min(num_computed_tokens // self._block_size, num_blocks)
-        )
-        block_hashes_to_query = request.block_hashes[
-            query_start_block:num_blocks]
+        query_start_block = 0 if self.use_layerwise else min(num_computed_tokens // self._block_size, num_blocks)
+        block_hashes_to_query = request.block_hashes[query_start_block:num_blocks]
         if not block_hashes_to_query:
             return 0
 
@@ -347,31 +325,26 @@ class KVPoolScheduler:
             block_hashes_to_query,
             include_layers=include_layers,
         )
-        query_keys = [
-            key
-            for block_keys in query_keys_by_block
-            for key in block_keys
-        ]
+        query_keys = [key for block_keys in query_keys_by_block for key in block_keys]
         exists_states = self.store_scheduler.batch_is_exist(query_keys)
         if len(exists_states) != len(query_keys):
             raise RuntimeError(
                 "KV pool exists check returned unexpected number of "
                 f"states for request {request.request_id}: "
-                f"expected={len(query_keys)}, actual={len(exists_states)}")
+                f"expected={len(query_keys)}, actual={len(exists_states)}"
+            )
 
         num_queried_hit_blocks = 0
         offset = 0
         for block_keys in query_keys_by_block:
-            block_states = exists_states[offset:offset + len(block_keys)]
+            block_states = exists_states[offset : offset + len(block_keys)]
             offset += len(block_keys)
             if all(exists == 1 for exists in block_states):
                 num_queried_hit_blocks += 1
                 continue
             if any(exists == 0 for exists in block_states):
                 break
-            raise RuntimeError(
-                "KV pool exists check failed for request "
-                f"{request.request_id}: states={exists_states}")
+            raise RuntimeError(f"KV pool exists check failed for request {request.request_id}: states={exists_states}")
 
         num_hit_blocks = query_start_block + num_queried_hit_blocks
         return num_hit_blocks * self._block_size
@@ -385,15 +358,10 @@ class KVPoolScheduler:
         num_blocks = token_len // self._block_size
         num_queried_hit_blocks = 0
         block_hashes_to_check = request.block_hashes[:num_blocks]
-        keys_to_check = [
-            f"{self.model_name}@{bh.hex()}" for bh in block_hashes_to_check
-        ]
+        keys_to_check = [f"{self.model_name}@{bh.hex()}" for bh in block_hashes_to_check]
         # In layerwise mode, always query from block 0 because the remote
         # pool stores per-layer data that may not match local prefix cache.
-        query_start_block = (
-            0 if self.use_layerwise
-            else min(num_computed_tokens // self._block_size, num_blocks)
-        )
+        query_start_block = 0 if self.use_layerwise else min(num_computed_tokens // self._block_size, num_blocks)
         keys_to_query = keys_to_check[query_start_block:]
         if not keys_to_query:
             return 0
@@ -546,12 +514,11 @@ class KVPoolScheduler:
             return 0, False
 
         if self.use_gva_layerwise:
-            num_external_hit_tokens = self._get_layerwise_gva_hit_tokens(
-                request, token_len, num_computed_tokens)
+            num_external_hit_tokens = self._get_layerwise_gva_hit_tokens(request, token_len, num_computed_tokens)
         elif self.use_layerwise:
             num_external_hit_tokens = self._get_store_lookup_hit_tokens(
-                request, token_len, num_computed_tokens,
-                include_layers=True)
+                request, token_len, num_computed_tokens, include_layers=True
+            )
         else:
             if self.client is None:
                 self.client = LookupKeyClient(self.vllm_config)
@@ -583,10 +550,7 @@ class KVPoolScheduler:
         # In layerwise mode, even when vLLM has local cached tokens, we still
         # need to load KV cache from the pool because layerwise transfer loads
         # per-layer data that may not be in HBM.
-        force_layerwise_load = (
-            self.use_layerwise
-            and num_external_hit_tokens > 0
-        )
+        force_layerwise_load = self.use_layerwise and num_external_hit_tokens > 0
         if need_to_allocate <= 0 and not force_layerwise_load:
             return 0, False
 
@@ -633,8 +597,7 @@ class KVPoolScheduler:
         if num_external_tokens == 0:
             # No need to load anything
             self.load_specs[request.request_id].can_load = (
-                self.use_layerwise
-                and self.load_specs[request.request_id].kvpool_cached_tokens > 0
+                self.use_layerwise and self.load_specs[request.request_id].kvpool_cached_tokens > 0
             )
             logger.debug(
                 "KV pool load spec updated req=%s because num_external_tokens=0 "
@@ -723,15 +686,11 @@ class KVPoolScheduler:
         force_skip_save: bool,
     ) -> ReqMeta | None:
         load_spec = self.load_specs.pop(request.req_id, None)
-        num_tokens_to_compute = (
-            request.num_computed_tokens
-            + scheduler_output.num_scheduled_tokens[request.req_id]
-        )
+        num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
         request_tuple = self._unfinished_requests.get(request.req_id)
         if request_tuple is None:
             raise ValueError(
-                f"Request {request.req_id} is not in _unfinished_requests, "
-                "but it is scheduled as a new request"
+                f"Request {request.req_id} is not in _unfinished_requests, but it is scheduled as a new request"
             )
         request_real = request_tuple[0]
         block_ids_by_group = normalize_block_ids_by_group(request.block_ids)
@@ -778,14 +737,10 @@ class KVPoolScheduler:
         request_tuple = self._unfinished_requests.get(req_id)
         if request_tuple is None:
             raise ValueError(
-                f"Request {req_id} is not in _unfinished_requests, "
-                "but it is scheduled as a preempted cached request"
+                f"Request {req_id} is not in _unfinished_requests, but it is scheduled as a preempted cached request"
             )
         request_real = request_tuple[0]
-        num_tokens_to_compute = (
-            request_real.num_computed_tokens
-            + scheduler_output.num_scheduled_tokens[req_id]
-        )
+        num_tokens_to_compute = request_real.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
         previous_tracker = self._request_trackers.get(req_id)
         request_tracker = RequestTracker(
             req_id=req_id,
@@ -827,33 +782,24 @@ class KVPoolScheduler:
             return None
         request_tracker = self._request_trackers.get(req_id)
         if request_tracker is None:
-            raise ValueError(
-                f"Request {req_id} is not in _request_trackers, "
-                "but it is scheduled to be cached"
-            )
+            raise ValueError(f"Request {req_id} is not in _request_trackers, but it is scheduled to be cached")
         num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
         req_tuple = self._unfinished_requests.get(req_id)
         if req_tuple:
             request = req_tuple[0]
             num_current_tokens = request_tracker.token_len
-            new_token_ids = request.all_token_ids[
-                num_current_tokens : num_current_tokens + num_new_tokens
-            ]
+            new_token_ids = request.all_token_ids[num_current_tokens : num_current_tokens + num_new_tokens]
             if request_tracker.token_ids is not None and new_token_ids:
                 request_tracker.token_ids.extend(new_token_ids)
             request_tracker.token_len += num_new_tokens
         else:
-            raise ValueError(
-                f"Request {req_id} is not in _unfinished_requests, "
-                "but it is scheduled to be cached"
-            )
+            raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
         prev_token_count = request_tracker.token_len - num_new_tokens
         prev_hash_count = prev_token_count // self._block_size
         current_hash_count = request_tracker.token_len // self._block_size
         new_hash_count = current_hash_count - prev_hash_count
-        has_last_block = (
-            request_tracker.token_len % self._block_size != 0
-            or current_hash_count > len(request.block_hashes)
+        has_last_block = request_tracker.token_len % self._block_size != 0 or current_hash_count > len(
+            request.block_hashes
         )
         if self.use_gva_layerwise and (new_hash_count > 0 or has_last_block):
             self._ensure_tracker_gvas_cover_blocks(
@@ -952,8 +898,7 @@ class KVPoolScheduler:
         )
 
         for request in scheduler_output.scheduled_new_reqs:
-            req_meta = self._process_new_request(
-                request, scheduler_output, force_skip_save)
+            req_meta = self._process_new_request(request, scheduler_output, force_skip_save)
             if req_meta is not None:
                 self.touch_sending_mamba_blocks(req_meta)
                 meta.add_request(req_meta)
@@ -966,13 +911,21 @@ class KVPoolScheduler:
                     continue
                 if req_id in self._preempted_req_ids:
                     req_meta = self._process_preempted_cached_request(
-                        new_block_ids, req_id, i,
-                        cached_reqs, scheduler_output, force_skip_save,
+                        new_block_ids,
+                        req_id,
+                        i,
+                        cached_reqs,
+                        scheduler_output,
+                        force_skip_save,
                     )
                 else:
                     req_meta = self._process_running_cached_request(
-                        new_block_ids, req_id, i,
-                        cached_reqs, scheduler_output, force_skip_save,
+                        new_block_ids,
+                        req_id,
+                        i,
+                        cached_reqs,
+                        scheduler_output,
+                        force_skip_save,
                     )
                 if req_meta is not None:
                     self.touch_sending_mamba_blocks(req_meta)
@@ -981,8 +934,7 @@ class KVPoolScheduler:
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
         for request_id, (request, block_ids) in self._unfinished_requests.items():
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
-                req_meta = self._process_async_load_request(
-                    request_id, request, block_ids)
+                req_meta = self._process_async_load_request(request_id, request, block_ids)
                 if req_meta is not None:
                     self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)

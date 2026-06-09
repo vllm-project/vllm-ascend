@@ -9,6 +9,7 @@ import torch
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
+
 from vllm_ascend.cpu_binding import bind_thread_to_cpus
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.memcache_utils import (
@@ -108,8 +109,7 @@ class MemcacheBackend(Backend):
             affinity_changed = self._set_current_thread_affinity(expanded_cpus)
             if affinity_changed:
                 logger.info(
-                    "Temporarily expanded current thread CPUs from %s to %s "
-                    "while initializing MemCache store.",
+                    "Temporarily expanded current thread CPUs from %s to %s while initializing MemCache store.",
                     sorted(original_cpus),
                     sorted(expanded_cpus),
                 )
@@ -191,10 +191,7 @@ class MemcacheBackend(Backend):
 
     @staticmethod
     def _is_memcache_thread(thread_name: str) -> bool:
-        return (
-            thread_name in MEMCACHE_THREAD_NAMES
-            or thread_name.startswith(MEMCACHE_THREAD_NAME_PREFIXES)
-        )
+        return thread_name in MEMCACHE_THREAD_NAMES or thread_name.startswith(MEMCACHE_THREAD_NAME_PREFIXES)
 
     def _bind_new_memcache_threads(
         self,

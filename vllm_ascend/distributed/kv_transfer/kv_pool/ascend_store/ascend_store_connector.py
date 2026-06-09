@@ -4,7 +4,6 @@ from typing import Any
 
 import torch
 import zmq
-
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     KVCacheEvent,
@@ -30,7 +29,6 @@ from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import AscendStoreKVConnectorWorkerMetadata
-
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     get_zmq_rpc_path_lookup,
@@ -86,8 +84,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
-        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "backend", "mooncake")
+        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.backend_name = backend_name.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
@@ -106,7 +103,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         if role == KVConnectorRole.SCHEDULER:
             page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config, page_size_bytes=page_size_bytes)
+            self.connector_scheduler = KVPoolScheduler(
+                vllm_config, self.use_layerwise, kv_cache_config, page_size_bytes=page_size_bytes
+            )
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
@@ -115,8 +114,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             )
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
-                self.lookup_server = LookupKeyServer(
-                    self.connector_worker, vllm_config)
+                self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
     ############################################################
     # Scheduler Side Methods
