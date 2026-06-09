@@ -180,6 +180,19 @@ def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Con
     return None
 
 
+def _get_rope_parameters(config: DeepseekV2Config | DeepseekV3Config | DeepseekV4Config) -> dict[str, typing.Any]:
+    rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
+    rope_parameters.setdefault("factor", getattr(config, "rope_scaling_factor", 1.0))
+    rope_parameters.setdefault("rope_theta", getattr(config, "rope_theta", 10000.0))
+    rope_parameters.setdefault("beta_fast", getattr(config, "beta_fast", 32))
+    rope_parameters.setdefault("beta_slow", getattr(config, "beta_slow", 1))
+    rope_parameters.setdefault(
+        "original_max_position_embeddings",
+        getattr(config, "original_max_position_embeddings", getattr(config, "max_position_embeddings", 0)),
+    )
+    return rope_parameters
+
+
 class DeepseekV2MLP(nn.Module):
     def __init__(
         self,
@@ -656,12 +669,13 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
         self.compress_ratio = get_dsv4_compress_ratio(config, config_layer_idx)
+        rope_parameters = _get_rope_parameters(config)
 
         if self.compress_ratio > 1:
-            config.rope_parameters["rope_theta"] = config.compress_rope_theta
+            rope_parameters["rope_theta"] = config.compress_rope_theta
             rope_groups = ["default", f"c{self.compress_ratio}"]
         else:
-            config.rope_parameters["rope_theta"] = config.rope_theta
+            rope_parameters["rope_theta"] = config.rope_theta
             rope_groups = ["default"]
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
@@ -670,10 +684,10 @@ class DeepseekV4Attention(nn.Module):
             rotary_dim=self.rope_head_dim,
             max_position_embeddings=max_position_embeddings,
             is_neox_style=False,
-            scaling_factor=config.rope_parameters["factor"],
-            base=config.rope_parameters["rope_theta"],
-            beta_fast=config.rope_parameters["beta_fast"],
-            beta_slow=config.rope_parameters["beta_slow"],
+            scaling_factor=rope_parameters["factor"],
+            base=rope_parameters["rope_theta"],
+            beta_fast=rope_parameters["beta_fast"],
+            beta_slow=rope_parameters["beta_slow"],
             rope_groups=rope_groups,
         )
 
@@ -785,7 +799,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        max_position_embeddings = config.rope_parameters["original_max_position_embeddings"]
+        max_position_embeddings = _get_rope_parameters(config)["original_max_position_embeddings"]
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
