@@ -17,10 +17,8 @@
       "os": "linux-aarch64-a2b3-1",
       "model_list": [
         "ERNIE-4.5-21B-A3B-PT",
-        "InternVL3_5-8B-hf",
         "Molmo-7B-D-0924",
-        "Llama-3.2-3B-Instruct",
-        "llava-onevision-qwen2-0.5b-ov-hf"
+        "Llama-3.2-3B-Instruct"
       ]
     },
     {
@@ -38,7 +36,6 @@
       "model_list": [
         "Qwen3-Next-80B-A3B-Instruct",
         "Qwen3-Omni-30B-A3B-Instruct",
-        "Hunyuan-A13B-Instruct",
         "Mixtral-8x7B-Instruct-v0.1"
       ]
     }
@@ -50,14 +47,17 @@
       "model_list": [
         "gemma-3-4b-it",
         "internlm3-8b-instruct",
-        "Qwen3-ASR-1.7B"
+        "Qwen3-ASR-1.7B",
+        "InternVL3_5-8B-hf",
+        "llava-onevision-qwen2-0.5b-ov-hf"
       ]
     },
     {
       "name": "pr-accuracy-group-2",
       "os": "linux-aarch64-a2b3-4",
       "model_list": [
-        "Qwen2.5-Math-RM-72B"
+        "Qwen2.5-Math-RM-72B",
+        "Hunyuan-A13B-Instruct"
       ]
     }
   ]
