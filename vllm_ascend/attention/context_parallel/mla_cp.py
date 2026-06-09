@@ -650,6 +650,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         ):
             input_layout = "BSND"
             num_decodes = attn_metadata.num_decodes
+            assert attn_metadata.query_lens is not None
             decode_query_lens = attn_metadata.query_lens[:num_decodes]
             max_decode_query_len = max(decode_query_lens)
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
@@ -670,7 +671,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     q_pe.shape[1],
                     q_pe.shape[-1],
                 )
-                unpad_indices = []
+                unpad_indices: list[int] = []
                 src_start = 0
                 for req_idx, query_len in enumerate(decode_query_lens):
                     src_end = src_start + query_len
