@@ -221,7 +221,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 if model is None:
                     logger.warning("Netloader elastic loading fails, use load format DefaultModelLoader")
 
-                    vllm_config.quant_config = _quant_config
+                    if hasattr(vllm_config, "quant_config"):
+                        vllm_config.quant_config = _quant_config
                     model_config = model_config_backup
 
                     del model
