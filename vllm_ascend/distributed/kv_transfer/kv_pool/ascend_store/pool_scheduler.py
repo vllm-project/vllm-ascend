@@ -278,7 +278,7 @@ class KVPoolScheduler:
         cache_family = self._get_group_family(self.kv_cache_group_families, kv_cache_group_id)
         keys_by_block = []
         for block_hash in block_hashes:
-            block_keys = []
+            block_keys: list[str] = []
             chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
             pp_ranks = [self.pp_rank] if include_layers else range(self.pp_size)
             for pcp_rank in range(self.pcp_size):

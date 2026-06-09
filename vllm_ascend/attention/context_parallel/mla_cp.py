@@ -508,9 +508,12 @@ class AscendMlaCPImpl(AscendMLAImpl):
         value: torch.Tensor,
         kv_c_and_k_pe_cache: tuple[torch.Tensor],
         attn_metadata: AscendMLAMetadata,
+        layer_name,
     ) -> torch.Tensor:
         if not self.pcp_size > 1:
-            return super()._forward_prefill(q_nope, q_pe, k_nope, k_pe, value, kv_c_and_k_pe_cache, attn_metadata)
+            return super()._forward_prefill(
+                q_nope, q_pe, k_nope, k_pe, value, kv_c_and_k_pe_cache, attn_metadata, layer_name
+            )
         assert attn_metadata.prefill is not None
         assert attn_metadata.prefill.pcp_metadata is not None
         num_tokens = q_nope.size(0)

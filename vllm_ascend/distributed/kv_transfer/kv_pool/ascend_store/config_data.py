@@ -318,23 +318,29 @@ class ChunkedTokenDatabase:
         return addr_list, size_list, block_id
 
     def prepare_block_info(self, start: int, end: int, block_ids: list[int]) -> tuple[int, list[int]]:
-        block_id = block_ids[start // self.block_size]
+        block_size = self.block_size[0]
+        block_id = block_ids[start // block_size]
+        block_len = self.group_block_len.get(0, [])
         size_list = []
-        for i in range(len(self.block_len)):
-            size = int(self.block_len[i] / self.block_size * (end - start))
+        for i in range(len(block_len)):
+            size = int(block_len[i] / block_size * (end - start))
             size_list.append(size)
         return block_id, size_list
 
     def prepare_addr_from_block_id(self, block_id: int, layer_id: int) -> list[int]:
-        length = len(self.block_len)
+        block_len = self.group_block_len.get(0, [])
+        kv_caches_base_addr = self.group_kv_caches_base_addr.get(0, [])
+        length = len(block_len)
         base_offset = layer_id * length
-        return [self.kv_caches_base_addr[base_offset + i] + block_id * self.block_len[i] for i in range(length)]
+        return [kv_caches_base_addr[base_offset + i] + block_id * block_len[i] for i in range(length)]
 
     def prepare_addrs_from_block_ids(self, block_ids: list[int], layer_id: int) -> list[int]:
-        length = len(self.block_len)
+        block_len = self.group_block_len.get(0, [])
+        kv_caches_base_addr = self.group_kv_caches_base_addr.get(0, [])
+        length = len(block_len)
         base_offset = layer_id * length
         return [
-            self.kv_caches_base_addr[base_offset + i] + block_id * self.block_len[i]
+            kv_caches_base_addr[base_offset + i] + block_id * block_len[i]
             for block_id in block_ids
             for i in range(length)
         ]
@@ -842,7 +848,7 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         loading_req_ids: set[str] | None = None,
         delayed_free_req_ids: set[str] | None = None,
     ):
-        self.requests = []
+        self.requests: list[ReqMeta] = []
         self.unfinished_request_ids = unfinished_request_ids
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
