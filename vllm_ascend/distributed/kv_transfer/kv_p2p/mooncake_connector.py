@@ -1542,7 +1542,15 @@ class MooncakeConnectorWorker:
         logger.warning("[ADDR] Worker init: pp_rank=%s tp_rank=%s side_channel_host=%s pp_size=%s",
                        self.pp_rank, self.tp_rank, self.side_channel_host, self.pp_size)
         self.pcp_size = get_pcp_group().world_size
-        self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        # Use global hidden layer count (not PP-sliced) for MTP index assignment,
+        # ensuring consistent MTP layer indices between P and D nodes in PD+PP mode.
+        try:
+            hf_text_config = vllm_config.model_config.hf_text_config
+            if hf_text_config is None:
+                raise AttributeError
+        except AttributeError:
+            hf_text_config = vllm_config.model_config.hf_config
+        self.total_layers = hf_text_config.num_hidden_layers
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
