@@ -10,7 +10,11 @@ This document will show the main verification steps of the model, including supp
 
 ### Model Weight
 
-`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64G NPUs). [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)
+`Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64G NPUs). 
+
+`Qwen3-ASR-1.7B`(fp16 version): requires 1 Ascend 310P (with 1 x 48G NPUs). 
+
+[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -84,12 +88,13 @@ After all samples were processed, transcription quality was measured using:
 
 The current evaluation results are:
 
-| Category | Dataset | Metric | Result |
-|----------|---------|--------|--------|
-| Accuracy | librispeech_asr / clean / test | Total Samples | 500 |
-| Accuracy | librispeech_asr / clean / test | Success | 500 |
-| Accuracy | librispeech_asr / clean / test | Failure | 0 |
-| Accuracy | librispeech_asr / clean / test | WER | 0.035 |
+|NPU| Category | Dataset | Metric | Result |
+|----------|----------|---------|--------|--------|
+|910B| Accuracy | librispeech_asr / clean / test | Total Samples | 500 |
+|910B| Accuracy | librispeech_asr / clean / test | Success | 500 |
+|910B| Accuracy | librispeech_asr / clean / test | Failure | 0 |
+|910B| Accuracy | librispeech_asr / clean / test | WER | 0.035 |
+|310P| Accuracy | ai-shell1 / wav / test | CER | 0.0272 |
 
 ## Performance
 
