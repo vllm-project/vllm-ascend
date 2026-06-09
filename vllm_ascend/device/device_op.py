@@ -34,9 +34,9 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 if HAS_TRITON:
-    from vllm_ascend.ops.triton.rms_norm import triton_q_rms
+    from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
-    triton_q_rms = None
+    triton_q_rms = None  # type: ignore
 
 
 class BaseDeviceAdaptor:
