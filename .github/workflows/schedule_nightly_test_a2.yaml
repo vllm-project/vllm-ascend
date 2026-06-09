@@ -35,6 +35,21 @@ on:
         required: false
         default: 'all'
         type: string
+      request_id:
+        description: 'Unique request ID from the triggering workflow for run identification'
+        required: false
+        default: ''
+        type: string
+      skip_build_image:
+        description: 'Skip build-image job (used when triggered by /nightly command)'
+        required: false
+        default: 'false'
+        type: string
+      vllm_ascend_ref:
+        description: 'PR commit SHA for PR-triggered tests'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -50,7 +65,7 @@ defaults:
 
 # only cancel in-progress runs of the same workflow
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-a2
+  group: ascend-nightly-${{ github.ref }}-a2${{ github.event.inputs.request_id && format('-{0}', github.event.inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -127,7 +142,9 @@ jobs:
 
   build-image:
     name: Build nightly-a2 image
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
     strategy:
       matrix:
         vllm_ascend_branch: >-
@@ -186,6 +203,8 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      request_id: ${{ inputs.request_id || '' }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -226,11 +245,12 @@ jobs:
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      request_id: ${{ inputs.request_id || '' }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -294,6 +314,8 @@ jobs:
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
+      request_id: ${{ inputs.request_id || '' }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       upload: false
 
   single-node-accuracy-tests-pr-only:
@@ -321,6 +343,8 @@ jobs:
           needs.parse-trigger.outputs.filter != 'all' &&
           contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
         }}
+      request_id: ${{ inputs.request_id || '' }}
+      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       upload: false
 
   clear-pre-logs:
