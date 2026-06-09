@@ -83,7 +83,7 @@ class MooncakeBackend(Backend):
             if self._store_initialized:
                 return
 
-            logger.info("Initializing Mooncake store on first put.")
+            logger.info("Initializing Mooncake store. metadata_server=%s", self.config.metadata_server)
             self.store = self._setup_store()
             self._store_initialized = True
 
@@ -143,7 +143,11 @@ class MooncakeBackend(Backend):
 
         if ret != 0:
             msg = "Initialize mooncake failed."
-            logger.error(msg)
+            logger.error(
+                "Initialize mooncake failed. ret=%d, metadata_server=%s. Check mooncake config and network.",
+                ret,
+                self.config.metadata_server,
+            )
             raise RuntimeError(msg)
         if ssd_kwargs:
             logger.info(
@@ -184,17 +188,22 @@ class MooncakeBackend(Backend):
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
             for value in res:
                 if value < 0:
-                    logger.error("Failed to put key %s,res:%s", keys, res)
+                    logger.error("Failed to put key. keys=%s, result=%s. Check memory and store capacity.", keys, res)
                     if self._lazy_init:
-                        logger.error("If this is the first DSV4(compress) request, this failure is expected.")
+                        logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
-            logger.error("Failed to put key %s,error:%s", keys, e)
+            logger.error(
+                "Failed to put key. keys=%s, type=%s, error=%s. Check store state and memory.",
+                keys,
+                type(e).__name__,
+                e,
+            )
             if self._lazy_init:
-                logger.error("If this is the first DSV4(compress) request, this failure is expected.")
+                logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
-            logger.error("MooncakeBackend.get called before store initialization, keys=%s", keys)
+            logger.error("get() called before store init. keys=%s. Call put() first to trigger initialization.", keys)
             return
         assert self.store is not None
         logger.debug(
@@ -213,12 +222,19 @@ class MooncakeBackend(Backend):
             )
             for i, value in enumerate(res_list):
                 if value < 0:
-                    logger.error("Failed to get key %s, res:%s", keys, res_list)
+                    logger.error(
+                        "Failed to get key. keys=%s, result=%s. Check key existence and memory state.", keys, res_list
+                    )
                 elif value > 0:
                     res_list[i] = 0
             return res_list
         except Exception as e:
-            logger.error("Failed to get key %s, error:%s", keys, e)
+            logger.error(
+                "Failed to get key. keys=%s, type=%s, error=%s. Check store state and network.",
+                keys,
+                type(e).__name__,
+                e,
+            )
             return None
 
 
