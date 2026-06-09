@@ -88,7 +88,7 @@ def _get_npu_smi_hbm_capacity_mb(device_id: int) -> int | None:
             stderr=subprocess.DEVNULL,
             text=True,
         )
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError):
         return None
 
     value = _get_npu_smi_field(output.splitlines(), "HBM Capacity(MB)")
