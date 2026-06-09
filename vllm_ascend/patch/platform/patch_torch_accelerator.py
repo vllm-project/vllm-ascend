@@ -6,6 +6,7 @@ def patch_empty_cache() -> None:
 
 
 torch.accelerator.empty_cache = patch_empty_cache
+torch.accelerator.synchronize = torch.npu.synchronize  # type: ignore[attr-defined]
 
 # Monkey-patch torch.accelerator memory APIs for NPU compatibility.
 # Upstream vLLM (commit 747b068) replaced current_platform.memory_stats()
