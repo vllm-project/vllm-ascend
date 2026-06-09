@@ -14,7 +14,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 from vllm.model_executor.layers.attention import Attention, MLAAttention
+
+logger = init_logger(__name__)
 
 
 @dataclass

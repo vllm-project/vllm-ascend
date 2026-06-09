@@ -24,7 +24,7 @@ import inspect
 import time
 
 from vllm.config import VllmConfig
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
@@ -41,6 +41,8 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
+
+logger = init_logger(__name__)
 
 
 class ProfilingChunkScheduler(Scheduler):

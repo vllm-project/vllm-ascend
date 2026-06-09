@@ -17,10 +17,12 @@
 from enum import Enum
 
 import torch.distributed as dist
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
+
+logger = init_logger(__name__)
 
 
 class ExpertWeightUpdateState(Enum):

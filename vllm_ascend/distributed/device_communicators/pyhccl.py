@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.logger import logger
+from vllm.logger import init_logger
 
 from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
     HCCLLibrary,
@@ -32,6 +32,8 @@ from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
     hcclUniqueId,
 )
 from vllm_ascend.utils import current_stream
+
+logger = init_logger(__name__)
 
 
 class PyHcclCommunicator:

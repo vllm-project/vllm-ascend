@@ -32,7 +32,7 @@ import regex as re
 import torch
 from transformers import PretrainedConfig
 from vllm.config import get_current_vllm_config
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
@@ -44,6 +44,8 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, AscendDeviceType, calc_split_factor, get_ascend_device_type
 
 from .methods import get_scheme_class
+
+logger = init_logger(__name__)
 
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"

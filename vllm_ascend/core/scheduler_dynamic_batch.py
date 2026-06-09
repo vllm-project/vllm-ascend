@@ -20,7 +20,7 @@ import time
 import pandas as pd
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
@@ -30,6 +30,8 @@ from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
+
+logger = init_logger(__name__)
 
 
 class BudgetRefiner:

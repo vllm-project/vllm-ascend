@@ -50,6 +50,14 @@
     - tests/e2e/pull_request/one_card/_310p
     - tests/e2e/pull_request/four_card/_310p
 
+# Logger
+- name: logger
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/logger.py
+  tests:
+    - tests/ut/test_logger.py
+
 # Attention
 - name: attention_common
   optional: true

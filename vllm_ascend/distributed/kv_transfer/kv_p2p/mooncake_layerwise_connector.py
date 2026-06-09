@@ -38,7 +38,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
 )
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.utils.torch_utils import get_dtype_size
@@ -71,6 +71,8 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     validate_register_region_count,
 )
 from vllm_ascend.utils import npu_stream_switch, trans_nd_to_nz
+
+logger = init_logger(__name__)
 
 # isort: off
 if TYPE_CHECKING:

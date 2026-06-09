@@ -19,8 +19,10 @@ from typing import Any
 
 import requests
 import torch
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
+
+logger = init_logger(__name__)
 
 
 class RForkTransferBackend:

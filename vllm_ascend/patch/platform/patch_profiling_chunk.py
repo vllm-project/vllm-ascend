@@ -29,8 +29,10 @@ an import of this module, which re-applies the ``EngineCore.__init__``
 patches inside the child process before any ``EngineCore`` is instantiated.
 """
 
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
+
+logger = init_logger(__name__)
 
 _profiling_patches_applied = False
 _original_update_from_output = None

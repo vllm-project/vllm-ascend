@@ -21,9 +21,11 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.logger import logger
+from vllm.logger import init_logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
+
+logger = init_logger(__name__)
 
 # computation-communication tiling block is 512
 ALLREDUCE_NORM_FUSE_THRESHOLD = 512

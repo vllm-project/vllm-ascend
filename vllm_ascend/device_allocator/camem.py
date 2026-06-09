@@ -25,7 +25,9 @@ from typing import Any
 
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
-from vllm.logger import logger
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def find_loaded_library(lib_name) -> str | None:

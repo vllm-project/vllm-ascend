@@ -20,9 +20,11 @@ from collections import defaultdict
 
 import numpy as np
 import torch
-from vllm.logger import logger
+from vllm.logger import init_logger
 
 from vllm_ascend.utils import vllm_version_is
+
+logger = init_logger(__name__)
 
 if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.fused_moe.layer import determine_expert_map

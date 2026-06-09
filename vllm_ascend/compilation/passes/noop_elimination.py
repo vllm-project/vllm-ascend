@@ -5,7 +5,9 @@ import torch.fx
 from torch import SymInt
 from torch.fx.experimental.symbolic_shapes import statically_known_true
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
-from vllm.logger import logger
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class NoOpEliminationPass(VllmInductorPass):

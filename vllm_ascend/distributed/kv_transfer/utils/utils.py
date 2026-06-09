@@ -7,9 +7,11 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from vllm.logger import logger
+from vllm.logger import init_logger
 
 from vllm_ascend.distributed.parallel_state import get_p_tp_group
+
+logger = init_logger(__name__)
 
 MAX_HCCL_REGISTER_REGIONS = 256
 REGISTER_MERGE_GAP_BYTES = 4096

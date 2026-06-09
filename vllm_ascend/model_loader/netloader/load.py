@@ -16,10 +16,12 @@
 
 import time
 
-from vllm.logger import logger
+from vllm.logger import init_logger
 
 from .executor.elastic_load import P2PLoad
 from .interaction.elastic import ElasticClient
+
+logger = init_logger(__name__)
 
 
 def elastic_load(

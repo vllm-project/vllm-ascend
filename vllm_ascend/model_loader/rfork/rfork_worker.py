@@ -16,13 +16,15 @@
 
 import threading
 
-from vllm.logger import logger
+from vllm.logger import init_logger
 
 from vllm_ascend.model_loader.rfork.seed_protocol import RForkSeedProtocol
 from vllm_ascend.model_loader.rfork.seed_server import start_rfork_server
 from vllm_ascend.model_loader.rfork.transfer_backend import (
     RForkTransferBackend,
 )
+
+logger = init_logger(__name__)
 
 
 class RForkWorker:

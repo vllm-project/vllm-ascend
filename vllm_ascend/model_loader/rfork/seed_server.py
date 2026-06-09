@@ -24,7 +24,9 @@ import requests
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import Response
-from vllm.logger import logger
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def start_fastapi_server(

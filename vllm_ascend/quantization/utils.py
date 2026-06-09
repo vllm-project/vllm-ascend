@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 
 from vllm import envs
-from vllm.logger import logger
+from vllm.logger import init_logger
 
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -28,6 +28,8 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
 )
+
+logger = init_logger(__name__)
 
 
 def get_model_file(

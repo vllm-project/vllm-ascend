@@ -7,9 +7,11 @@ import subprocess
 from collections import defaultdict
 
 import psutil
-from vllm.logger import logger
+from vllm.logger import init_logger
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+logger = init_logger(__name__)
 
 MASK_BIT = 32  # Number of bits in a CPU affinity mask group
 MIN_CPUS_PER_NPU = 5  # 2(IRQ) + 1(main, at least 1 CPU) + 1(acl) + 1(release) = 5 CPUs per NPU

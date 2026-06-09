@@ -20,10 +20,12 @@ from typing import Any
 
 import torch
 import torch_npu
-from vllm.logger import logger
+from vllm.logger import init_logger
 
 from .base import AscendLinearScheme
 from .registry import register_scheme
+
+logger = init_logger(__name__)
 
 KRONECKER_QUANT_MAX_BATCH_SIZE = 32768
 

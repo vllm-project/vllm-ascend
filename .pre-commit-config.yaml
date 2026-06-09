@@ -97,12 +97,6 @@ repos:
     language: python
     types: [python]
     pass_filenames: false
-  - id: check-logger
-    name: Forbid init_logger(__name__) in vllm_ascend modules
-    entry: tools/check_logger.sh
-    language: script
-    types: [python]
-    pass_filenames: false
   - id: check-forbidden-imports
     name: Check for forbidden imports
     entry: python tools/check_forbidden_imports.py

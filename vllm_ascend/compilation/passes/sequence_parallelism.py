@@ -5,10 +5,12 @@ from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group, tensor_model_parallel_all_reduce
-from vllm.logger import logger
+from vllm.logger import init_logger
 
 from vllm_ascend.compilation.passes.noop_elimination import NoOpEliminationPass
 from vllm_ascend.utils import is_moe_model
+
+logger = init_logger(__name__)
 
 SP_MIN_TOKEN_NUM_DEFAULT = 1000
 

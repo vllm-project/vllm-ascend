@@ -20,13 +20,15 @@ import subprocess
 import psutil
 import torch
 import torch_npu
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
+
+logger = init_logger(__name__)
 
 _IS_RC_DEVICE: bool | None = None
 

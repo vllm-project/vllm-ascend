@@ -18,7 +18,9 @@ import os
 import socket
 
 import regex as re
-from vllm.logger import logger
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def find_free_port():

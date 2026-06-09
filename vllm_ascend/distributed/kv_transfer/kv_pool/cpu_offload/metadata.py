@@ -10,12 +10,14 @@ import torch
 import vllm.envs as envs
 import zmq
 from vllm.config import KVTransferConfig, VllmConfig
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.cpu_kv_cache_manager import CPUKVCacheManager
+
+logger = init_logger(__name__)
 
 
 @dataclass
