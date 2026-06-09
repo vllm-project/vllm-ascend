@@ -174,7 +174,8 @@ public:
                     AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale2, uint32_t expertPerRank,
                     uint32_t EP, AscendC::GlobalTensor<float> const &gmGMM1, int32_t rank, int32_t listLen,
                     Arch::Resource<ArchTag> const &resource,
-                    uint32_t epilogueCoreNum = 40, float swigluLimit = 0.0f, Callback &&callback = Callback{})
+                    uint32_t epilogueCoreNum = 40, float swigluLimit = 0.0f, uint32_t blockK = 1,
+                    Callback &&callback = Callback{})
     {
         callback();
         uint32_t blockM = shapeC.row();
@@ -209,7 +210,7 @@ public:
 
         constexpr float DEFAULT_MUL_SCALE = 16.0f;
         for (uint32_t loopIdx = loopStartIdx; loopIdx < loopStartIdx + tasksForIdx; ++loopIdx) {
-            auto gmTileC = gmC[loopIdx * blockN * 2];
+            auto gmTileC = gmC[loopIdx * blockK * 2];
 
             auto &ubC = ubCList[ubListId];
             auto &ubweighAux = ubweighAuxList[ubListId];
