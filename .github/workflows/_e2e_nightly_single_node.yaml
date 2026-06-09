@@ -73,7 +73,7 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: 600
+    timeout-minutes: 120
     container:
       image: ${{ inputs.image }}
     env:
@@ -136,8 +136,9 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash -l {0}
         run: |
-          cp -r /tmp/aisbench-backup /vllm-workspace/vllm-ascend/benchmark
           cd /vllm-workspace/vllm-ascend/benchmark
+          git clone -b v3.1-20260609-master https://github.com/AISBench/benchmark.git
+          cd benchmark
           pip install pytest asyncio pytest-asyncio
           pip install -e . -r requirements/api.txt -r requirements/extra.txt
           python3 -m pip cache purge

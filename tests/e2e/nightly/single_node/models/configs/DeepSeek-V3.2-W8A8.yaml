@@ -5,8 +5,6 @@
 test_cases:
   - name: "DeepSeek-V3.2-W8A8-TP8-DP2"
     model: "vllm-ascend/DeepSeek-V3.2-W8A8"
-    special_dependencies:
-      transformers: "5.9.0"
     envs:
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
