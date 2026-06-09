@@ -29,6 +29,7 @@ from vllm_ascend.device.mxfp_compat import (
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+from vllm_ascend.ops.triton.rms_norm import triton_q_rms
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -593,13 +594,7 @@ class BaseDeviceAdaptor:
     def apply_dsa_q_rms(q, eps, q_norm_without_weight=None):
         """Apply Q RMS norm. Non-A5: triton_q_rms.
         A5: uses q_norm_without_weight callable when provided."""
-        from vllm.triton_utils import HAS_TRITON
-
-        if HAS_TRITON:
-            from vllm_ascend.ops.triton.rms_norm import triton_q_rms
-
-            return triton_q_rms(q, eps)
-        return q
+        return triton_q_rms(q, eps)
 
     # ===== KV Cache Helpers =====
 
@@ -1222,13 +1217,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         """Apply Q RMS norm. A5: uses q_norm_without_weight callable."""
         if q_norm_without_weight is not None:
             return q_norm_without_weight(q)
-        from vllm.triton_utils import HAS_TRITON
 
-        if HAS_TRITON:
-            from vllm_ascend.ops.triton.rms_norm import triton_q_rms
-
-            return triton_q_rms(q, eps)
-        return q
+        return triton_q_rms(q, eps)
 
     # ===== KV Cache Helpers =====
 
