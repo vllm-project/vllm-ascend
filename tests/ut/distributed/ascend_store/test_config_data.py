@@ -172,6 +172,16 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(result[1][1], 24)
         self.assertEqual(result[1][2].chunk_hash, _expected_grouped_hash("c").hex())
 
+    def test_process_tokens_rehashes_raw_bytes_and_hex_strings_consistently(self):
+        db = ChunkedTokenDatabase(self.meta, block_size=16, partitions=None, hash_block_size=8)
+        raw_hashes = [bytes([idx]) * 32 for idx in range(1, 5)]
+        hex_hashes = [block_hash.hex() for block_hash in raw_hashes]
+
+        raw_keys = [key.to_string() for _, _, key in db.process_tokens(32, raw_hashes)]
+        hex_keys = [key.to_string() for _, _, key in db.process_tokens(32, hex_hashes)]
+
+        self.assertEqual(raw_keys, hex_keys)
+
     def test_get_block_hashes_rehashes_grouped_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
         self.assertEqual(
@@ -190,6 +200,15 @@ class TestChunkedTokenDatabase(unittest.TestCase):
                 _expected_grouped_hash("a", "b"),
                 _expected_grouped_hash("c"),
             ],
+        )
+
+    def test_get_block_hashes_rehashes_raw_bytes_and_hex_strings_consistently(self):
+        raw_hashes = [bytes([idx]) * 32 for idx in range(1, 5)]
+        hex_hashes = [block_hash.hex() for block_hash in raw_hashes]
+
+        self.assertEqual(
+            get_block_hashes(hex_hashes, group_block_size=32, hash_block_size=16),
+            get_block_hashes(raw_hashes, group_block_size=32, hash_block_size=16),
         )
 
     def test_get_block_hashes_rehashes_grouped_bytes_hashes(self):
