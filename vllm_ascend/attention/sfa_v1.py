@@ -154,6 +154,7 @@ class AscendSFAMetadata:
     group_key_idx: torch.Tensor | None = None
     group_key_cache_idx: torch.Tensor | None = None
 
+
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
