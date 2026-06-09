@@ -67,6 +67,7 @@ from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
+    check_ascend_rt_visible_devices,
     enable_sp,
     get_ascend_device_type,
     register_ascend_customop,
@@ -445,8 +446,17 @@ class NPUWorker(WorkerBase):
             visible_device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
             device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
         else:
+            parallel_config = self.parallel_config
             device = torch.device(f"npu:{self.local_rank}")
 
+        # Detect CANN silently shrinking ASCEND_RT_VISIBLE_DEVICES before we
+        # hit rtSetDevice error 107001. Skip when the parent process
+        # pre-sharded via --device-ids (assigned_physical_gpu_ids), because
+        # each child then legitimately sees fewer devices than
+        # local_world_size and the helper's own local_world_size check would
+        # spurious-fail.
+        if parallel_config.assigned_physical_gpu_ids is None:
+            check_ascend_rt_visible_devices(parallel_config.local_world_size)
         torch.npu.set_device(device)
 
         # Import _inductor for graph mode execution with triton
@@ -480,20 +490,6 @@ class NPUWorker(WorkerBase):
                 f"({self.cache_config.gpu_memory_utilization}, "
                 f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                 f"utilization or reduce GPU memory used by other processes."
-            )
-
-        if (
-            self.parallel_config.data_parallel_size > 1
-            and self.parallel_config.data_parallel_size_local > 0
-            and self.parallel_config.distributed_executor_backend not in ["ray", "external_launcher"]
-            and self.vllm_config.parallel_config.data_parallel_backend != "ray"
-            and self.vllm_config.parallel_config.nnodes_within_dp == 1
-        ):
-            visible_device_count = torch.npu.device_count() if torch.npu.is_available() else 0
-            assert self.parallel_config.local_world_size <= visible_device_count, (
-                f"local_world_size ({self.parallel_config.local_world_size}) must "
-                f"be less than or equal to the number of visible devices "
-                f"({visible_device_count})."
             )
 
         # Initialize the distributed environment.
