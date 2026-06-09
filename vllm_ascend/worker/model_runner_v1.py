@@ -1033,7 +1033,7 @@ class NPUModelRunner(GPUModelRunner):
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
         if (
             self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
+            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
         ):
             self.prev_positions.copy_to_gpu(num_reqs)
@@ -1045,7 +1045,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_computed_tokens,
                 self.num_accepted_tokens.gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
-                self.valid_sampled_token_count_gpu,
+                self.valid_sampled_token_count_gpu, # type: ignore[has-type]
                 self.prev_num_draft_tokens.gpu,
                 cpu_values,
             )
@@ -1095,7 +1095,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self._needs_seq_lens_cpu_sync
             and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
+            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
         ):
             self.optimistic_seq_lens_cpu[:num_reqs].copy_(
@@ -1114,7 +1114,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self.use_compress
             and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
+            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
         ):
             # Async spec decode keeps the CPU counter optimistic until after
