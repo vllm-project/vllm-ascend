@@ -19,7 +19,7 @@ import pytest
 from tests.e2e.conftest import wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import PROMPTS_SHORT, compare_logprobs
 
-MODEL = "/home/weights/Qwen3-0.6B"
+MODEL = "Qwen/Qwen3-0.6B"
 
 
 # -------------------- Prefetch backend tests --------------------
