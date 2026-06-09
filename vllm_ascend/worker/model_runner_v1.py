@@ -1463,6 +1463,7 @@ class NPUModelRunner(GPUModelRunner):
         default_stream = torch.npu.current_stream()
         with torch.npu.stream(self.valid_sampled_token_count_copy_stream): 
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)
+            counts = valid_sampled_tokens_count
             counts_cpu = self.valid_sampled_token_count_cpu
             assert counts_cpu is not None
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
