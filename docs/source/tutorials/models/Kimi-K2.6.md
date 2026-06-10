@@ -764,7 +764,7 @@ The service returns HTTP 200 OK. The JSON response contains the `choices` field 
 
 ## 7 Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
+Here are one accuracy evaluation methods.
 
 ### Using AISBench
 
@@ -811,22 +811,6 @@ After about several minutes, you can get the performance evaluation result.
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
-**Best Practice Recommendations (from source document):**
-
-- **Single-Node Mixed Deployment**
-    - 16K Long-Context Sequences: Set dp2 tp8 to balance memory capacity and compute efficiency.
-    - 128K Long-Context (without Prefix-Cache): Set dp1 tp16 to maximize tensor parallelism and accommodate extreme context lengths within a single node.
-    - 128K Long-Context (with Prefix-Cache): Set dp2 tp8 to optimize memory bandwidth and improve prefix-cache utilization.
-    - 1080P Multimodal Scenarios: Set dp1 tp16 to handle the high computational and memory demands of high-resolution visual inputs.
-
-- **Dual-Node 1P1D Scenario (1 Prefill, 1 Decode Node)**
-    - General P/D Node Configuration: Set dp2 tp8 for both Prefill and Decode nodes to ensure a balanced trade-off between latency and throughput.
-    - 1080P Multimodal Scenarios: Configure as dp2 tp8 or dp16 tp1, depending on the specific memory constraints and concurrency requirements of the workload.
-
-- **Quad-Node 2P2D Scenario (2 Prefill, 2 Decode Nodes)**
-    - General P/D Node Configuration: Scale the configuration to range from dp4 tp4 to dp8 tp4 to effectively utilize the increased distributed compute resources.
-    - 1080P Multimodal Scenarios: Configure with higher data parallelism, ranging from dp8 tp2 to dp32 tp1, to maximize throughput and handle heavy multimodal workloads across multiple decode nodes.
-
 #### Table 1: Scenario Overview
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
@@ -860,17 +844,17 @@ After about several minutes, you can get the performance evaluation result.
 **Notice:**
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
 
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
-
-- **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
-
-  A: Clean up old processes and restart: `pkill -f vLLM*`.
-
-- **Q: How to handle OOM or unstable startup?**
-
-  A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce concurrency and load-testing pressure (e.g., `max-concurrency` / `num-prompts`).
 
 - **Q: What transformer version is required for tools_call feature?**
 
