@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
@@ -60,8 +61,22 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.config = config
         quant_config = vllm_config.quant_config
 
-        self.e_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
-        self.h_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.e_proj = ReplicatedLinear(
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.e_proj",
+            return_bias=False,
+        )
+        self.h_proj = ReplicatedLinear(
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.h_proj",
+            return_bias=False,
+        )
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -113,12 +128,12 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         if previous_hidden_states.dim() == 2 and previous_hidden_states.shape[-1] == self.config.hidden_size:
             previous_hidden_states = self.hnorm(previous_hidden_states)
-            hidden_states = self.e_proj(inputs_embeds) + self.h_proj(previous_hidden_states)
+            hidden_states = self.e_proj(inputs_embeds)[0] + self.h_proj(previous_hidden_states)[0]
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
         else:
             previous_hidden_states = previous_hidden_states.view(-1, self.hc_mult, self.config.hidden_size)
             previous_hidden_states = self.hnorm(previous_hidden_states)
-            hidden_states = self.e_proj(inputs_embeds).unsqueeze(-2) + self.h_proj(previous_hidden_states)
+            hidden_states = self.e_proj(inputs_embeds)[0].unsqueeze(-2) + self.h_proj(previous_hidden_states)[0]
 
         hidden_states, residual = self.mtp_block(positions=positions, hidden_states=hidden_states, residual=None)
 

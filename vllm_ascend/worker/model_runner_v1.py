@@ -470,7 +470,9 @@ class NPUModelRunner(GPUModelRunner):
         # kv role
         self.is_kv_producer = False
         self.is_kv_consumer = False
+        self.kv_role = None
         if vllm_config.kv_transfer_config is not None:
+            self.kv_role = getattr(vllm_config.kv_transfer_config, "kv_role", None)
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
@@ -638,8 +640,12 @@ class NPUModelRunner(GPUModelRunner):
             self.input_batch.sampling_metadata,
         ) is None
 
-    @staticmethod
-    def _fused_mtp_full_graph_enabled() -> bool:
+    def _is_pd_disaggregated(self) -> bool:
+        return getattr(self, "kv_role", None) in ("kv_producer", "kv_consumer")
+
+    def _fused_mtp_full_graph_enabled(self) -> bool:
+        if self._is_pd_disaggregated():
+            return False
         return bool(getattr(get_ascend_config(), "enable_fused_mtp_full_graph", False))
 
     def _get_fused_mtp_draft_path_block_reason(

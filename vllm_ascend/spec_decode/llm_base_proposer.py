@@ -321,7 +321,9 @@ class _FusedModelWithMTP:
         forward_context = get_forward_context()
         is_capturing = getattr(forward_context, "capturing", False)
         if is_capturing and self.capture_mtp_enabled and not isinstance(hidden_states, IntermediateTensors):
-            raw_hidden = hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
+            raw_hidden = (
+                hidden_states[0] if isinstance(hidden_states, tuple) and len(hidden_states) > 0 else hidden_states
+            )
             if getattr(forward_context, "flash_comm_v1_enabled", False):
                 from vllm.distributed import tensor_model_parallel_all_gather
 
@@ -1016,7 +1018,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             self.input_ids[:batch_size] = step_input_ids
             self._set_positions(batch_size, clamped_positions)
-            self.hidden_states[:batch_size] = step_hidden_states
+            self.hidden_states[:batch_size] = step_hidden_states.view(batch_size, -1)
 
             model_input_ids = self.input_ids[:num_tokens]
             model_positions = self._get_positions(num_tokens)
