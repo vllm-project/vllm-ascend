@@ -25,9 +25,11 @@ from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
     is_compressed_mask_supported,
 )
+from vllm_ascend._310p.attention.metadata import set_query_lens_cpu
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
+    AscendMetadata,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
@@ -64,14 +66,10 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         max_model_len = vllm_config.model_config.max_model_len
         self.attn_mask_builder: Any = AttentionMaskBuilder310(self.device, max_model_len)
 
-        self._query_lens_cpu_pool: list[torch.Tensor] = []
-        self._query_lens_cpu_pool_idx = -1
+        self._query_lens_cpu_buffer: torch.Tensor | None = None
         if device.type != "cpu":
             max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-            self._query_lens_cpu_pool = [
-                torch.empty(max_num_seqs, dtype=torch.int32, device="cpu", pin_memory=True),
-                torch.empty(max_num_seqs, dtype=torch.int32, device="cpu", pin_memory=True),
-            ]
+            self._query_lens_cpu_buffer = torch.empty(max_num_seqs, dtype=torch.int32, device="cpu", pin_memory=True)
 
     def _fill_query_lens_cpu(
         self,
@@ -79,13 +77,15 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         query_start_loc_cpu: torch.Tensor,
     ) -> torch.Tensor:
         """Pinned CPU per-request query lengths for ATB splitfuse (host qLensTensor)."""
-        query_lens_cpu = query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
-        if not self._query_lens_cpu_pool:
-            return query_lens_cpu.contiguous()
+        if self._query_lens_cpu_buffer is None:
+            return (query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]).contiguous()
 
-        self._query_lens_cpu_pool_idx = (self._query_lens_cpu_pool_idx + 1) % len(self._query_lens_cpu_pool)
-        buffer = self._query_lens_cpu_pool[self._query_lens_cpu_pool_idx]
-        buffer[:num_reqs].copy_(query_lens_cpu)
+        buffer = self._query_lens_cpu_buffer
+        torch.sub(
+            query_start_loc_cpu[1 : num_reqs + 1],
+            query_start_loc_cpu[:num_reqs],
+            out=buffer[:num_reqs],
+        )
         return buffer[:num_reqs]
 
     def build(
@@ -93,7 +93,7 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
-    ):
+    ) -> AscendMetadata:
         attn_metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
 
         num_reqs = common_attn_metadata.num_reqs
@@ -107,7 +107,10 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
         # ATB splitfuse qLensTensor must be host; filled here (outside graph forward).
-        attn_metadata.query_lens_cpu = self._fill_query_lens_cpu(num_reqs, query_start_loc_cpu)
+        set_query_lens_cpu(
+            attn_metadata,
+            self._fill_query_lens_cpu(num_reqs, query_start_loc_cpu),
+        )
 
         # Bind device-side views for in-place graph replay updates.
         attn_metadata.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
