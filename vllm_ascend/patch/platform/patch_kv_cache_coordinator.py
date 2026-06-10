@@ -4,6 +4,8 @@ import sys
 from math import lcm
 
 import vllm
+import vllm.envs as envs_vllm
+import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
@@ -24,7 +26,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
-from vllm_ascend import envs
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 from vllm_ascend.utils import vllm_version_is
 
@@ -69,6 +71,18 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if max_num_batched_tokens is None:
             max_num_batched_tokens = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        validate_retention_interval = getattr(
+            vllm_kv_cache_coordinator,
+            "_validate_prefix_cache_retention_interval",
+            None,
+        )
+        if self.retention_interval is not None and validate_retention_interval is not None:
+            validate_retention_interval(
+                self.retention_interval,
+                self.scheduler_block_size,
+                kv_cache_config,
+            )
 
         self.block_pool = BlockPool(
             kv_cache_config.num_blocks,
@@ -301,7 +315,7 @@ def get_kv_cache_coordinator(
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
-    if envs.VLLM_ASCEND_APPLY_DSV4_PATCH:
+    if envs_ascend.VLLM_ASCEND_APPLY_DSV4_PATCH:
         return AscendHybridKVCacheCoordinator(
             kv_cache_config,
             max_model_len,
