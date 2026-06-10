@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import vllm_ascend.logger  # noqa: F401 — triggers formatter patching on import
+
 _GLOBAL_PATCH_APPLIED = False
 
 
