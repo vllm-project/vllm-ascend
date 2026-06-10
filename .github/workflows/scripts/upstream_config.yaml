@@ -371,10 +371,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/entrypoints/openai/responses/test_sampling_params.py
     estimated_time: 20
-  - name: tests/kernels/moe/test_unquantized_backend_selection.py
-    estimated_time: 20
-  - name: tests/model_executor/model_loader/test_reload.py
-    estimated_time: 20
   - name: tests/model_executor/test_oink_integration.py
     estimated_time: 20
   - name: tests/model_executor/test_qwen3_vl_mrope.py
@@ -564,8 +560,6 @@ e2e-upstream_singlecard:
   - name: tests/models/language/pooling/test_head_dtype.py
     estimated_time: 20
   - name: tests/models/language/pooling/test_pooler_config_init_behaviour.py
-    estimated_time: 20
-  - name: tests/models/language/pooling/test_reward.py
     estimated_time: 20
   - name: tests/models/language/pooling_mteb_test/test_baai.py
     estimated_time: 20
@@ -838,6 +832,72 @@ e2e-upstream_singlecard:
   - name: tests/entrypoints/openai/chat_completion/test_vision.py
     estimated_time: 20
   - name: tests/models/multimodal/pooling/test_phi3v.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_colmodernvbert.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_prithvi_mae.py
+    estimated_time: 20
+  - name: tests/models/test_registry.py
+    estimated_time: 20
+  - name: tests/kernels/helion/test_case_key.py
+    estimated_time: 20
+  - name: tests/utils_/test_spawn_decorator.py
+    estimated_time: 20
+  - name: tests/ir/test_inplace_op.py
+    estimated_time: 20
+  - name: tests/v1/attention/test_kv_head_stride_canonicalization.py
+    estimated_time: 20
+  - name: tests/v1/attention/test_mla_prefill_selector.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/offloading_connector/test_worker_metadata.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_mooncake_store_connector.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_mooncake_stats.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_tp_mapping.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_mooncake_store_worker.py
+    estimated_time: 20
+  - name: tests/v1/kv_offload/cpu/test_manager.py
+    estimated_time: 20
+  - name: tests/renderers/test_chat_utils_prompt_embeds.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat_completion_with_mixed_image_embeds.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat_completion_with_prompt_embeds.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/chat_completion/test_chat_completion_with_mixed_audio_embeds.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/test_fingerprint.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/speech_to_text/test_speech_to_text_cancellation.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/test_tool_choice_content_none.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/test_utils.py
+    estimated_time: 20
+  - name: tests/evals/mrcr/test_mrcr_correctness.py
+    estimated_time: 20
+  - name: tests/benchmarks/test_custom_dataset_seed.py
+    estimated_time: 20
+  - name: tests/model_executor/test_gemma_hidden_act.py
+    estimated_time: 20
+  - name: tests/tool_parsers/test_lfm2_tool_parser.py
+    estimated_time: 20
+  - name: tests/compile/passes/ir/test_clone_cleanup.py
+    estimated_time: 20
+  - name: tests/compile/test_codegen.py
+    estimated_time: 20
+  - name: tests/tools/test_docker_build_metadata_args.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_moondream3.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_molmo2.py
+    estimated_time: 20
+  - name: tests/models/multimodal/test_nano_nemotron_vl.py
+    estimated_time: 20
+  - name: tests/parser/test_streaming.py
     estimated_time: 20
 e2e-upstream_a2_2:
   - name: tests/v1/distributed/test_async_llm_dp.py
