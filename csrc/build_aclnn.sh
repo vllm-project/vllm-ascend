@@ -2,6 +2,7 @@
 
 ROOT_DIR=$1
 SOC_VERSION=$2
+: "${ROOT_DIR:?ROOT_DIR is not set}"
 
 log() {
     echo "[build_aclnn] $*"
@@ -79,7 +80,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    export CPATH="${ABSOLUTE_CATLASS_PATH}${CPATH:+:${CPATH}}"
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
@@ -205,7 +206,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    export CPATH="${ABSOLUTE_CATLASS_PATH}${CPATH:+:${CPATH}}"
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
@@ -256,13 +257,14 @@ log_selected_ops
 (
   set -euo pipefail
 
-  log "subshell cwd before cd=$(pwd)"
-  cd csrc
-  log "subshell cwd after cd=$(pwd)"
-  log "cleaning csrc build dirs"
-  rm -rf -- build output build_out
-
   : "${ROOT_DIR:?ROOT_DIR is not set}"
+
+  log "subshell cwd before cd=$(pwd)"
+  cd "${ROOT_DIR}/csrc"
+  log "subshell cwd after cd=$(pwd)"
+  log "preserving csrc/build and cleaning output dirs"
+  rm -rf -- output build_out
+
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
