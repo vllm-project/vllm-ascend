@@ -54,6 +54,11 @@ class AscendRejectionSampler(RejectionSampler):
 
         """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
         if not HAS_TRITON:
+            logger.warning_once(
+                "[sample/rejection_sampler] Triton not available, falling back to vLLM default "
+                "penalty implementation in rejection sampler. Rejection sampling performance "
+                "may be degraded on NPU. "
+            )
             return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
 
         assert sampling_metadata.prompt_token_ids is not None
@@ -81,6 +86,14 @@ class AscendRejectionSampler(RejectionSampler):
         # Store Ascend-specific optimizations
         self._ascend_optimizations_enabled = True
         self.top_k = None
+        logger.debug(
+            "[sample/rejection_sampler] AscendRejectionSampler initialized. "
+            "ascend_optimizations_enabled=%s, triton_available=%s, "
+            "reduce_sample=%s",
+            self._ascend_optimizations_enabled,
+            HAS_TRITON,
+            get_ascend_config().enable_reduce_sample,
+        )
 
     def forward(
         self,
@@ -264,6 +277,10 @@ def apply_sampling_constraints(
     # New flow: top_k -> allgather -> top_p
     # Returns processed logits and indices
     if get_ascend_config().enable_reduce_sample:
+        logger.debug_once(
+            "[sample/rejection_sampler] Using reduce-sample path for "
+            "apply_sampling_constraints. top-k/top-p with TP all-gather.",
+        )
         return apply_top_k_top_p(logits, k, p, top_k)
     else:
         return apply_top_k_top_p(logits, k, p)
@@ -336,6 +353,17 @@ def rejection_sample(
     using_entropy_verify = bool(get_ascend_config().rejection_sampler_config.enable_entropy_verify)
     posterior_threshold = float(get_ascend_config().rejection_sampler_config.posterior_threshold)
     posterior_alpha = float(get_ascend_config().rejection_sampler_config.posterior_alpha)
+    logger.debug_once(
+        "[sample/rejection_sampler] Rejection sampling path: "
+        "block_verify=%s, entropy_verify=%s, all_greedy=%s, all_random=%s, "
+        "reduce_sample=%s, triton=%s",
+        using_block_verify,
+        using_entropy_verify,
+        sampling_metadata.all_greedy,
+        sampling_metadata.all_random,
+        get_ascend_config().enable_reduce_sample,
+        HAS_TRITON,
+    )
 
     if using_entropy_verify and ori_target_logits is not None:
         ori_target_probs = ori_target_logits.softmax(dim=-1, dtype=torch.float32)
@@ -555,6 +583,13 @@ def rejection_sample(
     else:
         # Fallback to original mode
         # This path should not be used in the new distributed flow
+        logger.warning_once(
+            "[sample/rejection_sampler] Using fallback (non-reduce-sample) path in "
+            "rejection_sample. This path should not be used in the new distributed flow. "
+            "enable_reduce_sample=%s, has_target_indices=%s",
+            get_ascend_config().enable_reduce_sample,
+            target_indices is not None,
+        )
         vocab_size = target_logits.shape[-1]
         global_vocab_size = draft_probs.shape[-1] if draft_probs is not None else vocab_size
 

@@ -117,6 +117,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Assign runner before it's used in the methods below
         self.runner = runner
 
+        logger.debug(
+            "[spec_decode/base] Initializing spec decode proposer: method=%s,"
+            " num_speculative_tokens=%s, hidden_size=%s, pass_hidden_states=%s,"
+            " parallel_drafting=%s, use_cuda_graph=%s, device=%s",
+            self.method,
+            self.num_speculative_tokens,
+            self.hidden_size,
+            pass_hidden_states_to_model,
+            self.speculative_config.parallel_drafting if self.speculative_config else False,
+            runner._use_aclgraph() if runner else False,
+            device,
+        )
+
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
@@ -217,7 +230,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_vllm_config = self._create_draft_vllm_config()
         draft_load_config = self.speculative_config.draft_load_config
         logger.info(
-            "AscendSpecDecodeBaseProposer._get_model(): loading draft model with load_format=%s, model=%s",
+            "[spec_decode/base] Loading draft model: method=%s, load_format=%s, model=%s",
+            self.method,
             getattr(draft_load_config, "load_format", None),
             getattr(self.speculative_config.draft_model_config, "model", None),
         )
@@ -294,6 +308,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else self.model.mask_hidden.view(self.hidden_size)
             )
 
+        logger.info(
+            "[spec_decode/base] Draft model loaded successfully: method=%s, num_draft_attn_layers=%d, block_size=%d",
+            self.method,
+            len(self._draft_attn_layer_names),
+            self.kernel_block_size,
+        )
+
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
         Some draft models may not have their own embedding layers, and some may
@@ -316,9 +337,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if not self.model.has_own_embed_tokens:
                     share_embeddings = True
                     logger.info(
-                        "Detected EAGLE model without its own embed_tokens in the"
-                        " checkpoint. Sharing target model embedding weights with the"
-                        " draft model."
+                        "[spec_decode/base] Detected EAGLE model without its own"
+                        " embed_tokens in the checkpoint. Sharing target model"
+                        " embedding weights with the draft model."
                     )
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
@@ -332,20 +353,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 ):
                     share_embeddings = True
                     logger.info(
-                        "Detected EAGLE model with embed_tokens identical to the target"
-                        " model. Sharing target model embedding weights with the draft"
-                        " model."
+                        "[spec_decode/base] Detected EAGLE model with embed_tokens"
+                        " identical to the target model. Sharing target model embedding"
+                        " weights with the draft model."
                     )
                 else:
                     logger.info(
-                        "Detected EAGLE model with distinct embed_tokens weights. "
-                        "Keeping separate embedding weights from the target model."
+                        "[spec_decode/base] Detected EAGLE model with distinct"
+                        " embed_tokens weights. Keeping separate embedding weights"
+                        " from the target model."
                     )
             else:
                 # MTP model
                 share_embeddings = not self.use_compress
                 if share_embeddings:
-                    logger.info("Detected MTP model. Sharing target model embedding weights with the draft model.")
+                    logger.info(
+                        "[spec_decode/base] Detected MTP model. Sharing target model"
+                        " embedding weights with the draft model."
+                    )
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
@@ -353,7 +378,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
-                "Since PP > 1 or other reasons the model head loaded its own vocab embedding"
+                "[spec_decode/base] PP>1: draft model loaded its own vocab embedding"
                 " weights instead of sharing them with the target model."
             )
 
@@ -374,17 +399,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             if draft_has_own_lm_head:
                 logger.info(
-                    "DFlash draft uses d2t vocab remapping; keeping the draft's "
-                    "own lm_head instead of sharing the target lm_head."
+                    "[spec_decode/base] DFlash draft uses d2t vocab remapping;"
+                    " keeping the draft's own lm_head instead of sharing the target"
+                    " lm_head."
                 )
             else:
-                logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
+                logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
                 if hasattr(model, "lm_head"):
                     self.model.lm_head = model.lm_head
                 elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
                     self.model.lm_head = model.get_language_model().lm_head
                 else:
-                    logger.warning("Target model has no accessible lm_head for sharing.")
+                    logger.warning(
+                        "[spec_decode/base] Target model has no accessible lm_head"
+                        " for sharing. Draft model will use its own lm_head."
+                        " This may cause incorrect logits if the draft lm_head"
+                        " is not trained."
+                    )
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
@@ -392,6 +423,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     layer_module.shared_head.head = model.lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
+            logger.info(
+                "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
+                " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
+                self.use_eagle,
+                self.enable_enpu,
+            )
             self.update_stream = torch.npu.Stream()
             self._runnable = ACLGraphWrapper(
                 self._run_merged_draft,
@@ -407,8 +444,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 del self.model.model.topk_indices_buffer
             self.model.model.topk_indices_buffer = target_language_model.model.topk_indices_buffer
             logger.info(
-                "Detecting MTP model with topk_indices_buffer."
-                "Sharing target model topk_indices_buffer with the draft model."
+                "[spec_decode/base] Detected MTP model with topk_indices_buffer."
+                " Sharing target model topk_indices_buffer with the draft model."
             )
 
     def get_model(self) -> nn.Module:
