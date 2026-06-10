@@ -99,13 +99,17 @@ If deploying a multi-node environment, set up the environment on each node.
 
 Installation Verification:
 After starting the container, run the following command to verify the installation:
+
 ```bash
 docker ps | grep vllm-ascend-env
 ```
+
 Expected result: The container is listed with status . You can also verify the vllm-ascend version inside the container:Up
+
 ```bash
 pip show vllm-ascend
 ```
+
 Expected result: The version information is displayed, matching the pulled image version.
 
 ### 4.2 Source Code Installation
@@ -113,15 +117,20 @@ Expected result: The version information is displayed, matching the pulled image
 If you prefer not to use the Docker image, you can build from source:
 
 1. Clone the repository:
-```bash
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-```
+
+    ```bash
+    git clone https://github.com/vllm-project/vllm-ascend.git
+    cd vllm-ascend
+    ```
+
 2. Install in development mode:
-```bash
-pip install -e .
-```
+
+    ```bash
+    pip install -e .
+    ```
+
 **Installation Verification:**
+
 ```bash
 pip show vllm-ascend
 ```
@@ -167,7 +176,9 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --async-scheduling
 ```
+
 :::{note}
+
 - Replace your_model_path with the actual model path (e.g., Modelscope ID or local path).
 
 - To enable quantization for Ascend, the quantization method must be `"ascend"`. If the model is not a quantized model, remove the `--quantization ascend` parameter.
@@ -178,6 +189,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 :::
 
 :::{note}
+
 - For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
 :::
 
@@ -368,7 +380,9 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
               "decode": {"dp_size": 8, "tp_size": 4}
           }}'
 ```
+
 :::{note}
+
 - For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
 :::
 
@@ -404,7 +418,6 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 ### Using AISBench
 
 For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
-
 
 ## 8 Performance
 
@@ -613,7 +626,6 @@ vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions
-
 
 This section provides complete, annotated launch commands for representative model variants. These configurations have been validated in production environments and can serve as a starting point for your deployment.
 

@@ -106,13 +106,17 @@ If deploying a multi-node environment, set up the environment on each node.
 
 Installation Verification:
 After starting the container, run the following command to verify the installation:
+
 ```bash
 docker ps | grep vllm-ascend-env
 ```
+
 Expected result: The container is listed with status . You can also verify the vllm-ascend version inside the container:Up
+
 ```bash
 pip show vllm-ascend
 ```
+
 Expected result: The version information is displayed, matching the pulled image version.
 
 ### 4.2 Source Code Installation
@@ -120,15 +124,20 @@ Expected result: The version information is displayed, matching the pulled image
 If you prefer not to use the Docker image, you can build from source:
 
 1. Clone the repository:
-```bash
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-```
+
+    ```bash
+    git clone https://github.com/vllm-project/vllm-ascend.git
+    cd vllm-ascend
+    ```
+
 2. Install in development mode:
-```bash
-pip install -e .
-```
+
+    ```bash
+    pip install -e .
+    ```
+
 **Installation Verification:**
+
 ```bash
 pip show vllm-ascend
 ```
@@ -169,6 +178,7 @@ vllm serve vllm-ascend/Qwen3-32B-W8A8 \
 ```
 
 :::{note}
+
 - Replace your_model_path with the actual model path (e.g., Modelscope ID or local path).
 
 - To enable quantization for Ascend, the quantization method must be `"ascend"`. If the model is not a quantized model, remove the `--quantization ascend` parameter.
@@ -177,6 +187,7 @@ vllm serve vllm-ascend/Qwen3-32B-W8A8 \
 :::
 
 :::{note}
+
 - For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
 :::
 
@@ -189,7 +200,6 @@ If the service starts successfully, the following startup log will be displayed:
 (APIServer pid=<pid>) INFO:     Waiting for application startup.
 (APIServer pid=<pid>) INFO:     Application startup complete.
 ```
-
 
 ## 6 Functional Verification
 
@@ -296,7 +306,7 @@ After several minutes, you will get the performance evaluation result.
 
 For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment) 
 
-<u>High Throughput Configuration:<u>
+<u>High Throughput Configuration:</u>
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -384,10 +394,8 @@ vllm serve /mnt/share/qwen3-32b-pdmix \
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions
 
-
 This section provides complete, annotated launch commands for representative model variants. These configurations have been validated in production environments and can serve as a starting point for your deployment.
 
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section only covers issues specific to Qwen3 Dense models.
-
