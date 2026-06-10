@@ -1111,8 +1111,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 AscendAttentionState.SpecDecoding,
             }
         )
-        o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
-        local_attn_output = self._forward(layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv)
+        local_attn_output, o_proj_full_handles = self._forward(
+            layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            need_gather_q_kv,
+            full_gather_wo_a_enabled,
+        )
         o_proj_input = self._restore_tp_head_layout(
             local_attn_output,
             layer_name,
@@ -1175,6 +1181,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         kv_cache: tuple,
         attn_metadata: list[M],
         need_gather_q_kv: bool = False,
+        full_gather_wo_a_enabled: bool = False,
     ):
         """Run full-sequence KV cache updates and local-token attention."""
         (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = DeviceOperator.unpack_dsa_forward_kv_cache(
@@ -1274,6 +1281,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         if wait_hidden_states_allgather_event:
             torch.npu.current_stream().wait_event(wait_hidden_states_allgather_event)
+
+        o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
         kv = self.wkv(hidden_states_cache)
         kv = self.kv_norm(kv)
@@ -1407,7 +1416,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             valid_local_tokens = int(local_seq_lengths_query[-1].item())
             if valid_local_tokens < attn_output.shape[0]:
                 attn_output[valid_local_tokens:].zero_()
-        return attn_output
+        return attn_output, o_proj_full_handles
 
     def _restore_tp_head_layout(
         self,
