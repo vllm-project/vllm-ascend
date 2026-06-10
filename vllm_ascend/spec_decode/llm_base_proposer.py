@@ -459,6 +459,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _draft_graph_capture_enabled(self) -> bool:
         return self.use_cuda_graph or getattr(self, "fused_with_main_graph", False)
 
+    def _draft_model_forward_context(self) -> AbstractContextManager[Any]:
+        if self.method == "mtp" and getattr(self, "fused_with_main_graph", False):
+            return self._skip_draft_model_compile_context()
+        return nullcontext()
+
+    @contextmanager
+    def _skip_draft_model_compile_context(self):
+        forward_context = get_forward_context() if is_forward_context_available() else None
+        saved_skip_compiled = getattr(forward_context, "skip_compiled", False) if forward_context is not None else False
+        if forward_context is not None:
+            forward_context.skip_compiled = True
+        with _maybe_eager_context(self.vllm_config):
+            try:
+                yield
+            finally:
+                if forward_context is not None:
+                    forward_context.skip_compiled = saved_skip_compiled
+
+    def _call_draft_model(self, model_kwargs: dict[str, Any]) -> Any:
+        return self.model(**model_kwargs)
+
     def build_graph_capture_attn_metadata(
         self,
         num_tokens: int,
@@ -475,6 +496,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         num_reqs = self._prepare_graph_capture_query_start_loc(num_tokens, num_reqs)
         num_computed_tokens_cpu = self.runner.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
+        positions_cpu = None
+        if self.use_compress:
+            positions_cpu = getattr(self.runner, "_dsa_positions_cpu_buf", None)
+            if positions_cpu is None:
+                raise RuntimeError(
+                    "Compressed DSA graph capture requires runner._dsa_positions_cpu_buf to be initialized."
+                )
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
@@ -490,7 +518,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
             slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
             positions=self.runner.positions,
-            positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
+            positions_cpu=positions_cpu,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
             max_seq_len=0,
@@ -983,7 +1011,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if self.method == "mtp":
                     model_kwargs["positions"] = model_positions
 
-            ret_hidden_states = raw_model(**model_kwargs)
+            with self._draft_model_forward_context():
+                ret_hidden_states = raw_model(**model_kwargs)
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
                 hidden_states_out = last_hidden_states
@@ -1038,7 +1067,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if self.pass_hidden_states_to_model:
                     model_kwargs["hidden_states"] = model_hidden_states
 
-                ret_hidden_states = raw_model(**model_kwargs)
+                with self._draft_model_forward_context():
+                    ret_hidden_states = raw_model(**model_kwargs)
                 if not self.model_returns_tuple():
                     last_hidden_states = ret_hidden_states
                     hidden_states_out = last_hidden_states
@@ -1115,6 +1145,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
             self.query_start_loc.copy_to_gpu()
 
+            positions_cpu = None
+            if self.use_compress:
+                positions_cpu = getattr(self.runner, "_dsa_positions_cpu_buf", None)
+                if positions_cpu is None:
+                    raise RuntimeError(
+                        "Compressed DSA graph capture requires runner._dsa_positions_cpu_buf to be initialized."
+                    )
+
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
@@ -1131,7 +1169,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
                 positions=self.runner.positions,
-                positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
+                positions_cpu=positions_cpu,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
@@ -1606,7 +1644,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if self.method == "mtp":
                     model_kwargs["positions"] = model_positions
 
-        ret_hidden_states = self.model(**model_kwargs)
+        with self._draft_model_forward_context():
+            ret_hidden_states = self._call_draft_model(model_kwargs)
         if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
             hidden_states = last_hidden_states
@@ -1781,7 +1820,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = model_hidden_states
 
-            ret_hidden_states = self.model(**model_kwargs)
+            with self._draft_model_forward_context():
+                ret_hidden_states = self._call_draft_model(model_kwargs)
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
