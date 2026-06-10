@@ -107,6 +107,7 @@ Expected result: The version information is displayed, matching the pulled image
 ### 4.2 Source Code Installation
 
 If you prefer not to use the Docker image, you can build from source:
+
 1.Clone the repository:
 ```bash
 git clone https://github.com/vllm-project/vllm-ascend.git
@@ -120,23 +121,18 @@ Installation Verification:
 ```bash
 pip show vllm-ascend
 ```
-If you want to deploy a multi-node envir  onment, you need to set up environment on each node.
+
+Expected result: The version information is displayed, confirming a successful installation.
+
+:::{note}
+If you want to deploy a multi-node environment, you need to set up environment on each node.
+:::
 
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios.
-
-:::{note}
-- Replace your_model_path with the actual model path (e.g., Modelscope ID or local path).
-
-- To enable quantization for Ascend, the quantization method must be `"ascend"`. If the model is not a quantized model, remove the `--quantization ascend` parameter.
-
-- --enable-expert-parallel enables Expert Parallelism, which is required for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP.
-
-- If you are already inside the container (see [Section 4.1](#41-docker-image-installation)), skip the Docker run step and proceed directly to **Start the server**.
-:::
 
 **Start the server:**
 
@@ -151,8 +147,8 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export TASK_QUEUE_ENABLE=1
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
-    --host 0.0.0.0 \
-    --port 8000 \
+    --host <host_ip> \
+    --port <port> \
     --tensor-parallel-size 8 \
     --data-parallel-size 1 \
     --seed 1024 \
@@ -168,6 +164,15 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --async-scheduling
 ```
+:::{note}
+- Replace your_model_path with the actual model path (e.g., Modelscope ID or local path).
+
+- To enable quantization for Ascend, the quantization method must be `"ascend"`. If the model is not a quantized model, remove the `--quantization ascend` parameter.
+
+- --enable-expert-parallel enables Expert Parallelism, which is required for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP.
+
+- If you are already inside the container (see [Section 4.1](#41-docker-image-installation)), skip the Docker run step and proceed directly to **Start the server**.
+:::
 
 :::{note}
 - For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
@@ -175,133 +180,19 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 
 **Service Verification:**
 
-After the service is started, verify it is running:
+If the service starts successfully, the following startup log will be displayed:
 
-```bash
-curl http://<node0_ip>:<port>/v1/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "qwen3",
-        "prompt": "The future of AI is",
-        "max_tokens": 50,
-        "temperature": 0
-    }'
+```text
+(APIServer pid=<pid>) INFO:     Started server process [<pid>]
+(APIServer pid=<pid>) INFO:     Waiting for application startup.
+(APIServer pid=<pid>) INFO:     Application startup complete.
 ```
-
-Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
 
 ### 5.2 Multi-Node PD Separation Deployment
 
-Assume you have Atlas 800I A3 (64G × 16) nodes (or 2× A2 nodes), and want to deploy the Qwen3-235B-A22B model across multiple nodes with Data Parallelism.
+The complete PD disaggregation deployment process involves multi-node communication, KV cache transfer, and proxy configuration. For the detailed deployment guide, please refer to [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](../features/pd_disaggregation_mooncake_multi_node.md).
 
-**Node 0 (Master):**
-
-```shell
-#!/bin/sh
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxxx"
-local_ip="xxxx"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
-
-vllm serve Qwen/Qwen3-235B-A22B \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --data-parallel-size 2 \
-    --api-server-count 2 \
-    --data-parallel-size-local 1 \
-    --data-parallel-address $local_ip \
-    --data-parallel-rpc-port 13389 \
-    --seed 1024 \
-    --served-model-name qwen3 \
-    --tensor-parallel-size 8 \
-    --enable-expert-parallel \
-    --max-num-seqs 16 \
-    --max-model-len 32768 \
-    --max-num-batched-tokens 4096 \
-    --trust-remote-code \
-    --async-scheduling \
-    --gpu-memory-utilization 0.9
-```
-
-**Node 1 (Worker):**
-
-```shell
-#!/bin/sh
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxxx"
-local_ip="xxxx"
-
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
-
-vllm serve Qwen/Qwen3-235B-A22B \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --headless \
-    --data-parallel-size 2 \
-    --data-parallel-size-local 1 \
-    --data-parallel-start-rank 1 \
-    --data-parallel-address $node0_ip \
-    --data-parallel-rpc-port 13389 \
-    --seed 1024 \
-    --tensor-parallel-size 8 \
-    --served-model-name qwen3 \
-    --max-num-seqs 16 \
-    --max-model-len 32768 \
-    --max-num-batched-tokens 4096 \
-    --enable-expert-parallel \
-    --trust-remote-code \
-    --async-scheduling \
-    --gpu-memory-utilization 0.9 \
-```
-
-If the service starts successfully, the following information will be displayed on node 0:
-
-```shell
-INFO:     Started server process [44610]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Started server process [44611]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-```
-
-### 5.3 Multi-Node Ray Deployment
-
-Refer to [Ray Distributed (Qwen/Qwen3-235B-A22B)](../features/ray.md).
-
-### 5.4 Prefill-Decode Disaggregation
-
-Refer to [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](../features/pd_disaggregation_mooncake_multi_node.md) for the detailed deployment guide.
-
-There is an example of Three Node A3 — PD Disaggregation:
-
-On three Atlas 800I A3 (64G × 16) servers, the recommended setup uses one node as the Prefill instance and two nodes as the Decode instance.
+The following example shows the parameter configuration for a three-node A3 PD disaggregation scenario (one Prefill node + two Decode nodes):
 
 **Prefill Node:**
 
@@ -330,8 +221,8 @@ export TASK_QUEUE_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
-    --host 0.0.0.0 \
-    --port 8000 \
+    --host <host_ip> \
+    --port <port> \
     --tensor-parallel-size 8 \
     --data-parallel-size 2 \
     --data-parallel-size-local 2 \
@@ -386,8 +277,8 @@ export TASK_QUEUE_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
-    --host 0.0.0.0 \
-    --port 8000 \
+    --host <host_ip> \
+    --port <port> \
     --tensor-parallel-size 4 \
     --data-parallel-size 8 \
     --data-parallel-size-local 4 \
@@ -443,8 +334,8 @@ export TASK_QUEUE_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
-    --host 0.0.0.0 \
-    --port 8000 \
+    --host <host_ip> \
+    --port <port> \
     --headless \
     --tensor-parallel-size 4 \
     --data-parallel-size 8 \
@@ -472,18 +363,20 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
           "kv_connector_extra_config": {
               "prefill": {"dp_size": 2, "tp_size": 8},
               "decode": {"dp_size": 8, "tp_size": 4}
-          }'
+          }}'
 ```
+:::{note}
+- For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
+:::
 
-**PD Proxy:**
+**Service Verification:**
 
-```shell
-python load_balance_proxy_server_example.py \
-    --port 12347 \
-    --prefiller-hosts prefill_node_1_ip \
-    --prefiller-port 8000 \
-    --decoder-hosts decode_node_1_ip \
-    --decoder-ports 8000
+If the service starts successfully, the following startup log will be displayed:
+
+```text
+(APIServer pid=<pid>) INFO:     Started server process [<pid>]
+(APIServer pid=<pid>) INFO:     Waiting for application startup.
+(APIServer pid=<pid>) INFO:     Application startup complete.
 ```
 
 ## 6 Functional Verification
@@ -505,18 +398,18 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-### 7.1 Using AISBench
+### Using AISBench
 
 For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
 
 ## 8 Performance
 
-### 8.1 Using AISBench
+### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### 8.2 Using vLLM Benchmark
+### Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
@@ -544,30 +437,32 @@ After several minutes, you will get the performance evaluation result.
 
 ## 9 Performance Tuning
 
-> **Important**: The configurations provided in this section are validated in specific test environments and are **not** guaranteed to be globally optimal. Actual performance depends on factors such as input/output length distribution, request rate, prefix cache hit rate, hardware configuration, and precision requirements. It is strongly recommended to use the following as a starting point and refer to [Section 9.2](#92-tuning-guidelines) for tuning based on your own workload.
-
 ### 9.1 Recommended Configurations
+
+> **Important**: The configurations provided in this section are validated in specific test environments and are **not** guaranteed to be globally optimal. Actual performance depends on factors such as input/output length distribution, request rate, prefix cache hit rate, hardware configuration, and precision requirements. It is strongly recommended to use the following as a starting point and refer to [Section 9.2](#92-tuning-guidelines) for tuning based on your own workload.
 
 #### Table 1: Scenario Overview
 
-| Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|-------------|----------------|---------------------|
-| High Throughput<br>(3.5K → 1.5K) | Single-node | 16 (A3) | Qwen3-235B-A22B-W8A8 | For high throughput with MoE models, try tuning DP and TP sizes (DP=4, TP=4), enabling FlashComm (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`), Fused MC2 (`VLLM_ASCEND_ENABLE_FUSED_MC2=1`), and expanding `max-num-seqs` for larger batch concurrency |
-| High Throughput<br>(3.5K → 1.5K) | PD Disaggregation (3 nodes) | 48 (3×A3) | Qwen3-235B-A22B-W8A8 | For PD disaggregation, try tuning prefill/decode TP and DP ratios, using Fused MC2=2 for large-scale EP, and tuning `max-num-batched-tokens` for prefill vs decode balance |
-| Low Latency<br>(TPOT bound) | PD Hybrid (single node) | 16 (A3) | Qwen3-235B-A22B-W8A8 | For low latency, try reducing TP to 16 with DP=1 (full model on all NPUs), enabling speculative decoding (Eagle3), and disabling unnecessary optimizations |
-| Long Context<br>(up to 135K) | PD Hybrid (single node) | 16 (A3) | Qwen3-235B-A22B-W8A8 | For long context scenarios, try enabling Context Parallelism (`--decode-context-parallel-size 2`), yarn rope-scaling (`--hf-overrides`), and reducing `max-num-seqs` to fit KV cache |
+| High Throughput | Single-Node (TP4, DP4) | 16 (A3) | W8A8 | DP and TP distribute MoE experts across 16 NPUs for maximum throughput |
+| High Throughput | PD Disaggregation (3 nodes) | 48 (3×A3) | W8A8 | 3-node PD separation balances prefill and decode resources for high throughput |
+| Low Latency | PD Hybrid (TP16) | 16 (A3) | W8A8 | 16-NPU TP minimizes per-token latency with speculative decoding |
+| Long Context | PD Hybrid (TP8, CP2) | 16 (A3) | W8A8 | 8-NPU TP with Context Parallelism extends context to 135K tokens |
+
+> **Note**: `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Total NPUs | Tensor Parallel | Data Parallel | Expert Parallel | Context Parallel | Max Num Seqs | Max Model Len | Max Batched Tokens | Speculative | FlashComm | Fused MC2 |
-|----------|-----------|----------------|---------------|----------------|-----------------|-------------|--------------|-------------------|-------------|-----------|-----------|
-| Single-Node High Throughput | 16 | 4 | 4 | Yes | - | 128 | 40960 | 16384 | No | Yes | 1 |
-| PD Disaggregation High Throughput | 48 | P:8 / D:4 | P:2 / D:8 | Yes | - | P:24 / D:128 | 40960 | P:16384 / D:256 | No | Yes | 2 |
-| PD Hybrid Low Latency | 16 | 16 | 1 | Yes | - | 128 | 32768 | 16384 | Eagle3 | Yes | No |
-| PD Hybrid Long Context | 16 | 8 | 1 | Yes | 2 | 32 | 135000 | 16384 | No | Yes | 1 |
+| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
+| High Throughput | Single-Node (TP4, DP4) | 16 | 4 | 4 | 128 | 128 | 40960 | | On | On | On | On |
+| Low Latency | PD Hybrid (TP16) | 16 | 16 | 1 | 128 | 128 | 32768 | | Off | On | On | On |
+| Long Context | PD Hybrid (TP8, CP2) | 16 | 8 | 1 | 32 | 32 | 135000 | | On | On | On | On |
 
+> **Note**: For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
 
-Single-node PD Hybrid — High Throughput (TPOT ~50ms):
+<u>Single-node PD Hybrid — High Throughput (TPOT ~50ms):</u>
 
 Single-node PD hybrid deployment optimized for maximum throughput on Atlas 800I A3 (64G × 16):
 
@@ -594,15 +489,15 @@ export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
     --served-model-name "qwen" \
-    --host 0.0.0.0 \
-    --port 20002 \
+    --host <host_ip> \
+    --port <port> \
     --async-scheduling \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
     --data-parallel-size-local 4 \
     --data-parallel-start-rank 0 \
     --data-parallel-address <node_ip> \
-    --data-parallel-rpc-port 13395 \
+    --data-parallel-rpc-port <rpc_port> \
     --enable-expert-parallel \
     --max-num-seqs 128 \
     --max-model-len 32768 \
@@ -615,7 +510,7 @@ vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
     --additional-config '{"enable_cpu_binding":true}'
 ```
 
-Single-node PD Hybrid — Low Latency (TPOT ~20ms):
+<u>Single-node PD Hybrid — Low Latency (TPOT ~20ms):</u>
 
 Single-node PD hybrid deployment optimized for low latency with speculative decoding (Eagle3):
 
@@ -640,15 +535,15 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
     --served-model-name "qwen" \
-    --host 0.0.0.0 \
-    --port 20002 \
+    --host <host_ip> \
+    --port <port> \
     --async-scheduling \
     --tensor-parallel-size 16 \
     --data-parallel-size 1 \
     --data-parallel-size-local 1 \
     --data-parallel-start-rank 0 \
     --data-parallel-address <node_ip> \
-    --data-parallel-rpc-port 13395 \
+    --data-parallel-rpc-port <rpc_port> \
     --enable-expert-parallel \
     --max-num-seqs 128 \
     --max-model-len 32768 \
@@ -662,7 +557,7 @@ vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
     --additional-config '{"enable_cpu_binding":true}'
 ```
 
-Single-node PD Hybrid — Long Context (up to 135K):
+<u>Single-node PD Hybrid — Long Context (up to 135K):</u>
 
 Single-node PD hybrid deployment optimized for long context with Context Parallelism and yarn rope-scaling:
 
@@ -689,8 +584,8 @@ export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
     --served-model-name "qwen" \
-    --host 0.0.0.0 \
-    --port 20002 \
+    --host <host_ip> \
+    --port <port> \
     --tensor-parallel-size 8 \
     --data-parallel-size 1 \
     --decode-context-parallel-size 2 \
@@ -710,6 +605,9 @@ vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
 ```
 
 ### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions
 

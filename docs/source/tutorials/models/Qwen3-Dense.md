@@ -114,6 +114,7 @@ Expected result: The version information is displayed, matching the pulled image
 ### 4.2 Source Code Installation
 
 If you prefer not to use the Docker image, you can build from source:
+
 1.Clone the repository:
 ```bash
 git clone https://github.com/vllm-project/vllm-ascend.git
@@ -127,22 +128,18 @@ Installation Verification:
 ```bash
 pip show vllm-ascend
 ```
-If you want to deploy a multi-node environment, you need to set up environment on each node.
 
+Expected result: The version information is displayed, confirming a successful installation.
+
+:::{note}
+If you want to deploy a multi-node environment, you need to set up environment on each node.
+:::
 
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios.
-
-:::{note}
-- Replace your_model_path with the actual model path (e.g., Modelscope ID or local path).
-
-- To enable quantization for Ascend, the quantization method must be `"ascend"`. If the model is not a quantized model, remove the `--quantization ascend` parameter.
-
-- If you are already inside the container (see [Section 4.1](#41-docker-image-installation)), skip the Docker run step and proceed directly to **Start the server**.
-:::
 
 **Start the server:**
 
@@ -163,9 +160,17 @@ vllm serve vllm-ascend/Qwen3-32B-W8A8 \
     --max-model-len 5500 \
     --max-num-batched-tokens 40960 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --port 8113 \
+    --port <port> \
     --gpu-memory-utilization 0.9
 ```
+
+:::{note}
+- Replace your_model_path with the actual model path (e.g., Modelscope ID or local path).
+
+- To enable quantization for Ascend, the quantization method must be `"ascend"`. If the model is not a quantized model, remove the `--quantization ascend` parameter.
+
+- If you are already inside the container (see [Section 4.1](#41-docker-image-installation)), skip the Docker run step and proceed directly to **Start the server**.
+:::
 
 :::{note}
 - For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
@@ -173,22 +178,13 @@ vllm serve vllm-ascend/Qwen3-32B-W8A8 \
 
 **Service Verification:**
 
-After the service is started, verify it is running:
+If the service starts successfully, the following startup log will be displayed:
 
-```bash
-# Check that the server process is listening
-curl http://localhost:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "qwen3",
-        "messages": [
-            {"role": "user", "content": "Hello."}
-        ],
-        "max_tokens": 10
-    }'
-
+```text
+(APIServer pid=<pid>) INFO:     Started server process [<pid>]
+(APIServer pid=<pid>) INFO:     Waiting for application startup.
+(APIServer pid=<pid>) INFO:     Application startup complete.
 ```
-Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
 
 
 ## 6 Functional Verification
@@ -198,7 +194,7 @@ After the service is started, the model can be invoked by sending a prompt.
 **Completions API:**
 
 ```bash
-curl http://localhost:8000/v1/completions \
+curl http://localhost:<port>/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3",
@@ -213,7 +209,7 @@ curl http://localhost:8000/v1/completions \
 **Chat Completions API:**
 
 ```bash
-curl http://localhost:8113/v1/chat/completions \
+curl http://localhost:<port>/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3",
@@ -231,17 +227,17 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-### 7.1 Using AISBench
+### Using AISBench
 
 For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
 ## 8 Performance
 
-### 8.1 Using AISBench
+### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### 8.2 Using vLLM Benchmark
+### Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
@@ -257,7 +253,7 @@ Take `serve` as an example:
 vllm bench serve \
     --model vllm-ascend/Qwen3-32B-W8A8 \
     --served-model-name qwen3 \
-    --port 8113 \
+    --port <port> \
     --dataset-name random \
     --random-input 200 \
     --num-prompts 200 \
@@ -270,33 +266,33 @@ After several minutes, you will get the performance evaluation result.
 
 ## 9 Performance Tuning
 
-> **Important**: The configurations provided in this section are validated in specific test environments and are **not** guaranteed to be globally optimal. Actual performance depends on factors such as input/output length distribution, request rate, prefix cache hit rate, hardware configuration, and precision requirements. It is strongly recommended to use the following as a starting point and refer to [Section 9.2](#92-tuning-guidelines) for tuning based on your own workload.
-
 ### 9.1 Recommended Configurations
+
+> **Important**: The configurations provided in this section are validated in specific test environments and are **not** guaranteed to be globally optimal. Actual performance depends on factors such as input/output length distribution, request rate, prefix cache hit rate, hardware configuration, and precision requirements. It is strongly recommended to use the following as a starting point and refer to [Section 9.2](#92-tuning-guidelines) for tuning based on your own workload.
 
 #### Table 1: Scenario Overview
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|-------------|----------------|---------------------|
-| High Throughput<br>(3.5K → 1.5K) | Single-node | 4 (A3) | W8A8 (PDMix) | For short-sequence high throughput, try adjusting TP size (4 or 8), enabling FlashComm and weight prefetch, tuning `pa_shape_list` via `--additional-config`, and expanding `cudagraph_capture_sizes` for larger batch concurrency |
-| Long Context<br>(up to 135K) | Single-node | 4 (A3) | W8A8 (PDMix) | For long-context scenarios, try adjusting yarn RoPE parameters (`--hf-overrides`), `--max-num-batched-tokens` for chunked prefill behavior, and enabling FlashComm for TP communication efficiency |
-| Low Latency<br>(real-time/interactive) | Single-node | 8 (A3) | W8A8 (PDMix) | For low-latency interactive scenarios, try using `cudagraph_mode: FULL_DECODE_ONLY`, tuning `cudagraph_capture_sizes` for small batch sizes, enabling `--async-scheduling`, and adjusting `--block-size` |
+| High Throughput | Single-Node (TP4) | 4 (A3) | W8A8 | 4-card TP maximizes concurrent request processing |
+| Long Context | Single-Node (TP4) | 4 (A3) | W8A8 | 4-card TP extends context window for long sequences |
+| Low Latency | Single-Node (TP8) | 8 (A3) | W8A8 | 8-card TP reduces per-token latency for interactive responses |
 
 > **Note**: `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
 #### Table 2: Detailed Node Configuration
 
 | Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|-----------|-----------|--------------|------------------|
-| High Throughput | Server-D Node | 4 | 4 | 1 | Dynamic | Dynamic | 5500 | 3 (eagle3) | N/A | N/A | FC Enabled | Enabled |
-| Long Context | Server-D Node | 4 | 4 | 1 | Dynamic | Dynamic | 135000 | 3 (eagle3) | N/A | N/A | FC Enabled | Enabled |
-| Low Latency | Server-D Node | 8 | 8 | 1 | Dynamic | Dynamic | 5500 | 3 (eagle3) | N/A | N/A | FC Disabled | Enabled |
+|----------|---------------|-------|----|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
+| High Throughput | Single-Node | 4 | 4 | 1 | 32 | 100 | 5500 | | Off | Off | On | On |
+| Long Context | Single-Node | 4 | 4 | 1 | 32 | 14 | 135000 | | Off | Off | On | On |
+| Low Latency | Single-Node | 8 | 8 | 1 | 1 | 100 | 5500 | | Off | Off | Off | On |
 
 > **Note**: BS (Batch Size) and Concurrency values depend on the specific workload and request pattern. Refer to the reference configurations below for detailed `cudagraph_capture_sizes` and `pa_shape_list` settings.
 
-For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment) and the reference configurations in [Section 9.3](#93-reference-configurations).
+For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment) 
 
-High Throughput Configuration:
+<u>High Throughput Configuration:<u>
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -318,13 +314,13 @@ vllm serve /mnt/share/qwen3-32b-pdmix \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600,640,660,680,700,720]}' \
   --additional-config '{"weight_prefetch_config":{"enabled":true}, "pa_shape_list":[32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256]}'\
   --speculative_config '{"method": "eagle3", "model":"/mnt/share/weights/qwen-eagle3/qwen3_32B_rot/", "enforce_eager": true, "num_speculative_tokens": 3}' \
-  --host 141.61.133.127 \
-  --port 2000 \
+  --host <host_ip> \
+  --port <port> \
   --block-size 128 \
   --gpu-memory-utilization 0.9
 ```
 
-Long Context Configuration:
+<u>Long Context Configuration:</u>
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -333,8 +329,8 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /mnt/share/qwen3-32b-pdmix \
-  --host 0.0.0.0 \
-  --port 8004 \
+  --host <host_ip> \
+  --port <port> \
   --served-model-name qwen \
   --trust-remote-code \
   --seed 1024 \
@@ -351,7 +347,7 @@ vllm serve /mnt/share/qwen3-32b-pdmix \
   --quantization ascend
 ```
 
-Low Latency Configuration:
+<u>Low Latency Configuration:</u>
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -370,12 +366,15 @@ vllm serve /mnt/share/qwen3-32b-pdmix \
   --quantization ascend \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}' \
   --speculative_config '{"method": "eagle3", "model":"/mnt/share/weights/qwen-eagle3/qwen3_32B_rot/", "enforce_eager": true, "num_speculative_tokens": 3}' \
-  --port 2000 \
+  --port <port> \
   --block-size 128 \
   --gpu-memory-utilization 0.9
 ```
 
 ### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions
 
@@ -386,20 +385,3 @@ This section provides complete, annotated launch commands for representative mod
 
 For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section only covers issues specific to Qwen3 Dense models.
 
-### Q: How do I choose between single-node and multi-node deployment?
-
-Single-node deployment is recommended when the model fits within the memory of a single node's NPUs. For models like Qwen3-32B (BF16), which requires 4 × 64G cards, multi-NPU within a single node (TP) is sufficient. Multi-node deployment is only needed when the total NPU count exceeds a single node's capacity.
-
-### Q: What quantization method should I use?
-
-- **BF16**: Best accuracy, highest memory footprint. Use for accuracy-critical applications or when memory is sufficient.
-- **W8A8**: Good balance of accuracy and memory reduction. Use for large models (e.g., 32B) on memory-constrained hardware.
-- **W4A8/W4A4**: Maximum memory reduction. Suitable for deploying larger models on smaller hardware configurations, with some accuracy trade-off.
-
-### Q: When should I enable FlashComm_v1?
-
-Enable FlashComm_v1 (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`) when using Tensor Parallelism (TP ≥ 2) with high concurrency. It is threshold-protected and will not activate in low-concurrency scenarios where it could degrade performance.
-
-### Q: What is the difference between FIA and PA operators for attention?
-
-FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
