@@ -44,7 +44,11 @@ jobs:
       - name: Run generate_cache_matrix.py (full matrix)
         run: |
           python3 .github/workflows/scripts/generate_cache_matrix.py \
-            > /tmp/full_matrix.json
+            | tee /tmp/full_matrix.json
+
+          echo "::group::Full matrix pretty JSON"
+          python3 -m json.tool /tmp/full_matrix.json
+          echo "::endgroup::"
 
       - name: Validate full matrix is valid JSON with entries
         run: |
@@ -75,7 +79,11 @@ jobs:
         run: |
           python3 .github/workflows/scripts/generate_cache_matrix.py \
             --branch-filter main \
-            > /tmp/filtered_matrix.json
+            | tee /tmp/filtered_matrix.json
+
+          echo "::group::Filtered matrix pretty JSON"
+          python3 -m json.tool /tmp/filtered_matrix.json
+          echo "::endgroup::"
 
       - name: Validate filtered matrix only contains main
         run: |
@@ -102,6 +110,7 @@ jobs:
           status=$?
           set -e
 
+          echo "Exit status: $status"
           echo "$output"
 
           if [[ "$status" -eq 0 ]]; then
