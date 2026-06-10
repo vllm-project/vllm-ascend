@@ -143,7 +143,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
         self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
 
-        # PD separation detection: P (kv_producer) uses full_mesh_v2, D (kv_consumer) uses hierarchy.
+        # PD separation detection: P (kv_producer) uses fullmesh_v2, D (kv_consumer) uses hierarchy.
         self.is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
         self.is_pd = vllm_config.kv_transfer_config is not None
         if self.is_pd:
@@ -224,9 +224,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 }
             )
         if self.need_comm_alg:
-            # PD separation: P (kv_producer) uses full_mesh_v2, D (kv_consumer) uses hierarchy.
+            # PD separation: P (kv_producer) uses fullmesh_v2, D (kv_consumer) uses hierarchy.
             if self.is_pd and not self.is_kv_consumer:
-                stage1_kwargs.update({"comm_alg": "full_mesh_v2"})
+                stage1_kwargs.update({"comm_alg": "fullmesh_v2"})
             else:
                 stage1_kwargs.update({"comm_alg": "hierarchy"})
 
@@ -332,9 +332,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 }
             )
         if self.need_comm_alg:
-            # PD separation: P (kv_producer) uses full_mesh_v2, D (kv_consumer) uses hierarchy.
+            # PD separation: P (kv_producer) uses fullmesh_v2, D (kv_consumer) uses hierarchy.
             if self.is_pd and not self.is_kv_consumer:
-                stage3_kwargs.update({"comm_alg": "full_mesh_v2"})
+                stage3_kwargs.update({"comm_alg": "fullmesh_v2"})
             else:
                 stage3_kwargs.update({"comm_alg": "hierarchy"})
 
