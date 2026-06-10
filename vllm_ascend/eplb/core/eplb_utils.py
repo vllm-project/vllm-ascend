@@ -20,7 +20,8 @@ from collections import defaultdict
 
 import numpy as np
 import torch
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 from vllm_ascend.utils import vllm_version_is
 

@@ -19,7 +19,8 @@ import json
 from pathlib import Path
 
 from vllm import envs
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,

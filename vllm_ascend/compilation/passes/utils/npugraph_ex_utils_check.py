@@ -17,7 +17,8 @@
 #
 
 from torch._inductor.pattern_matcher import Match
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 
 def extra_stream_scope_check(match: Match) -> bool:

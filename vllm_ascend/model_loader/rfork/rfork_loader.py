@@ -23,7 +23,7 @@ from torch.nn import Module
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.distributed import get_tensor_model_parallel_rank
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
@@ -33,6 +33,7 @@ from vllm.model_executor.model_loader.utils import (
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 from vllm_ascend.model_loader.rfork.rfork_worker import RForkWorker
+logger = init_logger(__name__)
 
 
 @register_model_loader("rfork")

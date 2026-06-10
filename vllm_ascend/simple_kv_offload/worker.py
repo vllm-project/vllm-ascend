@@ -26,11 +26,12 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm.config import VllmConfig
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 
 from vllm_ascend.simple_kv_offload.copy_backend import NPUDmaCopyBackend
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig

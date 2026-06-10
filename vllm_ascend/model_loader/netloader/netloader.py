@@ -22,7 +22,7 @@ from copy import deepcopy
 import torch
 from torch import nn
 from vllm.config import LoadConfig, ModelConfig, VllmConfig
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -32,6 +32,7 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from .interaction.elastic import ElasticServer
 from .load import elastic_load
 from .utils import find_free_port, is_valid_path_prefix
+logger = init_logger(__name__)
 
 DRAFT_PORT_OFFSET = 10000
 

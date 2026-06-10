@@ -13,7 +13,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
     SimpleCPUOffloadConnector,
 )
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 from vllm_ascend.simple_kv_offload.worker import SimpleCPUOffloadNPUWorker
 

@@ -22,7 +22,8 @@ from typing import Any
 
 import torch
 from torch.distributed import ReduceOp
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 from vllm_ascend.utils import find_hccl_library
 

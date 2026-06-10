@@ -16,7 +16,8 @@
 
 import threading
 
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 from vllm_ascend.model_loader.rfork.seed_protocol import RForkSeedProtocol
 from vllm_ascend.model_loader.rfork.seed_server import start_rfork_server

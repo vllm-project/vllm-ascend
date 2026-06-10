@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -38,6 +38,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
+logger = init_logger(__name__)
 
 
 @register_scheme("W8A8_MXFP8", "linear")

@@ -19,13 +19,14 @@ import numpy
 import torch
 import torch.distributed as dist
 import vllm.envs as envs
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+logger = init_logger(__name__)
 
 
 class EplbUpdator:

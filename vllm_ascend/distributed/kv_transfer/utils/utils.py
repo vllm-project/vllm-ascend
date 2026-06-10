@@ -6,7 +6,8 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 from vllm_ascend.distributed.parallel_state import get_p_tp_group
 

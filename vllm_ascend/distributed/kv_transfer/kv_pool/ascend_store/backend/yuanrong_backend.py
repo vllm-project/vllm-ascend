@@ -7,10 +7,11 @@ import regex as re
 import torch
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.utils.network_utils import split_host_port
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+logger = init_logger(__name__)
 
 
 def _iter_slices(total: int, batch_size: int):

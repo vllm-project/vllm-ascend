@@ -18,8 +18,9 @@ import time
 from urllib.error import HTTPError
 
 import requests
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.utils.network_utils import get_ip
+logger = init_logger(__name__)
 
 REQUEST_TIMEOUT_SEC = 10.0
 HEARTBEAT_LOG_EVERY_N = 4

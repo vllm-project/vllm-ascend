@@ -43,7 +43,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.distributed.utils import get_pp_indices
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -59,6 +59,7 @@ from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
 from vllm_ascend.utils import enable_custom_op
+logger = init_logger(__name__)
 
 # isort: off
 if TYPE_CHECKING:

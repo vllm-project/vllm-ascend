@@ -26,7 +26,8 @@ from torch.distributed import ProcessGroup, is_hccl_available
 from torch.distributed.distributed_c10d import Backend, BackendConfig, PrefixStore, _world
 from torch.distributed.rendezvous import rendezvous
 from torch_npu._C._distributed_c10d import ProcessGroupHCCL
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 
 def stateless_init_process_group(

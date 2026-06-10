@@ -26,7 +26,8 @@ import tempfile
 from pathlib import Path
 
 import vllm
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 VLLM_VERSION = vllm.__version__
 # Configuration file name

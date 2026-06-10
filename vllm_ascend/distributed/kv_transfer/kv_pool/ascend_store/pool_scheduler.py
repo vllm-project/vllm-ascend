@@ -5,7 +5,7 @@ import vllm.envs as envs
 import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.block_pool import BlockPool
@@ -33,6 +33,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     infer_group_cache_families,
     normalize_block_ids_by_group,
 )
+logger = init_logger(__name__)
 
 
 class KVPoolScheduler:

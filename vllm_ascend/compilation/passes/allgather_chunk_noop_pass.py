@@ -4,7 +4,8 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 
 class AllGatherChunkNoOpCleanupPass(VllmInductorPass):

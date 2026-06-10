@@ -17,8 +17,9 @@ import json
 import os
 from typing import TYPE_CHECKING, Any
 
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.utils.math_utils import cdiv
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

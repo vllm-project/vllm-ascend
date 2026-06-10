@@ -25,7 +25,7 @@ from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 
 # todo: please remove it when solve cuda hard code in vllm
@@ -53,6 +53,7 @@ from vllm_ascend.utils import (
     is_310p,
     enable_sp,
 )
+logger = init_logger(__name__)
 
 # Since vllm-project/vllm#43746, DeepSeek V4 model classes no longer
 # carry @support_torch_compile. This makes vLLM auto-enable the breakable

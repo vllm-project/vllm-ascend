@@ -10,7 +10,8 @@ import torch
 from numba import njit  # type: ignore
 from scipy import stats  # type: ignore
 from scipy.optimize import linear_sum_assignment  # type: ignore
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 

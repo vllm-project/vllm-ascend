@@ -29,13 +29,14 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size, get_world_group
 from vllm.forward_context import get_forward_context
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from xlite._C import AttnMeta, AttnMHA, Model, ModelConfig, Runtime, ScoringFuncSigmoid, ScoringFuncSoftmax
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState, AscendMetadata
 from vllm_ascend.xlite.utils import _get_nested_attr, rgetattr
+logger = init_logger(__name__)
 
 XliteInitResult: TypeAlias = tuple[Model, torch.Tensor, int, torch.dtype]
 XliteForwardResult: TypeAlias = torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]

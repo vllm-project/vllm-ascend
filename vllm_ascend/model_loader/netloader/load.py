@@ -16,7 +16,8 @@
 
 import time
 
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 from .executor.elastic_load import P2PLoad
 from .interaction.elastic import ElasticClient

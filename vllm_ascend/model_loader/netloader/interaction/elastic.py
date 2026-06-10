@@ -21,7 +21,8 @@ from contextlib import suppress
 
 import regex as re
 import torch
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 from ..executor.elastic_load import P2PSend
 from ..utils import find_free_port

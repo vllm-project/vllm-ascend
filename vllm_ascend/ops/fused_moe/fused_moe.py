@@ -24,7 +24,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # type: ignore
@@ -48,6 +48,7 @@ from vllm_ascend.utils import (
     shared_experts_calculation_stream,
     vllm_version_is,
 )
+logger = init_logger(__name__)
 
 if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map

@@ -20,7 +20,8 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from vllm.logger import logger
+from vllm_ascend.logger import init_logger
+logger = init_logger(__name__)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.quantization.methods.base import QuantType
