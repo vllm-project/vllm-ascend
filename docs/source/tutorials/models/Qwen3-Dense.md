@@ -283,10 +283,10 @@ After several minutes, you will get the performance evaluation result.
 #### Table 2: Detailed Node Configuration
 
 | Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
-| High Throughput | Single-Node | 4 | 4 | 1 | 32 | 100 | 5500 | | Off | Off | On | On |
-| Long Context | Single-Node | 4 | 4 | 1 | 32 | 14 | 135000 | | Off | Off | On | On |
-| Low Latency | Single-Node | 8 | 8 | 1 | 1 | 100 | 5500 | | Off | Off | Off | On |
+|----------|---------------|-------|----|----|----|-------------|--------------------|-----------|-----------|--------------|--------------|------------------|
+| High Throughput | Single-Node | 4 | 4 | 1 | 32 | 100 | 5500 | 3 | Off | Off | On | On |
+| Long Context | Single-Node | 4 | 4 | 1 | 32 | 14 | 135000 | 3 | Off | Off | On | On |
+| Low Latency | Single-Node | 8 | 8 | 1 | 1 | 100 | 5500 | 3 | Off | Off | Off | On |
 
 > **Note**: BS (Batch Size) and Concurrency values depend on the specific workload and request pattern. Refer to the reference configurations below for detailed `cudagraph_capture_sizes` and `pa_shape_list` settings.
 
@@ -321,6 +321,7 @@ vllm serve /mnt/share/qwen3-32b-pdmix \
 ```
 
 <u>Long Context Configuration:</u>
+
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -348,6 +349,7 @@ vllm serve /mnt/share/qwen3-32b-pdmix \
 ```
 
 <u>Low Latency Configuration:</u>
+
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True

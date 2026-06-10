@@ -455,10 +455,10 @@ After several minutes, you will get the performance evaluation result.
 #### Table 2: Detailed Node Configuration
 
 | Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
-| High Throughput | Single-Node (TP4, DP4) | 16 | 4 | 4 | 128 | 128 | 40960 | | On | On | On | On |
-| Low Latency | PD Hybrid (TP16) | 16 | 16 | 1 | 128 | 128 | 32768 | | Off | On | On | On |
-| Long Context | PD Hybrid (TP8, CP2) | 16 | 8 | 1 | 32 | 32 | 135000 | | On | On | On | On |
+|----------|---------------|-------|----|----|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
+| High Throughput | Single-Node (TP4, DP4) | 16 | 4 | 4 | 128 | 128 | 40960 | none | On | On | On | On |
+| Low Latency | PD Hybrid (TP16) | 16 | 16 | 1 | 128 | 128 | 32768 | 3 | Off | On | On | On |
+| Long Context | PD Hybrid (TP8, CP2) | 16 | 8 | 1 | 32 | 32 | 135000 | none | On | On | On | On |
 
 > **Note**: For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
 
