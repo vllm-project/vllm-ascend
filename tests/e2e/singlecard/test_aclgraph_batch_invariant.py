@@ -407,7 +407,7 @@ def test_aclgraph_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pyte
     model_name=DEFAULT_MODEL,
     quantization=None,
     max_model_len=8192,
-    dtype="float16",
+    dtype="bfloat16",
     gpu_memory_utilization=0.9,
     enable_prefix_caching=False,
     max_num_seqs=32,

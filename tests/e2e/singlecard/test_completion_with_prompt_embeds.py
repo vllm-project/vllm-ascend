@@ -38,8 +38,8 @@ def get_prompt_embeds(chat, tokenizer, embedding_layer):
 @pytest.mark.timeout(1000)
 @pytest.mark.model(
     model_name=MODELS,
-    enable_prompt_embeds=True,
     compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
+    extra_kwargs={"enable_prompt_embeds": True},
 )
 def test_mixed_prompt_embeds_and_text(vllm_runner):
     """Test mixed inputs with both prompt embeddings and text prompts."""

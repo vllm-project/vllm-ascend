@@ -28,6 +28,7 @@ import os
 import pytest
 
 from tests.e2e.singlecard.utils import PROMPTS_SHORT, LLMTestCase, compare_logprobs
+from tests.e2e.conftest import ModelName
 
 os.environ["VLLM_ASCEND_ENABLE_NZ"] = "2"
 
@@ -37,7 +38,7 @@ CASE_DECODE_ONLY = LLMTestCase(
 )
 
 CASE_FULL = LLMTestCase(
-    model="Qwen/Qwen3-0.6B",
+    model=ModelName.QWEN3_06B,
     prompts=PROMPTS_SHORT,
 )
 

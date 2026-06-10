@@ -78,7 +78,7 @@ def test_qwen3_prompt_logprobs(vllm_runner) -> None:
     tensor_parallel_size=1,
     distributed_executor_backend="mp",
     compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8]},
-    additional_config={"enable_async_exponential": True}
+    extra_kwargs={"additional_config":{"enable_async_exponential": True}}
 )
 def test_qwen3_exponential_overlap(vllm_runner) -> None:
     example_prompts = [

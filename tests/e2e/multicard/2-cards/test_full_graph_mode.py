@@ -20,7 +20,7 @@ import os
 
 from vllm import SamplingParams
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, ModelName
 from tests.e2e.model_utils import check_outputs_equal
 
 
@@ -33,7 +33,7 @@ def test_qwen3_moe_full_decode_only_tp2():
         "The capital of France is",
         "The future of AI is",
     ]
-    model = "Qwen/Qwen3-30B-A3B"
+    model = ModelName.QWEN3_30B_A3B
     sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
     with VllmRunner(
         model,
@@ -76,7 +76,7 @@ def test_qwen3_moe_full_graph_tp2():
         "The capital of France is",
         "The future of AI is",
     ]
-    model = "Qwen/Qwen3-30B-A3B"
+    model = ModelName.QWEN3_30B_A3B
     sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
     with VllmRunner(
         model,

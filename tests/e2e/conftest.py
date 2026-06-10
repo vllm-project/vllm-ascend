@@ -182,6 +182,8 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 class ModelName:
     """Global model name enumeration class."""
     QWEN3_06B = "/home/weight/Qwen3-0.6B"
+    QWEN3_8B = "/mnt/weights/Qwen3-8B"
+    QWEN3_30B_A3B = "/mnt/weights/Qwen3-30B-A3B"
     DEEPSEEK = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 
 
@@ -1296,6 +1298,46 @@ class ModelCache:
     """模型缓存管理类"""
     def __init__(self):
         self._cache: Dict[str, 'VllmRunner'] = {}
+
+    def close(self):
+        """正确关闭所有资源（包括终止子进程）"""
+        if hasattr(self, 'model') and self.model is not None:
+            try:
+                # 1. 关闭 LLM 实例
+                if hasattr(self.model, 'llm_engine'):
+                    self.model.llm_engine.shutdown()
+                
+                # 2. 删除 LLM 实例
+                del self.model
+                
+                # 3. 强制释放 NPU 内存
+                import torch
+                torch.npu.empty_cache()
+                
+                print("[INFO] VllmRunner closed successfully")
+            except Exception as e:
+                print(f"[WARNING] Error closing VllmRunner: {e}")
+
+    def _get_available_npu_memory(self) -> float:
+        """获取 NPU 可用内存（GiB）"""
+        import torch
+        free, _ = torch.npu.mem_get_info()
+        return free / (1024 ** 3)
+    
+    def _wait_for_memory(self, required_gib: float, timeout_seconds: int = 30) -> bool:
+        """等待直到有足够的可用内存"""
+        import time
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout_seconds:
+            available = self._get_available_npu_memory()
+            if available >= required_gib:
+                return True
+            
+            print(f"[INFO] Waiting for NPU memory... Available: {available:.2f} GiB, Required: {required_gib:.2f} GiB")
+            time.sleep(2)
+        
+        return False
     
     def get_cache_key(self, model_config: Dict[str, Any]) -> str:
         """生成唯一的缓存键
@@ -1320,7 +1362,53 @@ class ModelCache:
         Returns:
             VllmRunner: 模型实例
         """
+        """获取或创建模型实例（带完整的内存管理）"""
+        
+
         cache_key = self.get_cache_key(model_config)
+
+        # 2. 检查缓存是否已存在
+        if cache_key in self._cache:
+            print(f"[INFO] Reusing cached model instance for: {model_config['model_name']}")
+            return self._cache[cache_key]
+        
+        # 3. 缓存未命中，需要创建新实例
+        
+        # 4. 计算需要的内存
+        gpu_memory_utilization = model_config.get("gpu_memory_utilization", 0.9)
+        required_memory_gib = 61.27 * gpu_memory_utilization * 0.9
+        
+        # 5. 检查当前可用内存
+        free_memory_bytes, _ = torch.npu.mem_get_info()
+        available_memory_gib = free_memory_bytes / (1024 ** 3)
+        
+        print(f"[DEBUG] Creating new model - Available: {available_memory_gib:.2f} GiB, Required: {required_memory_gib:.2f} GiB")
+        
+        # 6. 如果内存不足，清理最旧的缓存
+        if available_memory_gib < required_memory_gib:
+            print(f"[WARNING] Insufficient memory! Cleaning oldest cache entries...")
+            
+            # 清理所有缓存
+            self.clear()
+            
+            # 等待内存释放
+            wait_count = 0
+            max_wait = 10
+            
+            while available_memory_gib < required_memory_gib and wait_count < max_wait:
+                time.sleep(3)
+                free_memory_bytes, _ = torch.npu.mem_get_info()
+                available_memory_gib = free_memory_bytes / (1024 ** 3)
+                print(f"[INFO] Waiting for memory... Available: {available_memory_gib:.2f} GiB")
+                wait_count += 1
+            
+            # 再次检查
+            if available_memory_gib < required_memory_gib:
+                raise RuntimeError(
+                    f"Failed to get enough NPU memory! "
+                    f"Available: {available_memory_gib:.2f} GiB, "
+                    f"Required: {required_memory_gib:.2f} GiB."
+                )
         
         if cache_key not in self._cache:
             # 创建新实例
@@ -1346,10 +1434,30 @@ class ModelCache:
     
     def clear(self):
         """清理所有缓存的模型实例"""
-        for runner in self._cache.values():
-            del runner
+        import gc
+        
+        # 清理所有缓存
+        for cache_key in list(self._cache.keys()):
+            runner = self._cache[cache_key]
+            
+            try:
+                # 删除模型引用
+                if hasattr(runner, 'model'):
+                    del runner.model
+                del self._cache[cache_key]
+                del runner
+                
+            except Exception as e:
+                print(f"[WARNING] Error clearing runner {cache_key}: {e}")
+        
+        # 强制垃圾回收和内存释放
+        gc.collect()
+        torch.npu.empty_cache()
+        time.sleep(3)
+        
+        # 清空缓存字典
         self._cache.clear()
-        print("Model cache cleared")
+        print("[INFO] Model cache cleared")
 
 
 # 创建全局模型缓存实例
@@ -1363,7 +1471,7 @@ def cleanup_model_cache():
     model_cache.clear()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def vllm_runner(request):
     """根据模型配置获取或创建模型实例
     
@@ -1373,8 +1481,22 @@ def vllm_runner(request):
     Yields:
         VllmRunner: 模型实例
     """
-    # 从测试标记或默认配置获取模型配置
+
+    # 添加详细调试信息
+    print(f"[DEBUG] Test name: {request.node.name}")
+    print(f"[DEBUG] All markers on test: {list(request.node.iter_markers())}")
+    
+    # 尝试获取 model marker
     model_marker = request.node.get_closest_marker("model")
+    
+    
+    if model_marker is None:
+        raise ValueError("Test must have @pytest.mark.model decorator")
+    
+    # 提取配置
+    model_config = model_marker.kwargs
+    print(f"[DEBUG] Final model_config: {model_config}")
+
     if model_marker:
         model_config = model_marker.kwargs
     else:

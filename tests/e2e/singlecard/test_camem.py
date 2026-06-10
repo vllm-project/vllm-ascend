@@ -20,47 +20,38 @@
 import os
 from unittest.mock import patch
 
-import pytest
 import torch
 from vllm import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 
-from tests.e2e.conftest import ModelName
+from tests.e2e.conftest import VllmRunner, ModelName
 from tests.e2e.utils import fork_new_process_for_each_test
-
-
-os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
 
 @fork_new_process_for_each_test
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
-@pytest.mark.timeout(1000)
-@pytest.mark.model(
-    model_name=ModelName.QWEN3_06B,
-    enable_sleep_mode=True,
-    compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
-)
-def test_end_to_end(vllm_runner):
+def test_end_to_end():
     free, total = torch.npu.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
 
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
-    output = vllm_runner.model.generate(prompt, sampling_params)
-    # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
-    # which is difficult to measure in the test. therefore, we only
-    # test sleep level 1 here.
-    vllm_runner.model.sleep(level=1)
+    with VllmRunner(ModelName.QWEN3_06B, enable_sleep_mode=True, cudagraph_capture_sizes=[1, 2, 4, 8]) as runner:
+        output = runner.model.generate(prompt, sampling_params)
+        # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
+        # which is difficult to measure in the test. therefore, we only
+        # test sleep level 1 here.
+        runner.model.sleep(level=1)
 
-    free_gpu_bytes_after_sleep, total = torch.npu.mem_get_info()
-    used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
-    # now the memory usage should be less than the model weights
-    # (0.5B model, 1GiB weights)
-    assert used_bytes < 1 * GiB_bytes
+        free_gpu_bytes_after_sleep, total = torch.npu.mem_get_info()
+        used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
+        # now the memory usage should be less than the model weights
+        # (0.5B model, 1GiB weights)
+        assert used_bytes < 1 * GiB_bytes
 
-    vllm_runner.model.wake_up()
-    output2 = vllm_runner.model.generate(prompt, sampling_params)
+        runner.model.wake_up()
+        output2 = runner.model.generate(prompt, sampling_params)
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text

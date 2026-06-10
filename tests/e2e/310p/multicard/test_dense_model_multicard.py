@@ -15,7 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, ModelName
 
 
 def test_qwen3_dense_tp2_fp16():
@@ -24,7 +24,7 @@ def test_qwen3_dense_tp2_fp16():
     ]
     max_tokens = 5
     with VllmRunner(
-        "Qwen/Qwen3-8B",
+        ModelName.QWEN3_8B,
         tensor_parallel_size=2,
         enforce_eager=True,
         dtype="float16",
