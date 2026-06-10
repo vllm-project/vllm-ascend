@@ -19,6 +19,12 @@ _FORMAT = (
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 
+def _is_ascend_module(pathname: str) -> bool:
+    if not pathname:
+        return False
+    return "vllm_ascend" in pathname.replace("\\", "/")
+
+
 def _infer_module_name(pathname: str) -> str:
     """Infer module name from the file path of the log caller."""
     if not pathname:
@@ -28,14 +34,17 @@ def _infer_module_name(pathname: str) -> str:
         idx = parts.index("vllm_ascend")
         if idx + 1 >= len(parts):
             return "core"
+        item = parts[idx + 1]
         if idx + 2 >= len(parts):
-            return "core"
-        return parts[idx + 1]
+            return item[:-3] if item.endswith(".py") else item
+        return item
     except ValueError:
         return "core"
 
 
 def _format_with_ascend_prefix(self, record, super_format):
+    if not _is_ascend_module(record.pathname):
+        return super_format(record)
     module = _infer_module_name(record.pathname)
     orig_msg = record.msg
     orig_args = record.args
