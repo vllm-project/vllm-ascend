@@ -224,11 +224,13 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         mask = db.store_mask(128, kv_cache_group_id=0, num_prompt_tokens=100)
 
         self.assertEqual(mask, [False, True, False, True])
-        self.assertEqual(_FakeMaskManager.last_reachable_call["end_block"], 4)
-        self.assertEqual(_FakeMaskManager.last_reachable_call["kv_cache_spec"].block_size, 32)
-        self.assertEqual(_FakeMaskManager.last_reachable_call["alignment_tokens"], 32)
-        self.assertEqual(_FakeMaskManager.last_reachable_call["retention_interval"], 64)
-        self.assertEqual(_FakeMaskManager.last_reachable_call["num_prompt_tokens"], 100)
+        reachable_call = _FakeMaskManager.last_reachable_call
+        assert reachable_call is not None
+        self.assertEqual(reachable_call["end_block"], 4)
+        self.assertEqual(reachable_call["kv_cache_spec"].block_size, 32)
+        self.assertEqual(reachable_call["alignment_tokens"], 32)
+        self.assertEqual(reachable_call["retention_interval"], 64)
+        self.assertEqual(reachable_call["num_prompt_tokens"], 100)
 
     def test_load_mask_uses_manager_hit_semantics(self):
         spec = _FakeSpec(block_size=16, manager_cls=_FakeMaskManager)
@@ -245,8 +247,10 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         mask = db.load_mask([b"h0", b"h1"], token_len=32, kv_cache_group_id=0)
 
         self.assertEqual(mask, [False, True])
-        self.assertEqual(_FakeMaskManager.last_hit_call["max_length"], 32)
-        self.assertEqual(_FakeMaskManager.last_hit_call["alignment_tokens"], 64)
+        hit_call = _FakeMaskManager.last_hit_call
+        assert hit_call is not None
+        self.assertEqual(hit_call["max_length"], 32)
+        self.assertEqual(hit_call["alignment_tokens"], 64)
 
     def test_get_block_hashes_rehashes_grouped_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
