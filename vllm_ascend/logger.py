@@ -11,10 +11,7 @@ import logging
 
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
-_FORMAT = (
-    "%(levelname)s %(asctime)s "
-    "[%(fileinfo)s:%(lineno)d] %(message)s"
-)
+_FORMAT = "%(levelname)s %(asctime)s [%(fileinfo)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 
@@ -72,13 +69,9 @@ class AscendColoredFormatter(ColoredFormatter):
 
 def _patch_handler(handler: logging.Handler) -> None:
     if isinstance(handler.formatter, ColoredFormatter):
-        handler.formatter = AscendColoredFormatter(
-            fmt=_FORMAT, datefmt=_DATE_FORMAT
-        )
+        handler.formatter = AscendColoredFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
     elif isinstance(handler.formatter, NewLineFormatter):
-        handler.formatter = AscendFormatter(
-            fmt=_FORMAT, datefmt=_DATE_FORMAT
-        )
+        handler.formatter = AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
 
 
 def _patch_vllm_formatter() -> None:
