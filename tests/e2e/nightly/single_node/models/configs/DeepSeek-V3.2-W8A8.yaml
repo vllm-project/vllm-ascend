@@ -61,6 +61,7 @@ test_cases:
         max_out_len: 32768
         batch_size: 32
         baseline: 86.67
+        thinking: true
         threshold: 5
 
       perf_2:
