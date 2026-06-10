@@ -291,7 +291,7 @@ vllm bench serve \
 |----------|---------------|-------|----|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
 | High Throughput | Single-Node | 1 | 1 | 1 | 32 | 100 | 37364 | Off | Off | Off | On |
 | Low Latency | Single-Node | 4 | 4 | 1 | 32 | 100 | 37364 | Off | On | On | On |
-| Long Context | Single-Node | 4 | 4 | 1 | 32 | 14 | 135000 | Off | On | On | On |
+| Long Context | Single-Node | 4 | 4 | 1 | 32 | 14 | 131072 | Off | On | On | On |
 
 > For detailed parameter descriptions, please refer to the deployment examples in Section 5.
 
@@ -372,7 +372,7 @@ vllm serve your_model_path \
     --served-model-name qwen3 \
     --trust-remote-code \
     --max-num-seqs 14 \
-    --max-model-len 135000 \
+    --max-model-len 131072 \
     --max-num-batched-tokens 16384 \
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
@@ -383,7 +383,8 @@ vllm serve your_model_path \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
     --port 1025 \
-    --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
+    --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}' \
+    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}'
 ```
 
 ### 9.2 Tuning Guidelines
