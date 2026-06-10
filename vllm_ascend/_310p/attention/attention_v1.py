@@ -28,6 +28,7 @@ from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
     is_compressed_mask_supported,
 )
+from vllm_ascend._310p.attention.metadata import get_query_lens_cpu
 from vllm_ascend._310p.attention.metadata_builder import AscendAttentionMetadataBuilder310
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -247,7 +248,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         output_slice = output[:num_actual_tokens]
 
         # Host qLens filled in AscendAttentionMetadataBuilder310.build(); eager fallback only.
-        qlens = getattr(attn_metadata, "query_lens_cpu", None)
+        qlens = get_query_lens_cpu(attn_metadata)
         if qlens is None:
             from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
