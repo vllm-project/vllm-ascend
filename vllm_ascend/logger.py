@@ -91,7 +91,7 @@ def _patch_vllm_formatter() -> None:
         _patch_handler(handler)
         _original_add_handler(handler)
 
-    vllm_logger.addHandler = _patched_add_handler
+    vllm_logger.addHandler = _patched_add_handler  # type: ignore[method-assign]
 
 
 _patch_vllm_formatter()
