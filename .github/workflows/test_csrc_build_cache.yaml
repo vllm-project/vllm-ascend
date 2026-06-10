@@ -42,103 +42,132 @@ jobs:
           python3 -m pip install pyyaml
 
       - name: Run generate_cache_matrix.py (full matrix)
-        id: full
         run: |
-          result=$(python3 .github/workflows/scripts/generate_cache_matrix.py)
-          echo "full_matrix=$result" >> "$GITHUB_OUTPUT"
+          python3 .github/workflows/scripts/generate_cache_matrix.py \
+            > /tmp/full_matrix.json
 
       - name: Validate full matrix is valid JSON with entries
         run: |
-          echo "${{ steps.full.outputs.full_matrix }}" | python3 -c "
-          import json, sys
-          data = json.load(sys.stdin)
-          assert 'include' in data, 'missing include key'
-          assert len(data['include']) > 0, 'empty matrix'
-          for e in data['include']:
-              required = ['branch', 'branch_normalized', 'dockerfile', 'image',
-                          'image_tag', 'soc_version', 'os_type', 'arch', 'runner']
-              missing = [k for k in required if k not in e]
-              assert not missing, f'entry missing keys: {missing}'
+          python3 <<'PY'
+          import json
+
+          with open("/tmp/full_matrix.json") as fh:
+              data = json.load(fh)
+
+          assert "include" in data, "missing include key"
+          assert len(data["include"]) > 0, "empty matrix"
+
+          required = [
+              "branch", "branch_normalized", "dockerfile", "image",
+              "image_tag", "soc_version", "os_type", "arch", "runner",
+          ]
+          for entry in data["include"]:
+              missing = [k for k in required if k not in entry]
+              assert not missing, "entry missing keys: {}".format(missing)
               # Verify image matches consumer CSRC_BUILD_CACHE_IMAGE format
-              assert ':' in e['image'], f'image missing tag: {e[\"image\"]}'
-          print(f'Valid: {len(data[\"include\"])} entries')
-          "
+              assert ":" in entry["image"], \
+                  "image missing tag: {}".format(entry["image"])
+
+          print("Valid: {} entries".format(len(data["include"])))
+          PY
 
       - name: Run generate_cache_matrix.py (branch-filter)
-        id: filtered
         run: |
-          result=$(python3 .github/workflows/scripts/generate_cache_matrix.py --branch-filter main)
-          echo "filtered_matrix=$result" >> "$GITHUB_OUTPUT"
+          python3 .github/workflows/scripts/generate_cache_matrix.py \
+            --branch-filter main \
+            > /tmp/filtered_matrix.json
 
       - name: Validate filtered matrix only contains main
         run: |
-          echo "${{ steps.filtered.outputs.filtered_matrix }}" | python3 -c "
-          import json, sys
-          data = json.load(sys.stdin)
-          branches = {e['branch'] for e in data['include']}
-          assert branches == {'main'}, f'expected only main, got: {branches}'
-          assert len(data['include']) > 0, 'filtered matrix is empty'
-          print(f'Filter valid: {len(data[\"include\"])} entries, branches={branches}')
-          "
+          python3 <<'PY'
+          import json
+
+          with open("/tmp/filtered_matrix.json") as fh:
+              data = json.load(fh)
+
+          branches = {e["branch"] for e in data["include"]}
+          assert branches == {"main"}, \
+              "expected only main, got: {}".format(branches)
+          assert len(data["include"]) > 0, "filtered matrix is empty"
+
+          print("Filter valid: {} entries, branches={}".format(
+              len(data["include"]), branches))
+          PY
 
       - name: Test --branch-filter with nonexistent branch (must fail)
-        continue-on-error: true
-        id: bad_filter
         run: |
-          python3 .github/workflows/scripts/generate_cache_matrix.py --branch-filter __nonexistent__ 2>&1
-          exit 0
+          set +e
+          output=$(python3 .github/workflows/scripts/generate_cache_matrix.py \
+            --branch-filter __nonexistent__ 2>&1)
+          status=$?
+          set -e
+
+          echo "$output"
+
+          if [[ "$status" -eq 0 ]]; then
+            echo "::error::Expected --branch-filter __nonexistent__ to fail, but it succeeded"
+            exit 1
+          fi
+
+          echo "Nonexistent branch filter failed as expected"
 
       - name: Verify cache key consistency (producer vs consumer)
         run: |
-          # Producer key format:
-          #   vllm-ascend-build-ninja-v1-${branch}-${runner.os}-${arch}-${image}-${cache_time}
-          # Consumer restore prefix:
-          #   vllm-ascend-build-ninja-v1-${branch}-${runner.os}-${arch}-${image}-
-          python3 -c "
-          import json, subprocess, sys
+          python3 <<'PY'
+          import json
 
-          result = subprocess.run(
-              [sys.executable, '.github/workflows/scripts/generate_cache_matrix.py'],
-              capture_output=True, text=True, check=True
-          )
-          data = json.loads(result.stdout)
+          with open("/tmp/full_matrix.json") as fh:
+              data = json.load(fh)
 
-          prefix = 'vllm-ascend-build-ninja-v1'
-          for e in data['include']:
+          prefix = "vllm-ascend-build-ninja-v1"
+          cache_time = "2026061018"
+
+          for entry in data["include"]:
+              bn = entry["branch_normalized"]
+              runner = entry["runner"]
+              arch = entry["arch"]
+              image = entry["image"]
+
               # Producer key
-              producer_key = f\"{prefix}-{e['branch_normalized']}-{e['runner']}-{e['arch']}-{e['image']}-2026061018\"
-              assert producer_key.startswith(prefix), f'bad key: {producer_key}'
+              producer_key = "{}-{}-{}-{}-{}-{}".format(
+                  prefix, bn, runner, arch, image, cache_time)
+              assert producer_key.startswith(prefix), \
+                  "bad key: {}".format(producer_key)
 
               # Consumer restore prefix
-              restore_prefix = f\"{prefix}-{e['branch_normalized']}-{e['runner']}-{e['arch']}-{e['image']}-\"
-              assert restore_prefix.startswith(prefix), f'bad restore prefix: {restore_prefix}'
-              assert restore_prefix.endswith('-'), f'restore prefix must end with -: {restore_prefix}'
+              restore_prefix = "{}-{}-{}-{}-{}-".format(
+                  prefix, bn, runner, arch, image)
+              assert restore_prefix.startswith(prefix), \
+                  "bad restore prefix: {}".format(restore_prefix)
+              assert restore_prefix.endswith("-"), \
+                  "restore prefix must end with -: {}".format(restore_prefix)
 
               # The restore prefix must be a prefix of the producer key
               assert producer_key.startswith(restore_prefix), (
-                  f'restore prefix {restore_prefix!r} '
-                  f'does not match producer key {producer_key!r}'
-              )
+                  "restore prefix {!r} does not match producer key {!r}"
+                  .format(restore_prefix, producer_key))
 
-          print(f'Cache key consistency OK: {len(data[\"include\"])} entries checked')
-          "
+          print("Cache key consistency OK: {} entries checked".format(
+              len(data["include"])))
+          PY
 
       - name: Validate normalize_branch function
         run: |
-          python3 -c "
+          python3 <<'PY'
           import sys
-          sys.path.insert(0, '.github/workflows/scripts')
+          sys.path.insert(0, ".github/workflows/scripts")
           import generate_cache_matrix as gcm
 
           tests = [
-              ('main', 'main'),
-              ('releases/v0.20.2rc', 'releases-v0.20.2rc'),
-              ('feature/my-branch@v1', 'feature-my-branch-v1'),
-              ('', 'unknown-branch'),
-              ('!!!', 'unknown-branch'),
+              ("main", "main"),
+              ("releases/v0.20.2rc", "releases-v0.20.2rc"),
+              ("feature/my-branch@v1", "feature-my-branch-v1"),
+              ("", "unknown-branch"),
+              ("!!!", "unknown-branch"),
           ]
           for inp, expected in tests:
               result = gcm.normalize_branch(inp)
-              assert result == expected, f'{inp!r} -> {result!r}, expected {expected!r}'
-          print('normalize_branch: all OK')
-          "
+              assert result == expected, \
+                  "{!r} -> {!r}, expected {!r}".format(inp, result, expected)
+          print("normalize_branch: all OK")
+          PY
