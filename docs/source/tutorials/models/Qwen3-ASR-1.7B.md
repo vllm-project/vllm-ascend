@@ -12,7 +12,7 @@ This document will show the main verification steps of the model, including supp
 
 `Qwen3-ASR-1.7B`(BF16 version): requires 1 Ascend 910B (with 1 x 64G NPUs). 
 
-`Qwen3-ASR-1.7B`(fp16 version): requires 1 Ascend 310P (with 1 x 48G NPUs). 
+`Qwen3-ASR-1.7B`(FP16 version): requires 1 Ascend 310P (with 1 x 48G NPUs). 
 
 [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B)
 
@@ -102,11 +102,12 @@ The current evaluation results are:
 
 In the current evaluation, **Qwen3-ASR-1.7B** processed **100 samples** in approximately **57 seconds**, achieving an average throughput of **1.73 samples/s** under the current online serving setup.
 
-| Category | Dataset | Metric | Result |
-|----------|---------|--------|--------|
-| Performance | LibriSpeech test/clean (100 samples) | Total Samples | 100 |
-| Performance | LibriSpeech test/clean (100 samples) | Total Runtime | 57 s |
-| Performance | LibriSpeech test/clean (100 samples) | Average Throughput | 1.73 samples/s |
+|NPU| Category | Dataset | Metric | Result |
+|----------|----------|---------|--------|--------|
+|910B| Performance | LibriSpeech test/clean (100 samples) | Total Samples | 100 |
+|910B| Performance | LibriSpeech test/clean (100 samples) | Total Runtime | 57 s |
+|910B| Performance | LibriSpeech test/clean (100 samples) | Average Throughput | 1.73 samples/s |
+|310P| Performance | aishell wav/test (7176 samples) | Total Runtime | 3182 s |
 
 ### Remarks
 
