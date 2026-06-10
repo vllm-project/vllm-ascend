@@ -46,7 +46,9 @@ class D2DExpertWeightLoader:
     def generate_expert_d2d_transfer_task(self, expert_send_info, expert_recv_info, updated_expert_map, layer_id):
         # When current send/recv and weight.expert_map update tasks are not finished, cannot accept new d2d task
         if self.state != ExpertWeightUpdateState.WAITING:
-            logger.warning_once("current d2d weight update tasks are on-going, cannot accept new weight update task")
+            logger.warning_once(
+                "[eplb/d2d_loader] Current D2D weight update is on-going, cannot accept new update task"
+            )
             return
 
         self.updated_expert_map = updated_expert_map
@@ -113,8 +115,14 @@ class D2DExpertWeightLoader:
             local_expert_to_replace, buffer_tensor_id = recv_expert_info
             self.eplb_adaptor.do_update_expert_weight(self.layer_id, local_expert_to_replace, buffer_tensor_id)
 
+        logger.debug(
+            "[eplb/d2d_loader] Layer %s D2D transfer completed, updated_experts=%s",
+            self.layer_id,
+            len(self.recv_expert_list),
+        )
+
         if self.layer_id == self.num_layers - 1:
-            logger.info("[EPLB] finished update expert weight.")
+            logger.info("[eplb/d2d_loader] Full expert weight update cycle completed, total_layers=%s", self.num_layers)
 
         self.recv_expert_list = []
         self.updated_expert_map = None

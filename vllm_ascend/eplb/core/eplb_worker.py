@@ -56,6 +56,7 @@ class EplbWorker:
         # Get MOE load information
         load_info = self.fetch_and_sum_load_info()
         if load_info is None:
+            logger.debug("[eplb/worker] No moe_load data available yet, skipping this cycle")
             return
 
         # Get the updated expert table based on the workload information
@@ -84,7 +85,7 @@ class EplbWorker:
             }
             # ms-service-metric end.
             logger.info(
-                "[Expert Hotness] Current: mean=%.3f, max=%.3f, Updated: mean=%.3f, max=%.3f",
+                "[eplb/worker] Expert hotness imbalance, current: mean=%.3f max=%.3f, updated: mean=%.3f max=%.3f",
                 current_mean,
                 current_max,
                 update_mean,
@@ -99,7 +100,7 @@ class EplbWorker:
 
         update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
-        logger.debug("EPLB Process compute complete")
+        logger.debug("[eplb/worker] EPLB Process compute complete")
 
         packed_update_info = self.pack_update_info(update_info)
 
@@ -112,7 +113,7 @@ class EplbWorker:
         for layer_id in range(num_layers):
             # check if any logical expert is not placed on any rank
             if torch.unique(new_placement[layer_id]).numel() < torch.unique(old_placement[layer_id]).numel():
-                logger.error("There exists expert not placed on any rank in layer %s", layer_id)
+                logger.error("[eplb/worker] There exists expert not placed on any rank in layer %s", layer_id)
                 new_placement[layer_id] = old_placement[layer_id]
                 continue
 
@@ -123,7 +124,7 @@ class EplbWorker:
                 # check if same logical experts are placed on the same NPU
                 if new_placement_check.numel() != torch.unique(new_placement_check).numel():
                     logger.error(
-                        "Replicated experts are placed on the same NPU; "
+                        "[eplb/worker] Replicated experts are placed on the same NPU; "
                         "expert placement on layer %s, rank %s is invalid",
                         layer_id,
                         rank_id,
@@ -135,7 +136,8 @@ class EplbWorker:
                 expert_not_move = torch.isin(new_placement_check, old_placement_check)
                 if not torch.equal(new_placement_check[expert_not_move], old_placement_check[expert_not_move]):
                     logger.error(
-                        "There exists expert movement inside NPU; expert placement on layer %s, rank %s is invalid",
+                        "[eplb/worker] Expert movement inside NPU detected; "
+                        "expert placement on layer %s, rank %s is invalid",
                         layer_id,
                         rank_id,
                     )
@@ -369,7 +371,7 @@ class EplbProcess:
 
             except Exception as e:
                 logger.warning(
-                    "[EPLB subprocess exiting due to error: %s]",
+                    "[eplb/worker] Subprocess crashed, EPLB optimization will stop. error=%s",
                     e,
                     exc_info=True,
                 )
