@@ -43,6 +43,24 @@ def _get_cpu_generator_310p(i: int, generator: torch.Generator) -> torch.Generat
     return cache_entry[0]
 
 
+def _fill_exponential_cpu_310p(
+    q_cpu: torch.Tensor,
+    generators: dict[int, torch.Generator],
+    has_draft_mask: torch.Tensor | None = None,
+) -> None:
+    """Fill a CPU tensor with exponential values for 310P stability."""
+    if len(generators) != q_cpu.shape[0]:
+        q_cpu.exponential_()
+    if generators:
+        for i, generator in generators.items():
+            temp_q = torch.empty_like(q_cpu[i])
+            temp_q.exponential_(generator=_get_cpu_generator_310p(i, generator))
+            if has_draft_mask is not None:
+                q_cpu[i] = torch.where(has_draft_mask[i], temp_q, q_cpu[i])
+            else:
+                q_cpu[i] = temp_q
+
+
 def fill_exponential_310p(
     q: torch.Tensor,
     generators: dict[int, torch.Generator],
@@ -51,16 +69,7 @@ def fill_exponential_310p(
     """Fill ``q`` with exponential values using CPU RNG for 310P stability."""
     with npu_stream_switch(global_stream()):
         q_cpu = q.cpu()
-        if len(generators) != q_cpu.shape[0]:
-            q_cpu.exponential_()
-        if generators:
-            for i, generator in generators.items():
-                temp_q = torch.empty_like(q_cpu[i])
-                temp_q.exponential_(generator=_get_cpu_generator_310p(i, generator))
-                if has_draft_mask is not None:
-                    q_cpu[i] = torch.where(has_draft_mask[i], temp_q, q_cpu[i])
-                else:
-                    q_cpu[i] = temp_q
+        _fill_exponential_cpu_310p(q_cpu, generators, has_draft_mask)
         q.copy_(q_cpu.to(q.device))
     torch.npu.current_stream().wait_stream(global_stream())
 
@@ -71,13 +80,8 @@ def _random_sample_310p(
 ) -> torch.Tensor:
     """310P-specific random sampling with CPU exponential generation for q."""
     with npu_stream_switch(global_stream()):
-        q = torch.empty_like(probs)
-        q = q.cpu()
-        if len(generators) != q.shape[0]:
-            q.exponential_()
-        if generators:
-            for i, generator in generators.items():
-                q[i].exponential_(generator=_get_cpu_generator_310p(i, generator))
+        q = torch.empty_like(probs).cpu()
+        _fill_exponential_cpu_310p(q, generators)
         q = q.npu()
     torch.npu.current_stream().wait_stream(global_stream())
     return probs.div_(q).argmax(dim=-1).view(-1)
