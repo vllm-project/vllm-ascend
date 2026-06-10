@@ -234,7 +234,7 @@ If you are building in a CPU-only environment where `npu-smi` is unavailable, yo
 ```
 
 ```{note}
-To enable the batch invariance feature, set the environment variable `VLLM_BATCH_INVARIANT=1` before building `vllm-ascend`. The build script checks this variable to determine whether to compile and install the `batch_invariant_ops`. For more details, see {doc}`Batch Invariance </user_guide/feature_guide/batch_invariance>`.
+To enable the batch invariance feature, set the environment variable `VLLM_BATCH_INVARIANT=1` before building `vllm-ascend`. The build script checks this variable to determine whether to compile and install the `batch_invariant_ops`.
 ```
 
 ## Set up using Docker
