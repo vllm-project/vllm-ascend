@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from enum import Enum
-from typing import Callable, cast
+from typing import cast
 
 from vllm.logger import logger
 from vllm.v1.core.sched.request_queue import (
@@ -28,8 +28,7 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from vllm.v1.request import Request
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend import envs
 
@@ -61,15 +60,12 @@ class LAPSRequestQueue(RequestQueue):
         self._long_queue = create_request_queue(policy)
         self._short_wait_started_at: float | None = None
         self._short_ready_to_dispatch = False
-        self._stats_log_interval_s = max(
-            envs.VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S, 0.0
-        )
+        self._stats_log_interval_s = max(envs.VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S, 0.0)
         self._last_stats_log_at = time.monotonic()
         self._prepend_counters = {"immediate": 0, "short": 0, "long": 0}
         self._dispatch_counters = {"immediate": 0, "short": 0, "long": 0}
         self._skip_or_requeue_counters = {
-            reason: {"immediate": 0, "short": 0, "long": 0}
-            for reason in self._SKIP_OR_REQUEUE_REASONS
+            reason: {"immediate": 0, "short": 0, "long": 0} for reason in self._SKIP_OR_REQUEUE_REASONS
         }
         self._short_ready_reason_counters = {
             "no_wait_window": 0,
@@ -138,9 +134,7 @@ class LAPSRequestQueue(RequestQueue):
         if reason in self._short_ready_reason_counters:
             self._short_ready_reason_counters[reason] += 1
 
-    def _increment_skip_or_requeue_counter(
-        self, queue: RequestQueue, reason: str
-    ) -> None:
+    def _increment_skip_or_requeue_counter(self, queue: RequestQueue, reason: str) -> None:
         if reason not in self._skip_or_requeue_counters:
             raise ValueError(f"Unknown skip_or_requeue reason: {reason}")
         self._skip_or_requeue_counters[reason][self._queue_name(queue)] += 1
@@ -193,9 +187,7 @@ class LAPSRequestQueue(RequestQueue):
     def has_immediate_requests(self) -> bool:
         return len(self._immediate_queue) > 0
 
-    def _classify_queue(
-        self, request: Request, *, force_immediate: bool = False
-    ) -> RequestQueue:
+    def _classify_queue(self, request: Request, *, force_immediate: bool = False) -> RequestQueue:
         if force_immediate or request.request_id in self._force_immediate_request_ids:
             return self._immediate_queue
         if self.immediate_predicate is not None and self.immediate_predicate(request):
@@ -285,9 +277,7 @@ class LAPSRequestQueue(RequestQueue):
     def _request_id(request: Request | object) -> str | None:
         return getattr(request, "request_id", None)
 
-    def _find_matching_request(
-        self, queue: RequestQueue, request: Request | object
-    ) -> Request | None:
+    def _find_matching_request(self, queue: RequestQueue, request: Request | object) -> Request | None:
         request_id = self._request_id(request)
         if request_id is None:
             return None
@@ -324,9 +314,7 @@ class LAPSRequestQueue(RequestQueue):
         self._queue_index.pop(request.request_id, None)
         if count_as_removal:
             if skip_or_requeue_reason is not None:
-                self._increment_skip_or_requeue_counter(
-                    queue, skip_or_requeue_reason
-                )
+                self._increment_skip_or_requeue_counter(queue, skip_or_requeue_reason)
                 event_name = f"skip_or_requeue:{skip_or_requeue_reason}"
             else:
                 event_name = "remove"
@@ -404,11 +392,7 @@ class LAPSRequestQueue(RequestQueue):
         return self._select_schedulable_queue() is not None
 
     def __len__(self) -> int:
-        return (
-            len(self._immediate_queue)
-            + len(self._short_queue)
-            + len(self._long_queue)
-        )
+        return len(self._immediate_queue) + len(self._short_queue) + len(self._long_queue)
 
     def __iter__(self) -> Iterator[Request]:
         yield from self._immediate_queue
@@ -465,8 +449,7 @@ class LAPSSchedulerMixin:
             immediate_predicate=immediate_predicate,
         )
         logger.info(
-            "LAPS scheduling enabled on Ascend: threshold=%d, "
-            "wait_window_ms=%.3f, wait_max_batch=%d",
+            "LAPS scheduling enabled on Ascend: threshold=%d, wait_window_ms=%.3f, wait_max_batch=%d",
             threshold,
             wait_window_ms,
             wait_max_batch,
@@ -486,37 +469,21 @@ class LAPSSchedulerMixin:
     def _classify_laps_request(
         self, request: Request, num_computed_tokens: int | None = None
     ) -> _LAPSRequestClass | None:
-        computed = (
-            request.num_computed_tokens
-            if num_computed_tokens is None
-            else num_computed_tokens
-        )
+        computed = request.num_computed_tokens if num_computed_tokens is None else num_computed_tokens
         if computed >= request.num_prompt_tokens:
             return None
         if request.num_prompt_tokens <= self._laps_threshold():
             return _LAPSRequestClass.SHORT_PREFILL
         return _LAPSRequestClass.LONG_PREFILL
 
-    def _is_prefill_request(
-        self, request: Request, num_computed_tokens: int | None = None
-    ) -> bool:
+    def _is_prefill_request(self, request: Request, num_computed_tokens: int | None = None) -> bool:
         return self._classify_laps_request(request, num_computed_tokens) is not None
 
-    def _is_short_prefill_request(
-        self, request: Request, num_computed_tokens: int | None = None
-    ) -> bool:
-        return (
-            self._classify_laps_request(request, num_computed_tokens)
-            is _LAPSRequestClass.SHORT_PREFILL
-        )
+    def _is_short_prefill_request(self, request: Request, num_computed_tokens: int | None = None) -> bool:
+        return self._classify_laps_request(request, num_computed_tokens) is _LAPSRequestClass.SHORT_PREFILL
 
-    def _is_long_prefill_request(
-        self, request: Request, num_computed_tokens: int | None = None
-    ) -> bool:
-        return (
-            self._classify_laps_request(request, num_computed_tokens)
-            is _LAPSRequestClass.LONG_PREFILL
-        )
+    def _is_long_prefill_request(self, request: Request, num_computed_tokens: int | None = None) -> bool:
+        return self._classify_laps_request(request, num_computed_tokens) is _LAPSRequestClass.LONG_PREFILL
 
     def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
         waiting = getattr(self, "waiting", None)

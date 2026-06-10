@@ -464,12 +464,10 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
 
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
-                
+
                 # skipped_waiting is not owned by LAPSRequestQueue, so only route
                 # pops through LAPS when the selected queue is one of its subqueues.
-                count_with_laps = (
-                    laps_waiting is not None and request_queue in laps_waiting._queues()
-                )
+                count_with_laps = laps_waiting is not None and request_queue in laps_waiting._queues()
 
                 request = request_queue.peek_request()
                 request_id = request.request_id

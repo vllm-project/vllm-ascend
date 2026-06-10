@@ -122,9 +122,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Optional periodic LAPS stats logging interval, in seconds. Set to 0 to
     # disable aggregate stats logging. This is intended for benchmark
     # observability without enabling global DEBUG logging.
-    "VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S": lambda: float(
-        os.getenv("VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S", "0")
-    ),
+    "VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S": lambda: float(os.getenv("VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S", "0")),
     # use fused op transpose_kv_cache_by_block, default is True
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
