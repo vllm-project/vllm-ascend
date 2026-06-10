@@ -58,6 +58,7 @@ VWN_EAGLE3_MODELS = {
 BASELINES_SP = {
     "eagle3": [0.68, 0.40, 0.18],
     "p-eagle": [0.5625, 0.25, 0.0625, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "vwn_eagle3": [0.75, 0.5, 0.3],
 }
 
 
@@ -337,15 +338,17 @@ def test_p_eagle_acceptance(
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
-def test_qwen3_vwn_eagle3_tp4():
+def test_qwen3_vwn_eagle3_tp2():
     """
-    Test Qwen3-30B-A3B with VWN-Eagle3 speculative decoding.
+    Test Qwen3-30B-A3B with VWN-Eagle3 speculative decoding acceptance rate.
     This test verifies that VWN-Eagle3 spec decode works correctly with:
     - Tensor Parallel size = 4
     - Expert Parallel enabled (for MoE)
     - num_speculative_tokens = 3
     - enforce_eager = True
+    - Acceptance rate matches baseline (tolerance 0.06)
     """
+    num_speculative_tokens = 3
     main_model_name = VWN_EAGLE3_MODELS["vwn_eagle3"]["main"]
     spec_model_name = VWN_EAGLE3_MODELS["vwn_eagle3"]["spec"]
 
@@ -384,7 +387,7 @@ def test_qwen3_vwn_eagle3_tp4():
 
     speculative_config = {
         "method": "eagle3",
-        "num_speculative_tokens": 3,
+        "num_speculative_tokens": num_speculative_tokens,
         "model": spec_model_name,
     }
 
@@ -400,11 +403,27 @@ def test_qwen3_vwn_eagle3_tp4():
         speculative_config=speculative_config,
         enable_expert_parallel=True,
     ) as llm:
-        outputs = llm.generate(prompts, sampling_params)
+        _ = llm.generate(prompts, sampling_params)
+        metrics = llm.model.get_metrics()
 
-    for output in outputs:
-        generated_text = output.outputs[0].text
-        assert len(generated_text) > 0, (
-            f"Expected non-empty output for prompt {output.prompt!r}, "
-            f"got: {generated_text!r}"
-        )
+    # Check acceptance rate
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                num_accepted_tokens_per_pos[pos] += metric.values[pos]
+
+    acceptance_per_pos = [n / num_drafts for n in num_accepted_tokens_per_pos]
+    golden = BASELINES_SP["vwn_eagle3"]
+
+    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+
+    assert match
