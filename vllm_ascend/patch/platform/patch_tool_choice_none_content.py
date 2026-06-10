@@ -112,31 +112,32 @@ def _patch_named_tool_choice_bool() -> None:
 _patch_named_tool_choice_bool()
 
 
-_original_parse_tool_calls_from_content = OpenAIServing._parse_tool_calls_from_content
+_original_parse_tool_calls_from_content = getattr(OpenAIServing, "_parse_tool_calls_from_content", None)
 
 
-def _patched_parse_tool_calls_from_content(
-    request,
-    tokenizer,
-    enable_auto_tools: bool,
-    tool_parser_cls,
-    content: str | None = None,
-):
-    if content is None and _is_forced_tool_choice(request):
-        _set_no_forced_tool_call(request, True)
-        return [], None
+if _original_parse_tool_calls_from_content is not None:
 
-    _set_no_forced_tool_call(request, False)
-    return _original_parse_tool_calls_from_content(
-        request=request,
-        tokenizer=tokenizer,
-        enable_auto_tools=enable_auto_tools,
-        tool_parser_cls=tool_parser_cls,
-        content=content,
-    )
+    def _patched_parse_tool_calls_from_content(
+        request,
+        tokenizer,
+        enable_auto_tools: bool,
+        tool_parser_cls,
+        content: str | None = None,
+    ):
+        if content is None and _is_forced_tool_choice(request):
+            _set_no_forced_tool_call(request, True)
+            return [], None
 
+        _set_no_forced_tool_call(request, False)
+        return _original_parse_tool_calls_from_content(
+            request=request,
+            tokenizer=tokenizer,
+            enable_auto_tools=enable_auto_tools,
+            tool_parser_cls=tool_parser_cls,
+            content=content,
+        )
 
-OpenAIServing._parse_tool_calls_from_content = staticmethod(_patched_parse_tool_calls_from_content)
+    OpenAIServing._parse_tool_calls_from_content = staticmethod(_patched_parse_tool_calls_from_content)
 
 _original_delegating_parse_tool_calls = DelegatingParser._parse_tool_calls
 

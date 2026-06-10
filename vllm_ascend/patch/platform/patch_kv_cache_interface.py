@@ -173,9 +173,14 @@ def _init_mla_cache_fields(spec: MLAAttentionSpec | SlidingWindowMLASpec):
         spec.model_version == "deepseek_v4" and spec.compress_ratio in [0, 4, 128]
     ), "Invalid compress ratio."
     if spec.compress_ratio > 1:
-        assert spec.block_size % spec.compress_ratio == 0, (
-            f"Block size {spec.block_size} must be divisible by compress ratio."
-        )
+        if spec.model_version == "deepseek_v4":
+            assert spec.block_size in [32, 64, 128], (
+                f"DeepSeek V4 block size {spec.block_size} must be one of [32, 64, 128]."
+            )
+        else:
+            assert spec.block_size % spec.compress_ratio == 0, (
+                f"Block size {spec.block_size} must be divisible by compress ratio."
+            )
 
 
 @dataclass(frozen=True, kw_only=True)

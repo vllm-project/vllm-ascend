@@ -71,6 +71,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.models.layer.attention.dsv4_block_sizes import DSV4_BLOCK_SIZES
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
@@ -520,7 +521,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=8,
+                block_size=DSV4_BLOCK_SIZES[cache_config.block_size][0][2],
             )
         elif compress_ratio == 128:
             self.state_cache = CompressorStateCache(
@@ -528,7 +529,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=32,
+                block_size=DSV4_BLOCK_SIZES[cache_config.block_size][0][3],
             )
         else:
             raise ValueError(
