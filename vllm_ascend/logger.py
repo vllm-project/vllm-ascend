@@ -20,6 +20,8 @@ _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 def _infer_module_name(pathname: str) -> str:
     """Infer module name from the file path of the log caller."""
+    if not pathname:
+        return "core"
     parts = pathname.replace("\\", "/").split("/")
     try:
         idx = parts.index("vllm_ascend")
@@ -32,40 +34,62 @@ def _infer_module_name(pathname: str) -> str:
         return "core"
 
 
+def _format_with_ascend_prefix(self, record, super_format):
+    module = _infer_module_name(record.pathname)
+    orig_msg = record.msg
+    orig_args = record.args
+    try:
+        record.msg = f"[vllm-ascend] [{module}] - {record.getMessage()}"
+        record.args = ()
+        return super_format(record)
+    finally:
+        record.msg = orig_msg
+        record.args = orig_args
+
+
 class AscendFormatter(NewLineFormatter):
     """Extends NewLineFormatter with [vllm-ascend] prefix and module name."""
 
     def format(self, record):
-        module = _infer_module_name(record.pathname)
-        original = record.getMessage()
-        record.msg = f"[vllm-ascend] [{module}] - {original}"
-        record.args = ()
-        return super().format(record)
+        return _format_with_ascend_prefix(self, record, super().format)
 
 
 class AscendColoredFormatter(ColoredFormatter):
     """Extends ColoredFormatter with [vllm-ascend] prefix and module name."""
 
     def format(self, record):
-        module = _infer_module_name(record.pathname)
-        original = record.getMessage()
-        record.msg = f"[vllm-ascend] [{module}] - {original}"
-        record.args = ()
-        return super().format(record)
+        return _format_with_ascend_prefix(self, record, super().format)
+
+
+def _patch_handler(handler: logging.Handler) -> None:
+    if isinstance(handler.formatter, ColoredFormatter):
+        handler.formatter = AscendColoredFormatter(
+            fmt=_FORMAT, datefmt=_DATE_FORMAT
+        )
+    elif isinstance(handler.formatter, NewLineFormatter):
+        handler.formatter = AscendFormatter(
+            fmt=_FORMAT, datefmt=_DATE_FORMAT
+        )
 
 
 def _patch_vllm_formatter() -> None:
-    """Replace vLLM handler formatters with ascend-aware versions."""
+    """Replace vLLM handler formatters with ascend-aware versions.
+
+    Handlers added after this call are also patched via addHandler monkey-patch,
+    making the patch robust against import order.
+    """
     vllm_logger = logging.getLogger("vllm")
+
     for handler in vllm_logger.handlers:
-        if isinstance(handler.formatter, ColoredFormatter):
-            handler.formatter = AscendColoredFormatter(
-                fmt=_FORMAT, datefmt=_DATE_FORMAT
-            )
-        elif isinstance(handler.formatter, NewLineFormatter):
-            handler.formatter = AscendFormatter(
-                fmt=_FORMAT, datefmt=_DATE_FORMAT
-            )
+        _patch_handler(handler)
+
+    _original_add_handler = vllm_logger.addHandler
+
+    def _patched_add_handler(handler: logging.Handler) -> None:
+        _patch_handler(handler)
+        _original_add_handler(handler)
+
+    vllm_logger.addHandler = _patched_add_handler
 
 
 _patch_vllm_formatter()
