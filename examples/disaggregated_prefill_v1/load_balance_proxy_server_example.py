@@ -607,7 +607,10 @@ async def send_request_to_service(
             response = await client.post(endpoint, json=req_data, headers=headers)
             response.raise_for_status()
             return response
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        except httpx.HTTPStatusError as e:
+            logger.error("HTTP error for %s: %s", endpoint, e)
+            raise
+        except httpx.RequestError as e:
             logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
             last_exc = e
             if attempt < max_retries:
@@ -635,7 +638,10 @@ async def stream_service_response_with_retry(
                     first_chunk_sent = True
                     yield chunk
                 return  # Success, exit after streaming
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        except httpx.HTTPStatusError as e:
+            logger.error("HTTP error for streaming %s: %s", endpoint, e)
+            raise
+        except httpx.RequestError as e:
             if attempt < max_retries:
                 logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
@@ -664,25 +670,37 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     prefiller_idx = proxy_state.select_prefiller(prefiller_score)
     prefiller = proxy_state.prefillers[prefiller_idx]
     # Send request to prefiller
-    response = await send_request_to_service(
-        prefiller.client,
-        prefiller_idx,
-        api,
-        req_data,
-        request_id,
-        max_retries=global_args.max_retries,
-        base_delay=global_args.retry_delay,
-    )
-    proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-    response_json = response.json()
-    kv_transfer_params = response_json.get("kv_transfer_params", {})
+    prefiller_released = False
+    try:
+        response = await send_request_to_service(
+            prefiller.client,
+            prefiller_idx,
+            api,
+            req_data,
+            request_id,
+            max_retries=global_args.max_retries,
+            base_delay=global_args.retry_delay,
+        )
+        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+        prefiller_released = True
+        response_json = response.json()
+        kv_transfer_params = response_json.get("kv_transfer_params", {})
+    except Exception:
+        if not prefiller_released:
+            proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+        raise
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
     # Select decoder
     decoder_score = proxy_state.calculate_decode_scores(request_length)
     logger.debug("Decoder score: %f", decoder_score)
     # Use the prefiller's kv_transfer_params to select decoder
-    decoder_idx = proxy_state.select_decoder(decoder_score)
+    try:
+        decoder_idx = proxy_state.select_decoder(decoder_score)
+    except RuntimeError:
+        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+        raise
     decoder = proxy_state.decoders[decoder_idx]
     logger.debug("Using %s %s", prefiller.url, decoder.url)
     return InstanceInfo(
@@ -731,6 +749,7 @@ async def _handle_completions(api: str, request: Request):
             nonlocal instance_info
             generated_token = ""
             released_kv = False
+            decoder_released = False
             retry_count = 0
             retry = True
             completion_tokens = 0
@@ -740,6 +759,12 @@ async def _handle_completions(api: str, request: Request):
                 if not released_kv:
                     proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
                     released_kv = True
+
+            def release_decoder_once():
+                nonlocal decoder_released
+                if not decoder_released:
+                    proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                    decoder_released = True
 
             # Only one await per chunk, minimal logic in loop
             try:
@@ -793,6 +818,9 @@ async def _handle_completions(api: str, request: Request):
                         if stop_reason == "recomputed":
                             retry = True
                             retry_count += 1
+                            # Release current instance resources before re-selecting
+                            release_decoder_once()
+                            release_prefiller_kv_once()
                             if chat_flag:
                                 messages[0]["content"] = origin_prompt + generated_token
                             else:
@@ -800,6 +828,8 @@ async def _handle_completions(api: str, request: Request):
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                             instance_info = await _handle_select_instance(api, req_data, tmp_request_length)
+                            released_kv = False
+                            decoder_released = False
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
@@ -823,7 +853,7 @@ async def _handle_completions(api: str, request: Request):
             finally:
                 # After streaming is done or cancelled, release tokens.
                 release_prefiller_kv_once()
-                proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                release_decoder_once()
                 proxy_state.request_num -= 1
 
         # Determine the correct media type based on stream flag
