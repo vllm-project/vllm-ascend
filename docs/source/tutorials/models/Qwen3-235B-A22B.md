@@ -34,7 +34,11 @@ The following model variants are available. It is recommended to download the mo
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
-### 3.2 Verify Multi-node Communication
+### 3.2 Model Quantization (Optional)
+
+If you wish to quantize the model yourself, refer to the [MindStudio ModelSlim documentation](https://gitcode.com/Ascend/msmodelslim) for W8A8 quantization procedures. Pre-converted quantized weights are also available for download (see [3.1 Model Weight](#31-model-weight)).
+
+### 3.3 Verify Multi-node Communication
 
 If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
 
@@ -108,16 +112,16 @@ Expected result: The version information is displayed, matching the pulled image
 
 If you prefer not to use the Docker image, you can build from source:
 
-1.Clone the repository:
+1. Clone the repository:
 ```bash
 git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 ```
-2.Install in development mode:
+2. Install in development mode:
 ```bash
 pip install -e .
 ```
-Installation Verification:
+**Installation Verification:**
 ```bash
 pip show vllm-ascend
 ```
@@ -137,8 +141,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 **Start the server:**
 
 ```shell
-# TODO 我对环境变量和参数存疑，我认为singlenode只要能跑就行，最简单示例。
-export VLLM_USE_MODELSCOPE=True # 可以删除吧？ TODO
+export VLLM_USE_MODELSCOPE=True
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
 export OMP_PROC_BIND=false
