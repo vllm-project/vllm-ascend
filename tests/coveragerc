@@ -1,3 +1,4 @@
+[run]
 branch = True
 # 指定覆盖数据中文件路径采用绝对路径，便于后续分析时路径匹配
 relative_files = False
