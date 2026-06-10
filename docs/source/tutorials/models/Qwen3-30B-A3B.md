@@ -6,7 +6,7 @@ Qwen3-30B-A3B is a Mixture-of-Experts (MoE) model in the Qwen3 series, featuring
 
 This document will demonstrate the main validation steps for Qwen3-30B-A3B in the vLLM-Ascend environment, including supported features, environment preparation, single-node deployment, as well as accuracy and performance evaluation.
 
-The Qwen3-30B-A3B model is first supported in v0.8.4rc2. This document is validated and written based on **vLLM-Ascend v0.13.0**. All **v0.13.0 and later versions** can run stably. To use the latest features, it is recommended to use v0.13.0 or a later version.
+The Qwen3-30B-A3B model is first supported in v0.8.4rc2. This document is validated and written based on **vLLM-Ascend v0.20.2**. All **v0.20.2 and later versions** can run stably. To use the latest features, it is recommended to use v0.20.2 or a later version.
 
 ## 2 Supported Features
 
@@ -130,7 +130,7 @@ If deploying a multi-node environment, set up the environment on each node.
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
 
 ```bash
-export VLLM_USE_V1=1
+
 export VLLM_USE_MODELSCOPE=True
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
@@ -151,7 +151,8 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --gpu-memory-utilization 0.95
+    --gpu-memory-utilization 0.95 \
+    --port 1025
 ```
 
 **Key Parameter Description:**
@@ -170,6 +171,7 @@ vllm serve your_model_path \
 | `--max-num-batched-tokens` | Maximum tokens processed in a single batch. Balances prefill chunking with memory usage. |
 | `--max-num-seqs` | Maximum number of concurrent requests. Adjust based on workload and available KV cache memory. |
 | `--no-enable-prefix-caching` | Disables prefix caching. Recommended for general scenarios to reduce memory overhead. |
+| `--port 1025` | Port number for the API server. Adjust to avoid conflicts with other services. |
 | `--quantization ascend` | Enables W8A8 quantization inference. Remove this parameter when using the BF16 model. |
 | `--served-model-name qwen3` | The model name exposed by the service, used as the `model` field in API calls. |
 | `--speculative-config` | Speculative decoding configuration. Uses eagle3 draft model to reduce decode latency. |
@@ -181,7 +183,7 @@ vllm serve your_model_path \
 After the service is started, verify it is running:
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:1025/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3",
@@ -201,7 +203,7 @@ After the service is started, the model can be invoked by sending a prompt.
 **Chat Completions API:**
 
 ```shell
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:1025/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3",
@@ -256,7 +258,7 @@ Take the `serve` subcommand as an example:
 vllm bench serve \
     --model vllm-ascend/Qwen3-30B-A3B-W8A8 \
     --served-model-name qwen3 \
-    --port 8000 \
+    --port 1025 \
     --dataset-name random \
     --random-input 200 \
     --num-prompts 200 \
@@ -296,7 +298,7 @@ vllm bench serve \
 **Low Latency Configuration:**
 
 ```shell
-export VLLM_USE_V1=1
+
 export ASCEND_RT_VISIBLE_DEVICES=12,13,14,15
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
@@ -320,13 +322,14 @@ vllm serve your_model_path \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
+    --port 1025 \
     --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
 ```
 
 **High Throughput Configuration:**
 
 ```shell
-export VLLM_USE_V1=1
+
 export ASCEND_RT_VISIBLE_DEVICES=15
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
@@ -348,13 +351,14 @@ vllm serve your_model_path \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
+    --port 1025 \
     --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
 ```
 
 **Long Context Configuration:**
 
 ```shell
-export VLLM_USE_V1=1
+
 export ASCEND_RT_VISIBLE_DEVICES=12,13,14,15
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
@@ -378,6 +382,7 @@ vllm serve your_model_path \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
+    --port 1025 \
     --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
 ```
 
