@@ -68,11 +68,15 @@ jobs:
         UV_HTTP_TIMEOUT: 120
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
+    env:
+      CSRC_BUILD_CACHE_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
     steps:
       - name: Check NPU availability
+        id: check_npu
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           npu-smi info
+          echo "has_npu=true" >> "$GITHUB_OUTPUT"
 
       - name: Install packages
         run: |
@@ -80,7 +84,9 @@ jobs:
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
-          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd clang-15 ninja-build
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install uv
 
@@ -110,58 +116,50 @@ jobs:
           git fetch origin main
           git rebase origin/main
 
-      - name: Get csrc hash
-        id: get_csrc_hash
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
         run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Get architecture
-        id: get_arch
+      - name: Get current cache hour
+        id: get_cache_time
         run: |
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
-            aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
-            *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
+
+      - name: Get csrc build cache arch
+        id: get_csrc_build_cache_arch
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64)
+              cache_arch="ARM64"
+              ;;
+            x86_64|amd64)
+              cache_arch="X64"
+              ;;
+            *)
+              cache_arch="$arch"
+              ;;
           esac
+          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
 
-      - uses: dorny/paths-filter@v4
-        id: csrc-filter
-        if: ${{ matrix.group.npu_type != 'cpu' }}
-        with:
-          filters: |
-            csrc:
-              - 'csrc/**'
-              - 'setup.py'
-              - 'CMakeLists.txt'
-              - 'cmake/**'
-
-      - name: Restore vllm-ascend csrc cache
-        id: cache-csrc
-        if: ${{ matrix.group.npu_type != 'cpu' }}
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
         uses: runs-on/cache/restore@v5
         with:
           path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            csrc/build
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
-            vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-
-
-      - name: Save vllm-ascend csrc cache
-        if: ${{ matrix.group.npu_type != 'cpu' && steps.csrc-filter.outputs.csrc == 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
-        uses: runs-on/cache/save@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
 
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -182,10 +180,11 @@ jobs:
 
           pip show mooncake-transfer-engine-ascend || true
 
+
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
-          CACHE_HIT="${{ steps.cache-csrc.outputs.cache-hit }}"
+          CACHE_HIT="${{ steps.restore-csrc-build-cache.outputs.cache-hit }}"
           if [ -n "$CACHE_HIT" ]; then
             echo "CSRC cache restored from cache: $CACHE_HIT"
           else
@@ -195,13 +194,7 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            echo "CSRC cache hit: .so files found, skip kernel compilation"
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            echo "CSRC cache miss: no .so files found, compile kernels"
-            uv pip install -e .
-          fi
+          uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend no device
         if: ${{ matrix.group.npu_type == 'cpu' }}

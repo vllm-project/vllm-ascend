@@ -15,18 +15,15 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# Cartesian product: 2 arch × 2 os × 3 chip_type = 12 jobs
-name: 'Cache csrc Build Artifacts'
+
+name: 'Cache csrc Build Directory'
 on:
   push:
-    branches: [ "main" ]
-    paths:
-      - 'csrc/**'
-      - 'setup.py'
-      - 'CMakeLists.txt'
-      - 'cmake/**'
-      - .github/workflows/push_build_csrc_cache.yaml
-      - 'pyproject.toml'
+    branches:
+      - main
+  schedule:
+    # UTC+8: 2am every day
+    - cron: '0 18 * * *'
   workflow_dispatch:
 
 defaults:
@@ -45,68 +42,54 @@ env:
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
+  # CI-internal CANN image registry mirror — this is infrastructure configuration,
+  # not a per-image dependency. All consumers use the same registry prefix.
+  IMAGE_REGISTRY: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann
 
 jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: dynamically build the matrix from Dockerfiles
+  # -------------------------------------------------------------------------
+  setup-matrix:
+    name: Setup build matrix
+    runs-on: linux-aarch64-a2b3-0
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Generate build matrix from Dockerfiles
+        id: generate
+        run: |
+          pip install pyyaml
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            matrix=$(python3 .github/workflows/scripts/generate_cache_matrix.py --branch-filter "${GITHUB_REF_NAME}")
+          else
+            matrix=$(python3 .github/workflows/scripts/generate_cache_matrix.py)
+          fi
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+
+  # -------------------------------------------------------------------------
+  # Job 2: build csrc cache for all branches × dockerfiles × archs
+  # -------------------------------------------------------------------------
   build-cache:
-    name: build-${{ matrix.arch }}-${{ matrix.chip_type }}-${{ matrix.os }}-cache
+    name: ${{ matrix.branch_normalized }}-${{ matrix.dockerfile }}-${{ matrix.arch }}
+    needs: setup-matrix
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix:
-        arch:
-          - X64
-          - ARM64
-        os:
-          - ubuntu
-          - openeuler
-        chip_type:
-          - a2
-          - a3
-          - 310p
-
-        include:
-          # arch → runner
-          - arch: X64
-            runner: linux-amd64-cpu-16-hk
-          - arch: ARM64
-            runner: linux-arm64-cpu-16
-
-          # chip_type → soc_version
-          - chip_type: a2
-            soc_version: ascend910b1
-          - chip_type: a3
-            soc_version: ascend910_9391
-          - chip_type: 310p
-            soc_version: ascend310p1
-
-          # os × chip_type → image
-          - os: ubuntu
-            chip_type: a2
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
-          - os: ubuntu
-            chip_type: a3
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
-          - os: ubuntu
-            chip_type: 310p
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-ubuntu22.04-py3.12
-          - os: openeuler
-            chip_type: a2
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-openeuler24.03-py3.12
-          - os: openeuler
-            chip_type: a3
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.12
-          - os: openeuler
-            chip_type: 310p
-            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-beta.1-310p-openeuler24.03-py3.12
+      matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
 
     container:
       image: ${{ matrix.image }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.branch }}
 
       - name: Config mirrors (ubuntu)
-        if: matrix.os == 'ubuntu'
+        if: matrix.os_type == 'ubuntu'
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
@@ -116,7 +99,7 @@ jobs:
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Config mirrors (openeuler)
-        if: matrix.os == 'openeuler'
+        if: matrix.os_type == 'openeuler'
         run: |
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
@@ -125,47 +108,37 @@ jobs:
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Install system dependencies (ubuntu)
-        if: matrix.os == 'ubuntu'
+        if: matrix.os_type == 'ubuntu'
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15
+          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15 ninja-build
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           pip install uv
 
       - name: Install system dependencies (openeuler)
-        if: matrix.os == 'openeuler'
+        if: matrix.os_type == 'openeuler'
         run: |
-          yum install -y gcc gcc-c++ cmake numactl-devel clang patch zstd
+          yum install -y gcc gcc-c++ cmake numactl-devel clang ninja-build
           pip install uv
 
-      - name: Get image tag
-        id: get_image_tag
+      - name: Get current cache hour
+        id: get_cache_time
         run: |
-          IMAGE="${{ matrix.image }}"
-          IMAGE_TAG="${IMAGE##*:}"
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
-
-      - name: Cache vllm-ascend csrc
-        id: cache-csrc
-        uses: runs-on/cache@v5
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
         with:
           path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ matrix.arch }}-${{ steps.get_image_tag.outputs.IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            csrc/build
+          key: vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ steps.get_cache_time.outputs.cache_time }}
+          restore-keys: |
+            vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-
 
       - name: Install vllm-ascend
-        if: steps.cache-csrc.outputs.cache-hit != 'true'
         env:
           SOC_VERSION: ${{ matrix.soc_version }}
           MAX_JOBS: "16"
@@ -175,6 +148,10 @@ jobs:
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
 
+          if [ "${{ matrix.os_type }}" = "openeuler" ]; then
+            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
+          fi
+
           pip install uc-manager
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
           # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
@@ -182,3 +159,11 @@ jobs:
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           uv pip install -e .
+
+      - name: Save vllm-ascend csrc build cache
+        if: success() && steps.restore-csrc-build-cache.outputs.cache-hit != 'true'
+        uses: runs-on/cache/save@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ steps.get_cache_time.outputs.cache_time }}
