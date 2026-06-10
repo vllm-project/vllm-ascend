@@ -372,30 +372,37 @@ def test_build_non_spec_causal_conv1d_host_meta_requires_has_initial_state():
         )
 
 
-def test_get_non_spec_causal_conv1d_host_args_requires_prefill_fallback_meta():
+def test_get_non_spec_causal_conv1d_host_args_falls_back_to_runtime_metadata():
     attn_metadata = SimpleNamespace(
         non_spec_prefill_fallback_meta=None,
-        non_spec_causal_conv1d_meta=SimpleNamespace(
-            query_start_loc_opt=(0, 4, 12),
-            cache_indices_opt=(3, 9),
-            initial_state_mode_opt=(1, 0),
-        ),
+        non_spec_query_start_loc=torch.tensor([0, 4, 12], dtype=torch.int32),
+        non_spec_state_indices_tensor=torch.tensor([3, 9], dtype=torch.int32),
+        has_initial_state=torch.tensor([True, False]),
     )
 
-    with pytest.raises(RuntimeError, match="non_spec_prefill_fallback_meta\\.causal_conv1d"):
-        get_non_spec_causal_conv1d_host_args(
-            attn_metadata,
-        )
+    assert get_non_spec_causal_conv1d_host_args(attn_metadata) == (
+        (0, 4, 12),
+        (3, 9),
+        (1, 0),
+    )
 
 
-def test_get_non_spec_chunked_prefill_meta_requires_prefill_fallback_meta():
+def test_get_non_spec_causal_conv1d_host_args_requires_runtime_metadata():
     attn_metadata = SimpleNamespace(
         non_spec_prefill_fallback_meta=None,
-        non_spec_chunked_prefill_meta=SimpleNamespace(chunk_offsets_chunk64=torch.tensor([0, 1])),
+        non_spec_query_start_loc=torch.tensor([0, 4, 12], dtype=torch.int32),
+        non_spec_state_indices_tensor=torch.tensor([3, 9], dtype=torch.int32),
+        has_initial_state=None,
     )
 
-    with pytest.raises(RuntimeError, match="non_spec_prefill_fallback_meta\\.chunk"):
-        get_non_spec_chunked_prefill_meta(attn_metadata)
+    with pytest.raises(RuntimeError, match="has_initial_state"):
+        get_non_spec_causal_conv1d_host_args(attn_metadata)
+
+
+def test_get_non_spec_chunked_prefill_meta_allows_missing_prefill_fallback_meta():
+    attn_metadata = SimpleNamespace(non_spec_prefill_fallback_meta=None)
+
+    assert get_non_spec_chunked_prefill_meta(attn_metadata) is None
 
 
 def test_builder_uses_device_chunk_builder_with_non_spec_query_start_loc(monkeypatch):

@@ -65,8 +65,25 @@ def _check_and_get_host_args(attn_metadata, field_name: str, sub_field_name: str
     return fallback_meta
 
 
+def _check_and_get_runtime_prefill_args(attn_metadata, field_name: str):
+    value = getattr(attn_metadata, field_name, None)
+    if value is None:
+        raise RuntimeError(f"Expected attn_metadata.{field_name} for Ascend GDN prefill path.")
+    return value
+
+
 def get_non_spec_causal_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_prefill_fallback_meta", "causal_conv1d")
+    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is None:
+        query_start_loc = _check_and_get_runtime_prefill_args(attn_metadata, "non_spec_query_start_loc")
+        cache_indices = _check_and_get_runtime_prefill_args(attn_metadata, "non_spec_state_indices_tensor")
+        has_initial_state = _check_and_get_runtime_prefill_args(attn_metadata, "has_initial_state")
+        return (
+            to_int64_tuple(query_start_loc),
+            to_int64_tuple(cache_indices),
+            to_int64_tuple(has_initial_state),
+        )
+
     causal_conv1d_meta = fallback_meta.causal_conv1d
     return (
         to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
@@ -245,7 +262,9 @@ def update_conv1d_graph_params(
 
 
 def get_non_spec_chunked_prefill_meta(attn_metadata):
-    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_prefill_fallback_meta", "chunk")
+    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is None:
+        return None
     return fallback_meta.chunk
 
 
