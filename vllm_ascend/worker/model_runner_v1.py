@@ -82,14 +82,18 @@ from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
-if vllm_version_is("0.21.0"):
+try:
     from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
         extract_routed_experts_for_current_batch,
         get_global_experts_capturer,
         issue_routing_d2h_copy,
     )
-else:
+
+    _HAS_V021_ROUTED_EXPERTS = True
+except ModuleNotFoundError:
     from vllm.v1.outputs import RoutedExpertsLists
+
+    _HAS_V021_ROUTED_EXPERTS = False
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -3400,7 +3404,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
-        if self.routed_experts_initialized and vllm_version_is("0.21.0"):
+        if self.routed_experts_initialized and _HAS_V021_ROUTED_EXPERTS:
             issue_routing_d2h_copy(
                 input_batch_req_ids=self.input_batch.req_ids,
                 num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
@@ -3411,7 +3415,7 @@ class NPUModelRunner(GPUModelRunner):
         routed_experts_dict = None
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.21.0") and self.routed_experts_initialized:
+            if _HAS_V021_ROUTED_EXPERTS and self.routed_experts_initialized:
                 routed_experts_dict = extract_routed_experts_for_current_batch(
                     req_ids=req_ids_output_copy,
                     requests=self.requests,
@@ -3445,7 +3449,7 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
             **(
                 {"routed_experts_dict": routed_experts_dict}
-                if vllm_version_is("0.21.0")
+                if _HAS_V021_ROUTED_EXPERTS
                 else {"routed_experts": routed_experts_lists}
             ),
         )

@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
+import copy
 import math
 import typing
 from collections.abc import Callable, Iterable

@@ -917,6 +917,21 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 f"got {self.attn_sink.numel()} heads, expected {self.num_heads}."
             )
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
+    ):
+        # DSA-CP currently does not require an extra graph-parameter update
+        # step during full-graph replay. Keep a no-op hook so ACLGraphWrapper
+        # can uniformly call into backend impl classes.
+        return None
+
     def forward(  # type: ignore[override]
         self,
         layer_name,
