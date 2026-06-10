@@ -363,7 +363,7 @@ You can get the proxy program in the repository's examples, [load\_balance\_prox
 
 ## Benchmark
 
-We recommend using aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark). Execute the following commands to install aisbench
+We recommend using aisbench tool to assess performance. [aisbench](https://github.com/AISBench/benchmark). Execute the following commands to install aisbench
 
 ```shell
 git clone https://github.com/AISBench/benchmark.git
@@ -412,7 +412,7 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf  --debug  --mode perf
 ```
 
-- For more details on commands and parameters for aisbench, refer to [aisbench](https://gitee.com/aisbench/benchmark)
+- For more details on commands and parameters for aisbench, refer to [aisbench](https://github.com/AISBench/benchmark)
 
 ## Prefill & Decode Configuration Details
 
