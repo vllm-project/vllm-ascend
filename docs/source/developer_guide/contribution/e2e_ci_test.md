@@ -1,80 +1,66 @@
 # E2E CI Test
 
 This document explains how to trigger specific E2E tests against your PR code via a
-comment command, without running the full E2E test suite.
+slash command comment, without running the full E2E test suite.
 
 ## Background
 
-The `E2E-Full` workflow (`pr_test.yaml`) normally runs the complete E2E test suite
-when a PR has `ready` label. This is expensive in CI resources
-and time.
-
-Authorized users can trigger only the specific test files they care about by posting a
-`/e2e` comment on the PR, then adding the `ready` label.
+E2E tests are expensive in CI resources and time. Authorized users can trigger only the
+specific test files they care about by posting a `/e2e` comment on the PR.
 
 ## How to Trigger
 
 ### 1. Post a comment
 
-First, post a comment on the PR specifying which test paths to run:
+Post a comment on the PR with the test paths to run:
 
 ```text
-/e2e [test-path-1] [test-path-2] ...
+/e2e <test-path> [test-path-2 ...] [--vllm <version1,version2>]
 ```
 
-- Each path must be a valid pytest path relative to the repository root.
+- Each path must be under `tests/e2e/pull_request/` and include a subdirectory
+  (e.g. `tests/e2e/pull_request/one_card/test_foo.py`).
 - Multiple paths can be listed in a single comment, separated by spaces.
-- A specific test case can be targeted using `::` notation.
+- Use `--vllm <versions>` to specify which vLLM versions to test against
+  (comma-separated commit SHA or release tag). Without `--vllm`, tests run against
+  both the pinned main commit and the latest release tag by default.
 
 | Comment format | Effect |
 |---|---|
 | `/e2e tests/e2e/pull_request/one_card/test_foo.py` | Run one test file on one_card |
 | `/e2e tests/e2e/pull_request/two_card/test_bar.py` | Run one test file on two_card |
 | `/e2e path1 path2 path3` | Run multiple files, routed by path pattern |
-| `/e2e tests/e2e/pull_request/one_card/test_foo.py::test_case` | Run a specific test case |
+| `/e2e tests/e2e/pull_request/one_card/test_foo.py --vllm <release-tag>` | Run against a specific vLLM version |
 
-### 2. Add the label
+### 2. Wait for results
 
-After posting the comment, add the **`ready`** label to your PR.
-Adding the label is what actually **triggers** the workflow — at that point the workflow
-reads the existing comments to find the `/e2e` command.
+Once the comment is posted, the workflow is triggered automatically. A 🚀 reaction is
+added to your comment to confirm receipt.
 
-:::{note}
-Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can add
-labels. If you do not have this permission, ask a maintainer to add the label for you.
-You can find the list of maintainers and contributors by checking the
-[CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
-file.
-:::
+Upon completion, the bot updates the comment with one of the following outcomes:
 
-:::{important}
-The comment must be posted **before** the label is added. If you add the label first,
-the workflow will find no `/e2e` comment and will not trigger any per-test runs.
-:::
+- **completed successfully** — all tests passed
+- **found no tests to run** — no tests matched the provided paths; check the test paths
+- **was cancelled** — the workflow was cancelled
+- **failed** — one or more tests failed
 
 :::{note}
-Additionally, only the **PR author** or collaborators with **write or admin** repository
-access can trigger tests via comment. The workflow validates the commenter's permission
-before proceeding.
+Only the **PR author** or collaborators with **triage or higher** repository permission
+can trigger `/e2e`. If you lack permission, ask a maintainer to post the comment instead.
 :::
-
-### 3. Wait for results
-
-GitHub Actions will trigger the `E2E-Full` workflow. Only the hardware jobs matching
-the provided test paths will run, which saves CI resources.
 
 ## Path Routing Rules
 
 The workflow automatically routes each test path to the correct hardware runner based
 on path patterns:
 
-| Path pattern | Hardware | Runner |
-|---|---|---|
-| `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-2` |
-| `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-4` |
-| `_310p` in filename under one/two_card | Ascend 310P x1 | `linux-aarch64-310p-*` |
-| `_310p` in filename under four_card | Ascend 310P x4 | `linux-aarch64-310p-*` |
-| All other paths | one_card A2 NPU | `linux-aarch64-a2b3-1` |
+| Test path contains | Runner |
+|---|---|
+| `four_card/_310p` | 310P 4-card |
+| `_310p` (under `one_card`/`two_card`) | 310P single card |
+| `four_card` | A3 4-card |
+| `two_card` | A3 2-card |
+| Others (e.g. `one_card`) | A2 single card |
 
 When paths from multiple categories are listed in a single comment, each category's
 tests run on its respective hardware in parallel.
@@ -90,22 +76,12 @@ tests/e2e/pull_request/
 ├── four_card/         # Four card tests → A3 NPU x4 runner
 ```
 
-310P tests use `_310p` subdirectories or `_310p.py` filename suffix under the
-corresponding card directory:
+310P tests use `_310p` subdirectories under the corresponding card directory:
 
 ```text
 tests/e2e/pull_request/one_card/_310p/   # 310P single card
 tests/e2e/pull_request/four_card/_310p/  # 310P four card
 ```
-
-## Comparison with Full E2E Suite
-
-| Aspect | Full E2E suite | Per-test comment trigger |
-|---|---|---|
-| Trigger | `ready` labels | `/e2e` comment + `ready` label |
-| Scope | All E2E tests | Only specified test paths |
-| Who can trigger | Anyone who can add labels | PR author or write/admin collaborator |
-| Use case | Pre-merge validation | Iterative debugging of specific tests |
 
 ## Examples
 
@@ -127,20 +103,24 @@ Run tests across multiple hardware categories in one comment:
 /e2e tests/e2e/pull_request/one_card/test_offline_inference.py tests/e2e/pull_request/two_card/test_data_parallel.py
 ```
 
-Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
-re-runs the workflow and picks up the existing `/e2e` comment automatically — no need
-to post a new comment.
+Run tests against a specific vLLM version:
+
+```text
+/e2e tests/e2e/pull_request/one_card/test_offline_inference.py --vllm <release-tag>
+```
 
 ## Troubleshooting
 
-**The workflow did not start after I added the label.**
+**The workflow did not start after I posted the comment.**
 
-- Make sure the `/e2e` comment was posted **before** the label was added.
-  If the label was added first, remove it and re-add it after posting the comment.
-- Check that the comment starts exactly with `/e2e` followed by at least one path,
+- Check that the comment starts exactly with `/e2e` followed by at least one valid path,
   with no leading spaces or extra characters before the slash.
-- To re-trigger after fixing an issue, simply push a new commit — the workflow will
-  reuse the existing `/e2e` comment automatically.
+- Confirm you are the PR author or have triage+ repository permission.
+
+**The bot replied "found no tests to run".**
+
+- Verify that each test path is under `tests/e2e/pull_request/<subdir>/`.
+  Paths outside this prefix are rejected.
 
 **Tests ran on the wrong hardware.**
 
@@ -148,7 +128,7 @@ to post a new comment.
   `four_card`, or `_310p`). Paths that do not match any of these patterns are routed to
   the one_card runner by default.
 
-**The `parse-comment` job skipped with a permission error.**
+**The bot replied with a permission error.**
 
-- Only the PR author or write/admin collaborators can use the comment trigger.
-  Ask a maintainer to post the `/e2e` comment instead.
+- Only the PR author or users with triage+ permission can trigger `/e2e`.
+  Ask a maintainer to post the comment instead.

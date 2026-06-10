@@ -39,9 +39,8 @@ jobs:
       pr_sha: ${{ steps.resolve.outputs.pr_sha }}
       test_groups: ${{ steps.groups.outputs.test_groups }}
       has_tests: ${{ steps.groups.outputs.has_tests }}
+      vllm_versions: ${{ steps.resolve.outputs.vllm_versions }}
       notify_comment_id: ${{ steps.notify.outputs.comment-id }}
-      main_commit: ${{ steps.vllm.outputs.main_commit }}
-      release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
       - name: Check user authorization
         id: auth
@@ -100,6 +99,7 @@ jobs:
         if: steps.auth.outputs.authorized == 'true'
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.client_payload.pull_request.head.sha }}
           fetch-depth: 1
 
       - name: Read verified vLLM refs
@@ -129,7 +129,36 @@ jobs:
           echo "pr_sha=$PR_SHA" >> "$GITHUB_OUTPUT"
 
           ALL_ARGS="${{ github.event.client_payload.slash_command.args.all }}"
-          echo "all_args=$ALL_ARGS" >> "$GITHUB_OUTPUT"
+
+          DEFAULT_VLLM_VERSIONS="[\"${{ steps.vllm.outputs.main_commit }}\",\"${{ steps.vllm.outputs.release_tag }}\"]"
+          VLLM_VERSIONS="$DEFAULT_VLLM_VERSIONS"
+          CLEAN_ARGS=""
+          NEXT_IS_VLLM=0
+          VLLM_FLAG_COUNT=0
+          for WORD in $(echo "$ALL_ARGS" | tr '\n' ' ' | xargs); do
+            if [ "$NEXT_IS_VLLM" = "1" ]; then
+              VLLM_VERSIONS=$(printf '%s' "$WORD" | python3 -c "import sys,json; print(json.dumps([v for v in sys.stdin.read().strip().split(',') if v]))")
+              NEXT_IS_VLLM=0
+            elif [ "$WORD" = "--vllm" ]; then
+              NEXT_IS_VLLM=1
+              VLLM_FLAG_COUNT=$((VLLM_FLAG_COUNT + 1))
+              if [ "$VLLM_FLAG_COUNT" -gt 1 ]; then
+                echo "::error::--vllm can only be specified once."
+                exit 1
+              fi
+            else
+              CLEAN_ARGS="$CLEAN_ARGS $WORD"
+            fi
+          done
+
+          if [ "$NEXT_IS_VLLM" = "1" ]; then
+            echo "::error::--vllm requires a value."
+            exit 1
+          fi
+
+          CLEAN_ARGS=$(echo "$CLEAN_ARGS" | xargs)
+          echo "all_args=$CLEAN_ARGS" >> "$GITHUB_OUTPUT"
+          echo "vllm_versions=$VLLM_VERSIONS" >> "$GITHUB_OUTPUT"
 
       - name: Validate test paths
         id: validate
@@ -167,9 +196,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_version:
-          - ${{ needs.e2e-test.outputs.main_commit }}
-          - ${{ needs.e2e-test.outputs.release_tag }}
+        vllm_version: ${{ fromJSON(needs.e2e-test.outputs.vllm_versions) }}
     needs: [e2e-test]
     if: ${{ needs.e2e-test.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
@@ -191,5 +218,5 @@ jobs:
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ needs.e2e-test.outputs.notify_comment_id }}
           body: |
-            [Bot]: e2e command ${{ (needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped') && 'completed successfully' || 'failed' }}.
-          reactions: ${{ (needs.trigger-selected-tests.result == 'success' || needs.trigger-selected-tests.result == 'skipped') && 'hooray' || 'confused' }}
+            [Bot]: e2e command ${{ (needs.trigger-selected-tests.result == 'success' && 'completed successfully') || (needs.trigger-selected-tests.result == 'skipped' && 'found no tests to run (please check the test paths)') || (needs.trigger-selected-tests.result == 'cancelled' && 'was cancelled') || 'failed' }}.
+          reactions: ${{ (needs.trigger-selected-tests.result == 'success' && 'hooray') || 'confused' }}
