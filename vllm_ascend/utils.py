@@ -893,6 +893,8 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
     if _IS_DRAFTER_MOE_MODEL is None:
         model_configs = vllm_config.speculative_config.draft_model_config.hf_text_config.to_dict()
         _IS_DRAFTER_MOE_MODEL = _is_contain_expert(model_configs)
+        if "architectures" in model_configs and "Eagle3DeepseekV2ForCausalLM" in model_configs["architectures"]:
+            _IS_DRAFTER_MOE_MODEL = False
     return _IS_DRAFTER_MOE_MODEL
 
 
