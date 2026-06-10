@@ -240,6 +240,16 @@
     - tests/e2e/pull_request/one_card/lora
     - tests/e2e/pull_request/two_card/lora
 
+# CPU Weight Offloading
+- name: cpu_weight_offload
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/model_executor
+    - vllm_ascend/worker/model_runner_v1.py
+    - vllm_ascend/compilation/acl_graph.py
+  tests:
+    - tests/e2e/pull_request/one_card/test_cpu_weight_offload.py
+
 # Model Loader
 - name: model_loader
   optional: true
