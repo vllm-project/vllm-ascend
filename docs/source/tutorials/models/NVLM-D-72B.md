@@ -125,3 +125,12 @@ Expected output (with a real photo):
 ```json
 {"choices": [{"message": {"content": "The image features an animated scene set in an outdoor environment during what appears to be either dawn or dusk, given the pastel hues of the sky..."}}], "usage": {"prompt_tokens": 823, "completion_tokens": 256}}
 ```
+
+## Introduction
+
+Reference values (from `tests/e2e/models/configs/NVLM-D-72B.yaml`):
+
+| Task  | Metric                       | Expected (yaml) |
+|-------|------------------------------|-----------------|
+| gsm8k | exact_match,strict-match     | 0.35            |
+| gsm8k | exact_match,flexible-extract | 0.47            |
