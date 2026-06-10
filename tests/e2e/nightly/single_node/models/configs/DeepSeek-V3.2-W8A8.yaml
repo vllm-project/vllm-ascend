@@ -61,6 +61,8 @@ test_cases:
         max_out_len: 32768
         batch_size: 32
         baseline: 86.67
+        temperature: 1.0
+        top_p: 0.95
         thinking: true
         threshold: 10
 
