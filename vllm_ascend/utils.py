@@ -600,7 +600,7 @@ def check_ascend_rt_visible_devices(local_world_size: int) -> None:
             f"which causes the surviving worker pool to be smaller than "
             f"the requested parallelism and the corresponding rank to fail "
             f"at rtSetDevice with error 107001. Use the logical-id form "
-            f'"0,1,...,{visible_device_count - 1}" and let the driver '
+            f'"0,1,...,{len(raw_ids) - 1}" and let the driver '
             f"map those onto the underlying physical NPUs."
         )
 
