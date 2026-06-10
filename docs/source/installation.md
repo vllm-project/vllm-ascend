@@ -180,12 +180,18 @@ source $HOME/.local/bin/env
 # Install vllm-project/vllm. The newest supported version is |vllm_version|.
 pip install vllm==|pip_vllm_version|
 
-# clear uv cache and Install vllm-project/vllm-ascend from wheelnext index.
-uv cache clean
+# Install vllm-project/vllm-ascend from wheelnext index.
 uv pip install --system \
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
 --index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
 vllm-ascend==|pip_vllm_ascend_version|
+
+```
+
+```{note}
+If you encounter errors during `uv pip install` (e.g., corrupted cache or stale package data), try clearing the uv cache first and then re-run the install command:
+
+    uv cache clean
 
 ```
 
