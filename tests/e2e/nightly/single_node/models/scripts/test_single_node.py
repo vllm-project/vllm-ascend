@@ -190,7 +190,6 @@ _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "matmul_allreduce",
     "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
-    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "context_parallel",
     "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
 }
 

@@ -22,6 +22,10 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+)
 
 
 class DSAAttention(nn.Module, AttentionLayerBase):
@@ -150,10 +154,17 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            kv_cache_dtype = torch.float8_e4m3fn
+            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
+
+        cached_head_size = (
+            (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
+        )
         return MLAAttentionSpec(
             block_size=128,
             num_kv_heads=1,
-            head_size=self.head_size,
+            head_size=cached_head_size,
             dtype=kv_cache_dtype,
             model_version="deepseek_v4",
             compress_ratio=self.compress_ratio,

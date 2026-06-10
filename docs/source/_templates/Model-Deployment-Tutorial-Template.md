@@ -186,27 +186,29 @@ lm_eval \
 
 Omitted. Requirements are the same as for Accuracy Evaluation.
 
-## 9 Best Practices
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
 
 **Content Writing Requirements:**
 
-Provide recommended configurations for three scenarios (long sequence, low latency, high throughput) for each model that can achieve optimal performance, but do not provide specific performance data.
+Provide recommended configurations for three typical scenarios (long context, low latency, high throughput). Clearly state that the configurations are not globally optimal and guide users to perform tuning based on their actual circumstances.
 
 **Example:**
 
-### Best Practice Configuration Reference
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
-### Table 1: Scenario Overview
+#### Table 1: Scenario Overview
 
-| Scenario | Deployment Mode | *Total NPUs | Weight Version | Optimization Rationale |
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|-------------|----------------|------------------------|
 | High Throughput<br>(32K context → 1K output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For short-sequence high throughput, try adjusting xxx parameters |
 | Long Context | | | | |
 | Low Latency | | | | |
 
-> **Note**: `*Total NPUs` indicates the total number of NPUs used across all nodes.
+> `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
-### Table 2: Node-Level Detailed Configuration
+#### Table 2: Detailed Node Configuration
 
 | Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
 |----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|-----------|-----------|--------------|------------------|
@@ -217,20 +219,30 @@ Provide recommended configurations for three scenarios (long sequence, low laten
 | Low Latency | Server-P Node / Single Machine | | | | | | | | | | | |
 | Low Latency | Server-D Node | | | | | | | | | | | |
 
-## 10 Performance Tuning (Optional)
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in Chapter 5.
+
+### 9.2 Tuning Guidelines (Optional)
+
+#### 9.2.1 General Tuning Reference
 
 **Content Writing Requirements:**
 
-- Summarize key optimization techniques and parameter tuning experiences for the model to help users achieve optimal performance in specific scenarios. Include optimization technique descriptions, enablement methods, parameter tuning recommendations, and typical configuration examples.
-- Hyperlinks to the features guide may be used to allow users to view detailed descriptions of specific features.
-
-### 10.1 Key Optimization Points
-
-In this section, we will introduce the key optimization points that can significantly improve the performance of the XX model. These techniques aim to improve throughput and efficiency in various scenarios.
-
-#### 10.1.1 Basic Optimizations
+If no special tuning is involved, directly provide a feature combination table and a link to the public performance tuning documentation.
 
 **Example:**
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+#### 9.2.2 Model-Specific Optimizations
+
+**Documentation Requirements:**
+
+If the model has specific optimizations, summarize the key optimization techniques and tuning experience for this model.
+
+**Example:**
+
+#### Optimizations Enabled by Default
 
 The following optimizations are enabled by default and require no additional configuration:
 
@@ -241,9 +253,7 @@ The following optimizations are enabled by default and require no additional con
 | Zero-like Elimination | Removes unnecessary zero-tensor operations in Attention forward pass | Reduces memory footprint, improves matrix operation efficiency |
 | FullGraph Optimization | Captures and replays the entire decoding graph at once using `compilation_config={"cudagraph_mode":"FULL_DECODE_ONLY"}` | Significantly reduces scheduling latency, stabilizes multi-device performance |
 
-#### 10.1.2 Advanced Optimizations (Require Explicit Enablement)
-
-**Example:**
+#### Optimizations That Require Explicit Enabling
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | --------------------- | -------------------- | ----------------- | ------------------- | ----------- |
@@ -251,17 +261,7 @@ The following optimizations are enabled by default and require no additional con
 | Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling FlashComm_v1 | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as FlashComm_v1, has threshold protection |
 | Weight Prefetch | MLP-intensive scenarios (Dense models) | `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | Utilizes vector computation time to prefetch MLP weights into L2 cache in advance | Requires coordination with prefetch buffer size adjustment |
 
-### 10.2 Optimization Highlights
-
-**Content Writing Requirements:**
-
-Summarize the most noteworthy optimization points during the actual tuning process, distill core experiences, and provide readers with tuning ideas for getting started quickly.
-
-**Example:**
-
-During the actual tuning process, the following points are most critical for performance improvement: The prefetch buffer size needs to be determined through empirical measurement to find the optimal overlap between computation and prefetching; the setting of `max-num-batched-tokens` needs to balance throughput and video memory to avoid excessive chunking or OOM risk; `cudagraph_capture_sizes` must be manually specified and cover the target concurrency; when FlashComm_v1 is enabled, it is also necessary to ensure that the values are multiples of TP; `pa_shape_list` is a temporary tuning parameter that only takes effect for specific batch sizes, requiring attention to version evolution for timely adjustments. The coordinated configuration of the above parameters and environment variables is key to achieving extreme performance.
-
-## 11 FAQ
+## 10 FAQ
 
 **Content Writing Requirements:**
 

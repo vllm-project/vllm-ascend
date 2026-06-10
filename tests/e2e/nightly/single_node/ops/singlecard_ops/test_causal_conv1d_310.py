@@ -97,8 +97,8 @@ def test_ascend_causal_conv1d_310_fn(
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("seqlen", [1, 3])
 @pytest.mark.parametrize("width", [4])
-@pytest.mark.parametrize("dim", [2048, 4096])
-@pytest.mark.parametrize("batch_size", [4, 8])
+@pytest.mark.parametrize("dim", [2048, 4096, 8192])
+@pytest.mark.parametrize("batch_size", [4, 8, 16, 32, 64])
 def test_causal_conv1d_310_update(batch_size, dim, width, seqlen, has_bias, silu_activation, itype):
     device = "npu"
     # total_entries = number of cache line

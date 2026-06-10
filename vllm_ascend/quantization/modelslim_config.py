@@ -493,6 +493,15 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
+        # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
+        # initialize lm_head with prefix="lm_head", while the quant description
+        # key is mapped to "language_model.lm_head.weight".
+        if (
+            prefix == "lm_head"
+            and "lm_head.weight" not in self.quant_description
+            and "language_model.lm_head.weight" in self.quant_description
+        ):
+            prefix = "language_model.lm_head"
         prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
         substr_mapping = QUANT_MODEL_SUBSTR_MAPPINGS.get(model_type)
         if prefix_mapping:
@@ -522,9 +531,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                     parts = parts[: exp_idx + 1]
                     prefix = ".".join(parts)
 
-        # TODO: remove it when vllm fixes the WeightsMapper bug of qwen3-vl.
-        if model_type in ["qwen3_vl"] and prefix == "lm_head":
-            prefix = "language_model.lm_head"
         if model_type in ["bailing_hybrid"]:
             # Adapt to bailing_hybrid architecture: update layer names to MoE convention
             prefix = prefix.replace("linear_attn", "attention")
@@ -549,7 +555,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
             logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa/indexer]")
             return AscendKVCacheMethod(scheme)
-        elif isinstance(layer, AttentionLayerBase) and self.quant_description.get("kv_cache_type") == "C8":
+        elif isinstance(layer, AttentionLayerBase) and self.is_c8_quant_layer(prefix):
             from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
             logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
@@ -625,6 +631,13 @@ class AscendModelSlimConfig(QuantizationConfig):
         if self.enable_indexer_quant:
             layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
             if layer_id_str.isdigit() and int(layer_id_str) in self.indexer_quant_layers:
+                return True
+        return False
+
+    def is_c8_quant_layer(self, prefix):
+        if self.enable_c8_quant:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.c8_quant_layers:
                 return True
         return False
 
@@ -813,11 +826,14 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
-        self.enable_c8_quant = kv_quant_type != ""
-        if self.enable_fa_quant or self.enable_indexer_quant:
+        self.enable_c8_quant = kv_quant_type == "C8"
+        self.c8_quant_layers = []
+        if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))
                 if "fa_k.scale" in key:
                     self.kvcache_quant_layers.append(int(_id))
                 if "indexer.quant_type" in key:
                     self.indexer_quant_layers.append(int(_id))
+                if "k_proj.kv_cache_scale" in key:
+                    self.c8_quant_layers.append(int(_id))

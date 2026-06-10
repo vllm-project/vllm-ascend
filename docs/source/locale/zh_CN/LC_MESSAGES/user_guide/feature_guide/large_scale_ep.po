@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-06-07 05:04+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -57,9 +57,9 @@ msgstr "物理层要求"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:12
 msgid ""
-"The physical machines must be located on the same WLAN, with network "
+"The physical machines must be located on the same LAN, with network "
 "connectivity."
-msgstr "物理机必须位于同一局域网（WLAN）内，并具备网络连通性。"
+msgstr "物理机必须位于同一局域网内，并具备网络连通性。"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:13
 msgid ""
@@ -132,17 +132,17 @@ msgstr "预填充节点"
 msgid "Decoder node"
 msgstr "解码节点"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:241
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:239
 msgid "Start Distributed DP Server for prefill-decode disaggregation"
 msgstr "启动分布式 DP 服务端以实现预填充-解码分离"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:243
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:241
 msgid ""
 "Execute the following Python file on all nodes to use the distributed DP "
 "server. (We recommend using this feature on the v0.9.1 official release)"
 msgstr "在所有节点上执行以下 Python 文件以使用分布式 DP 服务端。（建议在 v0.9.1 官方版本上使用此功能）"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:317
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:315
 msgid ""
 "Note that the prefiller nodes and the decoder nodes may have different "
 "configurations. In this example, each prefiller node is deployed as a "
@@ -153,105 +153,105 @@ msgstr ""
 "请注意，预填充节点和解码节点可能具有不同的配置。在此示例中，每个预填充节点独立部署为主节点，而解码节点则使用 192.0.0.5 "
 "节点作为主节点。这导致了 'dp_size_local' 和 'dp_rank_start' 的差异。"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:319
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:317
 msgid "Example proxy for Distributed DP Server"
 msgstr "分布式 DP 服务端代理示例"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:321
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:319
 msgid ""
 "In the PD separation scenario, we need a proxy to distribute requests. "
 "Execute the following commands to enable the example proxy:"
 msgstr "在 PD 分离场景中，我们需要一个代理来分发请求。执行以下命令以启用示例代理："
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Parameter"
 msgstr "参数"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "meaning"
 msgstr "含义"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "--port"
 msgstr "--port"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Proxy service Port"
 msgstr "代理服务端口"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "--host"
 msgstr "--host"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Proxy service Host IP"
 msgstr "代理服务主机 IP"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "--prefiller-hosts"
 msgstr "--prefiller-hosts"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Hosts of prefiller nodes"
 msgstr "预填充节点主机列表"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "--prefiller-hosts-num"
 msgstr "--prefiller-hosts-num"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Number of repetitions for prefiller node hosts"
 msgstr "预填充节点主机的重复次数"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "--prefiller-ports"
 msgstr "--prefiller-ports"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Ports of prefiller nodes"
 msgstr "预填充节点端口列表"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "--prefiller-ports-inc"
 msgstr "--prefiller-ports-inc"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Number of increments for prefiller node ports"
 msgstr "预填充节点端口的递增次数"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "--decoder-hosts"
 msgstr "--decoder-hosts"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Hosts of decoder nodes"
 msgstr "解码节点主机列表"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "--decoder-hosts-num"
 msgstr "--decoder-hosts-num"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Number of repetitions for decoder node hosts"
 msgstr "解码节点主机的重复次数"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "--decoder-ports"
 msgstr "--decoder-ports"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Ports of decoder nodes"
 msgstr "解码节点端口列表"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "--decoder-ports-inc"
 msgstr "--decoder-ports-inc"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "Number of increments for decoder node ports"
 msgstr "解码节点端口的递增次数"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:364
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:362
 msgid ""
 "You can get the proxy program in the repository's examples, "
 "[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
@@ -263,11 +263,11 @@ msgstr ""
 "project/vllm-"
 "ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:366
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:364
 msgid "Benchmark"
 msgstr "基准测试"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:368
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:366
 msgid ""
 "We recommend using aisbench tool to assess performance. "
 "[aisbench](https://gitee.com/aisbench/benchmark). Execute the following "
@@ -277,19 +277,19 @@ msgstr ""
 "工具来评估性能。[aisbench](https://gitee.com/aisbench/benchmark)。执行以下命令安装 "
 "aisbench"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:376
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:374
 msgid ""
 "You need to cancel the http proxy before assessing performance, as "
 "follows:"
 msgstr "在评估性能之前，您需要取消 HTTP 代理，如下所示："
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:384
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:382
 msgid ""
 "You can place your datasets in the directory: "
 "`benchmark/ais_bench/datasets`"
 msgstr "您可以将数据集放置在目录：`benchmark/ais_bench/datasets` 中"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:385
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:383
 msgid ""
 "You can change the configuration in the directory "
 ":`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take "
@@ -298,13 +298,13 @@ msgstr ""
 "您可以在目录 `benchmark/ais_bench/benchmark/configs/models/vllm_api` 中修改配置。以 "
 "`vllm_api_stream_chat.py` 为例："
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:411
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:409
 msgid ""
 "Taking the gsm8k dataset as an example, execute the following commands to"
 " assess performance."
 msgstr "以 gsm8k 数据集为例，执行以下命令评估性能。"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:417
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:415
 msgid ""
 "For more details on commands and parameters for aisbench, refer to "
 "[aisbench](https://gitee.com/aisbench/benchmark)"
@@ -312,73 +312,73 @@ msgstr ""
 "有关 aisbench 命令和参数的更多详细信息，请参阅 "
 "[aisbench](https://gitee.com/aisbench/benchmark)"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:419
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:417
 msgid "Prefill & Decode Configuration Details"
 msgstr "预填充与解码配置详情"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:421
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:419
 msgid "In the PD separation scenario, we provide an optimized configuration."
 msgstr "在 PD 分离场景中，我们提供了一套优化配置。"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:423
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:421
 msgid "**prefiller node**"
 msgstr "**预填充节点**"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:425
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:423
 msgid "set HCCL_BUFFSIZE=256"
 msgstr "设置 HCCL_BUFFSIZE=256"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:426
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:424
 msgid "add '--enforce-eager' command to 'vllm serve'"
 msgstr "在 'vllm serve' 中添加 '--enforce-eager' 命令"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:427
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:449
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:425
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:446
 msgid "Take '--kv-transfer-config' as follows:"
 msgstr "'--kv-transfer-config' 参数示例如下："
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:440
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:462
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:437
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:458
 msgid "Take '--additional-config' as follows:"
 msgstr "'--additional-config' 参数示例如下："
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:446
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:443
 msgid "**decoder node**"
 msgstr "**解码节点**"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:448
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:445
 msgid "set HCCL_BUFFSIZE=1024"
 msgstr "设置 HCCL_BUFFSIZE=1024"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:468
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:464
 msgid "Parameters Description"
 msgstr "参数说明"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:470
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:466
 msgid "'--additional-config' Parameter Introduction:"
 msgstr "'--additional-config' 参数介绍："
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:472
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:468
 msgid ""
 "**\"enable_weight_nz_layout\"**: Whether to convert quantized weights to "
 "NZ format to accelerate matrix multiplication."
 msgstr "**\"enable_weight_nz_layout\"**：是否将量化权重转换为 NZ 格式以加速矩阵乘法。"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:473
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:469
 msgid ""
 "**\"enable_prefill_optimizations\"**: Whether to enable DeepSeek models' "
 "prefill optimizations. <br>"
 msgstr "**\"enable_prefill_optimizations\"**：是否启用 DeepSeek 模型的 Prefill 优化。<br>"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:476
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:472
 msgid "Enable MTP Add the following command to your configurations."
 msgstr "启用 MTP：在您的配置中添加以下命令。"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:483
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:479
 msgid "Recommended Configuration Example"
 msgstr "推荐配置示例"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:485
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:481
 msgid ""
 "For example, if the average input length is 3.5k, and the output length "
 "is 1.1k, the context length is 16k, the max length of the input dataset "
@@ -389,105 +389,105 @@ msgstr ""
 "例如，如果平均输入长度为 3.5k，输出长度为 1.1k，上下文长度为 16k，输入数据集的最大长度为 7k。在此场景下，我们为支持高 EP "
 "的分布式 DP 服务器提供一套推荐配置。这里我们使用 4 个节点进行 Prefill，4 个节点进行 Decode。"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "node"
 msgstr "节点类型"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "DP"
 msgstr "DP"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "TP"
 msgstr "TP"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "EP"
 msgstr "EP"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "max-model-len"
 msgstr "max-model-len"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "max-num-batched-tokens"
 msgstr "max-num-batched-tokens"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "max-num-seqs"
 msgstr "max-num-seqs"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "gpu-memory-utilization"
 msgstr "gpu-memory-utilization"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "prefill"
 msgstr "prefill"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "2"
 msgstr "2"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "8"
 msgstr "8"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "16"
 msgstr "16"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "17000"
 msgstr "17000"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "16384"
 msgstr "16384"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "4"
 msgstr "4"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "0.9"
 msgstr "0.9"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "decode"
 msgstr "decode"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "64"
 msgstr "64"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "1"
 msgstr "1"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "256"
 msgstr "256"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:282
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:280
 msgid "28"
 msgstr "28"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:493
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:489
 msgid ""
 "Note that these configurations are not related to optimization. You need "
 "to adjust these parameters based on actual scenarios."
 msgstr "请注意，这些配置与优化逻辑无关。您需要根据实际场景调整这些参数。"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:496
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:492
 msgid "FAQ"
 msgstr "常见问题解答 (FAQ)"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:498
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:494
 msgid "1. Prefiller nodes need to warm up"
 msgstr "1.Prefiller 节点需要预热"
 
-#: ../../source/user_guide/feature_guide/large_scale_ep.md:500
+#: ../../source/user_guide/feature_guide/large_scale_ep.md:496
 msgid ""
 "Since the computation of some NPU operators requires several rounds of "
 "warm-up to achieve best performance, we recommend preheating the service "

@@ -27,7 +27,6 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -50,7 +49,7 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-if vllm_version_is("0.20.2"):
+if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map
 else:
 
@@ -69,7 +68,7 @@ class FusedMoEResult:
     before_dispatch_evt: torch.npu.Event | None = None
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
-    swiglu_limit: int = 0
+    swiglu_limit: float = 0.0
 
 
 @dataclass
@@ -79,7 +78,7 @@ class FusedMoEEvents:
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
-    swiglu_limit: int = 0
+    swiglu_limit: float = 0.0
 
 
 def mock_false():
@@ -180,9 +179,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             input_ids=input_ids,
         )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.20.2"):
-                # 0.20.2: capturer is a process-wide singleton.
-                capturer = RoutedExpertsCapturer.get_instance()
+            if vllm_version_is("0.21.0"):
+                # In 0.21.0, capturer is a process-wide singleton.
+                from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_global_experts_capturer
+
+                capturer = get_global_experts_capturer()
             else:
                 capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
             if capturer is not None:
@@ -414,7 +415,7 @@ class AscendFusedMoE(FusedMoE):
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
         self.local_num_experts = self.global_num_experts // self.ep_size
-        if not vllm_version_is("0.20.2"):
+        if not vllm_version_is("0.21.0"):
             self.expert_map_manager._local_num_experts = self.local_num_experts
             self.expert_map_manager._expert_map = self._expert_map
         if self._expert_map is not None:
@@ -776,6 +777,31 @@ class AscendFusedMoE(FusedMoE):
                     bias=None,
                     output_dtype=original_dtype,
                 )
+            elif has_quantized_shared and self.quant_type == QuantType.W4A8MXFP:
+                original_dtype = hidden_states.dtype
+                # Execute dynamic quant concurrently with MoE gate.
+                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+                    hidden_states, dst_type=torch.float8_e4m3fn
+                )
+                # Execute the gate projection and activation concurrently with the
+                # dispatch communication.
+                maybe_wait_event(fused_moe_evts.before_dispatch)
+                hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
+                # Execute activation concurrently with gmm2.
+                maybe_wait_event(fused_moe_evts.before_gmm2)
+                quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+                    hidden_states,
+                    topk_weight=None,
+                    group_index=None,
+                    dst_type=torch.float8_e4m3fn,
+                    quant_mode=2,
+                    clamp_value=fused_moe_evts.swiglu_limit,
+                )
+                # Execute the down projection concurrently with the combine
+                # communication.
+                maybe_wait_event(fused_moe_evts.before_combine)
+                shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)

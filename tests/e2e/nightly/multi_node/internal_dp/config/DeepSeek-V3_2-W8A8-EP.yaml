@@ -21,6 +21,7 @@ env_common: &env_common
   HCCL_INTRA_PCIE_ENABLE: 1
   HCCL_INTRA_ROCE_ENABLE: 0
 
+
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0, 1]
@@ -59,7 +60,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
-          "engine_id": "0",
           "kv_connector_extra_config": {
                     "prefill": {
                             "dp_size": 2,
@@ -105,7 +105,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
-          "engine_id": "0",
           "kv_connector_extra_config": {
                     "prefill": {
                             "dp_size": 2,
@@ -150,7 +149,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30200",
-          "engine_id": "1",
           "kv_connector_extra_config": {
                       "prefill": {
                               "dp_size": 2,
@@ -197,7 +195,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30200",
-          "engine_id": "1",
           "kv_connector_extra_config": {
                       "prefill": {
                               "dp_size": 2,
