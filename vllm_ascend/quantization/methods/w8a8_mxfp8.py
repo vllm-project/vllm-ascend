@@ -22,7 +22,6 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
-from vllm.distributed import get_ep_group
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
@@ -71,17 +70,22 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        # reshape x for Qwen VL models
-        original_shape = x.shape
-        if x.dim() > 2:
-            x = x.view(-1, x.shape[-1])
-        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
-        pertoken_scale = dynamic_scale
-        output_dtype = x.dtype
+        if isinstance(x, tuple):
+            quantized_x, pertoken_scale = x
+            original_shape = quantized_x.shape
+            output_dtype = torch.bfloat16
+        else:
+            # reshape x for Qwen VL models
+            original_shape = x.shape
+            if x.dim() > 2:
+                x = x.view(-1, x.shape[-1])
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+            output_dtype = x.dtype
+
         if bias is not None and bias.dtype != torch.float32:
             bias = bias.to(torch.float32)
 
@@ -196,7 +200,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def __init__(self):
         ensure_mxfp8_moe_available("W8A8_MXFP8 MoE quantization")
-        self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)

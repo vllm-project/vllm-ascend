@@ -1,4 +1,5 @@
 # Standard
+import functools
 import json
 import os
 import threading
@@ -20,6 +21,41 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import g
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
+
+
+@functools.lru_cache(maxsize=1)
+def _mooncake_setup_supports_ssd_offload() -> bool:
+    """True when installed Mooncake exposes SSD kwargs on setup() (v0.3.11+)."""
+    from mooncake.store import MooncakeDistributedStore  # type: ignore
+
+    setup = MooncakeDistributedStore.setup
+    try:
+        import inspect
+
+        sig = inspect.signature(setup)
+        return "enable_ssd_offload" in sig.parameters
+    except (TypeError, ValueError):
+        # pybind11 overloaded bindings often reject inspect.signature
+        doc = setup.__doc__ or ""
+        return "enable_ssd_offload" in doc
+
+
+def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
+    """Keyword args for store.setup(); empty on old Mooncake or when SSD is off."""
+    if not config.enable_ssd_offload:
+        return {}
+    if not _mooncake_setup_supports_ssd_offload():
+        raise RuntimeError(
+            "mooncake.json has enable_ssd_offload=true, but the installed "
+            "Mooncake does not support enable_ssd_offload/ssd_offload_path in "
+            "MooncakeDistributedStore.setup(). Upgrade Mooncake to v0.3.11 or "
+            "later (see Mooncake ssd-offload.md Step 3A), or set "
+            "enable_ssd_offload to false."
+        )
+    return {
+        "enable_ssd_offload": config.enable_ssd_offload,
+        "ssd_offload_path": config.ssd_offload_path,
+    }
 
 
 class MooncakeBackend(Backend):
@@ -47,7 +83,7 @@ class MooncakeBackend(Backend):
             if self._store_initialized:
                 return
 
-            logger.info("Initializing Mooncake store on first put.")
+            logger.info("Initializing Mooncake store. metadata_server=%s", self.config.metadata_server)
             self.store = self._setup_store()
             self._store_initialized = True
 
@@ -63,6 +99,18 @@ class MooncakeBackend(Backend):
 
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
+        ssd_kwargs = _ssd_setup_kwargs(self.config)
+        # Each TP rank must use a separate SSD directory to avoid bucket file
+        # collisions (independent BucketStorageBackend instances generate the
+        # same bucket_id sequence and would overwrite each other's data).
+        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
+            local_rank = get_world_group().local_rank
+            rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{local_rank}")
+            try:
+                os.makedirs(rank_path, exist_ok=True)
+            except OSError as e:
+                raise RuntimeError(f"Failed to create per-rank SSD offload directory: {rank_path!r} ({e})")
+            ssd_kwargs["ssd_offload_path"] = rank_path
         # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
         # and only can be used for 800 I/T A3 series.
         # Required supporting hardware versions are as follows:
@@ -78,6 +126,7 @@ class MooncakeBackend(Backend):
                 rdma_devices=self.config.device_name,
                 master_server_addr=self.config.master_server_address,
                 engine=transfer_engine.get_engine(),
+                **ssd_kwargs,
             )
         else:
             self.local_seg = local_hostname
@@ -89,12 +138,22 @@ class MooncakeBackend(Backend):
                 protocol=self.config.protocol,
                 rdma_devices=self.config.device_name,
                 master_server_addr=self.config.master_server_address,
+                **ssd_kwargs,
             )
 
         if ret != 0:
             msg = "Initialize mooncake failed."
-            logger.error(msg)
+            logger.error(
+                "Initialize mooncake failed. ret=%d, metadata_server=%s. Check mooncake config and network.",
+                ret,
+                self.config.metadata_server,
+            )
             raise RuntimeError(msg)
+        if ssd_kwargs:
+            logger.info(
+                "Mooncake SSD offload enabled (Mode A): path=%s",
+                self.config.ssd_offload_path,
+            )
         return store
 
     def set_device(self):
@@ -129,17 +188,22 @@ class MooncakeBackend(Backend):
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
             for value in res:
                 if value < 0:
-                    logger.error("Failed to put key %s,res:%s", keys, res)
+                    logger.error("Failed to put key. keys=%s, result=%s. Check memory and store capacity.", keys, res)
                     if self._lazy_init:
-                        logger.error("If this is the first DSV4(compress) request, this failure is expected.")
+                        logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
-            logger.error("Failed to put key %s,error:%s", keys, e)
+            logger.error(
+                "Failed to put key. keys=%s, type=%s, error=%s. Check store state and memory.",
+                keys,
+                type(e).__name__,
+                e,
+            )
             if self._lazy_init:
-                logger.error("If this is the first DSV4(compress) request, this failure is expected.")
+                logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
-            logger.error("MooncakeBackend.get called before store initialization, keys=%s", keys)
+            logger.error("get() called before store init. keys=%s. Call put() first to trigger initialization.", keys)
             return
         assert self.store is not None
         logger.debug(
@@ -158,12 +222,19 @@ class MooncakeBackend(Backend):
             )
             for i, value in enumerate(res_list):
                 if value < 0:
-                    logger.error("Failed to get key %s, res:%s", keys, res_list)
+                    logger.error(
+                        "Failed to get key. keys=%s, result=%s. Check key existence and memory state.", keys, res_list
+                    )
                 elif value > 0:
                     res_list[i] = 0
             return res_list
         except Exception as e:
-            logger.error("Failed to get key %s, error:%s", keys, e)
+            logger.error(
+                "Failed to get key. keys=%s, type=%s, error=%s. Check store state and network.",
+                keys,
+                type(e).__name__,
+                e,
+            )
             return None
 
 
@@ -177,6 +248,18 @@ class MooncakeStoreConfig:
     master_server_address: str
     preferred_segment: bool
     prefer_alloc_in_same_node: bool
+    enable_ssd_offload: bool = False
+    ssd_offload_path: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.enable_ssd_offload:
+            return
+        if not self.ssd_offload_path:
+            raise ValueError(
+                "enable_ssd_offload is true but ssd_offload_path is empty. Set ssd_offload_path in mooncake.json."
+            )
+        if not os.path.isabs(self.ssd_offload_path):
+            raise ValueError(f"ssd_offload_path must be an absolute path, got: {self.ssd_offload_path!r}")
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
@@ -199,6 +282,8 @@ class MooncakeStoreConfig:
             else config.get("master_server_address"),
             preferred_segment=config.get("preferred_segment", False),
             prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node", True),
+            enable_ssd_offload=bool(config.get("enable_ssd_offload", False)),
+            ssd_offload_path=config.get("ssd_offload_path", ""),
         )
 
     @staticmethod

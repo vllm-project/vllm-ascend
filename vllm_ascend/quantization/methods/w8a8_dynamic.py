@@ -21,7 +21,6 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
-from vllm.distributed import get_ep_group
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -158,8 +157,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.W8A8
 
     def __init__(self):
-        self.ep_group = get_ep_group()
-
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
         self.use_aclgraph = (

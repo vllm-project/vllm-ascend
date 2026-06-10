@@ -33,6 +33,13 @@
 #                paths after directory scanning)
 
 # === Modules ===
+# Default CPU UT module - always runs all CPU UTs in every PR
+- name: default_cpu_ut
+  optional: false
+  cpu_only: true
+  tests:
+    - tests/ut
+
 # 310P
 - name: 310p
   optional: true
@@ -356,6 +363,13 @@
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
 
+- name: patch_mamba_utils_310p
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/patch/worker/patch_mamba_utils.py
+  tests:
+    - tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py::test_qwen3_5_dense_prefix_mamba_cache_tp1_fp16
+
 # Profiler
 - name: profiler
   optional: true
@@ -372,6 +386,7 @@
   tests:
     - tests/ut/quantization
     - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
+    - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
 # Sample
 - name: sample
@@ -381,6 +396,14 @@
   tests:
     - tests/ut/sample
     - tests/e2e/pull_request/one_card/test_sampler.py
+
+- name: simple_kv_offload
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/simple_kv_offload
+    - vllm_ascend/distributed/kv_transfer/kv_pool/simple_cpu_offload
+  tests:
+    - tests/e2e/pull_request/one_card/test_simple_cpu_offload.py
 
 # Spec Decode
 - name: spec_decode_base
@@ -550,6 +573,7 @@
     - tests/ut/test_meta_registration.py
     - tests/ut/test_profiling_config.py
     - tests/ut/test_utils.py
+    - tests/ut/test_platform.py
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
 
@@ -577,6 +601,7 @@
     - vllm_ascend/ops/fused_moe/token_dispatcher.py
   tests:
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
+    - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
 # === Others ===
 - name: _tools

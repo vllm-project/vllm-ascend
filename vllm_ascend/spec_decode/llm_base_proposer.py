@@ -499,9 +499,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.pcp_size * self.dcp_size > 1:
                 # update long_seq related params and flatten block_table
                 common_attn_metadata.prefill_context_parallel_metadata = self.runner.pcp_manager.long_seq_metadata
-                common_attn_metadata.block_table_tensor = self.runner.input_batch.block_table[0].get_device_tensor()[
-                    : num_reqs * self.decode_threshold
-                ]
 
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
@@ -514,8 +511,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
                 if self.pcp_size * self.dcp_size > 1 and draft_step > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-                    slicing_length = num_reqs * self.decode_threshold
-                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:slicing_length]
+                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
                     AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
@@ -541,6 +537,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             inputs_embeds = self.inputs_embeds[:num_tokens]
         else:
             inputs_embeds = None
+
+        self.token_indices_to_sample.fill_(0)
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -832,13 +830,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                 slot_indices = torch.cat(slot_indices_list, dim=0)
 
-                # fold block_table (restore it to original size before flattened)
-                block_indices = torch.cat(
-                    [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d, dim=0)[:-1]]
-                )
-                common_attn_metadata.block_table_tensor[:batch_size] = common_attn_metadata.block_table_tensor[
-                    block_indices
-                ]
                 common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
 
                 # Copy the old attn_metadata and update
@@ -1275,7 +1266,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self._split_pcp_input(req_scheduled_tokens_p, input_ids_p, target_hidden_states_p)
                 )
                 num_tokens = num_tokens_d + num_tokens_p
-                target_positions = target_positions[:num_tokens]
+                if self.uses_mrope:
+                    target_positions = target_positions[:, :num_tokens]
+                else:
+                    target_positions = target_positions[:num_tokens]
                 self.input_ids[:num_tokens].copy_(torch.cat([input_ids_d, input_ids_p], dim=0))
                 target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
                 # 2. update sample_indices according to main model
@@ -1507,15 +1501,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
-        common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_max_model_len, 1)
+        exceeds_mask = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
+        common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
         if common_attn_metadata.seq_lens_cpu is not None:
             common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
-            exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
-            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
+            exceeds_mask_cpu = common_attn_metadata.seq_lens_cpu[:batch_size] > self.max_model_len
+            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_cpu, 1)
         if common_attn_metadata._seq_lens_cpu is not None:
             common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
-            exceeds_mask_internal = common_attn_metadata._seq_lens_cpu[:batch_size] >= self.max_model_len
-            common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal, 1)
+            exceeds_mask_internal_cpu = common_attn_metadata._seq_lens_cpu[:batch_size] > self.max_model_len
+            common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal_cpu, 1)
         if common_attn_metadata.num_computed_tokens_cpu is not None:
             common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
@@ -1604,6 +1599,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
+                attn_metadata.decode_meta.dcp_mtp_attn_mask = None
 
         return common_attn_metadata, attn_metadata
 

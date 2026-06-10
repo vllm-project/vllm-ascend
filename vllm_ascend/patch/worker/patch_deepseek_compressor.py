@@ -12,7 +12,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.patch.platform.patch_kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
-if vllm_version_is("0.20.2"):
+if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers import (
         deepseek_compressor,  # type:ignore
         deepseek_v4_attention,  # type:ignore
