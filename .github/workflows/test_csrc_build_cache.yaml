@@ -1,0 +1,144 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Verify csrc Build Cache
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/scripts/generate_cache_matrix.py'
+      - '.github/workflows/schedule_cache_csrc_build.yaml'
+      - '.github/workflows/test_csrc_build_cache.yaml'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  validate-generator:
+    name: Validate cache matrix generator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install pyyaml
+
+      - name: Run generate_cache_matrix.py (full matrix)
+        id: full
+        run: |
+          result=$(python3 .github/workflows/scripts/generate_cache_matrix.py)
+          echo "full_matrix=$result" >> "$GITHUB_OUTPUT"
+
+      - name: Validate full matrix is valid JSON with entries
+        run: |
+          echo "${{ steps.full.outputs.full_matrix }}" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          assert 'include' in data, 'missing include key'
+          assert len(data['include']) > 0, 'empty matrix'
+          for e in data['include']:
+              required = ['branch', 'branch_normalized', 'dockerfile', 'image',
+                          'image_tag', 'soc_version', 'os_type', 'arch', 'runner']
+              missing = [k for k in required if k not in e]
+              assert not missing, f'entry missing keys: {missing}'
+              # Verify image matches consumer CSRC_BUILD_CACHE_IMAGE format
+              assert ':' in e['image'], f'image missing tag: {e[\"image\"]}'
+          print(f'Valid: {len(data[\"include\"])} entries')
+          "
+
+      - name: Run generate_cache_matrix.py (branch-filter)
+        id: filtered
+        run: |
+          result=$(python3 .github/workflows/scripts/generate_cache_matrix.py --branch-filter main)
+          echo "filtered_matrix=$result" >> "$GITHUB_OUTPUT"
+
+      - name: Validate filtered matrix only contains main
+        run: |
+          echo "${{ steps.filtered.outputs.filtered_matrix }}" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          branches = {e['branch'] for e in data['include']}
+          assert branches == {'main'}, f'expected only main, got: {branches}'
+          assert len(data['include']) > 0, 'filtered matrix is empty'
+          print(f'Filter valid: {len(data[\"include\"])} entries, branches={branches}')
+          "
+
+      - name: Test --branch-filter with nonexistent branch (must fail)
+        continue-on-error: true
+        id: bad_filter
+        run: |
+          python3 .github/workflows/scripts/generate_cache_matrix.py --branch-filter __nonexistent__ 2>&1
+          exit 0
+
+      - name: Verify cache key consistency (producer vs consumer)
+        run: |
+          # Producer key format:
+          #   vllm-ascend-build-ninja-v1-${branch}-${runner.os}-${arch}-${image}-${cache_time}
+          # Consumer restore prefix:
+          #   vllm-ascend-build-ninja-v1-${branch}-${runner.os}-${arch}-${image}-
+          python3 -c "
+          import json, subprocess, sys
+
+          result = subprocess.run(
+              [sys.executable, '.github/workflows/scripts/generate_cache_matrix.py'],
+              capture_output=True, text=True, check=True
+          )
+          data = json.loads(result.stdout)
+
+          prefix = 'vllm-ascend-build-ninja-v1'
+          for e in data['include']:
+              # Producer key
+              producer_key = f\"{prefix}-{e['branch_normalized']}-{e['runner']}-{e['arch']}-{e['image']}-2026061018\"
+              assert producer_key.startswith(prefix), f'bad key: {producer_key}'
+
+              # Consumer restore prefix
+              restore_prefix = f\"{prefix}-{e['branch_normalized']}-{e['runner']}-{e['arch']}-{e['image']}-\"
+              assert restore_prefix.startswith(prefix), f'bad restore prefix: {restore_prefix}'
+              assert restore_prefix.endswith('-'), f'restore prefix must end with -: {restore_prefix}'
+
+              # The restore prefix must be a prefix of the producer key
+              assert producer_key.startswith(restore_prefix), (
+                  f'restore prefix {restore_prefix!r} '
+                  f'does not match producer key {producer_key!r}'
+              )
+
+          print(f'Cache key consistency OK: {len(data[\"include\"])} entries checked')
+          "
+
+      - name: Validate normalize_branch function
+        run: |
+          python3 -c "
+          import sys
+          sys.path.insert(0, '.github/workflows/scripts')
+          import generate_cache_matrix as gcm
+
+          tests = [
+              ('main', 'main'),
+              ('releases/v0.20.2rc', 'releases-v0.20.2rc'),
+              ('feature/my-branch@v1', 'feature-my-branch-v1'),
+              ('', 'unknown-branch'),
+              ('!!!', 'unknown-branch'),
+          ]
+          for inp, expected in tests:
+              result = gcm.normalize_branch(inp)
+              assert result == expected, f'{inp!r} -> {result!r}, expected {expected!r}'
+          print('normalize_branch: all OK')
+          "
