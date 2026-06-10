@@ -467,7 +467,22 @@ class BaseDeviceAdaptor:
         )
         return attn_output
 
+    @staticmethod
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
+        if query.dtype == torch.float32:
+            # _npu_flash_attention_unpad does not support FP32.
+            cumulative_seq_lens = seq_lens_cpu.cumsum(0).tolist()
+            return torch_npu.npu_fusion_attention(
+                query=query,
+                key=key,
+                value=value,
+                actual_seq_qlen=cumulative_seq_lens,
+                actual_seq_kvlen=cumulative_seq_lens,
+                head_num=head_num,
+                scale=scale_value,
+                input_layout="TND",
+            )[0]
+
         context_layer = torch.empty_like(query)
 
         torch_npu._npu_flash_attention_unpad(
@@ -1532,15 +1547,16 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             )
         return attn_output
 
+    @staticmethod
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
-        seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
+        cumulative_seq_lens = seq_lens_cpu.cumsum(0).tolist()
 
         context_layer = torch_npu.npu_fusion_attention(
             query=query,
             key=key,
             value=value,
-            actual_seq_qlen=seq_lens_cpu,
-            actual_seq_kvlen=seq_lens_cpu,
+            actual_seq_qlen=cumulative_seq_lens,
+            actual_seq_kvlen=cumulative_seq_lens,
             head_num=head_num,
             scale=scale_value,
             input_layout="TND",
