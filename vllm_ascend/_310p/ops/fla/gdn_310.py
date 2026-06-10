@@ -108,6 +108,33 @@ def _310p_get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
 _original_get_state_dtype = GatedDeltaNetAttention.get_state_dtype
 
 
+def _merge_spec_and_non_spec_outputs_310(
+    core_attn_out: torch.Tensor,
+    num_actual_tokens: int,
+    spec_token_indx: torch.Tensor,
+    non_spec_token_indx: torch.Tensor,
+    core_attn_out_spec: torch.Tensor,
+    core_attn_out_non_spec: torch.Tensor,
+) -> None:
+    """Merge spec/non-spec GDN outputs back into the batch layout.
+
+    Avoid NPU ``index_copy_`` (IndexPutV2) which fails on some layouts; use
+    direct indexing instead. Validate lengths so mixed prefill+spec batches
+    do not pass mismatched tensors from spec ops.
+    """
+    spec_out = core_attn_out_spec.squeeze(0)
+    non_spec_out = core_attn_out_non_spec.squeeze(0)
+    n_spec = spec_token_indx.numel()
+    n_non_spec = non_spec_token_indx.numel()
+    if spec_out.shape[0] != n_spec:
+        raise RuntimeError(f"GDN spec output length {spec_out.shape[0]} != spec_token_indx {n_spec}")
+    if non_spec_out.shape[0] != n_non_spec:
+        raise RuntimeError(f"GDN non-spec output length {non_spec_out.shape[0]} != non_spec_token_indx {n_non_spec}")
+    out = core_attn_out[:num_actual_tokens]
+    out[spec_token_indx] = spec_out
+    out[non_spec_token_indx] = non_spec_out
+
+
 class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
     get_state_dtype = _310p_get_state_dtype
 
@@ -171,6 +198,9 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            # Align with spec sub-batch only (mixed prefill+spec has fewer spec decodes
+            # than total requests; full-batch tensor fails tiling / wrong state offset).
+            spec_num_accepted = num_accepted_tokens[: attn_metadata.num_spec_decodes].to(torch.int64)
             mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
                 mixed_qkv_spec,
                 conv_weights,
@@ -179,7 +209,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 query_start_loc=spec_query_start_loc.to(torch.int64),
                 cache_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes].to(torch.int64),
                 initial_state_mode=None,
-                num_accepted_tokens=num_accepted_tokens.to(torch.int64),
+                num_accepted_tokens=spec_num_accepted,
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
                 run_mode=1,
@@ -252,7 +282,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     state=ssm_state,
                     cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
                     ssm_state_indices=spec_state_indices_tensor,
-                    num_accepted_tokens=num_accepted_tokens,
+                    num_accepted_tokens=spec_num_accepted,
                     use_qk_l2norm_in_kernel=True,
                 )
             else:
@@ -309,17 +339,14 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             )
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            merged_out = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_non_spec.dtype,
-                device=core_attn_out_non_spec.device,
+            _merge_spec_and_non_spec_outputs_310(
+                core_attn_out,
+                num_actual_tokens,
+                spec_token_indx,
+                non_spec_token_indx,
+                core_attn_out_spec,
+                core_attn_out_non_spec,
             )
-            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            if not enable_sp():
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
-            else:
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)[:num_actual_tokens]
         elif spec_sequence_masks is not None:
             if not enable_sp():
                 core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
