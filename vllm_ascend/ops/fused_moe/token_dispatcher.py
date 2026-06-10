@@ -143,6 +143,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
         self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
 
+        # PD separation detection: P (kv_producer) uses full_mesh_v2, D (kv_consumer) uses hierarchy.
+        self.is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+        self.is_pd = vllm_config.kv_transfer_config is not None
+        if self.is_pd:
+            self.need_comm_alg = True
+
         if not self.enable_dispatch_v2 and self.need_comm_alg:
             raise RuntimeError(
                 "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
@@ -218,7 +224,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 }
             )
         if self.need_comm_alg:
-            stage1_kwargs.update({"comm_alg": "hierarchy"})
+            # PD separation: P (kv_producer) uses full_mesh_v2, D (kv_consumer) uses hierarchy.
+            if self.is_pd and not self.is_kv_consumer:
+                stage1_kwargs.update({"comm_alg": "full_mesh_v2"})
+            else:
+                stage1_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
@@ -322,7 +332,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 }
             )
         if self.need_comm_alg:
-            stage3_kwargs.update({"comm_alg": "hierarchy"})
+            # PD separation: P (kv_producer) uses full_mesh_v2, D (kv_consumer) uses hierarchy.
+            if self.is_pd and not self.is_kv_consumer:
+                stage3_kwargs.update({"comm_alg": "full_mesh_v2"})
+            else:
+                stage3_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
