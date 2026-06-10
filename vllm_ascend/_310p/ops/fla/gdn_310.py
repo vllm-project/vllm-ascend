@@ -39,7 +39,6 @@ from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_r
 from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 
-
 _CONV1D_310_OP_BACKEND = "310"
 _CONV1D_310_BUFFER_REPLAY = "buffer_replay"
 
@@ -117,7 +116,6 @@ def _register_310_conv1d_buffer_replay(
     )
     graph_params.conv1d_handles[num_actual_tokens].append(None)
     graph_params.conv1d_events[num_actual_tokens].append(None)
-
 
 
 def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -223,14 +221,9 @@ def _merge_spec_and_non_spec_outputs_310(
     n_spec = spec_token_indx.numel()
     n_non_spec = non_spec_token_indx.numel()
     if spec_out.shape[0] != n_spec:
-        raise RuntimeError(
-            f"GDN spec output length {spec_out.shape[0]} != spec_token_indx {n_spec}"
-        )
+        raise RuntimeError(f"GDN spec output length {spec_out.shape[0]} != spec_token_indx {n_spec}")
     if non_spec_out.shape[0] != n_non_spec:
-        raise RuntimeError(
-            f"GDN non-spec output length {non_spec_out.shape[0]} != "
-            f"non_spec_token_indx {n_non_spec}"
-        )
+        raise RuntimeError(f"GDN non-spec output length {non_spec_out.shape[0]} != non_spec_token_indx {n_non_spec}")
     out = core_attn_out[:num_actual_tokens]
     out[spec_token_indx] = spec_out
     out[non_spec_token_indx] = non_spec_out
@@ -302,17 +295,13 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             # Align with spec sub-batch only (mixed prefill+spec has fewer spec decodes
             # than total requests; full-batch tensor fails tiling / wrong state offset).
             spec_num_accepted = num_accepted_tokens[: attn_metadata.num_spec_decodes].to(torch.int64)
-            uniform_spec_only = (
-                attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0
-            )
+            uniform_spec_only = attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0
             if _EXTRA_CTX.capturing and uniform_spec_only:
-                qsl_dev, cidx_dev, nat_dev, qsl_buf, cidx_buf, nat_buf = (
-                    _get_spec_causal_conv1d_device_args(attn_metadata)
+                qsl_dev, cidx_dev, nat_dev, qsl_buf, cidx_buf, nat_buf = _get_spec_causal_conv1d_device_args(
+                    attn_metadata
                 )
                 spec_q_per_seq = int(attn_metadata.spec_state_indices_tensor.size(-1))
-                graph_params = (
-                    get_draft_graph_params() if _EXTRA_CTX.is_draft_model else get_graph_params()
-                )
+                graph_params = get_draft_graph_params() if _EXTRA_CTX.is_draft_model else get_graph_params()
                 _register_310_conv1d_buffer_replay(
                     graph_params,
                     num_actual_tokens,
@@ -349,9 +338,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     bias=self.conv1d.bias,
                     conv_states=conv_state,
                     query_start_loc=spec_query_start_loc.to(torch.int64),
-                    cache_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes].to(
-                        torch.int64
-                    ),
+                    cache_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes].to(torch.int64),
                     initial_state_mode=None,
                     num_accepted_tokens=spec_num_accepted,
                     activation_mode=activation_num,
@@ -504,7 +491,6 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
         maybe_save_kv_layer_to_connector("", [])
 
 
-
 def _get_spec_causal_conv1d_update_host_args_310p(
     attn_metadata: GDNAttentionMetadata,
 ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -517,6 +503,7 @@ def _get_spec_causal_conv1d_update_host_args_310p(
         to_int64_tuple(attn_metadata.spec_state_indices_tensor[:, 0][:num_spec_decodes]),
         to_int64_tuple(attn_metadata.num_accepted_tokens[:num_spec_decodes]),
     )
+
 
 def update_conv1d_graph_params_310p(
     update_stream,
@@ -594,4 +581,3 @@ def update_conv1d_graph_params_310p(
             _copy_host_tuple_to_int64_buffer(cidx_dev, new_cache_indices)
             if nat_dev is not None:
                 _copy_host_tuple_to_int64_buffer(nat_dev, new_num_accepted)
-

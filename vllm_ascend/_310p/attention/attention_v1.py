@@ -330,14 +330,12 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         # Condition for DecodeOnly: Pure decoding phase where each request generates one token
         elif state == AscendAttentionState.DecodeOnly:
             output = self.forward_paged_attention(query, attn_metadata, output)
-        # Condition for ChunkedPrefill:
-        # 1. During speculative decoding scenarios (except mtp)
-        # 2. Processing large prefill requests in chunks
-        # Condition for PrefillCacheHit: Indicates prefill with some cached tokens already processed
-        elif state in [AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit]:
-            output = self.forward_chunked_prefill_310(query, attn_metadata, output)
-        # Condition for SpecDecoding: MTP spec verify (splitfuse v2 when compressed mask supported).
-        elif state == AscendAttentionState.SpecDecoding:
+        # ChunkedPrefill / PrefillCacheHit: chunked prefill or mixed batches.
+        # SpecDecoding: MTP uniform spec verify (splitfuse on 310P).
+        elif (
+            state in [AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit]
+            or state == AscendAttentionState.SpecDecoding
+        ):
             output = self.forward_chunked_prefill_310(query, attn_metadata, output)
         else:
             raise NotImplementedError(f"AscendAttentionState: {state} is not supported for 310P currently.")
