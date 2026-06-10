@@ -85,14 +85,6 @@ vllm serve ${MODEL_PATH} \
     --dtype bfloat16
 ```
 
-### Key Performance Indicators
-
-Based on verified CANN 8.5.1 test logs:
-
-- Memory usage for weights: each NPU has a static memory usage of approximately 37.87 GB.
-- Graph compilation (ACL Graph): with PIECEWISE mode enabled, the system automatically captures the graph in approximately 15 seconds, which can significantly accelerate subsequent inference.
-- KV cache capacity: the remaining NPU memory can provide concurrent cache space for approximately 211,072 tokens.
-
 ## Functional Verification
 
 ```bash
