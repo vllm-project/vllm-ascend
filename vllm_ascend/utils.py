@@ -896,7 +896,7 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
         if (
             model_configs 
             and "architectures" in model_configs 
-            and model_configs["architectures"]  # 确保不为 None 且不为空
+            and model_configs["architectures"] 
             and "Eagle3DeepseekV2ForCausalLM" in model_configs["architectures"]
         ):
             _IS_DRAFTER_MOE_MODEL = False
