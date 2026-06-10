@@ -590,6 +590,18 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
+        # vllm PR #40269: probabilistic draft sampling state.
+        # ``_draft_probs`` caches softmax probs produced by the drafter on
+        # the most recent ``propose_draft_token_ids`` call, shape
+        # ``[batch_size, num_speculative_tokens, vocab_size]``.
+        # ``_draft_prob_req_ids`` is a parallel list of req_ids so we can
+        # re-align probs to the spec_decode_metadata layout in ``_sample``.
+        # We initialize them defensively here (independent of upstream
+        # GPUModelRunner's own attribute, which may not exist on older vllm
+        # without PR #40269).
+        self._draft_probs: torch.Tensor | None = None
+        self._draft_prob_req_ids: list[str] | None = None
+
     def _get_drafter(self):
         return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
 
@@ -1612,6 +1624,12 @@ class NPUModelRunner(GPUModelRunner):
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
+        # vllm PR #40269: invalidate the previous round's draft probs at the
+        # start of every drafting call. We re-populate them below only on the
+        # eagle / draft-model path when the drafter supports probabilistic
+        # sampling.
+        self._draft_probs = None
+        self._draft_prob_req_ids = None
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
@@ -1823,6 +1841,18 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
+            # vllm PR #40269: collect probabilistic draft probs produced by
+            # this round of drafting (if any) so ``_sample`` can pass them
+            # to the rejection sampler. ``hasattr`` makes the hookup safe
+            # for drafters that don't implement the contract (older
+            # vllm-ascend builds, custom drafters, etc.).
+            if hasattr(self.drafter, "take_last_draft_probs"):
+                draft_probs = self.drafter.take_last_draft_probs()
+                if draft_probs is not None:
+                    self._draft_probs = draft_probs
+                    # Snapshot req_ids at draft time; the input_batch may be
+                    # reshuffled before ``_sample`` runs.
+                    self._draft_prob_req_ids = self.input_batch.req_ids.copy()
             if not self.vllm_config.speculative_config.disable_padded_drafter_batch:
                 self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
         else:
@@ -2523,13 +2553,65 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
+        # vllm PR #40269: look up draft probs cached on this runner during
+        # ``propose_draft_token_ids`` (if probabilistic draft sampling is
+        # active) and pass them to the rejection sampler so the probability
+        # ratio test uses the real draft distribution instead of one-hot.
+        # Returns ``None`` when probabilistic mode is off or no probs were
+        # produced, preserving the legacy one-hot rejection-sampling path.
+        draft_probs = self._get_spec_decode_draft_probs(spec_decode_metadata)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
-            None,  # draft_probs
+            draft_probs,
             logits,
             sampling_metadata,
         )
         return sampler_output
+
+    def _get_spec_decode_draft_probs(
+        self, spec_decode_metadata: SpecDecodeMetadata
+    ) -> torch.Tensor | None:
+        """Re-align cached draft probs to the spec_decode_metadata layout.
+
+        Mirrors upstream vllm ``GPUModelRunner._get_spec_decode_draft_probs``
+        (vllm PR #40269). The drafter caches probs row-by-req in the same
+        order as ``self.input_batch.req_ids`` at draft time; the rejection
+        sampler needs them concatenated in the same per-request order and
+        sliced by ``num_draft_tokens[i]`` (since some requests may have
+        fewer than ``num_speculative_tokens`` draft tokens, e.g. when a
+        request just completed a prefill).
+
+        Returns ``None`` when probabilistic draft sampling is off, when the
+        cached probs are unavailable, or when no request had draft tokens.
+        """
+        if self._draft_probs is None or self._draft_prob_req_ids is None:
+            return None
+
+        row_by_req_id = {
+            req_id: idx for idx, req_id in enumerate(self._draft_prob_req_ids)
+        }
+        draft_probs_rows: list[torch.Tensor] = []
+        for req_id, num_draft in zip(
+            self.input_batch.req_ids, spec_decode_metadata.num_draft_tokens
+        ):
+            if num_draft == 0:
+                continue
+            row_idx = row_by_req_id.get(req_id)
+            if row_idx is None:
+                # The set of req_ids changed between drafting and sampling
+                # (e.g. a request was discarded). Fall back to one-hot
+                # rejection rather than risk a wrong-index read.
+                logger.warning(
+                    "Missing cached draft probabilities for request %s; "
+                    "falling back to legacy speculative rejection behavior.",
+                    req_id,
+                )
+                return None
+            draft_probs_rows.append(self._draft_probs[row_idx, :num_draft])
+
+        if not draft_probs_rows:
+            return None
+        return torch.cat(draft_probs_rows, dim=0).contiguous()
 
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids

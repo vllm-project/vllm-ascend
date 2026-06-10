@@ -193,5 +193,139 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         self.assertTrue(runner._debugger_started)
 
 
+class TestNPUModelRunnerGetSpecDecodeDraftProbs(unittest.TestCase):
+    """Cover ``_get_spec_decode_draft_probs`` introduced for vllm PR #40269.
+
+    The method has no NPU dependencies: it just re-aligns the cached
+    ``[num_reqs, num_spec_tokens, vocab]`` draft probabilities to the
+    rejection-sampler-expected flat ``[sum(num_draft_tokens), vocab]`` layout
+    via a ``req_id -> row`` lookup. Easy to unit-test in pure python.
+    """
+
+    VOCAB = 7
+    NUM_SPEC = 3
+
+    def _build_runner(
+        self,
+        draft_probs,
+        draft_prob_req_ids,
+        current_req_ids,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._draft_probs = draft_probs
+        runner._draft_prob_req_ids = draft_prob_req_ids
+        runner.input_batch = MagicMock()
+        runner.input_batch.req_ids = current_req_ids
+        return runner
+
+    def _make_spec_metadata(self, num_draft_tokens):
+        return SimpleNamespace(num_draft_tokens=num_draft_tokens)
+
+    def test_returns_none_when_probs_never_cached(self):
+        """Default state (probabilistic sampling disabled) → no probs."""
+        runner = self._build_runner(draft_probs=None, draft_prob_req_ids=None, current_req_ids=["a", "b"])
+        spec_md = self._make_spec_metadata([self.NUM_SPEC, self.NUM_SPEC])
+        self.assertIsNone(runner._get_spec_decode_draft_probs(spec_md))
+
+    def test_returns_none_when_only_one_side_cached(self):
+        """Defensive: half-populated state must not throw, returns None."""
+        runner = self._build_runner(
+            draft_probs=torch.rand(2, self.NUM_SPEC, self.VOCAB),
+            draft_prob_req_ids=None,
+            current_req_ids=["a", "b"],
+        )
+        self.assertIsNone(runner._get_spec_decode_draft_probs(self._make_spec_metadata([1, 1])))
+
+    def test_concats_and_slices_per_request(self):
+        """Per-req num_draft_tokens slicing then dim-0 concat."""
+        probs = torch.arange(2 * self.NUM_SPEC * self.VOCAB, dtype=torch.float32).reshape(2, self.NUM_SPEC, self.VOCAB)
+        runner = self._build_runner(
+            draft_probs=probs,
+            draft_prob_req_ids=["a", "b"],
+            current_req_ids=["a", "b"],
+        )
+        # req "a" has 2 draft tokens, req "b" has 3 — total 5 rows
+        spec_md = self._make_spec_metadata([2, 3])
+
+        out = runner._get_spec_decode_draft_probs(spec_md)
+
+        self.assertIsNotNone(out)
+        self.assertEqual(out.shape, (5, self.VOCAB))
+        # First 2 rows == probs[0, :2], next 3 rows == probs[1, :3]
+        self.assertTrue(torch.equal(out[:2], probs[0, :2]))
+        self.assertTrue(torch.equal(out[2:], probs[1, :3]))
+
+    def test_skips_requests_with_zero_draft_tokens(self):
+        """Requests with num_draft_tokens=0 (e.g. just finished prefill)
+        must contribute zero rows but not crash."""
+        probs = torch.rand(3, self.NUM_SPEC, self.VOCAB)
+        runner = self._build_runner(
+            draft_probs=probs,
+            draft_prob_req_ids=["a", "b", "c"],
+            current_req_ids=["a", "b", "c"],
+        )
+        # Middle req has zero draft tokens
+        spec_md = self._make_spec_metadata([2, 0, 1])
+
+        out = runner._get_spec_decode_draft_probs(spec_md)
+
+        self.assertIsNotNone(out)
+        # Only req "a" (2 rows) and req "c" (1 row) contribute.
+        self.assertEqual(out.shape, (3, self.VOCAB))
+        self.assertTrue(torch.equal(out[:2], probs[0, :2]))
+        self.assertTrue(torch.equal(out[2:3], probs[2, :1]))
+
+    def test_returns_none_when_all_requests_have_zero_draft_tokens(self):
+        """Whole batch has no draft tokens (full-prefill step) → None."""
+        probs = torch.rand(2, self.NUM_SPEC, self.VOCAB)
+        runner = self._build_runner(
+            draft_probs=probs,
+            draft_prob_req_ids=["a", "b"],
+            current_req_ids=["a", "b"],
+        )
+        self.assertIsNone(runner._get_spec_decode_draft_probs(self._make_spec_metadata([0, 0])))
+
+    @patch("vllm_ascend.worker.model_runner_v1.logger")
+    def test_returns_none_when_req_id_unknown(self, mock_logger):
+        """If the batch was reshuffled between drafting and sampling and a
+        req_id is missing from the snapshot, we must fall back to None (not
+        index by mistake) and emit a warning."""
+        probs = torch.rand(1, self.NUM_SPEC, self.VOCAB)
+        runner = self._build_runner(
+            draft_probs=probs,
+            draft_prob_req_ids=["a"],
+            # Current batch references a request that wasn't in the snapshot.
+            current_req_ids=["a", "ghost"],
+        )
+        spec_md = self._make_spec_metadata([1, 2])
+
+        out = runner._get_spec_decode_draft_probs(spec_md)
+
+        self.assertIsNone(out)
+        mock_logger.warning.assert_called_once()
+
+    def test_reordered_request_ids_use_snapshot_index(self):
+        """If the runner's current batch reorders the requests w.r.t. the
+        draft-time snapshot, we must look up by req_id (NOT by position)."""
+        # Snapshot order: ["a", "b"]; probs[0] = a's probs, probs[1] = b's probs.
+        probs = torch.arange(2 * self.NUM_SPEC * self.VOCAB, dtype=torch.float32).reshape(2, self.NUM_SPEC, self.VOCAB)
+        runner = self._build_runner(
+            draft_probs=probs,
+            draft_prob_req_ids=["a", "b"],
+            # Current batch reverses the order.
+            current_req_ids=["b", "a"],
+        )
+        spec_md = self._make_spec_metadata([1, 1])
+
+        out = runner._get_spec_decode_draft_probs(spec_md)
+
+        self.assertIsNotNone(out)
+        self.assertEqual(out.shape, (2, self.VOCAB))
+        # First output row corresponds to current_req_ids[0]="b" → probs[1, :1].
+        self.assertTrue(torch.equal(out[:1], probs[1, :1]))
+        # Second output row corresponds to current_req_ids[1]="a" → probs[0, :1].
+        self.assertTrue(torch.equal(out[1:], probs[0, :1]))
+
+
 if __name__ == "__main__":
     unittest.main()
