@@ -24,7 +24,10 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 
-from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder310, is_compressed_mask_supported
+from vllm_ascend._310p.attention.attention_mask import (
+    AttentionMaskBuilder310,
+    is_compressed_mask_supported,
+)
 from vllm_ascend._310p.attention.metadata_builder import AscendAttentionMetadataBuilder310
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -99,7 +102,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     optimized for the Ascend 310P architecture.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.support_compressed_mask = is_compressed_mask_supported()
 
@@ -241,19 +244,31 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         """
         num_actual_tokens = int(attn_metadata.num_actual_tokens)
         query = query[:num_actual_tokens]
-        output = output[:num_actual_tokens]
+        output_slice = output[:num_actual_tokens]
 
-        # Calculate query lengths from start locations
-        qsl_cpu = attn_metadata.query_start_loc.cpu()
-        qlens = qsl_cpu[1:] - qsl_cpu[:-1]
+        # Host qLens filled in AscendAttentionMetadataBuilder310.build(); eager fallback only.
+        qlens = getattr(attn_metadata, "query_lens_cpu", None)
+        if qlens is None:
+            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-        context_lens = attn_metadata.seq_lens
+            if _EXTRA_CTX.capturing:
+                raise RuntimeError(
+                    "310P splitfuse requires attn_metadata.query_lens_cpu during graph capture; "
+                    "ensure AscendAttentionMetadataBuilder310.build() ran before forward."
+                )
+            qsl_cpu = attn_metadata.query_start_loc.cpu()
+            qlens = qsl_cpu[1:] - qsl_cpu[:-1]
+
         block_table = attn_metadata.block_tables
 
-        if context_lens.device != query.device:
-            context_lens = context_lens.to(query.device, non_blocking=True)
+        if attn_metadata.seq_lens.device != query.device:
+            attn_metadata.seq_lens = attn_metadata.seq_lens.to(
+                device=query.device,
+                non_blocking=True,
+            )
 
         if self.support_compressed_mask:
+            # splitfuse_v2 requires fixed ND [2048, 2048]; parent build() may set FRACTAL_NZ mask.
             mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(query.device)
             torch_npu._npu_paged_attention_splitfuse_v2(
                 query=query,
@@ -262,12 +277,12 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
                 mask=mask,
                 block_table=block_table,
                 seq_len=qlens,
-                context_lens=context_lens,
+                context_lens=attn_metadata.seq_lens,
                 num_kv_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale_value=self.scale,
                 mask_type=MASK_TYPE_NORM_COMPRESS_PAGED_ATTENTION,
-                out=output,
+                out=output_slice,
             )
             return output
 
@@ -280,11 +295,11 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             mask=mask,
             block_table=block_table,
             seq_len=qlens,
-            context_lens=context_lens,
+            context_lens=attn_metadata.seq_lens,
             num_kv_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale_value=self.scale,
-            out=output,
+            out=output_slice,
         )
 
         return output
@@ -321,7 +336,9 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         # Condition for PrefillCacheHit: Indicates prefill with some cached tokens already processed
         elif state in [AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit]:
             output = self.forward_chunked_prefill_310(query, attn_metadata, output)
-        # Condition for SpecDecoding: Specified for mtp, which is not supported yet.
+        # Condition for SpecDecoding: MTP spec verify (splitfuse v2 when compressed mask supported).
+        elif state == AscendAttentionState.SpecDecoding:
+            output = self.forward_chunked_prefill_310(query, attn_metadata, output)
         else:
             raise NotImplementedError(f"AscendAttentionState: {state} is not supported for 310P currently.")
         return output
