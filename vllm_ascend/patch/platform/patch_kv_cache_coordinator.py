@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from math import lcm
 
 import vllm
+import vllm.envs as envs_vllm
+import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
@@ -89,6 +91,18 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if max_num_batched_tokens is None:
             max_num_batched_tokens = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        validate_retention_interval = getattr(
+            vllm_kv_cache_coordinator,
+            "_validate_prefix_cache_retention_interval",
+            None,
+        )
+        if self.retention_interval is not None and validate_retention_interval is not None:
+            validate_retention_interval(
+                self.retention_interval,
+                self.scheduler_block_size,
+                kv_cache_config,
+            )
 
         self.block_pool = BlockPool(
             kv_cache_config.num_blocks,
