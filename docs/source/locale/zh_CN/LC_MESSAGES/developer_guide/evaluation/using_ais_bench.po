@@ -26,10 +26,10 @@ msgstr "使用 AISBench"
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:3
 msgid ""
 "This document guides you to conduct accuracy testing using "
-"[AISBench](https://gitee.com/aisbench/benchmark/tree/master). AISBench "
+"[AISBench](https://github.com/AISBench/benchmark/tree/master). AISBench "
 "provides accuracy and performance evaluation for many datasets."
 msgstr ""
-"本文档指导您如何使用 [AISBench](https://gitee.com/aisbench/benchmark/tree/master) "
+"本文档指导您如何使用 [AISBench](https://github.com/AISBench/benchmark/tree/master) "
 "进行准确率测试。AISBench 为多种数据集提供准确率和性能评估。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:5
@@ -69,10 +69,10 @@ msgstr "安装 AISBench"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:60
 msgid ""
-"Refer to [AISBench](https://gitee.com/aisbench/benchmark/tree/master) for"
+"Refer to [AISBench](https://github.com/AISBench/benchmark/tree/master) for"
 " details. Install AISBench from source."
 msgstr ""
-"详细安装说明请参考 [AISBench](https://gitee.com/aisbench/benchmark/tree/master) "
+"详细安装说明请参考 [AISBench](https://github.com/AISBench/benchmark/tree/master) "
 "文档。从源码安装 AISBench。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:69
@@ -98,12 +98,12 @@ msgstr "`C-Eval` 数据集。"
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:84
 msgid ""
 "Take `C-Eval` dataset as an example. You can refer to "
-"[Datasets](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets)"
+"[Datasets](https://github.com/AISBench/benchmark/tree/master/ais_bench/benchmark/configs/datasets)"
 " for more datasets. Each dataset has a `README.md` with detailed download"
 " and installation instructions."
 msgstr ""
 "以 `C-Eval` 数据集为例。您可以参考 "
-"[数据集列表](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets)"
+"[数据集列表](https://github.com/AISBench/benchmark/tree/master/ais_bench/benchmark/configs/datasets)"
 " 查看更多数据集信息。每个数据集都有一个 `README.md` 文件，提供了详细的下载和安装说明。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:86

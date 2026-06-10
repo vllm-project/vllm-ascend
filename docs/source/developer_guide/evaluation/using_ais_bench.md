@@ -1,6 +1,6 @@
 # Using AISBench
 
-This document guides you to conduct accuracy testing using [AISBench](https://gitee.com/aisbench/benchmark/tree/master). AISBench provides accuracy and performance evaluation for many datasets.
+This document guides you to conduct accuracy testing using [AISBench](https://github.com/AISBench/benchmark/tree/master). AISBench provides accuracy and performance evaluation for many datasets.
 
 ## Online Server
 
@@ -57,7 +57,7 @@ INFO:     Application startup complete.
 
 #### Install AISBench
 
-Refer to [AISBench](https://gitee.com/aisbench/benchmark/tree/master) for details.
+Refer to [AISBench](https://github.com/AISBench/benchmark/tree/master) for details.
 Install AISBench from source.
 
 ```shell
@@ -81,7 +81,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
 1. `C-Eval` dataset.
 
-    Take `C-Eval` dataset as an example. You can refer to [Datasets](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Each dataset has a `README.md` with detailed download and installation instructions.
+    Take `C-Eval` dataset as an example. You can refer to [Datasets](https://github.com/AISBench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Each dataset has a `README.md` with detailed download and installation instructions.
 
     Download dataset and install it to specific path.
 

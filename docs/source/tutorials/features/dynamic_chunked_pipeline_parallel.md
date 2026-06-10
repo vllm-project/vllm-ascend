@@ -4,7 +4,9 @@
 
 vLLM-Ascend supports Dynamic Chunked Pipeline Parallel (CPP) for optimizing prefill performance in Pipeline Parallelism scenarios. This guide demonstrates deployment with DeepSeek-V3.1 on 1 Atlas 800T A3 server (64G × 16).
 
-For configuration details, see the [Feature Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md). For design details, see the [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md).
+For configuration details, see the [Feature Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md).
+
+For design details, see the [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md).
 
 ## Environment Preparation
 

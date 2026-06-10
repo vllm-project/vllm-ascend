@@ -411,10 +411,10 @@ msgstr "基准测试"
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:881
 msgid ""
 "We recommend use aisbench tool to assess performance. "
-"[aisbench](https://gitee.com/aisbench/benchmark) Execute the following "
+"[aisbench](https://github.com/AISBench/benchmark) Execute the following "
 "commands to install aisbench"
 msgstr ""
-"我们推荐使用 aisbench 工具进行性能评估。[aisbench](https://gitee.com/aisbench/benchmark) 执行以下命令安装 aisbench"
+"我们推荐使用 aisbench 工具进行性能评估。[aisbench](https://github.com/AISBench/benchmark) 执行以下命令安装 aisbench"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:889
 msgid ""
@@ -444,9 +444,9 @@ msgstr "以 gsm8k 数据集为例，执行以下命令以评估性能。"
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:930
 msgid ""
 "For more details for commands and parameters for aisbench, refer to  "
-"[aisbench](https://gitee.com/aisbench/benchmark)"
+"[aisbench](https://github.com/AISBench/benchmark)"
 msgstr ""
-"有关 aisbench 命令和参数的更多详细信息，请参阅 [aisbench](https://gitee.com/aisbench/benchmark)"
+"有关 aisbench 命令和参数的更多详细信息，请参阅 [aisbench](https://github.com/AISBench/benchmark)"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:932
 msgid "FAQ"
