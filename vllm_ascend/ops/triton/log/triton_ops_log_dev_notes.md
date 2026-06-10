@@ -128,30 +128,6 @@ logger.debug("[TritonOps] Resolved triton ascend ops: insert_slice, extract_slic
 
 ---
 
-### 模式六（Bug Fix）：`causal_conv1d` 硬编码核心数替换为动态查询
-
-**适用文件：** `mamba/causal_conv1d.py`
-
-**变更前：**
-```python
-# TODO: use driver to get the vector core num
-CORE_HINT = 40
-```
-
-**变更后：**
-```python
-CORE_HINT = get_vectorcore_num()
-```
-
-同时新增导入：
-```python
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-```
-
-> 此变更消除了硬编码的 `CORE_HINT=40`，使 kernel 网格划分自适应实际 NPU 硬件的向量核数量，解决在核心数不同的设备上性能次优的问题。
-
----
-
 ## `triton_utils.py` 整体结构说明
 
 `triton_utils.py` 是所有 Triton 算子的基础工具模块，本次整改后其职责如下：
@@ -220,16 +196,6 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_ref
 causal_conv1d_ref(x.unsqueeze(0).unsqueeze(0),
                   torch.randn(1, 4),
                   activation="relu")  # 应先打印 ERROR 日志再抛 NotImplementedError
-```
-
-### 验证动态核心数（Bug Fix）
-
-确认 `causal_conv1d_update_npu` 不再使用硬编码 `CORE_HINT=40`：
-
-```python
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton, get_vectorcore_num
-init_device_properties_triton()
-print(get_vectorcore_num())  # 应输出当前 NPU 实际向量核数量，而非固定 40
 ```
 
 ---
