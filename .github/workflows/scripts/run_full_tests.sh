@@ -176,7 +176,7 @@ extract_tests() {
 import json, sys
 
 groups = json.loads('''${test_groups_json}''')
-skip_ut = ${skip_ut}
+skip_ut = '${skip_ut}' == 'true'
 
 matched = []
 for g in groups:
