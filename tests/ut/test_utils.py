@@ -388,3 +388,34 @@ class TestUtils(TestBase):
             result = utils.maybe_trans_nz(weight)
             self.assertIs(result, weight)
             assert_nz_cast(weight)
+
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_maybe_trans_nz_linear_weight_skips_unsupported_narrow_shapes(self, mock_npu_format_cast):
+        from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+
+        mock_npu_format_cast.side_effect = lambda weight, fmt: weight
+        mock_config = mock.MagicMock()
+        mock_config.weight_nz_mode = 2
+
+        with (
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        ):
+            out_features_one = torch.randn(1, 2048, dtype=torch.bfloat16)
+            result = utils.maybe_trans_nz_linear_weight(out_features_one)
+            self.assertIs(result, out_features_one)
+            mock_npu_format_cast.assert_not_called()
+
+            in_features_one = torch.randn(2048, 1, dtype=torch.bfloat16)
+            result = utils.maybe_trans_nz_linear_weight(in_features_one)
+            self.assertIs(result, in_features_one)
+            mock_npu_format_cast.assert_not_called()
+
+            supported_weight = torch.randn(32, 64, dtype=torch.bfloat16)
+            result = utils.maybe_trans_nz_linear_weight(supported_weight)
+            self.assertIs(result, supported_weight)
+            mock_npu_format_cast.assert_called_once()
+            args, kwargs = mock_npu_format_cast.call_args
+            self.assertIs(args[0], supported_weight)
+            self.assertEqual(args[1], ACL_FORMAT_FRACTAL_NZ)
+            self.assertEqual(kwargs, {})

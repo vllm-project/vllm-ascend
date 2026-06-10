@@ -88,6 +88,19 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_called_once()
 
+    @patch("vllm_ascend.utils.get_ascend_config")
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_with_nz2_skips_narrow_weight(self, mock_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 2
+        mock_get_config.return_value = mock_config
+        self.layer.prefix = "expert_gate"
+        self.layer.weight.data = torch.randn(1, 2048, dtype=torch.bfloat16)
+
+        self.method.process_weights_after_loading(self.layer)
+
+        mock_format_cast.assert_not_called()
+
 
 class TestAscendRowParallelLinear(BaseLinearTest):
     @patch("vllm_ascend.ops.linear_op.get_weight_prefetch_method", return_value=MagicMock())

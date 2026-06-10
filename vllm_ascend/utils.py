@@ -246,6 +246,12 @@ def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
+def maybe_trans_nz_linear_weight(weight: torch.Tensor) -> torch.Tensor:
+    if weight.ndim == 2 and (weight.shape[0] == 1 or weight.shape[1] == 1):
+        return weight
+    return maybe_trans_nz(weight)
+
+
 def _round_up(x: int, align: int):
     # round up x to align, for example, if align is 16, x will be rounded up to 16, 32, 48, etc.
     # input: 15, 16 -> output: 16
