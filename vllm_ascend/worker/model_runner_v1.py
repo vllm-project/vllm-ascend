@@ -1087,7 +1087,7 @@ class NPUModelRunner(GPUModelRunner):
         should_rebuild_async_inputs = (
             self.use_cp
             and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
+            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
             and has_decode_req
         )
