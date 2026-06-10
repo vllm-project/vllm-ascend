@@ -14,6 +14,7 @@ import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
@@ -202,6 +203,22 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         prebuilt_meta=None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
+        logger.debug(
+            "[TritonOps] chunk_gated_delta_rule_fwd: q.shape=%s, k.shape=%s, "
+            "v.shape=%s, g.shape=%s, beta.shape=%s, scale=%s, "
+            "initial_state.shape=%s, output_final_state=%s, cu_seqlens_shape=%s, "
+            "use_qk_l2norm_in_kernel=%s.",
+            q.shape,
+            k.shape,
+            v.shape,
+            g.shape,
+            beta.shape,
+            scale,
+            initial_state.shape if initial_state is not None else None,
+            output_final_state,
+            cu_seqlens.shape if cu_seqlens is not None else None,
+            use_qk_l2norm_in_kernel,
+        )
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import torch
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -243,6 +244,13 @@ def split_qkv_tp_rmsnorm_rope_impl(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    logger.debug(
+        "[TritonOps] split_qkv_tp_rmsnorm_rope_impl: input.shape=%s, q_hidden_size=%s, kv_hidden_size=%s, head_dim=%s",
+        input.shape,
+        q_hidden_size,
+        kv_hidden_size,
+        head_dim,
+    )
     num_tokens = input.shape[0]
     input_2d = input.view(num_tokens, -1)
     q = torch.empty(num_tokens, q_hidden_size, device=input.device, dtype=input.dtype)
