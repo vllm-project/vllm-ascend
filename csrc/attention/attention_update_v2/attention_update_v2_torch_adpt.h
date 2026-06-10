@@ -28,11 +28,14 @@ std::tuple<at::Tensor, at::Tensor> npu_attention_update_v2(
     int64_t update_type)
 {
     at::Tensor out = at::empty({local_out.size(1), local_out.size(2)}, local_out.options());
-    at::Tensor lse_out = at::empty({lse.size(1)}, lse.options().dtype(at::kFloat));
+    at::Tensor lse_out;  // valid only when update_type == 1
+    if (update_type == 1) {
+        lse_out = at::empty({lse.size(1)}, lse.options().dtype(at::kFloat));
+    }
 
     EXEC_NPU_CMD(aclnnAttentionUpdateV2, lse, local_out, update_type, out, lse_out);
     return {out, lse_out};
-}
+    }
 
 } // namespace vllm_ascend
 #endif
