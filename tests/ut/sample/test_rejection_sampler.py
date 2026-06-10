@@ -118,6 +118,64 @@ class TestAscendRejectionSampler(TestBase):
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))
     @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_rejection_random_sample_pytorch_rejects_placeholder(self):
+        batch_size = 1
+        max_spec_len = 1
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+
+        cu_num_draft_tokens = torch.tensor([1])
+        draft_token_ids = torch.tensor([PLACEHOLDER_TOKEN_ID])
+        target_probs = torch.tensor([[0.0, 0.0, 1.0]])
+        bonus_token_ids = torch.tensor([[100]])
+        recovered_token_ids = torch.tensor([2])
+        uniform_probs = torch.tensor([0.0])
+        is_greedy = torch.tensor([False])
+
+        rejection_random_sample_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            None,
+            target_probs,
+            bonus_token_ids,
+            recovered_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len,
+            vocab_size=3,
+            IS_NGRAM=True,
+        )
+
+        assert output_token_ids.tolist() == [[2, PLACEHOLDER_TOKEN_ID]]
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_sample_recovered_tokens_pytorch_keeps_placeholder_distribution(self):
+        output_token_ids = torch.empty(1, dtype=torch.int32)
+        cu_num_draft_tokens = torch.tensor([1])
+        draft_token_ids = torch.tensor([PLACEHOLDER_TOKEN_ID])
+        target_probs = torch.tensor([[0.1, 0.2, 0.7]])
+        q = torch.ones((1, 3), dtype=torch.float32)
+
+        sample_recovered_tokens_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            None,
+            target_probs,
+            q,
+            vocab_size=3,
+            IS_NGRAM=True,
+        )
+
+        assert output_token_ids.tolist() == [2]
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
     def test_expand_pytorch(self):
         """Test expand_pytorch functionality"""
         input_ptr = torch.tensor([10, 20, 30], dtype=torch.int32)
