@@ -181,7 +181,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 
 - Replace your_model_path with the actual model path (e.g., Modelscope ID or local path).
 
-- To enable quantization for Ascend, the quantization method must be `"ascend"`. If the model is not a quantized model, remove the `--quantization ascend` parameter.
+- --quantization: To enable quantization for Ascend, the quantization method must be `"ascend"`. If the model is not a quantized model, remove the `--quantization ascend` parameter.
 
 - --enable-expert-parallel enables Expert Parallelism, which is required for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP.
 
@@ -476,7 +476,7 @@ After several minutes, you will get the performance evaluation result.
 | Low Latency | PD Hybrid (TP16) | 16 | 16 | 1 | 128 | 128 | 32768 | 3 | Off | On | On | On |
 | Long Context | PD Hybrid (TP8, CP2) | 16 | 8 | 1 | 32 | 32 | 135000 | none | On | On | On | On |
 
-> **Note**: For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
+> **Note**: For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment) 
 
 <u>Single-node PD Hybrid — High Throughput (TPOT ~50ms):</u>
 
