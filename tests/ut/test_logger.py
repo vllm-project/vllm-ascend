@@ -18,20 +18,16 @@ from tests.ut.base import TestBase
 
 
 class TestLoggerModule(TestBase):
-
     def test_is_ascend_module_with_ascend_path(self):
         from vllm_ascend.logger import _is_ascend_module
 
-        self.assertTrue(_is_ascend_module(
-            "/path/to/vllm_ascend/platform.py"))
-        self.assertTrue(_is_ascend_module(
-            "\\path\\to\\vllm_ascend\\compilation\\acl_graph.py"))
+        self.assertTrue(_is_ascend_module("/path/to/vllm_ascend/platform.py"))
+        self.assertTrue(_is_ascend_module("\\path\\to\\vllm_ascend\\compilation\\acl_graph.py"))
 
     def test_is_ascend_module_with_vllm_path(self):
         from vllm_ascend.logger import _is_ascend_module
 
-        self.assertFalse(_is_ascend_module(
-            "/path/to/vllm/model.py"))
+        self.assertFalse(_is_ascend_module("/path/to/vllm/model.py"))
         self.assertFalse(_is_ascend_module(""))
 
     def test_infer_module_name_root_file(self):
@@ -68,7 +64,7 @@ class TestLoggerModule(TestBase):
         )
 
     def test_ascend_formatter_adds_prefix(self):
-        from vllm_ascend.logger import AscendFormatter, _FORMAT, _DATE_FORMAT
+        from vllm_ascend.logger import _DATE_FORMAT, _FORMAT, AscendFormatter
 
         fmt = AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
         record = logging.LogRecord(
@@ -85,7 +81,7 @@ class TestLoggerModule(TestBase):
         self.assertIn("test message", result)
 
     def test_ascend_formatter_pass_through_vllm_logs(self):
-        from vllm_ascend.logger import AscendFormatter, _FORMAT, _DATE_FORMAT
+        from vllm_ascend.logger import _DATE_FORMAT, _FORMAT, AscendFormatter
 
         fmt = AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
         record = logging.LogRecord(
@@ -102,7 +98,7 @@ class TestLoggerModule(TestBase):
         self.assertIn("vllm message", result)
 
     def test_ascend_colored_formatter_adds_prefix(self):
-        from vllm_ascend.logger import AscendColoredFormatter, _FORMAT, _DATE_FORMAT
+        from vllm_ascend.logger import _DATE_FORMAT, _FORMAT, AscendColoredFormatter
 
         fmt = AscendColoredFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
         record = logging.LogRecord(
