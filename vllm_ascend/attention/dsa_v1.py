@@ -1541,9 +1541,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        pass
-
     # TODO: cast to bfloat16 to speed up
     def rope_single(self, x, cos, sin, inverse=False):
         if inverse:

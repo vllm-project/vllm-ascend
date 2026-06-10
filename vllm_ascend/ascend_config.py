@@ -432,13 +432,22 @@ class FinegrainedTPConfig:
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
-            # dummy_run does not run the entire attention module in eager mode,
-            # so the o_proj tp split can only be used in graph mode.
-            if vllm_config.model_config.enforce_eager:
-                raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
-            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+            # OTP is supported in two scenarios:
+            # 1. Pure DP: data_parallel_size > 1 and tensor_parallel_size == 1
+            # 2. PD disaggregation: current node is KV consumer (D node)
+            is_pure_dp = (
+                vllm_config.parallel_config.data_parallel_size > 1
+                and vllm_config.parallel_config.tensor_parallel_size == 1
+            )
+            is_pd_d_node = (
+                vllm_config.kv_transfer_config is not None
+                and vllm_config.kv_transfer_config.is_kv_consumer
+            )
+            if not (is_pure_dp or is_pd_d_node):
                 raise AssertionError(
-                    "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+                    "oproj_tensor_parallel_size (OTP) is only supported in pure DP scenarios "
+                    "(data_parallel_size > 1 and tensor_parallel_size == 1) "
+                    "or PD disaggregation scenarios (as KV consumer / D node)"
                 )
         if self.olora_tensor_parallel_size > 0:
             enabled_configs.append(f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}")

@@ -17,6 +17,7 @@
 #
 
 from collections.abc import Callable
+import re
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
@@ -124,6 +125,50 @@ class AscendLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
+
+        # wo_b OTP row-slicing: in OTP mode, wo_b weight is row-sliced along
+        # the output dimension (not column-sliced along the input).  The weight
+        # is loaded unsplit (get_parallel_op returns tp_size=1), so we slice it
+        # here and release the full-weight storage to reclaim ~3 GiB NPU memory.
+        if (oproj_tp_enable() and isinstance(layer, RowParallelLinear)
+                and re.search(r'\.wo_b$', getattr(layer, 'prefix', ''))):
+            otp_group = get_otp_group()
+            otp_rank = otp_group.rank_in_group
+            otp_size = otp_group.world_size
+
+            wo_b_weight = layer.weight.data
+            total_rows = wo_b_weight.shape[0]
+            rows_per_shard = total_rows // otp_size
+
+            # Row-slice weight: each OTP rank takes its shard along dim 0
+            wo_b_shard = wo_b_weight[
+                otp_rank * rows_per_shard:(otp_rank + 1) * rows_per_shard, :
+            ].clone()
+
+            # Release old full-weight storage before reassigning
+            del wo_b_weight
+            layer.weight = torch.nn.Parameter(wo_b_shard, requires_grad=False)
+
+            # Row-slice weight_scale and weight_offset (W8A8: shape [output_rows, ...])
+            if hasattr(layer, 'weight_scale'):
+                ws = layer.weight_scale.data
+                ws_shard = ws[
+                    otp_rank * rows_per_shard:(otp_rank + 1) * rows_per_shard
+                ].clone()
+                del ws
+                layer.weight_scale = torch.nn.Parameter(
+                    ws_shard, requires_grad=False)
+
+            if hasattr(layer, 'weight_offset'):
+                wo = layer.weight_offset.data
+                wo_shard = wo[
+                    otp_rank * rows_per_shard:(otp_rank + 1) * rows_per_shard
+                ].clone()
+                del wo
+                layer.weight_offset = torch.nn.Parameter(
+                    wo_shard, requires_grad=False)
+
+            torch.npu.synchronize()  # Ensure old storage is freed
 
     def get_computed_params(self) -> set[str]:
         """Return parameter name patterns that are computed, not loaded.
