@@ -149,7 +149,7 @@ vllm serve your_model_path \
     --quantization ascend \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling True \
+    --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95
 ```
@@ -161,7 +161,7 @@ vllm serve your_model_path \
 
 | Parameter | Description |
 |-----------|-------------|
-| `--async-scheduling True` | Enables asynchronous scheduling to improve concurrent request processing. |
+| `--async-scheduling` | Enables asynchronous scheduling to improve concurrent request processing. |
 | `--compilation-config` | FullGraph optimization that captures and replays the entire decode graph, reducing scheduling latency. |
 | `--distributed_executor_backend "mp"` | Uses the multi-process distributed backend for parallel execution. |
 | `--enable-expert-parallel` | Enables Expert Parallelism, which is required for MoE models to distribute experts across NPUs. |
@@ -316,7 +316,7 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling True \
+    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
@@ -344,7 +344,7 @@ vllm serve your_model_path \
     --tensor-parallel-size 1 \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling True \
+    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
@@ -374,7 +374,7 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling True \
+    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
