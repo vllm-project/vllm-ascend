@@ -30,9 +30,9 @@ from vllm.v1.worker.worker_base import CompilationTimes
 from vllm_ascend._310p.compile_warmup import build_piecewise_compile_warmup_sizes
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
-from vllm_ascend.cpu_binding import bind_cpus
 
 _IS_RC_DEVICE: bool | None = None
 

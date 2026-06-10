@@ -1,6 +1,6 @@
 import vllm
-import vllm_ascend.ops.gdn as gdn_ops
 
+import vllm_ascend.ops.gdn as gdn_ops
 from vllm_ascend._310p.ops.fla.gdn_310 import (
     AscendGatedDeltaNetAttention310,
     update_conv1d_graph_params_310p,
