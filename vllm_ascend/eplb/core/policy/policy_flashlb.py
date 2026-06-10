@@ -867,7 +867,7 @@ class FlashLB(EplbPolicy):
                     self.update_threshold_value = 0.9
                     self.true_update = True
             except Exception:
-                logger.info("Dynamic eplb group is not initialized now")
+                logger.info("[eplb/policy] Dynamic eplb group not initialized yet, using default thresholds")
         current_deployment = np.array(current_expert_table)
         expert_workload = np.array(expert_workload)
 

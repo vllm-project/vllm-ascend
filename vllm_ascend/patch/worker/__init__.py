@@ -19,8 +19,8 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
 
-# v2 model runner is only supported on vllm > 0.20.2.
-_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.20.2")
+# v2 model runner patches depend on upstream main APIs beyond v0.21.0.
+_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.21.0")
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -45,9 +45,6 @@ if not is_310p():
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
-
-# TODO(MengqingCao): remove after the upstream community is modified
-import vllm_ascend.patch.worker.patch_llama_eagle3  # noqa
 
 # torchair/npugraph_ex is only available on NPU; silently skip when missing
 # so that CPU-only environments (e.g. UT runners without torch_npu) can still

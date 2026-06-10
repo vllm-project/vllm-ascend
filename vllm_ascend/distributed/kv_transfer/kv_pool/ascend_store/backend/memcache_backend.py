@@ -42,7 +42,7 @@ class MemcacheBackend(Backend):
             if self._store_initialized:
                 return
 
-            logger.info("Initializing Memcache store on first put.")
+            logger.info("Initializing Memcache store. local_rank=%d", self.local_rank)
             self.store = self._setup_store()
             self._store_initialized = True
             self._register_buffers_if_needed()
@@ -66,10 +66,10 @@ class MemcacheBackend(Backend):
             assert res == 0
             return store
         except ValueError as e:
-            logger.error("Configuration loading failed: %s", e)
+            logger.error("Configuration loading failed. error=%s. Check memcache config and environment.", e)
             raise
         except Exception as exc:
-            logger.error("An error occurred while loading the configuration: %s", exc)
+            logger.error("Store initialization failed. error=%s. Check memcache setup and dependencies.", exc)
             raise
 
     def set_device(self):
@@ -105,17 +105,24 @@ class MemcacheBackend(Backend):
 
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
-            logger.error("MemcacheBackend.get called before store initialization, keys=%s", key)
+            logger.error("get() called before store init. keys=%s. Call put() first to trigger initialization.", key)
             return
         assert self.store is not None
         try:
             res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
             for value in res:
                 if value != 0:
-                    logger.error("Failed to get key %s,res:%s", key, res)
+                    logger.error(
+                        "Failed to get key. keys=%s, result=%s. Check key existence and memory state.", key, res
+                    )
             return res
         except Exception as e:
-            logger.error("Failed to get key %s. %s", key, e)
+            logger.error(
+                "Failed to get key. keys=%s, type=%s, error=%s. Check store state and network.",
+                key,
+                type(e).__name__,
+                e,
+            )
             return None
 
     def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
@@ -125,10 +132,12 @@ class MemcacheBackend(Backend):
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             for value in res:
                 if value != 0:
-                    logger.error("Failed to put key %s,res:%s", key, res)
+                    logger.error("Failed to put key. keys=%s, result=%s. Check memory and store capacity.", key, res)
                     if self._lazy_init:
-                        logger.error("If this is the first DSV4(compress) request, this failure is expected.")
+                        logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
-            logger.error("Failed to put key %s,error:%s", key, e)
+            logger.error(
+                "Failed to put key. keys=%s, type=%s, error=%s. Check store state and memory.", key, type(e).__name__, e
+            )
             if self._lazy_init:
-                logger.error("If this is the first DSV4(compress) request, this failure is expected.")
+                logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")

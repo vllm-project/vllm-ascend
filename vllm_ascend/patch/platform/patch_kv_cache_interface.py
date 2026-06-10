@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import vllm.model_executor.layers.attention.mla_attention
@@ -14,6 +14,16 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+
+def _get_c8_k_cache_dtype() -> torch.dtype:
+    return torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+
+
+def _get_c8_k_scale_cache_dtype() -> torch.dtype:
+    return torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else torch.float16
 
 
 @dataclass(frozen=True)
@@ -46,8 +56,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     scale_dtype: torch.dtype = torch.int8
     sparse_head_dim: tuple[int, ...] | None = None
     cache_sparse_c8: bool = False
-    c8_k_cache_dtype: torch.dtype = torch.int8
-    c8_k_scale_cache_dtype: torch.dtype = torch.float16
+    c8_k_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_cache_dtype)
+    c8_k_scale_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_scale_cache_dtype)
 
     @property
     def page_size_bytes(self) -> int:
@@ -55,19 +65,22 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             assert self.sparse_head_dim is not None
             assert len(self.sparse_head_dim) == 3
             num_heads_per_page = self.block_size * self.num_kv_heads
-            # kv_cache[0]: bfloat16, kv_cache[1]: bfloat16
-            kv_lora_rank, qk_rope_head_dim = self.sparse_head_dim[:2]
-            k_pe_nope_bytes = num_heads_per_page * (kv_lora_rank + qk_rope_head_dim) * get_dtype_size(self.dtype)
-            # kv_cache[2]: int8
-            index_head_dim = self.sparse_head_dim[-1]
-            indexer_k_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-            # kv_cache[3]: float16
-            # since the scale is stored per token, head_dim is set to 1.
-            index_scale_head_dim = 1
-            indexer_k_scale_bytes = (
-                num_heads_per_page * index_scale_head_dim * get_dtype_size(self.c8_k_scale_cache_dtype)
-            )
-            return k_pe_nope_bytes + indexer_k_bytes + indexer_k_scale_bytes
+
+            kv_lora_rank, qk_rope_head_dim, index_head_dim = self.sparse_head_dim
+
+            # A5: kv_lora and k_rope are merged into a single CKV tensor (fp8).
+            # A3: separate kv_lora + k_rope (bf16).
+            if qk_rope_head_dim == 0:
+                kv_dtype = self.c8_k_cache_dtype  # A5 CKV: float8_e4m3fn
+                kv_dim = kv_lora_rank
+            else:
+                kv_dtype = self.dtype  # A3 kv_lora + k_rope: bfloat16
+                kv_dim = kv_lora_rank + qk_rope_head_dim
+
+            kv_bytes = num_heads_per_page * kv_dim * get_dtype_size(kv_dtype)
+            qli_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+            qli_scale_bytes = num_heads_per_page * 1 * get_dtype_size(self.c8_k_scale_cache_dtype)
+            return kv_bytes + qli_bytes + qli_scale_bytes
 
         return (
             self.block_size
@@ -85,7 +98,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             - kv_cache[0]
             - kv_cache[1]
             - kv_cache[2]
-            - kv_cache[3] (None if Sparse C8 is disabled)
+            - kv_cache[3] (None if Sparse C8 is disabled or Sparse C8 on A5 device)
         """
 
         assert self.sparse_head_dim is not None
@@ -96,6 +109,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
             kv_lora_rank, qk_rope_head_dim, index_k_head_dim = self.sparse_head_dim
 
+            if qk_rope_head_dim == 0:
+                # A5: ckv (float8_e4m3fn) and qli share c8_k_cache_dtype;
+                ckv_virtual = kv_lora_rank * get_dtype_size(self.c8_k_cache_dtype)
+                qk_rope_virtual = 0
+                qli_virtual = index_k_head_dim * get_dtype_size(self.c8_k_cache_dtype)
+                scale_virtual = get_dtype_size(self.c8_k_scale_cache_dtype)
+                return (ckv_virtual, qk_rope_virtual, qli_virtual, scale_virtual)
+
+            # A3: keep the original element-count / byte mix
             factor = get_dtype_size(self.dtype) // get_dtype_size(self.c8_k_cache_dtype)
             index_k_head_dim_virtual = index_k_head_dim // factor
 
@@ -113,12 +135,22 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             virtual_dims = get_sparse_head_dim_virtual()
             total_virtual_head_dim = sum(virtual_dims)
 
-            return (
-                total_virtual_head_dim / virtual_dims[0],  # kv_cache[0]
-                total_virtual_head_dim / virtual_dims[1],  # kv_cache[1]
-                total_virtual_head_dim / virtual_dims[2],  # kv_cache[2]
-                total_virtual_head_dim / virtual_dims[3],  # kv_cache[3]
-            )
+            if virtual_dims[1] == 0:
+                # A5: ckv merged (kv_lora + k_rope + scale) → 3-tensor
+                return (
+                    total_virtual_head_dim / virtual_dims[0],  # kv_cache[0]: ckv
+                    total_virtual_head_dim / virtual_dims[2],  # kv_cache[1]: qli
+                    total_virtual_head_dim / virtual_dims[3],  # kv_cache[2]: qli_scale
+                    None,  # kv_cache[3] does not exist for A5
+                )
+            else:
+                # A3: 4-tensor
+                return (
+                    total_virtual_head_dim / virtual_dims[0],  # kv_cache[0]
+                    total_virtual_head_dim / virtual_dims[1],  # kv_cache[1]
+                    total_virtual_head_dim / virtual_dims[2],  # kv_cache[2]
+                    total_virtual_head_dim / virtual_dims[3],  # kv_cache[3]
+                )
 
         return (
             self.head_size / self.sparse_head_dim[0],  # kv_cache[0]
