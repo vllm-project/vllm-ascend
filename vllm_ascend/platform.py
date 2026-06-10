@@ -512,16 +512,19 @@ class NPUPlatform(Platform):
 
         if compilation_config.mode == CompilationMode.VLLM_COMPILE:
             # VLLM_COMPILE uses ACL Graph. Dispatch by cudagraph_mode.
+            # Set backend to AscendCompiler qualname so make_compiler()'s else
+            # branch (backends.py:119) can resolve and instantiate it.
+            # get_compile_backend() returns "npu" (torch.compile backend string),
+            # which is NOT a resolvable Python qualname, so we must override here.
+            compilation_config.backend = "vllm_ascend.compilation.compiler_interface.AscendCompiler"
             compilation_config.use_inductor = False
             if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-                compilation_config.backend = "eager"
                 compilation_config.mode = CompilationMode.NONE
                 ascend_config.ascend_compilation_config.enable_npugraph_ex = False
             elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
                 logger.info(
                     "PIECEWISE compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode"
                 )
-                compilation_config.backend = "eager"
                 compilation_config.set_splitting_ops_for_v1(
                     all2all_backend=vllm_config.parallel_config.all2all_backend,
                     data_parallel_size=vllm_config.parallel_config.data_parallel_size,
@@ -544,7 +547,6 @@ class NPUPlatform(Platform):
                     "FULL_DECODE_ONLY compilation enabled on NPU. "
                     "use_inductor not supported - using only ACL Graph mode"
                 )
-                compilation_config.backend = "eager"
                 # We don't want to have our FX graph split for the sake of static kernel feature,
                 # because it will compile multiple times, so we set splitting_ops to empty manually.
                 compilation_config.splitting_ops = []
@@ -566,7 +568,6 @@ class NPUPlatform(Platform):
                     "%s cudagraph_mode is not support on NPU. falling back to NONE",
                     compilation_config.cudagraph_mode,
                 )
-                compilation_config.backend = "eager"
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
                 compilation_config.mode = CompilationMode.NONE
                 ascend_config.ascend_compilation_config.enable_npugraph_ex = False
