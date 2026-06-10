@@ -662,7 +662,10 @@ class NPUModelRunner(GPUModelRunner):
                 patch_eagle3_pp_aux_propagation,
             )
 
-            patch_eagle3_pp_aux_propagation(_inner)
+            if patch_eagle3_pp_aux_propagation(_inner):
+                self.model.make_empty_intermediate_tensors = (
+                    _inner.make_empty_intermediate_tensors
+                )
 
     def _use_aclgraph(self) -> bool:
         return (
@@ -1952,7 +1955,6 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        print(f"scheduler_output.total_num_scheduled_tokens={scheduler_output.total_num_scheduled_tokens}")
         if self.vllm_config.model_config.enable_return_routed_experts:
             if self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
@@ -2074,6 +2076,11 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs = self.input_batch.num_reqs
                 req_ids = self.input_batch.req_ids
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+                if (scheduler_output.total_num_scheduled_tokens <= 0
+                        or not tokens or sum(tokens) == 0):
+                    if not has_kv_transfer_group():
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+                    return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                 (
@@ -3792,7 +3799,7 @@ class NPUModelRunner(GPUModelRunner):
         # Initialize drafter attention group initialization
         if self.speculative_config and get_pp_group().is_last_rank and (
             self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
-        ) and get_pp_group().is_last_rank:
+        ):
             assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
             block_size = (self.kernel_block_sizes[0] if isinstance(
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
