@@ -76,6 +76,10 @@ jobs:
 
           if [[ "${{ github.event_name }}" == "push" ]]; then
             matrix=$(python .github/workflows/scripts/generate_cache_matrix.py --branch-filter "${GITHUB_REF_NAME}")
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # PR validation should not fan out to all release branches.
+            # Keep the producer validation small to reduce third-party download flooding.
+            matrix=$(python .github/workflows/scripts/generate_cache_matrix.py --branch-filter main)
           else
             matrix=$(python .github/workflows/scripts/generate_cache_matrix.py)
           fi
@@ -91,6 +95,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
+      # Avoid flooding GitCode third-party release downloads from concurrent matrix jobs.
+      max-parallel: 1
       matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
 
     container:
