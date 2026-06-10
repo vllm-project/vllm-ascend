@@ -40,6 +40,8 @@ jobs:
       test_groups: ${{ steps.groups.outputs.test_groups }}
       has_tests: ${{ steps.groups.outputs.has_tests }}
       notify_comment_id: ${{ steps.notify.outputs.comment-id }}
+      main_commit: ${{ steps.vllm.outputs.main_commit }}
+      release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
       - name: Check user authorization
         id: auth
@@ -100,6 +102,25 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Read verified vLLM refs
+        id: vllm
+        if: steps.auth.outputs.authorized == 'true'
+        run: |
+          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+            exit 1
+          }
+          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+            exit 1
+          }
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Resolve PR info and test names
         id: resolve
         if: steps.auth.outputs.authorized == 'true'
@@ -146,7 +167,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.20.2]
+        vllm_version:
+          - ${{ needs.e2e-test.outputs.main_commit }}
+          - ${{ needs.e2e-test.outputs.release_tag }}
     needs: [e2e-test]
     if: ${{ needs.e2e-test.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
