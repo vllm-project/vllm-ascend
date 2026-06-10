@@ -18,7 +18,6 @@
 #include "tiling/tiling_api.h"
 #include "platform/platform_info.h"
 #include "util/shape_util.h"
-#include "common/op_host/matmul_common_infershape.h"
 #include "attention_update_v2_tiling.h"
 #include "tiling_base/tiling_templates_registry.h"
 #include "decode_update_tiling.h"
@@ -171,16 +170,16 @@ ge::graphStatus AttentionUpdateV2Tiling::GetShapeAttrsInfo()
     OP_TILING_CHECK(context_ == nullptr, OP_LOGE("AttentionUpdateV2", "context is null"),
                     return ge::GRAPH_FAILED);
     auto attrs = context_->GetAttrs();
-    OPS_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
 
     // lse: [sp, bsh],  go: [sp, bsh, hd]
-    OPS_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputShape(INPUT_LSE_INDEX));
-    OPS_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputShape(INPUT_GO_INDEX));
+    OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputShape(INPUT_LSE_INDEX));
+    OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputShape(INPUT_GO_INDEX));
     lseShape_ = context_->GetInputShape(INPUT_LSE_INDEX)->GetOriginShape();
     goShape_  = context_->GetInputShape(INPUT_GO_INDEX)->GetOriginShape();
 
-    OPS_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputDesc(INPUT_LSE_INDEX));
-    OPS_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputDesc(INPUT_GO_INDEX));
+    OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputDesc(INPUT_LSE_INDEX));
+    OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputDesc(INPUT_GO_INDEX));
     lseType_ = context_->GetInputDesc(INPUT_LSE_INDEX)->GetDataType();
     goType_  = context_->GetInputDesc(INPUT_GO_INDEX)->GetDataType();
 
@@ -305,7 +304,7 @@ ge::graphStatus AttentionUpdateV2Tiling::GetWorkspaceSize()
 ge::graphStatus AttentionUpdateV2Tiling::PostTiling()
 {
     auto workspaces = context_->GetWorkspaceSizes(1);
-    OPS_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
+    OP_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
     workspaces[0] = workspaceSize_;
 
     context_->SetBlockDim(usedCoreNum_);
