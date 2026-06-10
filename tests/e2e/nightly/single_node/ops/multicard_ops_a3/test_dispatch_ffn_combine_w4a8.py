@@ -1,4 +1,6 @@
+import os
 import random
+from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
@@ -11,6 +13,19 @@ from vllm_ascend.utils import enable_custom_op
 enable_custom_op()
 
 DEVICE_OFFSET = 0
+
+BASE_KWARGS = {
+    "batch_size": 64,
+    "token_hidden_size": 1024,
+    "moe_intermediate_size": 512,  # post-SwiGLU dim; GMM1 outputs 2× this, GMM2 takes this as input
+    "top_k": 8,
+    "moe_expert_num": 16,  # global expert count; per-rank = this // ep_world_size
+    "ep_world_size": 2,
+    "active_ratio_tensor_list": 1,  # m // 1 = all tokens active
+    "active_ratio_normal": 1,       # m // 1 = all tokens active
+    "output_dir": "./output",
+    "profile": False,
+}
 
 
 def int32_to_8x_int4_float(tensor_int32):
@@ -62,11 +77,12 @@ def int32_to_8x_int4_float(tensor_int32):
 
 
 class TestDispatchFFNCombine:
-    def __init__(self, rank, world_size, port):
+    def __init__(self, rank, world_size, port, kwargs):
         self.rank = rank
         self.world_size = world_size
         self.master_ip = "127.0.0.1"
         self.port = port
+        self.kwargs = kwargs
 
     def get_hcomm(self, comm_group):
         hcomm_info = None
@@ -136,29 +152,33 @@ class TestDispatchFFNCombine:
 
     def run_tensor_list(self) -> bool:
         torch_npu.npu.set_device(DEVICE_OFFSET + self.rank)
-        m = 64
-        k = 1024
-        n = 1024
-        topk = 8
-        e = 8
-        k2 = n // 2
-        n2 = k
-        active_num = m // 8
+        m = self.kwargs["batch_size"]
+        k = self.kwargs["token_hidden_size"]
+        n = self.kwargs["moe_intermediate_size"]
+        topk = self.kwargs["top_k"]
+        e_global = self.kwargs["moe_expert_num"]  # global expert count
+        e = e_global // self.world_size            # per-rank expert count
+        k2 = n  # GMM2 input: post-SwiGLU intermediate_size
+        n2 = k  # GMM2 output: token_hidden_size
+        active_num = m // self.kwargs["active_ratio_tensor_list"]
 
         torch_npu.npu.config.allow_internal_format = True
         x = self.generate_random_tensor((m, k), dtype=torch.bfloat16)
-        weight1 = self.generate_random_tensor((e, k, n // 8), dtype=torch.int32).npu()
+        weight1 = self.generate_random_tensor((e, k, n * 2 // 8), dtype=torch.int32).npu()  # GMM1: K × 2*intermediate
         weight1 = torch_npu.npu_format_cast(weight1, 29)
         weight2 = self.generate_random_tensor((e, k2, n2 // 8), dtype=torch.int32).npu()
         weight2 = torch_npu.npu_format_cast(weight2, 29)
 
         bias1 = int32_to_8x_int4_float(weight1.cpu())
-        bias1_npu = bias1.sum(dim=-1).npu()  # shape: [e, n]
+        bias1_npu = bias1.sum(dim=-1).npu()
         bias2 = int32_to_8x_int4_float(weight2.cpu())
-        bias2_npu = bias2.sum(dim=-1).npu()  # shape: [e, n2]
+        bias2_npu = bias2.sum(dim=-1).npu()
 
-        expert_idx = torch.randint(0, self.world_size * e, (m, topk), dtype=torch.int32)
-        scale1 = torch.randint(0, 1, (e, n), dtype=torch.int64)
+        expert_idx = torch.arange(
+            self.rank * m * topk,
+            self.rank * m * topk + m * topk,
+            dtype=torch.int32).view(m, topk) % e_global
+        scale1 = torch.randint(0, 1, (e, n * 2), dtype=torch.int64)  # GMM1 output: 2*intermediate channels
         scale2 = torch.randint(0, 1, (e, n2), dtype=torch.int64)
         probs = torch.randn(size=(m, topk), dtype=torch.float32)
 
@@ -195,49 +215,75 @@ class TestDispatchFFNCombine:
 
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
         expert_token_nums = self.generate_random_tensor((1, e), dtype=torch.int32).npu()
-        torch.ops._C_ascend.dispatch_ffn_combine(
-            x=x,
-            weight1=weight1_nz_npu,
-            weight2=weight2_nz_npu,
-            expert_idx=expert_idx,
-            scale1=scale1_npu,
-            scale2=scale2_npu,
-            bias1=bias1_list,
-            bias2=bias2_list,
-            probs=probs,
-            group=self.hcomm_info,
-            max_output_size=512,
-            out=out,
-            expert_token_nums=expert_token_nums,
-            x_active_mask=x_active_mask,
-        )
+        profile = self.kwargs.get("profile", False)
+        ctx = nullcontext()
+        if profile:
+            output_path = os.path.join(self.kwargs["output_dir"], "run_tensor_list", f"rank_{self.rank}")
+            os.makedirs(output_path, exist_ok=True)
+            experimental_config = torch_npu.profiler._ExperimentalConfig(
+                profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
+                data_simplification=False,
+            )
+            ctx = torch_npu.profiler.profile(
+                activities=[torch_npu.profiler.ProfilerActivity.NPU],
+                with_stack=True,
+                experimental_config=experimental_config,
+                schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
+                on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(output_path),
+            )
+
+        print("begin")
+        with ctx:
+            torch.ops._C_ascend.dispatch_ffn_combine(
+                x=x,
+                weight1=weight1_nz_npu,
+                weight2=weight2_nz_npu,
+                expert_idx=expert_idx,
+                scale1=scale1_npu,
+                scale2=scale2_npu,
+                bias1=bias1_list,
+                bias2=bias2_list,
+                probs=probs,
+                group=self.hcomm_info,
+                max_output_size=m * topk,
+                out=out,
+                expert_token_nums=expert_token_nums,
+                x_active_mask=x_active_mask,
+            )
+        if profile:
+            torch_npu.npu.synchronize()
+        print("end1")
         return True
 
     def run_normal(self) -> bool:
         torch_npu.npu.set_device(DEVICE_OFFSET + self.rank)
-        m = 64
-        k = 1024
-        n = 1024
-        topk = 8
-        e = 8
-        k2 = n // 2
-        n2 = k
-        active_num = m // 2
+        m = self.kwargs["batch_size"]
+        k = self.kwargs["token_hidden_size"]
+        n = self.kwargs["moe_intermediate_size"]
+        topk = self.kwargs["top_k"]
+        e_global = self.kwargs["moe_expert_num"]  # global expert count
+        e = e_global // self.world_size            # per-rank expert count
+        k2 = n  # GMM2 input: post-SwiGLU intermediate_size
+        n2 = k  # GMM2 output: token_hidden_size
+        active_num = m // self.kwargs["active_ratio_normal"]
 
         torch_npu.npu.config.allow_internal_format = True
         x = self.generate_random_tensor((m, k), dtype=torch.bfloat16)
-        weight1 = self.generate_random_tensor((e, k, n // 8), dtype=torch.int32).npu()
+        weight1 = self.generate_random_tensor((e, k, n * 2 // 8), dtype=torch.int32).npu()  # GMM1: K × 2*intermediate
         weight1 = torch_npu.npu_format_cast(weight1, 29)
         weight2 = self.generate_random_tensor((e, k2, n2 // 8), dtype=torch.int32).npu()
         weight2 = torch_npu.npu_format_cast(weight2, 29)
 
         bias1 = int32_to_8x_int4_float(weight1.cpu())
-        bias1_npu = bias1.sum(dim=-1).npu()  # shape: [e, n]
+        bias1_npu = bias1.sum(dim=-1).npu()
         bias2 = int32_to_8x_int4_float(weight2.cpu())
-        bias2_npu = bias2.sum(dim=-1).npu()  # shape: [e, n2]
+        bias2_npu = bias2.sum(dim=-1).npu()
 
-        expert_idx = torch.randint(0, self.world_size * e, (m, topk), dtype=torch.int32)
-        scale1 = torch.randint(0, 1, (e, n), dtype=torch.int64)
+        expert_idx = torch.arange(
+            self.rank * m * topk,
+            self.rank * m * topk + m * topk,
+            dtype=torch.int32).view(m, topk) % e_global
+        scale1 = torch.randint(0, 1, (e, n * 2), dtype=torch.int64)  # GMM1 output: 2*intermediate channels
         scale2 = torch.randint(0, 1, (e, n2), dtype=torch.int64)
         probs = torch.randn(size=(m, topk), dtype=torch.float32)
 
@@ -275,22 +321,44 @@ class TestDispatchFFNCombine:
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
         expert_token_nums = self.generate_random_tensor((1, e), dtype=torch.int32).npu()
 
-        torch.ops._C_ascend.dispatch_ffn_combine(
-            x=x,
-            weight1=weight1_nz_npu,
-            weight2=weight2_nz_npu,
-            expert_idx=expert_idx,
-            scale1=scale1_npu,
-            scale2=scale2_npu,
-            bias1=bias1_list,
-            bias2=bias2_list,
-            probs=probs,
-            group=self.hcomm_info,
-            max_output_size=512,
-            out=out,
-            expert_token_nums=expert_token_nums,
-            x_active_mask=x_active_mask,
-        )
+        profile = self.kwargs.get("profile", False)
+        ctx = nullcontext()
+        if profile:
+            output_path = os.path.join(self.kwargs["output_dir"], "run_normal", f"rank_{self.rank}")
+            os.makedirs(output_path, exist_ok=True)
+            experimental_config = torch_npu.profiler._ExperimentalConfig(
+                profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
+                data_simplification=False,
+            )
+            ctx = torch_npu.profiler.profile(
+                activities=[torch_npu.profiler.ProfilerActivity.NPU],
+                with_stack=True,
+                experimental_config=experimental_config,
+                schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
+                on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(output_path),
+            )
+
+        print("begin:\n")
+        with ctx:
+            torch.ops._C_ascend.dispatch_ffn_combine(
+                x=x,
+                weight1=weight1_nz_npu,
+                weight2=weight2_nz_npu,
+                expert_idx=expert_idx,
+                scale1=scale1_npu,
+                scale2=scale2_npu,
+                bias1=bias1_list,
+                bias2=bias2_list,
+                probs=probs,
+                group=self.hcomm_info,
+                max_output_size=m * topk,
+                out=out,
+                expert_token_nums=expert_token_nums,
+                x_active_mask=x_active_mask,
+            )
+        if profile:
+            torch_npu.npu.synchronize()
+        print("end2")
         return True
 
     def generate_random_tensor(self, size, dtype):
@@ -304,8 +372,8 @@ class TestDispatchFFNCombine:
             raise ValueError(f"Invalid dtype: {dtype}")
 
 
-def worker(rank: int, world_size: int, port: int, q: mp.SimpleQueue):
-    op = TestDispatchFFNCombine(rank, world_size, port)
+def worker(rank: int, world_size: int, port: int, q: mp.SimpleQueue, kwargs: dict):
+    op = TestDispatchFFNCombine(rank, world_size, port, kwargs)
     op.generate_hcom()
     out1 = op.run_tensor_list()
     q.put(out1)
@@ -314,8 +382,10 @@ def worker(rank: int, world_size: int, port: int, q: mp.SimpleQueue):
 
 
 @torch.inference_mode()
-def test_dispatch_ffn_combine_kernel():
-    world_size = 2
+def test_dispatch_ffn_combine_kernel(kwargs: dict = None):
+    if kwargs is None:
+        kwargs = BASE_KWARGS
+    world_size = kwargs["ep_world_size"]
     mp.set_start_method("fork", force=True)
 
     q = mp.SimpleQueue()
@@ -323,7 +393,7 @@ def test_dispatch_ffn_combine_kernel():
     port = 29501 + random.randint(0, 10000)
 
     for rank in range(world_size):
-        p = mp.Process(target=worker, args=(rank, world_size, port, q))
+        p = mp.Process(target=worker, args=(rank, world_size, port, q, kwargs))
         p.start()
         p_list.append(p)
 
@@ -333,3 +403,46 @@ def test_dispatch_ffn_combine_kernel():
         p.join()
 
     assert all(results)
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Test dispatch_ffn_combine w4a8 kernel with configurable parameters"
+    )
+    parser.add_argument("--batch_size", type=int, default=BASE_KWARGS["batch_size"],
+                        help="Batch/token count (default: 64)")
+    parser.add_argument("--token_hidden_size", type=int, default=BASE_KWARGS["token_hidden_size"],
+                        help="Input hidden size (default: 1024)")
+    parser.add_argument("--moe_intermediate_size", type=int, default=BASE_KWARGS["moe_intermediate_size"],
+                        help="Intermediate size — post-SwiGLU dim (default: 512)")
+    parser.add_argument("--top_k", type=int, default=BASE_KWARGS["top_k"],
+                        help="Top-k experts (default: 8)")
+    parser.add_argument("--moe_expert_num", type=int, default=BASE_KWARGS["moe_expert_num"],
+                        help="Global expert count across all ranks (default: 16)")
+    parser.add_argument("--ep_world_size", type=int, default=BASE_KWARGS["ep_world_size"],
+                        help="Number of processes (default: 2)")
+    parser.add_argument("--active_ratio_tensor_list", type=int, default=BASE_KWARGS["active_ratio_tensor_list"],
+                        help="Denominator for active_num in run_tensor_list, m // N (default: 1)")
+    parser.add_argument("--active_ratio_normal", type=int, default=BASE_KWARGS["active_ratio_normal"],
+                        help="Denominator for active_num in run_normal, m // N (default: 1)")
+    parser.add_argument("--output_dir", type=str, default=BASE_KWARGS["output_dir"],
+                        help="Output directory for result storage (default: ./output)")
+    parser.add_argument("--profile", action="store_true", default=BASE_KWARGS["profile"],
+                        help="Enable torch_npu profiler (default: False)")
+
+    args = parser.parse_args()
+    BASE_KWARGS["batch_size"] = args.batch_size
+    BASE_KWARGS["token_hidden_size"] = args.token_hidden_size
+    BASE_KWARGS["moe_intermediate_size"] = args.moe_intermediate_size
+    BASE_KWARGS["top_k"] = args.top_k
+    BASE_KWARGS["moe_expert_num"] = args.moe_expert_num
+    BASE_KWARGS["ep_world_size"] = args.ep_world_size
+
+    BASE_KWARGS["active_ratio_tensor_list"] = args.active_ratio_tensor_list
+    BASE_KWARGS["active_ratio_normal"] = args.active_ratio_normal
+    BASE_KWARGS["output_dir"] = args.output_dir
+    BASE_KWARGS["profile"] = True
+
+    test_dispatch_ffn_combine_kernel(BASE_KWARGS)
+    print("test_dispatch_ffn_combine_kernel PASSED")
