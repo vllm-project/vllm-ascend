@@ -342,6 +342,8 @@ class NPUModelRunner(GPUModelRunner):
         # use_hybrid_blocks: if hybrid blocks is used.
         self.use_hybrid_blocks: bool = False
         self.need_accepted_tokens: bool = False
+        # Stashed by _copy_valid_sampled_token_count for async spec decode.
+        self.valid_sampled_token_count_gpu: torch.Tensor | None = None
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
@@ -1618,7 +1620,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.use_async_spec_decode:
             # Stash for GPU-side correction in _prepare_inputs.
-            self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
+            self.valid_sampled_token_count_gpu = valid_sampled_tokens_count
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
@@ -2372,7 +2374,7 @@ class NPUModelRunner(GPUModelRunner):
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
 
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
+        self.valid_sampled_token_count_gpu = None
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
