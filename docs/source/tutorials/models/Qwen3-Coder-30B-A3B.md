@@ -253,7 +253,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-Take the `serve` subcommand as an example:
+Take the `serve` subcommand as an example. The `--random-output-len` parameter controls the number of output tokens per request; adjust it based on your target scenario (e.g., 2048 for short outputs, 32768 for long outputs).
 
 ```shell
 vllm bench serve \
@@ -262,6 +262,7 @@ vllm bench serve \
     --port 1025 \
     --dataset-name random \
     --random-input 200 \
+    --random-output-len 2048 \
     --num-prompts 200 \
     --request-rate 1 \
     --save-result \
