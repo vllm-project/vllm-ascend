@@ -1980,9 +1980,7 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant(
     const at::Tensor& bias_opt = c10::value_or_else(bias, [] { return at::Tensor(); });
     const at::Tensor& quant_scale_opt = c10::value_or_else(quant_scale, [] { return at::Tensor(); });
     const at::Tensor& quant_offset_opt = c10::value_or_else(quant_offset, [] { return at::Tensor(); });
-    const at::Tensor& group_index_value = c10::value_or_else(group_index, [&x] {
-        return at::empty({1}, x.options().dtype(c10::ScalarType::Long)).fill_(x.size(0));
-    });
+    const at::Tensor& group_index_opt = c10::value_or_else(group_index, [] { return at::Tensor(); });
 
     static const bool is_v2_available =
         GetOpApiFuncAddr("aclnnDequantSwigluQuantV2") != nullptr &&
@@ -1990,13 +1988,13 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant(
 
     if (swiglu_mode == 0 && !is_v2_available) {
         EXEC_NPU_CMD(aclnnDequantSwigluQuant, x, weight_scale_value, activation_scale_opt, bias_opt, quant_scale_opt,
-                     quant_offset_opt, group_index_value, activate_left, quant_mode_ptr, y, scale);
+                     quant_offset_opt, group_index_opt, activate_left, quant_mode_ptr, y, scale);
     } else {
         int64_t dst_type = 2;
         char* round_mode = const_cast<char*>("rint");
         int64_t activate_dim = -1;
         EXEC_NPU_CMD(aclnnDequantSwigluQuantV2, x, weight_scale_value, activation_scale_opt, bias_opt, quant_scale_opt,
-                     quant_offset_opt, group_index_value, activate_left, quant_mode_ptr, dst_type, round_mode,
+                     quant_offset_opt, group_index_opt, activate_left, quant_mode_ptr, dst_type, round_mode,
                      activate_dim, swiglu_mode, clamp_limit, glu_alpha, glu_bias, y, scale);
     }
 
