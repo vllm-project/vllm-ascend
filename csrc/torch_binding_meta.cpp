@@ -1601,6 +1601,27 @@ at::Tensor chunk_fwd_o_meta(
     return o;
 }
 
+at::Tensor npu_gumbel_sample_meta(
+    const at::Tensor& logits,
+    const at::Tensor& idx_mapping,
+    const at::Tensor& temperature,
+    const at::Tensor& seeds,
+    const at::Tensor& pos,
+    bool apply_temperature,
+    const c10::optional<at::Tensor>& output_processed_logits,
+    const c10::optional<at::Tensor>& output_processed_logits_col)
+{
+    (void)idx_mapping;
+    (void)temperature;
+    (void)seeds;
+    (void)pos;
+    (void)apply_temperature;
+    (void)output_processed_logits;
+    (void)output_processed_logits_col;
+    int64_t num_tokens = logits.size(0);
+    return at::empty({num_tokens}, logits.options().dtype(at::kLong));
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1709,6 +1730,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // GumbelSample
+    ops.impl("npu_gumbel_sample", &vllm_ascend::meta::npu_gumbel_sample_meta);
     // npu_fused_gdn_gating
     ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
 }
