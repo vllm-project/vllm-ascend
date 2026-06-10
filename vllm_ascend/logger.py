@@ -42,10 +42,14 @@ def _format_with_ascend_prefix(self, record, super_format):
     if not _is_ascend_module(record.pathname):
         return super_format(record)
     module = _infer_module_name(record.pathname)
+    if record.filename == module + ".py":
+        prefix = "[vllm-ascend]"
+    else:
+        prefix = f"[vllm-ascend] [{module}]"
     orig_msg = record.msg
     orig_args = record.args
     try:
-        record.msg = f"[vllm-ascend] [{module}] - {record.getMessage()}"
+        record.msg = f"{prefix} - {record.getMessage()}"
         record.args = ()
         return super_format(record)
     finally:

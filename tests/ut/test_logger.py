@@ -63,21 +63,39 @@ class TestLoggerModule(TestBase):
             "core",
         )
 
-    def test_ascend_formatter_adds_prefix(self):
+    def test_ascend_formatter_adds_prefix_root_file(self):
         from vllm_ascend.logger import _DATE_FORMAT, _FORMAT, AscendFormatter
 
         fmt = AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
         record = logging.LogRecord(
             name="vllm.logger",
             level=logging.INFO,
-            pathname="/vllm_ascend/platform.py",
+            pathname="/vllm_ascend/ascend_config.py",
             lineno=42,
             msg="test message",
             args=(),
             exc_info=None,
         )
         result = fmt.format(record)
-        self.assertIn("[vllm-ascend] [platform]", result)
+        self.assertIn("[vllm-ascend]", result)
+        self.assertNotIn("[vllm-ascend] [ascend_config]", result)
+        self.assertIn("test message", result)
+
+    def test_ascend_formatter_adds_prefix_nested_file(self):
+        from vllm_ascend.logger import _DATE_FORMAT, _FORMAT, AscendFormatter
+
+        fmt = AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
+        record = logging.LogRecord(
+            name="vllm.logger",
+            level=logging.INFO,
+            pathname="/vllm_ascend/compilation/acl_graph.py",
+            lineno=42,
+            msg="test message",
+            args=(),
+            exc_info=None,
+        )
+        result = fmt.format(record)
+        self.assertIn("[vllm-ascend] [compilation]", result)
         self.assertIn("test message", result)
 
     def test_ascend_formatter_pass_through_vllm_logs(self):
@@ -104,12 +122,12 @@ class TestLoggerModule(TestBase):
         record = logging.LogRecord(
             name="vllm.logger",
             level=logging.INFO,
-            pathname="/vllm_ascend/platform.py",
+            pathname="/vllm_ascend/compilation/acl_graph.py",
             lineno=42,
             msg="colored test",
             args=(),
             exc_info=None,
         )
         result = fmt.format(record)
-        self.assertIn("[vllm-ascend] [platform]", result)
+        self.assertIn("[vllm-ascend] [compilation]", result)
         self.assertIn("colored test", result)
