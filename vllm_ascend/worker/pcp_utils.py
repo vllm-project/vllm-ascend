@@ -134,6 +134,13 @@ class PCPManager:
             "qwen3_5_moe",
         )
 
+        self.dcp_mtp_attn_mask = CpuGpuBuffer(
+            (max_num_reqs, self.decode_threshold, vllm_config.model_config.max_model_len),
+            dtype=torch.bool,
+            device=device,
+            pin_memory=pin_memory,
+        )
+
         self.pcp_pads_logits_hybrid_attn = torch.ones(self.max_num_reqs, dtype=torch.int32) * (self.pcp_world_size - 1)
         self.pcp_padded_tokens_fla = 0
         self.pcp_padded_tokens_length = 0
@@ -1058,67 +1065,14 @@ class PCPManager:
             )
             prefill_context_lens = input_batch.num_computed_tokens_cpu[self.num_decode_reqs : self.num_reqs]
             context_lens = np.concatenate([decode_context_lens, prefill_context_lens])
-            num_computed_tokens_of_pcp_dcp = torch.zeros(
-                [self.num_reqs * self.decode_threshold, self.pcp_world_size, self.dcp_world_size],
-                dtype=torch.int32,
-            )
-            # For pcp + spec decode, we flatten seq_lens
-            # to avoid irregular attn_mask shape.
-            # Same as block_table, we flatten decode seq_lens to query_lens,
-            # and keep prefill seq_lens unchanged.
-            for decode_idx in range(self.decode_threshold):
-                num_computed_tokens_of_pcp_dcp[self.decode_threshold - 1 - decode_idx :: self.decode_threshold] = (
-                    self._get_cp_local_seq_lens(
-                        torch.tensor(context_lens) - decode_idx,
-                        self.pcp_world_size,
-                        self.dcp_world_size,
-                        self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
-                    )
-                )
-            if self.decode_threshold > 1:
-                num_computed_tokens_of_pcp_dcp_list = []
-                if self.num_decode_reqs:
-                    num_decodes_flatten = query_lens[: self.num_decode_reqs].sum().item()
-                    if query_lens[: self.num_decode_reqs].min().item() == self.decode_threshold:
-                        decode_flatten_idx = list(range(num_decodes_flatten))
-                    else:
-                        decode_flatten_idx = []
-                        for req_id in range(self.num_decode_reqs):
-                            offset = (req_id + 1) * self.decode_threshold
-                            decode_flatten_idx += list(range(offset - query_lens[req_id], offset))
-                    num_computed_tokens_of_pcp_dcp_list.append(num_computed_tokens_of_pcp_dcp[decode_flatten_idx])
-                if self.num_prefill_reqs:
-                    num_computed_tokens_of_pcp_dcp_list.append(
-                        num_computed_tokens_of_pcp_dcp[
-                            (self.num_decode_reqs + 1) * self.decode_threshold - 1 :: self.decode_threshold
-                        ]
-                    )
-                num_computed_tokens_of_pcp_dcp = torch.cat(num_computed_tokens_of_pcp_dcp_list, dim=0)
 
-                # For pcp + spec decode, we flatten block_table
-                # to avoid irregular attn_mask shape, e.g.,
-                # num_decode_req=2, num_prefill_req=3, num_speculative_tokens=1,
-                # ori block_table: # [d0, d1, p0, p1, p2]
-                # (num_reqs_d + num_reqs_p, max_num_blocks),
-                # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
-                # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens = self.query_lens_pcp_full.gpu[:num_reqs_padded]
-                num_prefill_reqs = self.num_prefill_reqs
-                num_decode_reqs = self.num_decode_reqs
-                num_decode_reqs_flatten = ori_query_lens_cpu[:num_decode_reqs].sum().item()
-                if not self.use_sparse:
-                    block_table_tensor[num_decode_reqs_flatten : num_decode_reqs_flatten + num_prefill_reqs].copy_(
-                        block_table_tensor[num_decode_reqs : num_decode_reqs + num_prefill_reqs].clone()
-                    )
-                    block_table_tensor[:num_decode_reqs_flatten].copy_(
-                        block_table_tensor[:num_decode_reqs].repeat_interleave(ori_query_lens[:num_decode_reqs], dim=0)
-                    )
-                    block_table_tensor = block_table_tensor[: num_decode_reqs_flatten + num_prefill_reqs]
-                    if num_reqs_padded > num_reqs:
-                        pad_size = num_reqs_padded - num_reqs
-                        ori_query_lens_cpu[-pad_size:] = torch.full(
-                            [pad_size], ori_query_lens_cpu[-pad_size - 1].item()
-                        )
+            num_computed_tokens_of_pcp_dcp = self._get_cp_local_seq_lens(
+                torch.tensor(context_lens),
+                self.pcp_world_size,
+                self.dcp_world_size,
+                self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+            )
+
             pcp_unpad_mask = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length]
             long_seq_metadata = AscendPrefillContextParallelMetadata(
                 pcp_use_hybrid_attn=self.pcp_use_hybrid_attn,
@@ -1273,6 +1227,29 @@ class PCPManager:
                 long_seq_metadata.tail_actual_seq_lengths_kv = self.extra_long_seq_kwargs["tail_actual_seq_lengths_kv"]
                 long_seq_metadata.attn_chunk_seqlens = attn_chunk_seqlens
 
+            # Generate MTP attention masks for decode requests when dcp_size > 1 with speculative decoding
+            if (
+                self.dcp_world_size * self.pcp_world_size > 1
+                and self.speculative_config
+                and self.num_decode_reqs > 0
+                and num_scheduled_tokens is not None
+            ):
+                # Extract decode request info from input_batch and num_scheduled_tokens
+                decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
+                decode_num_scheduled_tokens = num_scheduled_tokens[: self.num_decode_reqs]
+
+                dcp_mtp_attn_mask = self.generate_mtp_attention_mask_for_decode(
+                    decode_num_computed_tokens, decode_num_scheduled_tokens
+                )
+                if dcp_mtp_attn_mask is not None:
+                    self.dcp_mtp_attn_mask.np[: self.num_decode_reqs] = dcp_mtp_attn_mask
+                    self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decode_reqs)
+                    long_seq_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[: self.num_decode_reqs]
+                else:
+                    long_seq_metadata.dcp_mtp_attn_mask = None
+            else:
+                long_seq_metadata.dcp_mtp_attn_mask = None
+
         self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata, block_table_tensor
 
@@ -1356,3 +1333,85 @@ class PCPManager:
                 )
 
             mrope_pos_ptr += num_sched
+
+    def generate_mtp_attention_mask_for_decode(
+        self,
+        decode_num_computed_tokens: list[int],
+        decode_num_scheduled_tokens: np.ndarray,
+    ) -> list[torch.Tensor | None]:
+        """
+        Generate MTP attention masks for decode requests in PCP mode.
+
+        This function handles the case where decode requests with MTP (speculative decoding)
+        need attention masks computed based on the local sequence after load balancing.
+
+        New MTP token allocation logic (using position % cp_size):
+        - History tokens are already split via DualChunkSwap
+        - MTP tokens are allocated based on (history_len + mtp_idx) % cp_size
+        - Each rank only computes mask for tokens assigned to itself
+
+        Example:
+            - pcp=1, dcp=2 (cp_size=2)
+            - history_len=5: [a,b,c,d,e] split via DualChunkSwap
+              - cp0: [a,b,c] (positions 0,1,2) -> 3 tokens
+              - cp1: [d,e] (positions 3,4) -> 2 tokens
+            - num_scheduled_tokens=4: [f,g,h,i] (positions 5,6,7,8)
+            - MTP allocation by position % cp_size:
+              - f: pos 5 % 2 = 1 -> rank1
+              - g: pos 6 % 2 = 0 -> rank0
+              - h: pos 7 % 2 = 1 -> rank1
+              - i: pos 8 % 2 = 0 -> rank0
+            - Final:
+              - rank0: [a,b,c,g,i] positions [0,1,2,6,8] -> mask shape 4x5
+              - rank1: [d,e,f,h] positions [3,4,5,7] -> mask shape 4x4
+
+        Args:
+            decode_num_computed_tokens: List of global history lengths for decode requests
+            decode_num_scheduled_tokens: Array of scheduled token counts for decode requests
+        """
+        cp_rank = self.pcp_world_rank * self.dcp_world_size + self.dcp_world_rank
+        cp_size = self.pcp_world_size * self.dcp_world_size
+        assert cp_size > 1, "cp_size must be greater than 1"
+
+        q_lens = torch.tensor(decode_num_scheduled_tokens[: self.num_decode_reqs], dtype=torch.int32)
+        global_histories = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
+        total_lens = global_histories + q_lens
+        context_lens = total_lens - q_lens
+
+        max_indices = total_lens - 1
+        valid = max_indices >= cp_rank
+
+        if not valid.any():
+            return self.dcp_mtp_attn_mask.cpu[: self.num_decode_reqs]
+
+        k_lens = torch.div(max_indices - cp_rank, cp_size, rounding_mode="floor") + 1
+        k_lens = torch.where(valid, k_lens, torch.zeros_like(k_lens))
+
+        mtp_attn_mask = self.dcp_mtp_attn_mask.cpu[: self.num_decode_reqs]
+        mtp_attn_mask.zero_()
+
+        num_valid = valid.sum().item()
+        if num_valid == 0:
+            return mtp_attn_mask
+
+        max_q = int(q_lens[valid].max().item())
+        max_k = int(k_lens[valid].max().item())
+
+        # Generate indices up to max dimensions
+        q_indices = torch.arange(max_q, dtype=torch.int32)
+        k_indices = torch.arange(max_k, dtype=torch.int32)
+
+        valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
+        valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
+
+        k_upper = (context_lens[:, None] + q_indices - cp_rank) // cp_size
+        k_upper_expanded = k_upper[:, :, None]  # [num_decode_reqs, max_q, 1]
+        k_idx_expanded = k_indices[None, None, :]  # [1, 1, max_k]
+        full_mask = (k_idx_expanded > k_upper_expanded) & (k_upper_expanded >= 0)
+
+        valid_mask_3d = valid_q[:, :, None] & valid_k[:, None, :]
+        full_mask = full_mask & valid_mask_3d
+
+        mtp_attn_mask[: self.num_decode_reqs, :max_q, :max_k] = full_mask
+
+        return mtp_attn_mask

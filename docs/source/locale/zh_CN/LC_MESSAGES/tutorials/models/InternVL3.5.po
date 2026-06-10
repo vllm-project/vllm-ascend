@@ -1,0 +1,266 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-07 05:04+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/InternVL3.5.md:1
+msgid "InternVL3.5(InternVL3_5-38B/241B-A28B)"
+msgstr "InternVL3.5(InternVL3_5-38B/241B-A28B)"
+
+#: ../../source/tutorials/models/InternVL3.5.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/InternVL3.5.md:5
+msgid ""
+"[InternVL3.5](https://huggingface.co/papers/2508.18265), a new family of "
+"open-source multimodal models that significantly advances versatility, "
+"reasoning capability, and inference efficiency along the InternVL series."
+msgstr ""
+"[InternVL3.5](https://huggingface.co/papers/2508.18265)是InternVL系列中新的开源多模态模型家族，显著提升了通用性、推理能力和推理效率。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:7
+msgid "The `InternVL3.5` model is first supported in `vllm-ascend:v0.20.2`"
+msgstr "`InternVL3.5`模型在`vllm-ascend:v0.20.2`中首次获得支持"
+
+#: ../../source/tutorials/models/InternVL3.5.md:9
+msgid ""
+"This document will show the main verification steps of both "
+"`InternVL3_5-38B` and `InternVL3_5-241B-A28B` model, including supported "
+"features, feature configuration, environment preparation, single-node and"
+" multi-node deployment, accuracy and performance evaluation."
+msgstr ""
+"本文档将展示`InternVL3_5-38B`和`InternVL3_5-241B-A28B`模型的主要验证步骤，包括支持特性、特性配置、环境准备、单节点和多节点部署、精度和性能评估。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:11
+msgid "Supported Features"
+msgstr "支持特性"
+
+#: ../../source/tutorials/models/InternVL3.5.md:13
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参考[支持特性](../../user_guide/support_matrix/supported_models.md)获取模型的支持特性矩阵。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:15
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"the feature's configuration."
+msgstr ""
+"请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:17
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/InternVL3.5.md:19
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/InternVL3.5.md:21
+msgid "require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 16) node:"
+msgstr "需要1个Atlas 800I A2 (64G × 8)节点或1个Atlas 800 A3 (64G × 16)节点："
+
+#: ../../source/tutorials/models/InternVL3.5.md:23
+msgid ""
+"`InternVL3_5-38B`:   [Download model "
+"weight](https://huggingface.co/OpenGVLab/InternVL3_5-38B)"
+msgstr ""
+"`InternVL3_5-38B`：[下载模型权重](https://huggingface.co/OpenGVLab/InternVL3_5-38B)"
+
+#: ../../source/tutorials/models/InternVL3.5.md:24
+msgid ""
+"`InternVL3_5-241B-A28B`:   [Download model "
+"weight](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)"
+msgstr ""
+"`InternVL3_5-241B-A28B`：[下载模型权重](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)"
+
+#: ../../source/tutorials/models/InternVL3.5.md:26
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr ""
+"建议将模型权重下载到多节点的共享目录，例如`/root/.cache/`"
+
+#: ../../source/tutorials/models/InternVL3.5.md:28
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "single-NPU"
+msgstr "单NPU"
+
+#: ../../source/tutorials/models/InternVL3.5.md:37
+#: ../../source/tutorials/models/InternVL3.5.md:65
+msgid "Run docker container:"
+msgstr "运行Docker容器："
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "multi-NPU"
+msgstr "多NPU"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "Build from source"
+msgstr "从源码构建"
+
+#: ../../source/tutorials/models/InternVL3.5.md:101
+msgid "You can build all from source."
+msgstr "您可以从源码构建所有内容。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:103
+msgid ""
+"Install `vllm-ascend`, refer to [set up using "
+"python](../../installation.md#set-up-using-python)."
+msgstr ""
+"安装`vllm-ascend`，请参考[使用Python设置](../../installation.md#set-up-using-python)。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:107
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr ""
+"如果要部署多节点环境，需要在每个节点上设置环境。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:109
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/InternVL3.5.md:111
+msgid "Online Serving"
+msgstr "在线服务"
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "InternVL3_5-38B"
+msgstr "InternVL3_5-38B"
+
+#: ../../source/tutorials/models/InternVL3.5.md:120
+msgid "Run docker container to start the vLLM server on multi-node NPU:"
+msgstr "运行Docker容器以在多节点NPU上启动vLLM服务器："
+
+#: ../../source/tutorials/models/InternVL3.5.md:131
+#: ../../source/tutorials/models/InternVL3.5.md:198
+msgid "If your service start successfully, you can see the info shown below:"
+msgstr "如果服务启动成功，您将看到如下信息："
+
+#: ../../source/tutorials/models/InternVL3.5.md:139
+#: ../../source/tutorials/models/InternVL3.5.md:206
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示查询模型："
+
+#: ../../source/tutorials/models/InternVL3.5.md:156
+#: ../../source/tutorials/models/InternVL3.5.md:223
+msgid ""
+"If you query the server successfully, you can see the info shown below "
+"(client):"
+msgstr ""
+"如果成功查询服务器，您将看到如下信息（客户端）："
+
+#: ../../source/tutorials/models/InternVL3.5.md:162
+#: ../../source/tutorials/models/InternVL3.5.md:229
+msgid "Logs of the vllm server:"
+msgstr "vLLM服务器日志："
+
+#: ../../source/tutorials/models/InternVL3.5.md
+msgid "InternVL3_5-241B-A28B"
+msgstr "InternVL3_5-241B-A28B"
+
+#: ../../source/tutorials/models/InternVL3.5.md:177
+msgid "Run docker container to start the vLLM server on multi-NPU:"
+msgstr "运行Docker容器以在多NPU上启动vLLM服务器："
+
+#: ../../source/tutorials/models/InternVL3.5.md:243
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/models/InternVL3.5.md:245
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用Language Model Evaluation Harness"
+
+#: ../../source/tutorials/models/InternVL3.5.md:247
+msgid ""
+"The accuracy of some models is already within our CI monitoring scope, "
+"including:"
+msgstr ""
+"部分模型的精度已在我们的CI监控范围内，包括："
+
+#: ../../source/tutorials/models/InternVL3.5.md:249
+msgid ""
+"As an example, take the `mmmu_val` dataset as a test dataset, and run "
+"accuracy evaluation of `InternVL3_5-241B-A28B` in offline mode."
+msgstr ""
+"以`mmmu_val`数据集为例，在离线模式下运行`InternVL3_5-241B-A28B`的精度评估。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:251
+msgid ""
+"Refer to [Using "
+"lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more "
+"details on `lm_eval` installation."
+msgstr ""
+"有关`lm_eval`安装的更多详情，请参考[使用lm_eval](../../developer_guide/evaluation/using_lm_eval.md)。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:257
+msgid "Run `lm_eval` to execute the accuracy evaluation."
+msgstr "运行`lm_eval`执行精度评估。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:270
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/InternVL3.5.md:272
+msgid "Using vLLM Benchmark"
+msgstr "使用vLLM基准测试"
+
+#: ../../source/tutorials/models/InternVL3.5.md:274
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
+"for more details."
+msgstr ""
+"更多详情请参考[vllm基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:276
+msgid "There are three `vllm bench` subcommands:"
+msgstr "有三个`vllm bench`子命令："
+
+#: ../../source/tutorials/models/InternVL3.5.md:278
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`：基准测试单批请求的延迟。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:279
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`：基准测试在线服务吞吐量。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:280
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`：基准测试离线推理吞吐量。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:282
+msgid ""
+"The performance evaluation must be conducted in an online mode. Take the "
+"`serve` as an example. Run the code as follows."
+msgstr ""
+"性能评估必须以在线模式进行。以`serve`为例，按如下方式运行代码。"
+
+#: ../../source/tutorials/models/InternVL3.5.md:288
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr ""
+"大约几分钟后，您将获得性能评估结果。"

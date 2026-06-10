@@ -53,6 +53,7 @@ class NPUWorker310(NPUWorker):
         init_workspace_manager(self.device, num_ubatches=1)
 
         self.model_runner = NPUModelRunner310(self.vllm_config, self.device)
+        logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
 
     def save_sharded_state(
         self,
@@ -130,7 +131,7 @@ class NPUWorker310(NPUWorker):
 
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %.2f GiB",
+            "Available KV cache memory: %.2f GiB (halved for workspace)",
             GiB(self.available_kv_cache_memory_bytes),
             scope="local",
         )
@@ -138,7 +139,7 @@ class NPUWorker310(NPUWorker):
 
     def _warm_up_atb(self):
         # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops
-        logger.info("Skip warm-up atb ops for 310P device.")
+        logger.info_once("Skip warm-up atb ops for 310P device.")
 
     def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
@@ -156,7 +157,7 @@ class NPUWorker310(NPUWorker):
         self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
         if _is_rc_device():
             self.init_snapshot.free_memory = psutil.virtual_memory().available
-            logger.info("NPU device is working in Root Complex (RC) mode.")
+            logger.info_once("Root Complex (RC) mode: host and device memory are shared.")
         if self.init_snapshot.free_memory < self.requested_memory:
             GiB = lambda b: round(b / GiB_bytes, 2)
             raise ValueError(

@@ -9,7 +9,7 @@ Taking the DeepSeek model as an example, using 8 Atlas 800T A3 servers to deploy
 
 ### Physical Layer Requirements
 
-- The physical machines must be located on the same WLAN, with network connectivity.
+- The physical machines must be located on the same LAN, with network connectivity.
 - All NPUs must be interconnected. For the Atlas A2 generation, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For the Atlas A3 generation, both intra-node and inter-node connectivity are via HCCS.
 
 ### Verification Process
@@ -163,7 +163,6 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
       "kv_role": "kv_producer",
       "kv_parallel_size": "1",
       "kv_port": "20001",
-      "engine_id": "0"
     }' \
     --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
 ```
@@ -229,7 +228,6 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
         "kv_role": "kv_consumer",
         "kv_parallel_size": "1",
         "kv_port": "20001",
-        "engine_id": "0"
         }' \
     --additional-config '{"enable_weight_nz_layout":true}'
 ```
@@ -433,7 +431,6 @@ In the PD separation scenario, we provide an optimized configuration.
           "kv_role": "kv_producer",
           "kv_parallel_size": "1",
           "kv_port": "20001",
-          "engine_id": "0"
         }'
     ```
 
@@ -455,7 +452,6 @@ In the PD separation scenario, we provide an optimized configuration.
           "kv_role": "kv_consumer",
           "kv_parallel_size": "1",
           "kv_port": "20001",
-          "engine_id": "0"
         }'
     ```
 

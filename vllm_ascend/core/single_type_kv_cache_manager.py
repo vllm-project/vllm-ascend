@@ -20,6 +20,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class CompressAttentionManager(FullAttentionManager):
     def __init__(self, kv_cache_spec: MLAAttentionSpec, block_pool: BlockPool, **kwargs) -> None:
@@ -149,7 +151,12 @@ class CompressAttentionManager(FullAttentionManager):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        alignment_tokens: int | None = None,
+    ) -> None:
         """
         Cache the blocks for the request.
 
@@ -157,10 +164,26 @@ class CompressAttentionManager(FullAttentionManager):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
+            alignment_tokens: The cache-hit alignment used by upstream vLLM
+                main. v0.21.0 does not expose this argument in the base class.
         """
-        num_tokens //= self.compress_ratio
+        num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
+        num_full_blocks = num_tokens // (self.block_size * self.compress_ratio)
 
-        return super().cache_blocks(request, num_tokens)
+        if num_cached_blocks >= num_full_blocks:
+            return
+        if vllm_version_is("0.21.0"):
+            return super().cache_blocks(request, num_tokens)
+
+        self.block_pool.cache_full_blocks(
+            request=request,
+            blocks=self.req_to_blocks[request.request_id],
+            num_cached_blocks=num_cached_blocks,
+            num_full_blocks=num_full_blocks,
+            block_size=self.block_size * self.compress_ratio,
+            kv_cache_group_id=self.kv_cache_group_id,
+        )
+        self.num_cached_block[request.request_id] = num_full_blocks
 
     @classmethod
     def find_longest_cache_hit(
@@ -181,7 +204,7 @@ class CompressAttentionManager(FullAttentionManager):
         #     "CompressAttentionManager can only be used for compressor attention groups"
         # )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple([] for _ in range(len(kv_cache_group_ids)))
-        block_size = kv_cache_spec.block_size
+        block_size = kv_cache_spec.block_size * kv_cache_spec.compress_ratio
         if dcp_world_size * pcp_world_size > 1:
             block_size *= dcp_world_size * pcp_world_size
         max_num_blocks = max_length // block_size
