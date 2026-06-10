@@ -5,7 +5,11 @@ from collections.abc import Sequence
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (
+    BlockHashList,
+    BlockHashListWithBlockSize,
+    KVCacheBlock,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SingleTypeKVCacheManager,
@@ -158,9 +162,22 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
         """
-        num_tokens //= self.compress_ratio
+        num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
+        logical_block_size = self.block_size * self.compress_ratio
+        num_full_blocks = num_tokens // logical_block_size
 
-        return super().cache_blocks(request, num_tokens)
+        if num_cached_blocks >= num_full_blocks:
+            return
+
+        self.block_pool.cache_full_blocks(
+            request=request,
+            blocks=self.req_to_blocks[request.request_id],
+            num_cached_blocks=num_cached_blocks,
+            num_full_blocks=num_full_blocks,
+            block_size=logical_block_size,
+            kv_cache_group_id=self.kv_cache_group_id,
+        )
+        self.num_cached_block[request.request_id] = num_full_blocks
 
     @classmethod
     def find_longest_cache_hit(
@@ -184,8 +201,10 @@ class CompressAttentionManager(FullAttentionManager):
         block_size = kv_cache_spec.block_size
         if dcp_world_size * pcp_world_size > 1:
             block_size *= dcp_world_size * pcp_world_size
-        max_num_blocks = max_length // block_size
-        for block_hash in itertools.islice(block_hashes, max_num_blocks):
+        logical_block_size = block_size * kv_cache_spec.compress_ratio
+        logical_block_hashes = BlockHashListWithBlockSize(block_hashes, block_size, logical_block_size)
+        max_num_blocks = max_length // logical_block_size
+        for block_hash in itertools.islice(logical_block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
@@ -199,11 +218,9 @@ class CompressAttentionManager(FullAttentionManager):
             for computed in computed_blocks:
                 computed.pop()
 
-        # NOTE: Div the compress ratio when finding the longest cache hit token length.
-        alignment_tokens = cdiv(alignment_tokens, kv_cache_spec.compress_ratio)
         while (
-            block_size != alignment_tokens  # Faster for common case.
-            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+            logical_block_size != alignment_tokens  # Faster for common case.
+            and len(computed_blocks[0]) * logical_block_size % alignment_tokens != 0
         ):
             for computed in computed_blocks:
                 computed.pop()
