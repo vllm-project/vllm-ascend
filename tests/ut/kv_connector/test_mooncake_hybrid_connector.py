@@ -1,7 +1,39 @@
 import sys
 import types
 import unittest
+from importlib import import_module
+from pathlib import Path
 from unittest.mock import MagicMock
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT_STR = str(_REPO_ROOT)
+if _REPO_ROOT_STR not in sys.path:
+    sys.path.insert(0, _REPO_ROOT_STR)
+
+
+def _prepend_package_path(module_name: str, source_path: Path) -> None:
+    module = import_module(module_name)
+    path = str(source_path)
+    if path not in module.__path__:
+        module.__path__.insert(0, path)
+
+
+# CPU smart UT installs vllm-ascend before collecting tests. Make this test use
+# the current checkout even if the package was imported from site-packages first.
+_prepend_package_path("vllm_ascend", _REPO_ROOT / "vllm_ascend")
+_prepend_package_path("vllm_ascend.distributed", _REPO_ROOT / "vllm_ascend" / "distributed")
+_prepend_package_path(
+    "vllm_ascend.distributed.kv_transfer",
+    _REPO_ROOT / "vllm_ascend" / "distributed" / "kv_transfer",
+)
+_prepend_package_path(
+    "vllm_ascend.distributed.kv_transfer.kv_p2p",
+    _REPO_ROOT / "vllm_ascend" / "distributed" / "kv_transfer" / "kv_p2p",
+)
+_prepend_package_path(
+    "vllm_ascend.distributed.kv_transfer.utils",
+    _REPO_ROOT / "vllm_ascend" / "distributed" / "kv_transfer" / "utils",
+)
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
