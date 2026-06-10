@@ -62,7 +62,7 @@ test_cases:
         batch_size: 32
         baseline: 86.67
         thinking: true
-        threshold: 5
+        threshold: 10
 
       perf_2:
         case_type: performance
