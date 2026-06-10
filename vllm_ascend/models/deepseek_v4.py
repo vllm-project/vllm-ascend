@@ -22,7 +22,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
+"""Inference-only DeepseekV2/DeepseekV3 model."""
+
+import copy
 import math
 import typing
 from collections.abc import Callable, Iterable
@@ -179,13 +181,25 @@ def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Con
     return None
 
 
+def _get_rope_parameters(config: DeepseekV2Config | DeepseekV3Config | DeepseekV4Config) -> dict[str, typing.Any]:
+    rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
+    rope_parameters.setdefault("factor", getattr(config, "rope_scaling_factor", 1.0))
+    rope_parameters.setdefault("rope_theta", getattr(config, "rope_theta", 10000.0))
+    rope_parameters.setdefault("beta_fast", getattr(config, "beta_fast", 32))
+    rope_parameters.setdefault("beta_slow", getattr(config, "beta_slow", 1))
+    rope_parameters.setdefault(
+        "original_max_position_embeddings",
+        getattr(config, "original_max_position_embeddings", getattr(config, "max_position_embeddings", 0)),
+    )
+    return rope_parameters
+
+
 class DeepseekV2MLP(nn.Module):
     def __init__(
         self,
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        swiglu_limit: float | None = None,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         is_sequence_parallel=False,
@@ -240,7 +254,6 @@ class DeepseekV4MoE(nn.Module):
         layer_idx = int(prefix.split(sep=".")[-2])
         self.layer_idx = layer_idx
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.5)
-        self.swiglu_limit = getattr(config, "swiglu_limit", None)
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
@@ -282,7 +295,6 @@ class DeepseekV4MoE(nn.Module):
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
-                swiglu_limit=self.swiglu_limit,
                 quant_config=quant_config,
                 is_sequence_parallel=self.is_sequence_parallel,
                 reduce_results=False,
@@ -499,7 +511,7 @@ class Compressor(nn.Module):
             self.dim,
             self.coff * self.head_dim,
             bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.wkv",
             return_bias=False,
         )
@@ -507,14 +519,11 @@ class Compressor(nn.Module):
             self.dim,
             self.coff * self.head_dim,
             bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.wgate",
             return_bias=False,
         )
-
-        # A5 compressor kernel needs float for norm_weight input
-        norm_dtype = torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else None
-        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=norm_dtype)
+        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps)
 
         state_dtype = torch.float32
         # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
@@ -532,7 +541,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=16 if get_ascend_device_type() in {AscendDeviceType.A5} else 32,
+                block_size=32,
             )
         else:
             raise ValueError(
@@ -625,7 +634,6 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-        self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
         wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
         self.wq_b = wq_b_cls(
             self.q_lora_rank,
@@ -662,12 +670,13 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
         self.compress_ratio = get_dsv4_compress_ratio(config, config_layer_idx)
+        rope_parameters = _get_rope_parameters(config)
 
         if self.compress_ratio > 1:
-            config.rope_parameters["rope_theta"] = config.compress_rope_theta
+            rope_parameters["rope_theta"] = config.compress_rope_theta
             rope_groups = ["default", f"c{self.compress_ratio}"]
         else:
-            config.rope_parameters["rope_theta"] = config.rope_theta
+            rope_parameters["rope_theta"] = config.rope_theta
             rope_groups = ["default"]
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
@@ -676,10 +685,10 @@ class DeepseekV4Attention(nn.Module):
             rotary_dim=self.rope_head_dim,
             max_position_embeddings=max_position_embeddings,
             is_neox_style=False,
-            scaling_factor=config.rope_parameters["factor"],
-            base=config.rope_parameters["rope_theta"],
-            beta_fast=config.rope_parameters["beta_fast"],
-            beta_slow=config.rope_parameters["beta_slow"],
+            scaling_factor=rope_parameters["factor"],
+            base=rope_parameters["rope_theta"],
+            beta_fast=rope_parameters["beta_fast"],
+            beta_slow=rope_parameters["beta_slow"],
             rope_groups=rope_groups,
         )
 
@@ -729,7 +738,7 @@ class DeepseekV4Attention(nn.Module):
         dsa_modules = DSAModules(
             wq_a=self.wq_a,
             q_norm=self.q_norm,
-            q_norm_without_weight=self.q_norm_without_weight,
+            q_norm_without_weight=self.q_norm,
             wq_b=self.wq_b,
             wkv=self.wkv,
             kv_norm=self.kv_norm,
@@ -791,7 +800,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        max_position_embeddings = config.rope_parameters["original_max_position_embeddings"]
+        max_position_embeddings = _get_rope_parameters(config)["original_max_position_embeddings"]
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
@@ -1221,8 +1230,6 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
             if ".attn_norm." in name:
                 name = name.replace(".attn_norm.", ".input_layernorm.")
-            if name.endswith(".scale"):
-                name = name.replace(".scale", ".weight_scale")
 
             if "rotary_emb.inv_freq" in name:
                 continue

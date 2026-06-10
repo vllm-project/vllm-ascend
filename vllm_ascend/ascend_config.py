@@ -161,6 +161,12 @@ class AscendConfig:
             "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE",
             ascend_envs.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE,
         )
+        self.enable_fused_mtp_full_graph = self._get_config_value(
+            additional_config,
+            "enable_fused_mtp_full_graph",
+            "VLLM_ASCEND_ENABLE_FUSED_MTP_FULL_GRAPH",
+            ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MTP_FULL_GRAPH,
+        )
         self.msmonitor_use_daemon = self._get_config_value(
             additional_config,
             "msmonitor_use_daemon",

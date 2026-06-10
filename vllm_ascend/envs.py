@@ -107,6 +107,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    "VLLM_ASCEND_ENABLE_FUSED_MTP_FULL_GRAPH": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MTP_FULL_GRAPH", "0"))
+    ),
+    "VLLM_ASCEND_FUSED_MTP_DEBUG": lambda: os.getenv("VLLM_ASCEND_FUSED_MTP_DEBUG", "0").lower()
+    in ("1", "true", "yes", "on"),
+    "VLLM_ASCEND_FUSED_MTP_DEBUG_INTERVAL": lambda: max(
+        _get_int_env("VLLM_ASCEND_FUSED_MTP_DEBUG_INTERVAL", 200),
+        1,
+    ),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
@@ -115,6 +124,16 @@ env_variables: dict[str, Callable[[], Any]] = {
 }
 
 # end-env-vars-definition
+
+
+def _get_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def __getattr__(name: str):

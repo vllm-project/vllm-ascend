@@ -610,6 +610,35 @@ class NPUPlatform(Platform):
             )
             import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
 
+        # Use FusedMTPScheduler when fused MTP full graph is enabled.
+        # This keeps decode batches pure so the fused MTP CUDA graph fires.
+        # Skip if a higher-priority scheduler is already configured.
+        speculative_method = getattr(vllm_config.speculative_config, "method", None)
+        kv_transfer_config = vllm_config.kv_transfer_config
+        kv_role = getattr(kv_transfer_config, "kv_role", None)
+        is_pd_disaggregated = kv_role in ("kv_producer", "kv_consumer")
+        if (
+            ascend_config.enable_fused_mtp_full_graph
+            and speculative_method in ("mtp", "deepseek_mtp")
+            and not is_pd_disaggregated
+            and vllm_config.scheduler_config.scheduler_cls is None
+            and not ascend_config.profiling_chunk_config.enabled
+            and ascend_config.SLO_limits_for_dynamic_batch == -1
+        ):
+            scheduler_cls = (
+                "vllm_ascend.core.scheduler_fused_mtp.FusedMTPAsyncScheduler"
+                if vllm_config.scheduler_config.async_scheduling
+                else "vllm_ascend.core.scheduler_fused_mtp.FusedMTPScheduler"
+            )
+            vllm_config.scheduler_config.scheduler_cls = scheduler_cls
+            logger.info(
+                "Using fused MTP scheduler %s. refill_policy=adaptive_group_refill, "
+                "max_decode_steps_before_refill=%s, max_refill_slots=%s",
+                scheduler_cls,
+                os.environ.get("VLLM_ASCEND_FUSED_MTP_MAX_DECODE_STEPS", "adaptive"),
+                os.environ.get("VLLM_ASCEND_FUSED_MTP_MAX_REFILL_SLOTS", "adaptive"),
+            )
+
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         if (
             vllm_config.kv_transfer_config is not None

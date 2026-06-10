@@ -1,7 +1,7 @@
 import torch
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.triton_utils import HAS_TRITON
+from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
@@ -9,6 +9,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
+from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
@@ -39,6 +40,104 @@ def random_sample(
                 q[i].exponential_(generator=generator)
     torch.npu.current_stream().wait_stream(global_stream())
     return probs.div_(q).argmax(dim=-1).view(-1)
+
+
+def _ensure_runtime_state_tensor(
+    tensor: torch.Tensor | None,
+    needed: int,
+    default_value,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    if tensor is not None and tensor.shape[0] >= needed:
+        return tensor
+    out = torch.full((needed,), default_value, dtype=dtype, device=device)
+    if tensor is not None and tensor.numel() > 0:
+        out[: tensor.shape[0]].copy_(tensor)
+    return out
+
+
+def sample_with_runtime_state(
+    logits: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    temperature: torch.Tensor | None,
+    top_k: torch.Tensor | None,
+    top_p: torch.Tensor | None,
+    seeds: torch.Tensor | None,
+    all_greedy: bool = False,
+    all_random: bool = False,
+) -> torch.Tensor:
+    needed = max(int(idx_mapping.shape[0]), 1)
+    if all_greedy or temperature is None:
+        return logits.argmax(dim=-1)
+
+    temperature = _ensure_runtime_state_tensor(
+        temperature,
+        needed,
+        0.0,
+        torch.float32,
+        logits.device,
+    )
+    seeds = _ensure_runtime_state_tensor(
+        seeds,
+        needed,
+        0,
+        torch.int64,
+        logits.device,
+    )
+
+    idx_mapping_long = idx_mapping.to(torch.long)
+    row_temperature = temperature[idx_mapping_long]
+    greedy_sampled = None if all_random else logits.argmax(dim=-1)
+    if not all_random:
+        safe_temperature = torch.where(
+            row_temperature < _SAMPLING_EPS,
+            torch.ones_like(row_temperature),
+            row_temperature,
+        )
+    else:
+        safe_temperature = row_temperature
+    logits = logits.div(safe_temperature.unsqueeze(dim=1))
+    if top_k is not None or top_p is not None:
+        top_k_base = _ensure_runtime_state_tensor(
+            top_k,
+            needed,
+            logits.shape[1],
+            torch.int32,
+            logits.device,
+        )
+        top_p_base = _ensure_runtime_state_tensor(
+            top_p,
+            needed,
+            1.0,
+            torch.float32,
+            logits.device,
+        )
+        logits = apply_top_k_top_p(
+            logits,
+            top_k_base[idx_mapping_long],
+            top_p_base[idx_mapping_long],
+        )
+    if logits.device.type != "npu" or not hasattr(triton, "cdiv"):
+        return logits.argmax(dim=-1) if greedy_sampled is None else greedy_sampled
+    random_sampled = gumbel_sample(
+        logits,
+        idx_mapping.to(torch.int32),
+        temperature,
+        seeds,
+        positions.to(torch.int32),
+        apply_temperature=False,
+    )
+    if all_random:
+        return random_sampled
+    assert greedy_sampled is not None
+    return torch.where(
+        temperature[idx_mapping_long] < _SAMPLING_EPS,
+        greedy_sampled,
+        random_sampled,
+        out=greedy_sampled,
+    )
 
 
 class AscendSampler(Sampler):

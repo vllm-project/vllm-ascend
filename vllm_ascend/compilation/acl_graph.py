@@ -142,6 +142,10 @@ class ACLGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    def is_captured(self, batch_descriptor: BatchDescriptor) -> bool:
+        entry = self.concrete_aclgraph_entries.get(batch_descriptor)
+        return entry is not None and entry.aclgraph is not None
+
     @property
     def cudagraph_wrapper(self) -> "ACLGraphWrapper":
         return self

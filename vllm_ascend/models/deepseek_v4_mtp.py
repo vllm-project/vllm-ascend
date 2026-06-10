@@ -62,10 +62,20 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.e_proj = ReplicatedLinear(
-            config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.e_proj",
+            return_bias=False,
         )
         self.h_proj = ReplicatedLinear(
-            config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.h_proj",
+            return_bias=False,
         )
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -115,10 +125,15 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         # masking inputs at position 0, as not needed by MTP
         inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
-        previous_hidden_states = previous_hidden_states.view(-1, self.hc_mult, self.config.hidden_size)
-        previous_hidden_states = self.hnorm(previous_hidden_states)
 
-        hidden_states = self.e_proj(inputs_embeds).unsqueeze(-2) + self.h_proj(previous_hidden_states)
+        if previous_hidden_states.dim() == 2 and previous_hidden_states.shape[-1] == self.config.hidden_size:
+            previous_hidden_states = self.hnorm(previous_hidden_states)
+            hidden_states = self.e_proj(inputs_embeds)[0] + self.h_proj(previous_hidden_states)[0]
+            hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
+        else:
+            previous_hidden_states = previous_hidden_states.view(-1, self.hc_mult, self.config.hidden_size)
+            previous_hidden_states = self.hnorm(previous_hidden_states)
+            hidden_states = self.e_proj(inputs_embeds)[0].unsqueeze(-2) + self.h_proj(previous_hidden_states)[0]
 
         hidden_states, residual = self.mtp_block(positions=positions, hidden_states=hidden_states, residual=None)
 
@@ -202,7 +217,6 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
-        self.quant_config = vllm_config.quant_config
         self.model = DeepSeekMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp"))
         # Set MoE hyperparameters
         self.set_moe_parameters()
@@ -279,14 +293,6 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-
-            if self.quant_config is not None and self.quant_config.get_name() == "fp8":
-                if name == "embed.weight":
-                    name = "mtp.0.emb.tok_emb.weight"
-
-                if name == "head.weight":
-                    name = "mtp.0.head.weight"
-
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
@@ -305,9 +311,6 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 name = name.replace(".w2.", ".down_proj.")
             if ".w3." in name:
                 name = name.replace(".w3.", ".up_proj.")
-
-            if ".scale" in name:
-                name = name.replace(".scale", ".weight_scale")
 
             if ".head." in name:
                 name = name.replace(".head.", ".shared_head.head.")

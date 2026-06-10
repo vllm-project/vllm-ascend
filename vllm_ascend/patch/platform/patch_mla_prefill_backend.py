@@ -14,7 +14,13 @@
 
 import torch
 import vllm.model_executor.layers.attention.mla_attention
-from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+
+try:
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+except ModuleNotFoundError:
+
+    class MLAPrefillBackend:  # type: ignore[no-redef]
+        pass
 
 
 class AscendMLAPrefillBackend(MLAPrefillBackend):

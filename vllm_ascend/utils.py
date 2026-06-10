@@ -777,12 +777,36 @@ _ascend_device_type = None
 
 def _init_ascend_device_type():
     global _ascend_device_type
-    from vllm_ascend import _build_info  # type: ignore
+    try:
+        from vllm_ascend import _build_info  # type: ignore
+    except ImportError:
+        _build_info = None
 
     device_type = getattr(_build_info, "__device_type__", None)
     if device_type is None:
-        soc_version = getattr(_build_info, "__soc_version__", "ASCEND910B1").upper()
-        device_type = "_310P" if "310P" in soc_version else "A2"
+        soc_version = getattr(_build_info, "__soc_version__", None)
+        if soc_version is None:
+            soc_version = envs_ascend.SOC_VERSION
+        if soc_version is None:
+            try:
+                soc_version = torch_npu.npu.get_soc_version()
+            except Exception:
+                soc_version = "ASCEND910B1"
+
+        if isinstance(soc_version, int):
+            if 220 <= soc_version <= 225:
+                device_type = "A2"
+            elif 250 <= soc_version <= 255:
+                device_type = "A3"
+            elif 200 <= soc_version <= 205:
+                device_type = "_310P"
+            elif soc_version == 260:
+                device_type = "A5"
+            else:
+                device_type = "A2"
+        else:
+            soc_version = soc_version.upper()
+            device_type = "_310P" if "310P" in soc_version else "A2"
     _ascend_device_type = AscendDeviceType[device_type]
 
 
