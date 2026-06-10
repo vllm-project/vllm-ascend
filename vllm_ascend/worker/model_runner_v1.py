@@ -274,6 +274,21 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+        # Replace the CUDA PrefetchOffloader set by parent __init__ with NPU version.
+        offload_cfg = vllm_config.offload_config
+        if (offload_cfg is not None
+                and getattr(offload_cfg, "prefetch", None) is not None
+                and getattr(offload_cfg.prefetch, "offload_group_size", 0) > 0):
+            from vllm.model_executor.offloader.base import set_offloader
+
+            from vllm_ascend.model_executor.offloader.prefetch import NPUPrefetchOffloader
+            set_offloader(NPUPrefetchOffloader(
+                group_size=offload_cfg.prefetch.offload_group_size,
+                num_in_group=offload_cfg.prefetch.offload_num_in_group,
+                prefetch_step=offload_cfg.prefetch.offload_prefetch_step,
+                offload_params=offload_cfg.prefetch.offload_params,
+            ))
+
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
         self.query_start_loc = self._make_buffer(
@@ -3625,6 +3640,9 @@ class NPUModelRunner(GPUModelRunner):
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
+
+        from vllm.model_executor.offloader.base import get_offloader
+        get_offloader().post_init()
 
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
