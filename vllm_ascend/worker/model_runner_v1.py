@@ -3071,7 +3071,7 @@ class NPUModelRunner(GPUModelRunner):
             max_seq_len=max_seq_len,
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
-            slot_mapping_cpu=torch.from_numpy(self.cpu_slot_mapping) if self.cpu_slot_mapping is not None else None,
+            slot_mapping_cpu=self.cpu_slot_mapping,
             causal=True,
             is_prefilling=is_prefilling,
             num_input_tokens=num_tokens_padded,
