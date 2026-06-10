@@ -46,6 +46,13 @@ P_EAGLE_MODELS = {
     },
 }
 
+VWN_EAGLE3_MODELS = {
+    "vwn_eagle3": {
+        "main": "/mnt/weight/Qwen3-30B-A3B",
+        "spec": "/mnt/share/t00886357/eagle3_weights/vwn_eagle3_full_m_4_r_1_5",
+    },
+}
+
 # NOTE: golden may change (eagle_proposer only runs in eager mode currently),
 # thus please update it if ci fails but you have better acceptance
 BASELINES_SP = {
@@ -327,3 +334,77 @@ def test_p_eagle_acceptance(
         print(f"golden: {golden}")
 
     assert match
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+def test_qwen3_vwn_eagle3_tp4():
+    """
+    Test Qwen3-30B-A3B with VWN-Eagle3 speculative decoding.
+    This test verifies that VWN-Eagle3 spec decode works correctly with:
+    - Tensor Parallel size = 4
+    - Expert Parallel enabled (for MoE)
+    - num_speculative_tokens = 3
+    - enforce_eager = True
+    """
+    main_model_name = VWN_EAGLE3_MODELS["vwn_eagle3"]["main"]
+    spec_model_name = VWN_EAGLE3_MODELS["vwn_eagle3"]["spec"]
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        main_model_name,
+        trust_remote_code=True,
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        ignore_eos=False,
+        max_tokens=256,
+    )
+
+    prompts = [
+        {
+            "role": "user",
+            "content": "Hello, my name is",
+        },
+        {
+            "role": "user",
+            "content": "The capital of France is",
+        },
+        {
+            "role": "user",
+            "content": "The future of AI is",
+        },
+    ]
+    prompts = [
+        tokenizer.apply_chat_template(
+            [prompt],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        for prompt in prompts
+    ]
+
+    speculative_config = {
+        "method": "eagle3",
+        "num_speculative_tokens": 3,
+        "model": spec_model_name,
+    }
+
+    with VllmRunner(
+        main_model_name,
+        enforce_eager=True,
+        max_model_len=2048,
+        disable_log_stats=False,
+        tensor_parallel_size=4,
+        max_num_seqs=16,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.92,
+        speculative_config=speculative_config,
+        enable_expert_parallel=True,
+    ) as llm:
+        outputs = llm.generate(prompts, sampling_params)
+
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        assert len(generated_text) > 0, (
+            f"Expected non-empty output for prompt {output.prompt!r}, "
+            f"got: {generated_text!r}"
+        )

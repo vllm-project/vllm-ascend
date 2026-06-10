@@ -76,7 +76,7 @@ class VwnLlamaDecoderLayer(Eagle3LlamaDecoderLayer):
         self.pre_attention_layernorm = RMSNorm(hs, eps=cfg.rms_norm_eps)
         self.upward_after_attn = _linear(hs // m, wd // m, vllm_config, qc, mp(prefix, "upward_after_attn"))
         self.downward_and_forgot_after_attn = _linear(
-            wd // m, (hs + wd) // m, vllm_config, qc, mp(prefix, "downward_and_forgot")
+            wd // m, (hs + wd) // m, vllm_config, qc, mp(prefix, "downward_and_forgot_after_attn")
         )
         self.post_attention_layernorm = RMSNorm(hs, eps=cfg.rms_norm_eps)
         self.upward_after_mlp = _linear(hs // m, wd // m, vllm_config, qc, mp(prefix, "upward_after_mlp"))
