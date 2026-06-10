@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-04 05:04+0000\n"
+"POT-Creation-Date: 2026-06-10 04:47+0000\n"
 "PO-Revision-Date: 2026-01-22 11:40+0800\n"
 "Last-Translator: Gemini <gemini@google.com>\n"
 "Language: zh_CN\n"
@@ -507,50 +507,80 @@ msgid ""
 msgstr "17.如何排查并解决因流资源耗尽导致的尺寸捕获失败，其根本原因是什么？"
 
 #: ../../source/faqs.md:214
+msgid ""
+"When vLLM Ascend recognizes this capture-time stream-resource signature "
+"in the error text, it re-raises the error with targeted guidance for ACL "
+"graph sizing and mitigation."
+msgstr ""
+"当 vLLM Ascend 在错误文本中识别出这种捕获时的流资源特征时，它会重新抛出错误，并提供针对 ACL 图尺寸和缓解措施的具体指导。"
+
+#: ../../source/faqs.md:216
 msgid "Recommended mitigation strategies:"
 msgstr "建议的缓解策略："
 
-#: ../../source/faqs.md:216
-#, python-brace-format
-msgid ""
-"Manually configure the compilation_config parameter with a reduced size "
-"set: '{\"cudagraph_capture_sizes\":[size1, size2, size3, ...]}'."
-msgstr ""
-"手动配置 `compilation_config` 参数以减少尺寸集：'{\"cudagraph_capture_sizes\":[size1, "
-"size2, size3, ...]}'。"
-
-#: ../../source/faqs.md:217
-msgid ""
-"If your workload is mostly uniform decode, employ ACLGraph's `FULL` or "
-"`FULL_DECODE_ONLY` mode as an alternative to the piecewise approach."
-msgstr "如果您的负载主要是均匀解码，请使用 ACLGraph 的 `FULL` 或 `FULL_DECODE_ONLY` 模式作为分段方式的替代方案。"
-
 #: ../../source/faqs.md:218
 msgid ""
-"If you use `PIECEWISE` or `FULL_AND_PIECEWISE`, it is recommended to set "
-"`cudagraph_capture_sizes` manually according to your workload."
-msgstr "如果您使用 `PIECEWISE` 或 `FULL_AND_PIECEWISE`，建议根据您的负载手动设置 `cudagraph_capture_sizes`。"
+"Upgrade to a newer HDK/CANN stack if one is available for your "
+"environment. Recent releases improve ACL graph capacity, so older "
+"workarounds may no longer be necessary."
+msgstr ""
+"如果您的环境有可用的较新 HDK/CANN 栈，请升级。最近的版本改进了 ACL 图容量，因此旧的变通方法可能不再需要。"
+
+#: ../../source/faqs.md:219
+#, python-brace-format
+msgid ""
+"Manually reduce the configured graph sizes, for example: "
+"'{\"cudagraph_capture_sizes\":[size1, size2, size3, ...]}', or lower "
+"`max_cudagraph_capture_size`."
+msgstr ""
+"手动减少配置的图尺寸，例如：'{\"cudagraph_capture_sizes\":[size1, size2, size3, ...]}'，或降低 "
+"`max_cudagraph_capture_size`。"
 
 #: ../../source/faqs.md:220
 msgid ""
-"Root cause analysis: The current stream requirement calculation for size "
-"captures only accounts for measurable factors including: data parallel "
-"size, tensor parallel size, expert parallel configuration, piece graph "
-"count, multistream-overlap shared expert settings, and HCCL communication"
-" mode (AIV/AICPU). However, numerous unquantifiable elements, such as "
-"operator characteristics and specific hardware features, consume "
-"additional streams outside of this calculation framework, resulting in "
-"stream resource exhaustion during size capture operations."
-msgstr ""
-"根本原因分析：当前的尺寸捕获流需求计算仅考虑了可测量因素，包括：数据并行大小、张量并行大小、专家并行配置、分段图数量、多流重叠共享专家设置以及 "
-"HCCL "
-"通信模式（AIV/AICPU）。然而，许多不可量化的因素（如算子特性和特定硬件功能）在该计算框架之外消耗了额外的流，导致在尺寸捕获操作期间流资源耗尽。"
+"If your workload is mostly uniform decode, try ACLGraph's `FULL` or "
+"`FULL_DECODE_ONLY` mode instead of the `PIECEWISE`."
+msgstr "如果您的负载主要是均匀解码，请尝试使用 ACLGraph 的 `FULL` 或 `FULL_DECODE_ONLY` 模式，而不是 `PIECEWISE`。"
 
-#: ../../source/faqs.md:223
+#: ../../source/faqs.md:221
+msgid ""
+"If you use `PIECEWISE` or `FULL_AND_PIECEWISE` and still hit this failure"
+" after upgrading, set `cudagraph_capture_sizes` manually according to "
+"your real workload and reduce the configured coverage."
+msgstr ""
+"如果您使用 `PIECEWISE` 或 `FULL_AND_PIECEWISE`，并且在升级后仍然遇到此失败，请根据您的实际负载手动设置 "
+"`cudagraph_capture_sizes` 并减少配置的覆盖范围。"
+
+#: ../../source/faqs.md:222
+msgid ""
+"If you are debugging a startup failure, temporarily disable graph mode "
+"(`cudagraph_mode=\"NONE\"` / `enforce_eager=True`) to confirm the issue "
+"is capture-related."
+msgstr ""
+"如果您正在调试启动失败，请临时禁用图模式（`cudagraph_mode=\"NONE\"` / `enforce_eager=True`），以确认问题是否与捕获相关。"
+
+#: ../../source/faqs.md:224
+msgid ""
+"Root cause analysis: ACL graph capture can still fail when the runtime "
+"resources required by the selected graph sizes exceed what the current "
+"software/hardware stack can provide. This is most visible in `PIECEWISE` "
+"scenarios because the number of captured graphs scales with model depth "
+"and capture-size coverage. vLLM Ascend no longer auto-shrinks the "
+"PIECEWISE capture-size set locally, so the practical mitigations are to "
+"upgrade the HDK/CANN stack or reduce the configured graph sizes "
+"explicitly. The runtime guidance is intentionally narrow: it is only "
+"added when capture fails with the confirmed stream-resource signature "
+"above."
+msgstr ""
+"根本原因分析：当所选图尺寸所需的运行时资源超过当前软件/硬件栈所能提供的资源时，ACL 图捕获仍可能失败。这在 `PIECEWISE` "
+"场景中最为明显，因为捕获的图数量随模型深度和捕获尺寸覆盖范围而扩展。vLLM Ascend 不再在本地自动缩小 PIECEWISE "
+"捕获尺寸集，因此实际的缓解措施是升级 HDK/CANN 栈或显式减少配置的图尺寸。运行时指导特意保持狭窄：仅在捕获失败并带有上述确认的流资源特征时才会添加。"
+
+#: ../../source/faqs.md:227
 msgid "18. How to install custom version of torch_npu?"
 msgstr "18.如何安装自定义版本的 torch_npu？"
 
-#: ../../source/faqs.md:225
+#: ../../source/faqs.md:229
 msgid ""
 "torch-npu will be overridden  when installing vllm-ascend. If you need to"
 " install a specific version of torch-npu, you can manually install the "
@@ -559,48 +589,48 @@ msgstr ""
 "安装 vllm-ascend 时会覆盖 torch-npu。如果您需要安装特定版本的 torch-npu，请在安装完 vllm-ascend "
 "之后再手动安装指定版本的 torch-npu。"
 
-#: ../../source/faqs.md:227
+#: ../../source/faqs.md:231
 msgid ""
 "19. On certain systems (e.g., Kylin OS), `docker pull` may fail with an "
 "`invalid tar header` error"
 msgstr "19.在某些系统（如麒麟 OS）上，执行 `docker pull` 可能会报错 `invalid tar header`"
 
-#: ../../source/faqs.md:229
+#: ../../source/faqs.md:233
 msgid ""
 "On certain operating systems, such as Kylin OS, you may encounter an "
 "`invalid tar header` error during the `docker pull` process:"
 msgstr "在某些操作系统（如麒麟 OS）上，您可能会在 `docker pull` 过程中遇到 `invalid tar header` 错误："
 
-#: ../../source/faqs.md:235
+#: ../../source/faqs.md:239
 msgid ""
 "This is often due to system compatibility issues. You can resolve this by"
 " using an offline loading method with a second machine."
 msgstr "这通常是由于系统兼容性问题导致的。您可以通过另一台机器使用离线加载的方法来解决。"
 
-#: ../../source/faqs.md:237
+#: ../../source/faqs.md:241
 msgid ""
 "On a separate host machine (e.g., a standard Ubuntu server), pull the "
 "image for the target ARM64 architecture and package it into a `.tar` "
 "file."
 msgstr "在另一台宿主机（如标准的 Ubuntu 服务器）上，拉取目标 ARM64 架构的镜像并打包为 `.tar` 文件。"
 
-#: ../../source/faqs.md:250
+#: ../../source/faqs.md:254
 msgid "Transfer the image archive"
 msgstr "传输镜像归档文件"
 
-#: ../../source/faqs.md:252
+#: ../../source/faqs.md:256
 msgid ""
 "Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you"
 " used) to your target machine"
 msgstr "将 `vllm_ascend_<tag>.tar` 文件（其中 `<tag>` 是您使用的镜像标签）拷贝到目标机器。"
 
-#: ../../source/faqs.md:254
+#: ../../source/faqs.md:258
 msgid ""
 "20. Why am I getting an error when executing the script to start a Docker"
 " container? The error message is: \"operation not permitted\""
 msgstr "20.为什么执行启动 Docker 容器的脚本时会报错 \"operation not permitted\"？"
 
-#: ../../source/faqs.md:256
+#: ../../source/faqs.md:260
 msgid ""
 "When using `--shm-size`, you may need to add the `--privileged=true` flag"
 " to your `docker run` command to grant the container necessary "
@@ -613,13 +643,13 @@ msgstr ""
 "标志以授予容器必要权限。请注意，使用 `--privileged=true` "
 "会授予容器在宿主机系统上的极高权限，这可能存在安全风险。请仅在您了解后果并信任镜像来源的情况下使用此选项。"
 
-#: ../../source/faqs.md:258
+#: ../../source/faqs.md:262
 msgid ""
 "21. How to set `SOC_VERSION` when building from source on a CPU-only "
 "machine?"
 msgstr "21.在仅有 CPU 的机器上从源码构建时，如何设置 `SOC_VERSION`？"
 
-#: ../../source/faqs.md:260
+#: ../../source/faqs.md:264
 msgid ""
 "When building from source (e.g. `pip install -e .`), the build may try to"
 " infer the target chip via `npu-smi`. If `npu-smi` is not available "
@@ -629,15 +659,15 @@ msgstr ""
 "从源码构建时（例如执行 `pip install -e .`），构建过程可能会尝试通过 `npu-smi` 推断目标芯片。如果 `npu-smi`"
 " 不可用（这在仅有 CPU 的构建环境中很常见），则必须在安装前手动设置 `SOC_VERSION`。"
 
-#: ../../source/faqs.md:262
+#: ../../source/faqs.md:266
 msgid "You can use the defaults from `Dockerfile*` as a reference. For example:"
 msgstr "你可以参考 `Dockerfile*` 中的默认值。例如："
 
-#: ../../source/faqs.md:278
+#: ../../source/faqs.md:282
 msgid "22. Why TPOT increases drastically as concurrency grows?"
 msgstr "22.为什么 TPOT 会随着并发数增加而急剧上升？"
 
-#: ../../source/faqs.md:280
+#: ../../source/faqs.md:284
 msgid ""
 "When testing a vLLM server, one may find that TPOT increases as "
 "concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when "
@@ -659,7 +689,7 @@ msgstr ""
 " 引起的。通常，当你的服务器达到 KV 缓存限制时，vLLM 会尝试释放某些请求的 KV 缓存，以确保为其他请求提供足够的空间，这在 vLLM "
 "中称为抢占。当一个请求被抢占时，默认行为是在未来重新计算该请求的 KV 缓存，这就是性能可能显著下降的原因。有几种方法可以验证这一点："
 
-#: ../../source/faqs.md:283
+#: ../../source/faqs.md:287
 msgid ""
 "vLLM usually logs stats on your server. You might see metrics like `GPU "
 "KV cache usage: 99.0%,`. When reaching 100%, it triggers preemption."
@@ -667,7 +697,7 @@ msgstr ""
 "vLLM 通常会在服务器上记录统计信息。你可能会看到类似 `GPU KV cache usage: 99.0%,` 的指标。当达到 100% "
 "时，会触发抢占。"
 
-#: ../../source/faqs.md:284
+#: ../../source/faqs.md:288
 msgid ""
 "When launching a vLLM server, you will see logs like `GPU KV cache size: "
 "66340 tokens` and `Maximum concurrency for 16,384 tokens per request: "
@@ -678,7 +708,7 @@ msgstr ""
 "concurrency for 16,384 tokens per request: 4.05` 的日志。这些是针对单个 DP 组的估计 KV "
 "缓存容量。你可以据此调整总体请求流量。"
 
-#: ../../source/faqs.md:286
+#: ../../source/faqs.md:290
 msgid ""
 "Preemption cannot be avoided completely since KV cache usage always has a"
 " limit. But there are methods to reduce the chances of preemption. As is "
@@ -762,3 +792,23 @@ msgstr ""
 #~ "`tools/install_flash_infer_attention_score_ops_a3.sh` 脚本中的 "
 #~ "`/vllm-workspace` 目录更改为您自己的目录，或创建一个。如果您不是 root "
 #~ "用户，运行此脚本需要 `sudo` **权限**。"
+
+#~ msgid ""
+#~ "Root cause analysis: The current stream"
+#~ " requirement calculation for size captures"
+#~ " only accounts for measurable factors "
+#~ "including: data parallel size, tensor "
+#~ "parallel size, expert parallel configuration,"
+#~ " piece graph count, multistream-overlap "
+#~ "shared expert settings, and HCCL "
+#~ "communication mode (AIV/AICPU). However, "
+#~ "numerous unquantifiable elements, such as "
+#~ "operator characteristics and specific hardware"
+#~ " features, consume additional streams "
+#~ "outside of this calculation framework, "
+#~ "resulting in stream resource exhaustion "
+#~ "during size capture operations."
+#~ msgstr ""
+#~ "根本原因分析：当前的尺寸捕获流需求计算仅考虑了可测量因素，包括：数据并行大小、张量并行大小、专家并行配置、分段图数量、多流重叠共享专家设置以及"
+#~ " HCCL "
+#~ "通信模式（AIV/AICPU）。然而，许多不可量化的因素（如算子特性和特定硬件功能）在该计算框架之外消耗了额外的流，导致在尺寸捕获操作期间流资源耗尽。"
