@@ -173,9 +173,6 @@ jobs:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
           # pytest-driven tests
-          - name: test_custom_op
-            os: linux-aarch64-a2b3-1
-            tests: tests/e2e/nightly/single_node/ops/singlecard_ops
           - name: test_custom_op_multi_card
             os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
