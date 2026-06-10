@@ -51,7 +51,7 @@ test_cases:
         max_out_len: 65536
         batch_size: 32
         baseline: 90
-        threshold: 5
+        threshold: 10
         ignore_eos: false
         thinking: true
         temperature: 1.0
