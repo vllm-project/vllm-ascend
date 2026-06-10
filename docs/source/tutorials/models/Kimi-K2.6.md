@@ -1,9 +1,5 @@
 # Kimi-K2.6
 
-<p align="center">
-  <a href="Kimi-K2.6.md"><b>English</b></a> | <a href="Kimi-K2.6.zh.md"><b>中文</b></a>
-</p>
-
 ## 1 Introduction
 
 Kimi K2.6 is an open-source, native multimodal agentic model built through continual pretraining on approximately 15 trillion mixed visual and text tokens atop Kimi-K2-Base. It seamlessly integrates vision and language understanding with advanced agentic capabilities, instant and thinking modes, as well as conversational and agentic paradigms.
