@@ -289,11 +289,7 @@ class NPUWorker(WorkerBase):
             )
 
     def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        """Begin a new weight update; prepares the model for layerwise reload.
-
-        Only invoked on vLLM main. v0.20.2 has no /start_weight_update endpoint
-        and folds init/finalize layerwise reload into update_weights itself.
-        """
+        """Begin a new weight update; prepares the model for layerwise reload."""
         self._check_weight_transfer_engine()
 
         if self._weight_update_active:
@@ -321,72 +317,35 @@ class NPUWorker(WorkerBase):
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
         model = self.model_runner.model
 
-        if vllm_version_is("0.20.2"):
-            # v0.20.2 lifecycle: update_weights is self-contained — it runs
-            # initialize_layerwise_reload before receive_weights and
-            # finalize_layerwise_reload after, reading is_checkpoint_format
-            # off the update_info payload (no start/finish endpoints).
-            self._check_nz_disabled()
-            is_checkpoint_format = typed_update_info.is_checkpoint_format
-            with torch.device(self.device):
-                if is_checkpoint_format:
-                    from vllm.model_executor.model_loader.reload import (
-                        finalize_layerwise_reload,
-                        initialize_layerwise_reload,
-                    )
+        # state machine driven by start/finish.
+        if not self._weight_update_active:
+            raise RuntimeError("start_weight_update must be called before update_weights.")
 
-                    initialize_layerwise_reload(model)
-                    self.weight_transfer_engine.receive_weights(
-                        typed_update_info,
-                        load_weights=model.load_weights,
-                    )
-                    finalize_layerwise_reload(model, self.model_config)
-                else:
+        with torch.device(self.device):
+            if self._is_checkpoint_format:
+                self.weight_transfer_engine.receive_weights(
+                    typed_update_info,
+                    load_weights=model.load_weights,
+                )
+            else:
 
-                    def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
-                        with torch.no_grad():
-                            for name, weight in weights:
-                                param = model.get_parameter(name)
-                                param.copy_(weight)
+                def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
+                    with torch.no_grad():
+                        for name, weight in weights:
+                            param = model.get_parameter(name)
+                            param.copy_(weight)
 
-                    self.weight_transfer_engine.receive_weights(
-                        typed_update_info,
-                        load_weights=load_weights_direct,
-                    )
-        else:
-            # main lifecycle: state machine driven by start/finish.
-            if not self._weight_update_active:
-                raise RuntimeError("start_weight_update must be called before update_weights.")
-
-            with torch.device(self.device):
-                if self._is_checkpoint_format:
-                    self.weight_transfer_engine.receive_weights(
-                        typed_update_info,
-                        load_weights=model.load_weights,
-                    )
-                else:
-
-                    def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
-                        with torch.no_grad():
-                            for name, weight in weights:
-                                param = model.get_parameter(name)
-                                param.copy_(weight)
-
-                    self.weight_transfer_engine.receive_weights(
-                        typed_update_info,
-                        load_weights=load_weights_direct,
-                    )
+                self.weight_transfer_engine.receive_weights(
+                    typed_update_info,
+                    load_weights=load_weights_direct,
+                )
 
         # HCCL broadcast / packed paths are asynchronous.
         # Sync so the next step uses the new weights.
         torch.npu.synchronize()
 
     def finish_weight_update(self) -> None:
-        """Finish the current weight update; runs layerwise postprocessing.
-
-        Only invoked on vLLM main. v0.20.2 has no /finish_weight_update endpoint
-        and folds layerwise finalization into update_weights itself.
-        """
+        """Finish the current weight update; runs layerwise postprocessing."""
         self._check_weight_transfer_engine()
 
         if not self._weight_update_active:
@@ -723,8 +682,8 @@ class NPUWorker(WorkerBase):
                 WeightTransferEngineFactory,
             )
 
-            if vllm_version_is("0.20.2") or vllm_version_is("0.21.0"):
-                # v0.20.2 / v0.21.0: create_engine takes (config, parallel_config)
+            if vllm_version_is("0.21.0"):
+                # v0.21.0: create_engine takes (config, parallel_config)
                 self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
                     self.vllm_config.weight_transfer_config,
                     self.vllm_config.parallel_config,

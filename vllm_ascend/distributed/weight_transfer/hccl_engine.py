@@ -125,10 +125,9 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
             model: The local model instance which will receive the weights.
-                   Not available on v0.20.2 / v0.21.0 (base class does not
-                   accept it).
+                   Not available on v0.21.0 (base class does not accept it).
         """
-        if vllm_version_is("0.20.2") or vllm_version_is("0.21.0"):
+        if vllm_version_is("0.21.0"):
             super().__init__(config, parallel_config)
         else:
             super().__init__(config, parallel_config, model)
