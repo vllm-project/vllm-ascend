@@ -208,6 +208,7 @@ nav:
         - tutorials/models/MiniMax-M2.md
         - tutorials/models/Hunyuan-A13B-Instruct.md
         - tutorials/models/Hy3-preview.md
+        - tutorials/models/Mamba-Codestral-7B-v0.1.md
         - tutorials/models/Minitron-8B-Base.md
         - tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md
         - tutorials/models/gpt-oss-120b.md

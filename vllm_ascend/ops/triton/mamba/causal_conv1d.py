@@ -7,18 +7,154 @@
 # and https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 # mypy: ignore-errors
 
+from typing import Any
+
 import torch
+import torch.nn.functional as F
+from vllm.distributed import get_pcp_group
+from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
-if not HAS_TRITON:
-    from vllm_ascend._310p.ops.causal_conv1d import (
-        causal_conv1d_update as _pytorch_update,
-    )
-else:
-    _pytorch_update = None
+
+def causal_conv1d_ref(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    initial_states: torch.Tensor | None = None,
+    return_final_states: bool = False,
+    final_states_out: torch.Tensor | None = None,
+    activation: str | None = "silu",
+):
+    """
+    x: (batch, dim, seqlen)
+    weight: (dim, width)
+    bias: (dim,)
+    initial_states: (batch, dim, width - 1)
+    final_states_out: (batch, dim, width - 1)
+    out: (batch, dim, seqlen)
+    """
+    if activation not in [None, "silu", "swish"]:
+        raise NotImplementedError(f"causal_conv1d_ref activation must be None, silu, or swish, got {activation}")
+    dtype_in = x.dtype
+    x = x.to(weight.dtype)
+    seqlen = x.shape[-1]
+    dim, width = weight.shape
+
+    if initial_states is None:
+        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
+    else:
+        x = torch.cat([initial_states, x], dim=-1)
+        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
+    out = out[..., :seqlen]
+
+    if return_final_states:
+        final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(dtype_in)  # (batch, dim, width - 1)
+        if final_states_out is not None:
+            final_states_out.copy_(final_states)
+        else:
+            final_states_out = final_states
+    out = (out if activation is None else F.silu(out)).to(dtype=dtype_in)
+    return (out, None) if not return_final_states else (out, final_states_out)
+
+
+def causal_conv1d_fn(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    activation: str | None = "silu",
+    conv_states: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    cache_indices: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    metadata: Any | None = None,
+    pad_slot_id: int = PAD_SLOT_ID,
+    **_: Any,
+):
+    """
+    x: (batch, dim, seqlen) or (dim,cu_seq_len) for varlen
+        sequences are concatenated from left to right for varlen
+    weight: (dim, width)
+    bias: (dim,)
+    query_start_loc: (batch + 1) int32
+        The cumulative sequence lengths of the sequences in
+        the batch, used to index into sequence. prepended by 0.
+        for example: query_start_loc = torch.Tensor([0,10,16,17]),
+        x.shape=(dim,17)
+    cache_indices: (batch)  int32
+        indicates the corresponding state index,
+        like so: conv_state = conv_states[cache_indices[batch_id]]
+    has_initial_state: (batch) bool
+        indicates whether should the kernel take the current state as initial
+        state for the calculations
+    conv_states: (...,dim,width - 1) itype
+        updated inplace if provided
+    activation: either None or "silu" or "swish"
+    pad_slot_id: int
+            if cache_indices is passed, lets the kernel identify padded
+            entries that will not be processed,
+            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
+            in this case, the kernel will not process entries at
+            indices 0 and 3
+    out: (batch, dim, seqlen)
+    """
+    forward_context = get_forward_context()
+    num_prefills = 0
+    attn_metadata = forward_context.attn_metadata
+    if attn_metadata is not None and isinstance(attn_metadata, dict):
+        attn_metadata = next(iter(attn_metadata.values()), None)
+    if attn_metadata is not None:
+        num_prefills = attn_metadata.num_prefills
+
+    if activation not in [None, "silu", "swish"]:
+        raise NotImplementedError(f"causal_conv1d_fn: activation must be None, silu, or swish, got {activation}")
+    if x.stride(-1) != 1:
+        x = x.contiguous()
+    bias = bias.contiguous() if bias is not None else None
+
+    out_ref = []
+    out_ref_b = []
+    seqlens = query_start_loc[1:] - query_start_loc[:-1]
+    seqlens = seqlens.tolist()
+    splits = torch.split(x, seqlens, dim=-1)
+    width = weight.shape[1]
+    state_len = width - 1
+    prefill_seq_offset = max(0, len(seqlens) - num_prefills)
+    last_width_prefill_x = extract_last_width(x, query_start_loc[prefill_seq_offset:], state_len)
+
+    pcp_rank = get_pcp_group().rank_in_group
+    if get_pcp_group().world_size > 1:
+        all_last_width_prefill_x = get_pcp_group().all_gather(last_width_prefill_x.unsqueeze(0).contiguous(), 0)
+        if pcp_rank > 0:
+            conv_states[cache_indices[prefill_seq_offset:], :, :state_len] = all_last_width_prefill_x[pcp_rank - 1, ...]
+
+    for i in range(len(seqlens)):
+        x_s = splits[i]
+        if cache_indices[i] == PAD_SLOT_ID:
+            continue
+        if pcp_rank == 0 and not bool(has_initial_state[i].item()):
+            initial_states = None
+        else:
+            initial_states = conv_states[cache_indices[i]][..., : (width - 1)]
+        out_ref_b.append(
+            causal_conv1d_ref(
+                x_s,
+                weight,
+                bias,
+                activation=activation,
+                return_final_states=True,
+                final_states_out=conv_states[cache_indices[i]][..., : (width - 1)].unsqueeze(0),
+                initial_states=initial_states,
+            )
+        )
+
+    if get_pcp_group().world_size > 1:
+        conv_states[cache_indices[prefill_seq_offset:], :, :state_len] = all_last_width_prefill_x[-1, ...]
+    out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
+    out_ref_tensor = torch.cat(out_ref, dim=0)
+    return out_ref_tensor
 
 
 def extract_last_width(x, start_loc, width):
@@ -27,6 +163,126 @@ def extract_last_width(x, start_loc, width):
     indices = end_loc.unsqueeze(1) - width + offsets.unsqueeze(0)  # (num_seqs, width)
 
     return x[:, indices].permute(1, 0, 2)
+
+
+def _causal_conv1d_update_fallback(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    activation: bool | str | None = None,
+    conv_state_indices: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    pad_slot_id: int = PAD_SLOT_ID,
+):
+    """PyTorch fallback kept local so Mamba support does not depend on 310P code."""
+    if isinstance(activation, bool):
+        activation = "silu" if activation is True else None
+    elif activation is not None:
+        assert activation in ["silu", "swish"]
+
+    original_x_dtype = x.dtype
+    x = x.to(conv_state.dtype)
+
+    feature_dim = x.shape[-1] if query_start_loc is None else x.shape[1]
+    if weight.shape[0] != feature_dim and weight.shape[1] == feature_dim:
+        weight = weight.transpose(0, 1)
+    weight = weight.contiguous()
+    dim, width = weight.shape
+    if dim != feature_dim:
+        raise RuntimeError(
+            f"causal_conv1d_update: weight dim mismatch, feature_dim={feature_dim}, weight.shape={tuple(weight.shape)}"
+        )
+
+    if conv_state.shape[-2] != dim and conv_state.shape[-1] == dim:
+        conv_state = conv_state.transpose(-1, -2)
+    if conv_state.shape[-2] != dim:
+        raise RuntimeError(
+            f"causal_conv1d_update: conv_state dim mismatch, "
+            f"expected dim={dim}, conv_state.shape={tuple(conv_state.shape)}"
+        )
+
+    state_len = width - 1
+    if conv_state.shape[-1] < state_len:
+        raise RuntimeError(
+            f"causal_conv1d_update: conv_state too short, need >= {state_len}, got {conv_state.shape[-1]}"
+        )
+
+    out = x.clone()
+
+    def _select_state(i: int) -> torch.Tensor | None:
+        if conv_state_indices is not None:
+            idx = int(conv_state_indices[i].item())
+            if idx == pad_slot_id:
+                return None
+            return conv_state[idx]
+        return conv_state[i]
+
+    def _run_one(seq_tokens: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        x_ref = seq_tokens.transpose(0, 1).unsqueeze(0)
+        init_state = state[..., :state_len].unsqueeze(0)
+        out_ref, final_state = causal_conv1d_ref(
+            x_ref,
+            weight,
+            bias,
+            initial_states=init_state,
+            return_final_states=True,
+            activation=activation,
+        )
+        state[..., :state_len].copy_(final_state.squeeze(0))
+        return out_ref.squeeze(0).transpose(0, 1)
+
+    if query_start_loc is None:
+        if x.dim() == 2:
+            batch = x.shape[0]
+            for i in range(batch):
+                state = _select_state(i)
+                if state is None:
+                    continue
+                seq_tokens = x[i : i + 1]
+                if num_accepted_tokens is not None:
+                    accepted = int(num_accepted_tokens[i].item())
+                    if accepted <= 0:
+                        continue
+                    seq_tokens = seq_tokens[:accepted]
+                out_i = _run_one(seq_tokens, state)
+                out[i : i + out_i.shape[0]] = out_i
+        else:
+            batch = x.shape[0]
+            for i in range(batch):
+                state = _select_state(i)
+                if state is None:
+                    continue
+                seq_tokens = x[i]
+                if num_accepted_tokens is not None:
+                    accepted = int(num_accepted_tokens[i].item())
+                    if accepted <= 0:
+                        continue
+                    seq_tokens = seq_tokens[:accepted]
+                out_i = _run_one(seq_tokens, state)
+                out[i, : out_i.shape[0]] = out_i
+    else:
+        assert conv_state_indices is not None
+        batch = conv_state_indices.size(0)
+        for i in range(batch):
+            start = int(query_start_loc[i].item())
+            end = int(query_start_loc[i + 1].item())
+            if end <= start:
+                continue
+            state = _select_state(i)
+            if state is None:
+                continue
+            seq_tokens = x[start:end]
+            if num_accepted_tokens is not None:
+                accepted = int(num_accepted_tokens[i].item())
+                if accepted <= 0:
+                    continue
+                seq_tokens = seq_tokens[:accepted]
+            out_i = _run_one(seq_tokens, state)
+            out[start : start + out_i.shape[0]] = out_i
+
+    return out.to(original_x_dtype)
 
 
 @triton.jit(
@@ -411,6 +667,7 @@ def causal_conv1d_update_npu(
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     validate_data=False,
+    **_: Any,
 ):
     """
     x: Input tensor which can take the following shapes:
@@ -451,7 +708,7 @@ def causal_conv1d_update_npu(
     out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
     """
     if not HAS_TRITON:
-        return _pytorch_update(
+        return _causal_conv1d_update_fallback(
             x,
             conv_state,
             weight,
@@ -462,7 +719,6 @@ def causal_conv1d_update_npu(
             query_start_loc=query_start_loc,
             pad_slot_id=pad_slot_id,
         )
-
     weight = weight.transpose(0, 1).contiguous()
     conv_state = conv_state.transpose(1, 2).contiguous()
     if validate_data:

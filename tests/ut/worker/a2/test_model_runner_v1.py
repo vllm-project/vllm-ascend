@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -95,6 +96,36 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
+
+    def test_allocate_kv_cache_for_pure_mamba_without_linear_attn_name(self):
+        runner = self._build_runner()
+        kv_cache_spec = MambaSpec(
+            block_size=16,
+            shapes=((8, 16),),
+            dtypes=(torch.float16,),
+            mamba_cache_mode="align",
+            num_speculative_blocks=0,
+        )
+        layer_name = "backbone.layers.0.mixer"
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=kv_cache_spec.page_size_bytes * 2,
+                    shared_by=[layer_name],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=kv_cache_spec,
+                )
+            ],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        self.assertEqual(raw_caches[layer_name].numel(), kv_cache_spec.page_size_bytes * 2)
 
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
