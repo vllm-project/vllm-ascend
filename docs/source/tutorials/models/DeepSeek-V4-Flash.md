@@ -140,7 +140,6 @@ export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export HCCL_BUFFSIZE=1024
-export VLLM_ASCEND_APPLY_DSV4_PATCH=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -190,7 +189,6 @@ export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export HCCL_BUFFSIZE=1024
-export VLLM_ASCEND_APPLY_DSV4_PATCH=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export TASK_QUEUE_ENABLE=1   
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -359,7 +357,6 @@ Before you start, please
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=2560
         export TASK_QUEUE_ENABLE=1
-        export VLLM_ASCEND_APPLY_DSV4_PATCH=1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export HCCL_OP_EXPANSION_MODE="AIV"
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
@@ -433,7 +430,6 @@ Before you start, please
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
-        export VLLM_ASCEND_APPLY_DSV4_PATCH=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
@@ -616,7 +612,6 @@ Before you start, please
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_APPLY_DSV4_PATCH=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
         --host 0.0.0.0 \
@@ -684,7 +679,6 @@ For each P instance, only these two configuration values need to be modified: â€
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_OP_EXPANSION_MODE="AIV"
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_APPLY_DSV4_PATCH=1
     export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
     export HCCL_EXEC_TIMEOUT=204

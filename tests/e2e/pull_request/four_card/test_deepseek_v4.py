@@ -28,7 +28,6 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 @patch.dict(
     os.environ,
     {
-        "VLLM_ASCEND_APPLY_DSV4_PATCH": "1",
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
     },
 )
@@ -69,7 +68,6 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
 @patch.dict(
     os.environ,
     {
-        "VLLM_ASCEND_APPLY_DSV4_PATCH": "1",
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
     },
 )

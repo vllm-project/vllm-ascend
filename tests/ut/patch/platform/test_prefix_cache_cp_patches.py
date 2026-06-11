@@ -13,10 +13,13 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
+    _is_deepseek_v4_kv_cache_spec,
     get_kv_cache_coordinator,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
@@ -50,6 +53,40 @@ def _make_hybrid_kv_cache_config(
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=full_spec),
             KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec),
+        ],
+    )
+
+
+def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
+    c4_spec = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+    )
+    c128_spec = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=128,
+        model_version="deepseek_v4",
+    )
+    c4_group_spec = UniformTypeKVCacheSpecs.from_specs({"c4_attn": c4_spec})
+    c128_group_spec = UniformTypeKVCacheSpecs.from_specs({"c128_attn": c128_spec})
+    assert c4_group_spec is not None
+    assert c128_group_spec is not None
+    return KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[
+            KVCacheTensor(size=c4_spec.page_size_bytes * 10, shared_by=["c4_attn"]),
+            KVCacheTensor(size=c128_spec.page_size_bytes * 10, shared_by=["c128_attn"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["c4_attn"], kv_cache_spec=c4_group_spec),
+            KVCacheGroupSpec(layer_names=["c128_attn"], kv_cache_spec=c128_group_spec),
         ],
     )
 
@@ -231,6 +268,52 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
     )
 
     assert coordinator is sentinel
+
+
+def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> None:
+    sentinel = object()
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+
+    def _fake_orig(*args, **kwargs):
+        raise AssertionError("DeepSeek V4 should use AscendHybridKVCacheCoordinator")
+
+    def _fake_ascend_coordinator(*args, **kwargs):
+        return sentinel
+
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_coordinator._orig_get_kv_cache_coordinator",
+        _fake_orig,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_coordinator.AscendHybridKVCacheCoordinator",
+        _fake_ascend_coordinator,
+    )
+
+    coordinator = get_kv_cache_coordinator(
+        kv_cache_config,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=128,
+    )
+
+    assert coordinator is sentinel
+
+
+def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
+    kv_cache_spec = SimpleNamespace(
+        kv_cache_specs=[
+            SimpleNamespace(model_version="deepseek_v4"),
+        ]
+    )
+    unknown_spec = SimpleNamespace(kv_cache_specs=object())
+
+    assert _is_deepseek_v4_kv_cache_spec(kv_cache_spec)
+    assert not _is_deepseek_v4_kv_cache_spec(unknown_spec)
 
 
 def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> None:

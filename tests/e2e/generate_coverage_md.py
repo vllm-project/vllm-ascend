@@ -67,7 +67,6 @@ COLUMNS = [
     "Xlite Graph",
     "CP KV Interleave",
     "Long Sequence",
-    "DeepSeek V4 patch",
     "FlashComm1 env",
     "Skipped",
     "Conditional skip",
@@ -823,9 +822,6 @@ def _process_test_file(filepath, source_code, root_path=None):
         )
         row["Long Sequence"] = CHECK if is_long_seq else EMPTY
 
-        has_dsv4 = "VLLM_ASCEND_APPLY_DSV4_PATCH" in env_vars and env_vars.get("VLLM_ASCEND_APPLY_DSV4_PATCH") == "1"
-        row["DeepSeek V4 patch"] = CHECK if has_dsv4 else EMPTY
-
         has_flashcomm1 = (
             "VLLM_ASCEND_ENABLE_FLASHCOMM1" in env_vars and env_vars.get("VLLM_ASCEND_ENABLE_FLASHCOMM1") == "1"
         )
@@ -1092,8 +1088,6 @@ def _process_yaml_file(filepath, source_code, root_path):
                 if ascend_cc.get("enable_npugraph_ex"):
                     has_cudagraph_sizes = True
 
-        has_dsv4 = env_vars.get("VLLM_ASCEND_APPLY_DSV4_PATCH") == "1"
-
         row = {}
         row["Test file"] = display_path
         row["_orig_rel_path"] = rel_path
@@ -1213,8 +1207,6 @@ def _process_yaml_file(filepath, source_code, root_path):
 
         is_long_seq = max_model_len is not None and max_model_len > 8192
         row["Long Sequence"] = CHECK if is_long_seq else EMPTY
-
-        row["DeepSeek V4 patch"] = CHECK if has_dsv4 else EMPTY
 
         has_flashcomm1 = env_vars.get("VLLM_ASCEND_ENABLE_FLASHCOMM1") == "1"
         if enable_flashcomm1:

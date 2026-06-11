@@ -113,7 +113,6 @@ def test_models_pcp_dcp_basic():
 @patch.dict(
     os.environ,
     {
-        "VLLM_ASCEND_APPLY_DSV4_PATCH": "1",
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     },
