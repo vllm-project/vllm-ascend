@@ -234,7 +234,7 @@ jobs:
       - name: Select all tests
         id: full-scope
         run: |
-          pip install regex pyyaml
+          pip3 install regex pyyaml
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           python3 .github/workflows/scripts/select_tests.py \
             --changed-files vllm_ascend/dummy.py \
