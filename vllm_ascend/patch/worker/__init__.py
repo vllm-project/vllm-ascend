@@ -35,7 +35,6 @@ import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
-import vllm_ascend.patch.worker.patch_deepseek_compressor  # noqa
 
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
