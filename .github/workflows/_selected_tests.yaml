@@ -67,8 +67,6 @@ jobs:
         UV_HTTP_TIMEOUT: 120
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
-    env:
-      CSRC_BUILD_CACHE_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
     steps:
       - name: Check NPU availability
         id: check_npu
@@ -115,51 +113,6 @@ jobs:
           git fetch origin main
           git rebase origin/main
 
-      - name: Get csrc build cache base branch
-        id: get_csrc_build_cache_base_branch
-        run: |
-          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
-          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
-          if [ -z "$base_branch" ]; then
-            base_branch="unknown-branch"
-          fi
-          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
-
-      - name: Get current cache time
-        id: get_cache_time
-        run: |
-          cache_time=$(date -u +'%Y%m%d%H%M%S')
-          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
-
-      - name: Get csrc build cache arch
-        id: get_csrc_build_cache_arch
-        shell: bash
-        run: |
-          arch="$(uname -m)"
-          case "$arch" in
-            aarch64|arm64)
-              cache_arch="ARM64"
-              ;;
-            x86_64|amd64)
-              cache_arch="X64"
-              ;;
-            *)
-              cache_arch="$arch"
-              ;;
-          esac
-          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
-
-      - name: Restore vllm-ascend csrc build cache
-        id: restore-csrc-build-cache
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
-        uses: runs-on/cache/restore@v5
-        with:
-          path: |
-            csrc/build
-          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
-          restore-keys: |
-            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
-
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
@@ -182,12 +135,6 @@ jobs:
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
-          CACHE_HIT="${{ steps.restore-csrc-build-cache.outputs.cache-hit }}"
-          if [ -n "$CACHE_HIT" ]; then
-            echo "CSRC cache restored from cache: $CACHE_HIT"
-          else
-            echo "CSRC cache miss: no cache entry found"
-          fi
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
           pip install uc-manager
           uv pip install -r requirements-dev.txt
