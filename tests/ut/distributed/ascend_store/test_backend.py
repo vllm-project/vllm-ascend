@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
     MooncakeStoreConfig,
     _convert_to_bytes,
     _parse_global_segment_size,
+    _ssd_setup_kwargs,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
@@ -41,6 +42,19 @@ class TestBackendABC(unittest.TestCase):
     def test_cannot_instantiate(self):
         with self.assertRaises(TypeError):
             Backend(MagicMock())  # type: ignore[abstract]
+
+
+def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:
+    """Build MooncakeStoreConfig via from_file(); inherits from_file() defaults."""
+    config = dict(overrides)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(config, f)
+        f.flush()
+        path = f.name
+    try:
+        return MooncakeStoreConfig.from_file(path)
+    finally:
+        os.unlink(path)
 
 
 # =========================================================================
@@ -85,8 +99,79 @@ class TestMooncakeStoreConfig(unittest.TestCase):
             cfg = MooncakeStoreConfig.from_file(path)
             self.assertEqual(cfg.protocol, "ascend")
             self.assertEqual(cfg.device_name, "")
+            self.assertFalse(cfg.enable_ssd_offload)
+            self.assertEqual(cfg.ssd_offload_path, "")
         finally:
             os.unlink(path)
+
+    def test_from_file_ssd_offload(self):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
+        cfg = _make_mooncake_store_config(
+            enable_ssd_offload=True,
+            ssd_offload_path=ssd_path,
+        )
+        self.assertTrue(cfg.enable_ssd_offload)
+        self.assertEqual(cfg.ssd_offload_path, ssd_path)
+
+    def test_ssd_offload_requires_absolute_path(self):
+        with self.assertRaises(ValueError):
+            _make_mooncake_store_config(
+                enable_ssd_offload=True,
+                ssd_offload_path="relative/path",
+            )
+
+    def test_ssd_offload_requires_path_in_json(self):
+        with self.assertRaises(ValueError):
+            _make_mooncake_store_config(enable_ssd_offload=True)
+
+    @staticmethod
+    def _writable_ssd_path() -> str:
+        return tempfile.mkdtemp(prefix="mooncake_ssd_ut_")
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
+        "mooncake_backend._mooncake_setup_supports_ssd_offload",
+        return_value=False,
+    )
+    def test_ssd_setup_kwargs_off_when_disabled(self, _mock_supports):
+        cfg = _make_mooncake_store_config()
+        self.assertEqual(_ssd_setup_kwargs(cfg), {})
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
+        "mooncake_backend._mooncake_setup_supports_ssd_offload",
+        return_value=False,
+    )
+    def test_ssd_setup_kwargs_raises_on_old_mooncake(self, _mock_supports):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
+        cfg = _make_mooncake_store_config(
+            enable_ssd_offload=True,
+            ssd_offload_path=ssd_path,
+        )
+        with self.assertRaises(RuntimeError):
+            _ssd_setup_kwargs(cfg)
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend."
+        "mooncake_backend._mooncake_setup_supports_ssd_offload",
+        return_value=True,
+    )
+    def test_ssd_setup_kwargs_when_supported(self, _mock_supports):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
+        cfg = _make_mooncake_store_config(
+            enable_ssd_offload=True,
+            ssd_offload_path=ssd_path,
+        )
+        self.assertEqual(
+            _ssd_setup_kwargs(cfg),
+            {
+                "enable_ssd_offload": cfg.enable_ssd_offload,
+                "ssd_offload_path": cfg.ssd_offload_path,
+            },
+        )
 
     def test_load_from_env_missing(self):
         with patch.dict(os.environ, {}, clear=True):
