@@ -488,9 +488,17 @@ This is because HCCL one-sided communication connections are created lazily afte
 
 ## Example of using Memcache as a KV Pool backend
 
-### Installing Memcache
+### Overview
+Memcache is a distributed key-value store that provides a high-performance cache for accelerators. It is designed to be used with MemFabric, which provides high-performance communication between accelerators and host.
 
-**MemCache depends on MemFabric. Therefore, MemFabric must be installed.Installing the memcache after the memfabric is installed.**
+Memcache support two modes of deployments: 
+- **Embedded Deployment**: LocalService is launched with vLLM processes. This is the default mode. 
+- **Standalone Deployment**: LocalService is launched independently before vLLM processes. This is recommended for A3 + device_sdma scenario.
+
+![memcache_embedded_deployment.png](images/memcache_embedded_deployment.png)
+![memcache_standalone_deployment.png](images/memcache_standalone_deployment.png)
+
+### Installing Memcache
 
 ```shell
 pip install memfabric-hybrid
@@ -501,7 +509,7 @@ pip install memcache-hybrid
 
 **mmc-meta.conf：**
 
-```shell
+```ini
 ock.mmc.meta_service_url = tcp://xx.xx.xx.xx:5000
 ock.mmc.meta_service.config_store_url = tcp://xx.xx.xx.xx:6000
 ock.mmc.log_level = error
@@ -509,7 +517,7 @@ ock.mmc.log_level = error
 
 **mmc-local.conf：**
 
-```shell
+```ini
 ock.mmc.meta_service_url = tcp://xx.xx.xx.xx:5000
 ock.mmc.local_service.config_store_url = tcp://xx.xx.xx.xx:6000
 ock.mmc.log_level = error
@@ -520,15 +528,25 @@ ock.mmc.local_service.dram.size = 1GB
 
 **Key Focuses：**
 
-| Parameter | Description |
-| :--- | :--- |
-| `ock.mmc.meta_service_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
-| `ock.mmc.local_service.config_store_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
-| `ock.mmc.local_service.world_size` | Total count of local service, including services that will be added in the future. |
-| `ock.mmc.local_service.protocol` | `device_rdma` (supported for A2 and A3 when device ROCE available, recommended for A2), `device_sdma` (supported for A3 when HCCS available, recommended for A3). Currently does not support heterogeneous protocol setting.|
-| `ock.mmc.local_service.dram.size` | Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card. |
+| Parameter                                | Description                                                                                                                                                                                                                  |
+|:-----------------------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ock.mmc.meta_service_url`               | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.                                                                                        |
+| `ock.mmc.local_service.config_store_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.                                                                                        |
+| `ock.mmc.local_service.world_size`       | Total count of local service, including services that will be added in the future.                                                                                                                                           |
+| `ock.mmc.local_service.protocol`         | `device_rdma` (supported for A2 and A3 when device ROCE available, recommended for A2), `device_sdma` (supported for A3 when HCCS available, recommended for A3). Currently does not support heterogeneous protocol setting. |
+| `ock.mmc.local_service.dram.size`        | Sets the size of the memory applied by the local service. The configured value is the size of the memory occupied by each card.                                                                                              |
+| `ock.mmc.local_service.max.dram.size`    | Sets the maximum size of the memory applied by the local service. Necessary if ranks contribute different sizes of DRAM memory.                                                                                              |
 
-### Run Memcache Master
+**Note**
+
+For Standalone Deployment, please add the following configuration to the `mmc-local.conf` file:
+```ini
+ock.mmc.local_service.max.dram.size = 1024GB
+```
+
+### Launch The vLLM Service with Memcache
+
+#### (1) Start Memcache MetaService
 
 Starting the MetaService service.
 
@@ -538,15 +556,86 @@ export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.co
 python -c "from memcache_hybrid import MetaService; MetaService.main()"
 ```
 
-### PD Disaggregation Scenario
+#### (2) Start Memcache Independent Process (Only For Standalone Deployment Mode)
+**Ignore this step if you are using Embedded Deployment**
 
-#### 1. Run `prefill` Node and `decode` Node
+Run [mem_scan.py](https://gitcode.com/Ascend/memfabric_hybrid/blob/develop/script/mem_scan.py) to check the maximum size of DRAM memory could be applied in this server. 
+
+`python3 mem_scan.py`
+
+Example of the result
+```text
+===== Summary =====
+NUMA Node 0: 157216.00 MB
+NUMA Node 1: 156144.00 MB
+NUMA Node 2: 161048.00 MB
+NUMA Node 3: 154264.00 MB
+Total: 628.00 GB
+```
+
+Copy your previously prepared `mmc-local.conf` file to a new file named `mmc-local-standalone.conf`. 
+Configure `ock.mmc.local_service.dram.size` in `mmc-local.conf` to 0GB. 
+Configure the `ock.mmc.local_service.dram.size` in `mmc-local-standalone.conf` to the maximum size of DRAM memory could be applied in this server.
+
+`mmc-local.conf` for vLLM process
+```ini
+ock.mmc.meta_service_url = tcp://xx.xx.xx.xx:5000
+ock.mmc.local_service.config_store_url = tcp://xx.xx.xx.xx:6000
+ock.mmc.log_level = error
+ock.mmc.local_service.world_size = 256
+ock.mmc.local_service.protocol = device_sdma
+ock.mmc.local_service.dram.size = 0GB
+ock.mmc.local_service.max.dram.size = 1024GB
+```
+
+`mmc-local-standalone.conf` for memcache independent process
+```ini
+ock.mmc.meta_service_url = tcp://xx.xx.xx.xx:5000
+ock.mmc.local_service.config_store_url = tcp://xx.xx.xx.xx:6000
+ock.mmc.log_level = error
+ock.mmc.local_service.world_size = 256
+ock.mmc.local_service.protocol = device_sdma
+ock.mmc.local_service.dram.size = 600GB
+ock.mmc.local_service.max.dram.size = 1024GB
+```
+
+Prepare the following Python script on each node, named `memcache_standalone.py`:
+```python
+import time
+
+from memcache_hybrid import DistributedObjectStore
+
+
+if __name__ == "__main__":
+    store = DistributedObjectStore()
+    res = store.init(0)
+    if res != 0:
+        print(f"Failed to initialize memcache, res = {res}")
+        exit(1)
+    print("Successfully initialized memcache. ")
+
+    while True:
+        time.sleep(1)
+```
+
+Start the memcache independent process on each node:
+```shell
+export MMC_LOCAL_CONFIG_PATH=mmc-local-standalone.conf
+python3 memcache_standalone.py
+```
+
+Seeing "Successfully initialized memcache. " indicates that the memcache independent process has started successfully.
+
+
+#### (3) Start vLLM Service
+
+##### PD Disaggregation Scenario
+
+###### 1. Run `prefill` Node and `decode` Node
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` enables KV Cache Pool
 
-#### 800I A2/800T A2/800I A3/800T A3 Series
-
-**run_prefill.sh/run_decode.sh:**
+**run_prefill.sh/run_decode.sh (800I A2/800T A2/800I A3/800T A3 Series):**
 
 ```shell
 #!/bin/bash
@@ -655,17 +744,15 @@ python -m vllm.entrypoints.openai.api_server "${CMD_ARGS[@]}" > log_${ROLE}.log 
 echo "vLLM started. Log file: log_${ROLE}.log"
 ```
 
-#### [2、Start proxy_server](#2start-proxy_server)
+###### [2、Start proxy_server](#2start-proxy_server)
 
-#### [3、run-inference](#3run-inference)
+###### [3、run-inference](#3run-inference)
 
-### PD-Mixed Scenario
+##### PD-Mixed Scenario
 
-#### 1. Run Mixed Deployment Script
+###### 1. Run Mixed Deployment Script
 
-#### 800I A2/800T A2/800I A3/800T A3 Series
-
-**Run_pd_mix.sh:**
+**Run_pd_mix.sh (800I A2/800T A2/800I A3/800T A3 Series):**
 
 ```shell
 #!/bin/bash
@@ -741,7 +828,7 @@ echo "vLLM started. Log file: log_mix.log"
 
 ```
 
-#### [2. Run Inference](#2-run-inference)
+###### [2. Run Inference](#2-run-inference)
 
 ## Example of using Yuanrong as a KV Pool backend
 
