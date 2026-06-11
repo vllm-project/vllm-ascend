@@ -28,8 +28,10 @@ from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
     is_compressed_mask_supported,
 )
-from vllm_ascend._310p.attention.metadata import get_query_lens_cpu
-from vllm_ascend._310p.attention.metadata_builder import AscendAttentionMetadataBuilder310
+from vllm_ascend._310p.attention.metadata_builder import (
+    AscendAttentionMetadataBuilder310,
+    get_query_lens_cpu,
+)
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
