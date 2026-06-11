@@ -194,7 +194,7 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-torch-cpu.txt --extra-index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          uv pip install -e . --no-build-isolation
 
       - name: Install vllm-project/vllm-ascend no device
         if: ${{ matrix.group.npu_type == 'cpu' }}
@@ -205,7 +205,7 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-torch-cpu.txt --extra-index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          uv pip install -e . --no-build-isolation
 
       - name: Uninstall Triton for 310P tests
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
