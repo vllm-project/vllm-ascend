@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM ascendai/python:3.11-ubuntu22.04
+FROM ascendai/python:3.12-ubuntu22.04
 
 ARG TARGETARCH
 
