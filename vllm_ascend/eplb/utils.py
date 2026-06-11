@@ -20,19 +20,33 @@ import types
 import torch
 
 
+def _resolve_moe_attr(layer) -> str:
+    # MiniMax names its MoE block `block_sparse_moe`; DeepSeek et al. use `mlp`.
+    for attr in ("mlp", "block_sparse_moe"):
+        block = getattr(layer, attr, None)
+        if block is not None and hasattr(block, "experts"):
+            return attr
+    raise AttributeError("EPLB: no MoE block found on layer (tried 'mlp', 'block_sparse_moe')")
+
+
 def get_expert_map(self, layer_id):
-    return self.model.layers[layer_id].mlp.experts.expert_map
+    moe = getattr(self.model.layers[layer_id], self._moe_attr)
+    return moe.experts.expert_map
 
 
 def get_log2phy_map(self, layer_id):
-    return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
+    moe = getattr(self.model.layers[layer_id], self._moe_attr)
+    return moe.experts.get_log2phy_map()
 
 
 def get_all_moe_loads(self):
     num_dense_layers = getattr(self.model.config, "first_k_dense_replace", 0)
     num_layers = self.model.config.num_hidden_layers
     all_moe_loads = torch.stack(
-        [self.model.layers[layer_id].mlp.experts.moe_load for layer_id in range(num_dense_layers, num_layers)],
+        [
+            getattr(self.model.layers[layer_id], self._moe_attr).experts.moe_load
+            for layer_id in range(num_dense_layers, num_layers)
+        ],
         dim=0,
     )
     return all_moe_loads
@@ -42,12 +56,13 @@ def clear_all_moe_loads(self):
     num_dense_layers = getattr(self.model.config, "first_k_dense_replace", 0)
     num_layers = self.model.config.num_hidden_layers
     for layer_id in range(num_dense_layers, num_layers):
-        self.model.layers[layer_id].mlp.experts.clear_moe_load()
+        getattr(self.model.layers[layer_id], self._moe_attr).experts.clear_moe_load()
 
 
 def model_register(model):
     if hasattr(model, "language_model"):
         model = model.language_model
+    model._moe_attr = _resolve_moe_attr(model.model.layers[-1])
     model.get_expert_map = types.MethodType(get_expert_map, model)
     model.get_log2phy_map = types.MethodType(get_log2phy_map, model)
     model.get_all_moe_loads = types.MethodType(get_all_moe_loads, model)
