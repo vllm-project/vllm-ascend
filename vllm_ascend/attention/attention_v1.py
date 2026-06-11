@@ -69,7 +69,6 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
-_ATTN_KEYS_BUFFER = None
 
 GraphParamKind = Literal["paged_attention", "fia"]
 
@@ -535,6 +534,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
                 ):
+                    _, param, layer_name = _normalize_graph_param(param, key)
                     (
                         query,
                         key_cache,
@@ -560,8 +560,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                         attn_count = attn_count + 1
                     else:
-                        seq_lens = attn_metadata[key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        metadata_key = layer_name if layer_name in attn_metadata else key
+                        seq_lens = attn_metadata[metadata_key].seq_lens_list
+                        actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score_v2.out(
@@ -598,22 +599,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
-                # In some speculative methods (such as DFlash), the order of attn_keys in the Target model
-                # will be disrupted instead of increasing by layer index, so need regular expressions to
-                # reorder the attn_keys and stor the results in _ATTN_KEYS_BUFFER.
-                attn_keys_length = len(graph_params.attn_params[num_tokens])
-                global _ATTN_KEYS_BUFFER
-                if _ATTN_KEYS_BUFFER is None:
-                    import regex as re
-
-                    def extract_layer_index(key: str) -> int:
-                        match = re.search(r"(\d+)", key)
-                        return int(match.group(1)) if match else 0
-
-                    attn_keys_tmp = attn_keys[:attn_keys_length]
-                    attn_keys_tmp.sort(key=extract_layer_index)
-                    _ATTN_KEYS_BUFFER = attn_keys_tmp
-                attn_keys[:attn_keys_length] = _ATTN_KEYS_BUFFER
             # For Qwen3-next, since the kv_cache_config has already categorized
             # linear_attn and self_attn, the attn_metadata is first arranged with
             # self_attn followed by linear_attn. Therefore, using zip directly
@@ -961,22 +946,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event.reset(stream)
         graph_params.events[num_tokens].append(event)
         graph_params.attn_params[num_tokens].append(
-            (
-                weak_ref_tensors(query),
-                weak_ref_tensors(key),
-                weak_ref_tensors(value),
-                weak_ref_tensors(block_table),
-                weak_ref_tensors(attn_metadata.attn_mask),
-                block_size,
-                actual_seq_lengths_kv,
-                self.num_kv_heads,
-                self.num_heads,
-                self.scale,
-                self.sliding_window,
-                self.sinks,
-                weak_ref_tensors(output),
-                weak_ref_tensors(softmax_lse),
-                weak_ref_tensors(workspace),
+            AttentionGraphParam(
+                "fia",
+                (
+                    weak_ref_tensors(query),
+                    weak_ref_tensors(key),
+                    weak_ref_tensors(value),
+                    weak_ref_tensors(block_table),
+                    weak_ref_tensors(attn_metadata.attn_mask),
+                    block_size,
+                    actual_seq_lengths_kv,
+                    self.num_kv_heads,
+                    self.num_heads,
+                    self.scale,
+                    self.sliding_window,
+                    self.sinks,
+                    weak_ref_tensors(output),
+                    weak_ref_tensors(softmax_lse),
+                    weak_ref_tensors(workspace),
+                ),
+                self._layer_name,
             )
         )
         torch.npu.graph_task_group_begin(stream)
