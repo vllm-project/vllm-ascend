@@ -210,7 +210,7 @@ jobs:
 # ─── Schedule/Dispatch path: full tests ────────────────────────────────────────
 
   select-full-tests:
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     runs-on: linux-amd64-cpu-8-hk
     outputs:
       has_tests: ${{ steps.full-scope.outputs.has_tests }}
