@@ -16,7 +16,6 @@
 #
 
 import torch
-import torch_npu
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
@@ -28,7 +27,6 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
@@ -39,11 +37,8 @@ from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.mamba.causal_conv1d import (
-    causal_conv1d_fn,
-    causal_conv1d_update_npu,
-)
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update_npu
+from vllm_ascend.utils import vllm_version_is
 
 
 def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
@@ -160,7 +155,6 @@ def update_conv1d_graph_params(
     draft_attn_metadatas=None,
 ):
     """Update host-side parameters for conv1d."""
-    from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params
 
     graph_params = get_draft_graph_params() if is_draft_model else get_graph_params()
 
@@ -440,7 +434,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
             # Conv1d_update AsecendC op version will cause about 1ms delay before
-            # the graph dispatching because of the mix attention(Conv1d and Full) 
+            # the graph dispatching because of the mix attention(Conv1d and Full)
             # param update.We will switch to ascendC op again once we solve this.
             mixed_qkv_spec = causal_conv1d_update_npu(
                 mixed_qkv_spec,
