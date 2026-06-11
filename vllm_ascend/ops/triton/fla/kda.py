@@ -1,14 +1,21 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
 #
-# This file contains code copied from the flash-linear-attention project.
-# The original source code was licensed under the MIT license and included
-# the following copyright notice:
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 # ruff: noqa: E501
 # mypy: ignore-errors
-
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -17,14 +24,12 @@ from vllm.utils.math_utils import cdiv, next_power_of_2
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h_kda
 from .cumsum import chunk_local_cumsum
 from .fused_recurrent_kda import fused_recurrent_gated_delta_rule_fwd_kernel
-from .index_kda import prepare_chunk_indices
 from .l2norm import l2norm_fwd
-from .op_kda import exp2, log
 from .solve_tril import solve_tril_kda
-from .utils import FLA_CHUNK_SIZE, is_amd
+from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
-NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [4, 8, 16, 32]
 RCP_LN2 = 1.4426950408889634
 
 
@@ -414,15 +419,6 @@ def rms_norm_gated(
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-# @triton.autotune(
-#     configs=[
-#         triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
-#         for BK in [32, 64]
-#         for num_warps in [1, 2, 4, 8]
-#         for num_stages in [2, 3, 4]
-#     ],
-#     key=["BC"],
-# )
 @triton.autotune(
     configs=[triton.Config({"BK": 64}, num_warps=4, num_stages=2)],
     key=["BC"],
@@ -533,14 +529,14 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
                         other=0,
                     )
                     b_g = tl.load(p_g, boundary_check=(0, 1))
-                    b_k = tl.load(p_k, boundary_check=(0, 1)) * exp2(b_g - b_gn[None, :])
+                    b_k = tl.load(p_k, boundary_check=(0, 1)) * tl.exp2(b_g - b_gn[None, :])
                     b_gk = tl.load(p_gk, boundary_check=(0, 1))
                     b_kt_val = tl.load(b_kt, boundary_check=(0, 1))
-                    b_ktg = b_kt_val * exp2(b_gn[:, None] - b_gk)
+                    b_ktg = b_kt_val * tl.exp2(b_gn[:, None] - b_gk)
                     b_A += tl.dot(b_k, b_ktg)
 
                     b_q = tl.load(p_q, boundary_check=(0, 1))
-                    b_qg = b_q * exp2(b_g - b_gn[None, :]) * scale
+                    b_qg = b_q * tl.exp2(b_g - b_gn[None, :]) * scale
                     b_Aqk += tl.dot(b_qg, b_ktg)
 
                 b_A *= b_b[:, None]
@@ -574,10 +570,6 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-# @triton.autotune(
-#     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
-#     key=["BK", "BT"],
-# )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=4)],
     key=["BK", "BT"],
@@ -662,7 +654,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_intra(
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         b_kt = tl.load(p_kt, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_ktg = b_kt[None, :] * exp2(b_g - b_gk[None, :])
+        b_ktg = b_kt[None, :] * tl.exp2(b_g - b_gk[None, :])
         b_A = tl.sum(b_k * b_ktg, 1)
         b_A = tl.where(o_i > j, b_A, 0.0)
         b_Aqk = tl.sum(b_q * b_ktg, 1)
@@ -764,14 +756,6 @@ def chunk_kda_scaled_dot_kkt_fwd(
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-# @triton.autotune(
-#     configs=[
-#         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-#         for num_warps in [2, 4, 8]
-#         for num_stages in [2, 3, 4]
-#     ],
-#     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
-# )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=8, num_stages=2)],
     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
@@ -873,7 +857,7 @@ def recompute_w_u_fwd_kernel(
             (1, 0),
         )
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        b_kb *= exp2(b_gk)
+        b_kb *= tl.exp2(b_gk)
         if STORE_QG:
             p_q = tl.make_block_ptr(
                 q + (bos * H + i_h) * K,
@@ -892,7 +876,7 @@ def recompute_w_u_fwd_kernel(
                 (1, 0),
             )
             b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_qg = b_q * exp2(b_gk)
+            b_qg = b_q * tl.exp2(b_gk)
             tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
         if STORE_KG:
             last_idx = min(i_t * BT + BT, T) - 1
@@ -900,7 +884,7 @@ def recompute_w_u_fwd_kernel(
             o_k = i_k * BK + tl.arange(0, BK)
             m_k = o_k < K
             b_gn = tl.load(gk + ((bos + last_idx) * H + i_h) * K + o_k, mask=m_k, other=0.0)
-            b_kg = b_k * exp2(b_gn - b_gk)
+            b_kg = b_k * tl.exp2(b_gn - b_gk)
 
             p_kg = tl.make_block_ptr(
                 kg + (bos * H + i_h) * K,
@@ -964,16 +948,6 @@ def recompute_w_u_fwd(
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-# @triton.autotune(
-#     configs=[
-#         triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
-#         for BK in [32, 64]
-#         for BV in [64, 128]
-#         for num_warps in [2, 4, 8]
-#         for num_stages in [2, 3, 4]
-#     ],
-#     key=["BT"],
-# )
 @triton.autotune(
     configs=[triton.Config({"BK": 64, "BV": 128}, num_warps=2, num_stages=4)],
     key=["BT"],
@@ -1052,7 +1026,7 @@ def chunk_gla_fwd_kernel_o(
         # [BT, BK]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         # [BT, BK]
-        b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+        b_qg = (b_q * tl.exp2(b_g)).to(b_q.dtype)
         # [BV, BK]
         b_h = tl.load(p_h, boundary_check=(0, 1))
         # [BT, BV]
@@ -1222,8 +1196,8 @@ def chunk_kda(
         scale = k.shape[-1] ** -0.5
 
     if use_qk_l2norm_in_kernel:
-        q = l2norm_fwd(q.contiguous(), backend="fla")
-        k = l2norm_fwd(k.contiguous(), backend="fla")
+        q = l2norm_fwd(q.contiguous(), use_tiled_kernel=True)
+        k = l2norm_fwd(k.contiguous(), use_tiled_kernel=True)
 
     o, final_state = chunk_kda_fwd(
         q=q,
@@ -1304,7 +1278,7 @@ def kda_gate_fwd_kernel(
     # Use threshold to switch to linear when beta*x > threshold
     g_scaled = b_g * beta
     use_linear = g_scaled > threshold
-    sp = tl.where(use_linear, b_g, (1.0 / beta) * log(1.0 + tl.exp(g_scaled)))
+    sp = tl.where(use_linear, b_g, (1.0 / beta) * tl.log(1.0 + tl.exp(g_scaled)))
     b_y = b_a * sp
 
     tl.store(y_ptr, b_y.to(y.dtype.element_ty), boundary_check=(0, 1))
