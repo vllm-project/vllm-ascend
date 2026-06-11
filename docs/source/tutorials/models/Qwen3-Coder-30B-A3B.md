@@ -27,8 +27,16 @@ The following model variants are available. It is recommended to download the mo
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
-:::{note}
 If the W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
+
+:::{note}
+Qwen3-Coder-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model structure):
+
+- **Embedding layer**: FP32 (no quantization)
+- **Q/K normalization** (q_norm, k_norm): FP32 (weights and biases)
+- **Attention projections** (q/k/v/o_proj): Static W8A8 with pre-computed per-tensor scales; biases kept in FP32
+- **MoE routing gate** (mlp.gate): FP32
+- **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
 :::
 
 ## 4 Installation
@@ -287,11 +295,11 @@ vllm bench serve \
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
-| High Throughput | Single-Node | 1 | 1 | 1 | 32 | 100 | 37364 | Off | Off | Off | On |
-| Low Latency | Single-Node | 4 | 4 | 1 | 32 | 100 | 37364 | Off | On | On | On |
-| Long Context | Single-Node | 4 | 4 | 1 | 32 | 14 | 135000 | Off | On | On | On |
+| Scenario | Configuration | NPUs | TP | DP | Concurrency | Max Context Length | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
+| High Throughput | Single-Node | 1 | 1 | 1 | 100 | 37364 | Off | Off | Off | On |
+| Low Latency | Single-Node | 4 | 4 | 1 | 100 | 37364 | Off | On | On | On |
+| Long Context | Single-Node | 4 | 4 | 1 | 14 | 131072 | Off | On | On | On |
 
 > For detailed parameter descriptions, please refer to the deployment examples in Section 5.
 
@@ -385,7 +393,7 @@ vllm serve your_model_path \
     --served-model-name qwen3-coder \
     --trust-remote-code \
     --max-num-seqs 14 \
-    --max-model-len 135000 \
+    --max-model-len 131072 \
     --max-num-batched-tokens 16384 \
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
@@ -420,13 +428,15 @@ For common environment, installation, and general parameter issues, please refer
 
 The model can run on Atlas 800I A3 with 64G NPUs, typically using 1 to 4 cards.
 
-### Q: How do I enable long context (beyond 32K)?
+### Q: How do I enable long context (beyond 256K)?
 
-Qwen3-Coder-30B-A3B natively supports 256K token context length, extendable up to 1M with YaRN rope scaling. For contexts beyond the default 32K, use YaRN rope scaling via `--hf-overrides` (for vLLM >= v0.12.0):
+Qwen3-Coder-30B-A3B natively supports 256K token context length. For contexts beyond 256K, YaRN rope scaling is required to extend up to 1M. Enable YaRN via `--hf-overrides`:
 
 ```bash
---hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}'
+--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":262144}}'
 ```
+
+For contexts within the native 256K range, no additional configuration is needed. Just set `--max-model-len` to your desired length.
 
 ### Q: Why is `--enable-expert-parallel` required?
 
