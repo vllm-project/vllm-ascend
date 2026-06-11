@@ -6,7 +6,6 @@ Track progress and planned improvements at <https://github.com/vllm-project/vllm
 ```
 ```{note}
 To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.
-
 For installation instructions, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python>
 ```
 
