@@ -107,12 +107,12 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
 
-      - name: Rebase on latest main
-        run: |
-          git config user.name "vllm-ascend-ci"
-          git config user.email "vllm-ascend-ci@users.noreply.github.com"
-          git fetch origin main
-          git rebase origin/main
+#      - name: Rebase on latest main
+#        run: |
+#          git config user.name "vllm-ascend-ci"
+#          git config user.email "vllm-ascend-ci@users.noreply.github.com"
+#          git fetch origin main
+#          git rebase origin/main
 
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
