@@ -38,7 +38,6 @@ from vllm_ascend.models.llama_eagle3_vwn import (
     VwnLlamaModel,
 )
 
-
 _HIDDEN = 2048
 _INTERMEDIATE = 6144
 _VOCAB = 151936
@@ -106,13 +105,15 @@ def _mock_npu_env():
         mlp_tensor_parallel_size=0,
     )
 
-    with patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=_mock), \
-         patch("vllm.distributed.parallel_state.get_tp_group", return_value=_mock), \
-         patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=_mock), \
-         patch("vllm_ascend.utils.get_ascend_config", return_value=mock_cfg), \
-         patch.object(torch.ops.vllm, "unquantized_gemm", F.linear), \
-         patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None), \
-         patch.object(torch.ops.vllm, "maybe_pad_and_reduce", lambda x, *a, **kw: x):
+    with (
+        patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=_mock),
+        patch("vllm.distributed.parallel_state.get_tp_group", return_value=_mock),
+        patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=_mock),
+        patch("vllm_ascend.utils.get_ascend_config", return_value=mock_cfg),
+        patch.object(torch.ops.vllm, "unquantized_gemm", F.linear),
+        patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None),
+        patch.object(torch.ops.vllm, "maybe_pad_and_reduce", lambda x, *a, **kw: x),
+    ):
         yield
 
 
@@ -239,7 +240,6 @@ def _make_model_with_mocked_ops(**kwargs):
 
 
 class TestPreVwnLayerV1:
-
     @pytest.mark.parametrize("vwn_m,vwn_r", [(4, 1.5), (1, 1.0)])
     def test_init_and_forward(self, vwn_m, vwn_r):
         """Verify layer init and forward output shape."""
@@ -260,7 +260,6 @@ class TestPreVwnLayerV1:
 
 
 class TestVwnLlamaDecoderLayer:
-
     @pytest.mark.parametrize("vwn_m,vwn_r", [(4, 1.5), (4, 1.0)])
     def test_forward_layer0(self, vwn_m, vwn_r):
         """VWN forward with various m/r configs — init + shape check."""
@@ -298,13 +297,16 @@ class TestVwnLlamaDecoderLayer:
 
         assert layer.self_attn.qkv_proj.input_size == _HIDDEN
 
-class TestVwnLlamaModel:
 
-    @pytest.mark.parametrize("num_hidden_layers,use_input_embeds", [
-        (1, False),
-        (2, False),
-        (1, True),
-    ])
+class TestVwnLlamaModel:
+    @pytest.mark.parametrize(
+        "num_hidden_layers,use_input_embeds",
+        [
+            (1, False),
+            (2, False),
+            (1, True),
+        ],
+    )
     def test_forward(self, num_hidden_layers, use_input_embeds):
         """Verify layer count, type, and forward output shapes."""
         vllm_config = _create_vllm_config_for_vwn(num_hidden_layers=num_hidden_layers)
@@ -329,7 +331,10 @@ class TestVwnLlamaModel:
             input_embeds = torch.randn(num_tokens, hs) if use_input_embeds else None
 
             postnorm, prenorm = model(
-                input_ids, positions, hidden_states, input_embeds=input_embeds,
+                input_ids,
+                positions,
+                hidden_states,
+                input_embeds=input_embeds,
             )
 
         assert postnorm.shape == (num_tokens, hs)
@@ -337,7 +342,6 @@ class TestVwnLlamaModel:
 
 
 class TestEagle3VwnLlamaForCausalLM:
-
     def test_init_and_forward(self):
         """Init creates VwnLlamaModel; forward returns (postnorm, prenorm)."""
         with _make_model_with_mocked_ops(vwn_m=4) as (model, _, hs):
@@ -348,7 +352,9 @@ class TestEagle3VwnLlamaForCausalLM:
             positions = torch.arange(num_tokens, dtype=torch.long)
 
             postnorm, prenorm = model(
-                input_ids, positions, torch.randn(num_tokens, hs),
+                input_ids,
+                positions,
+                torch.randn(num_tokens, hs),
             )
 
             assert postnorm.shape == (num_tokens, hs)
