@@ -20,7 +20,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `Kimi-K2.6-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.6-W4A8).
 - `kimi-k2.6-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.6): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.6-eagle3)
-- `Kimi-K2.6-DFlash` (a speculative decoding framework that leverages a lightweight block diffusion model for parallel drafting): [Download model weight](https://huggingface.co/z-lab/Kimi-K2.6-DFlash)
+- `Kimi-K2.5-DFlash` (a speculative decoding framework that leverages a lightweight block diffusion model for parallel drafting): [Download model weight](https://huggingface.co/z-lab/Kimi-K2.5-DFlash)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -114,7 +114,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower.
+To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
 
 ## 5 Online Service Deployment
 
@@ -146,7 +146,6 @@ sysctl -w kernel.sched_migration_cost_ns=50000
 export HCCL_BUFFSIZE=800
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --quantization ascend \
@@ -176,7 +175,6 @@ Key Parameter Descriptions:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: enables a large-scale fused operator to replace the original fine-grained small operators, which can significantly reduce kernel launch overhead and improve overall execution performance.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
@@ -318,7 +316,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export HCCL_BUFFSIZE=800
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
-    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
       --host 0.0.0.0 \
@@ -397,7 +394,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export HCCL_BUFFSIZE=800
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
-    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
       --host 0.0.0.0 \
@@ -476,7 +472,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export HCCL_BUFFSIZE=800
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
-    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
       --host 0.0.0.0 \
@@ -554,7 +549,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
     export HCCL_BUFFSIZE=1100
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
-    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
       --host 0.0.0.0 \
@@ -597,7 +591,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
 
 Key Parameter Descriptions:
 
-- `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: enables a large-scale fused operator to replace the original fine-grained small operators, which can significantly reduce kernel launch overhead and improve overall execution performance.
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
@@ -824,16 +817,16 @@ After about several minutes, you can get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-|Scenario|Configuration|#NPUs|TP|DP|Max Context Length|MTP Speculation Num|FUSED_MC2|
-|--------|-------------|-----|--|--|-------------------|--------------------|---------|
-|High Throughput / Low Latency (16K)|Server / Single Machine|16|8|2|~16K|15|On|
-|High Throughput / Low Latency (16K)|Server-P Node|16|8|2|~16K|3|On|
-|High Throughput / Low Latency (16K)|Server-D Node|16|8|2|~16K|3|On|
-|Long Context (128K, no cache)|Server / Single Machine|16|16|1|128K|15|On|
-|Long Context (128K, with cache)|Server / Single Machine|16|8|2|128K|15|On|
-|Multimodal (1080P)|Server / Single Machine|16|16|1|~16K|15|On|
-|Multimodal (1080P)|Server-P Node|16|8|2|~16K|3|On|
-|Multimodal (1080P)|Server-D Node|16|1|16|~16K|3|On|
+|Scenario|Configuration|#NPUs|TP|DP|Max Context Length|MTP Speculation Num|
+|--------|-------------|-----|--|--|-------------------|--------------------|
+|High Throughput / Low Latency (16K)|Server / Single Machine|16|8|2|~16K|15|
+|High Throughput / Low Latency (16K)|Server-P Node|16|8|2|~16K|3|
+|High Throughput / Low Latency (16K)|Server-D Node|16|8|2|~16K|3|
+|Long Context (128K, no cache)|Server / Single Machine|16|16|1|128K|15|
+|Long Context (128K, with cache)|Server / Single Machine|16|8|2|128K|15|
+|Multimodal (1080P)|Server / Single Machine|16|16|1|~16K|15|
+|Multimodal (1080P)|Server-P Node|16|8|2|~16K|3|
+|Multimodal (1080P)|Server-D Node|16|1|16|~16K|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
@@ -854,4 +847,4 @@ For common environment, installation, and general parameter issues, please refer
 
 - **Q: What transformer version is required for tools_call feature?**
 
-  A: To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower.
+  A: To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
