@@ -41,11 +41,7 @@ The following model variants are available. It is recommended to download the mo
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
-### 3.2 Model Quantization (Optional)
-
-If you wish to quantize the model yourself, refer to the [MindStudio ModelSlim documentation](https://gitcode.com/Ascend/msmodelslim) for W4A8, W4A4 and W8A8 quantization procedures. Pre-converted quantized weights are also available for download (see [3.1 Model Weight](#31-model-weight)).
-
-### 3.3 Verify Multi-node Communication
+### 3.2 Verify Multi-node Communication
 
 If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
 
@@ -163,7 +159,7 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve vllm-ascend/Qwen3-32B-W8A8 \
+vllm serve your_model_path \
     --served-model-name qwen3 \
     --trust-remote-code \
     --async-scheduling \
@@ -296,11 +292,11 @@ After several minutes, you will get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|----|----|-------------|--------------------|-----------|-----------|--------------|--------------|------------------|
-| High Throughput | Single-Node | 4 | 4 | 1 | 32 | 100 | 5500 | 3 | Off | Off | On | On |
-| Long Context | Single-Node | 4 | 4 | 1 | 32 | 14 | 135000 | 3 | Off | Off | On | On |
-| Low Latency | Single-Node | 8 | 8 | 1 | 1 | 100 | 5500 | 3 | Off | Off | Off | On |
+| Scenario | Configuration | #NPUs | TP | DP | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|-------------|--------------------|-----------|-----------|--------------|--------------|------------------|
+| High Throughput | Single-Node | 4 | 4 | 1 | 90 | 5500 | 3 | Off | Off | On | On |
+| Long Context | Single-Node | 4 | 4 | 1 | 2 | 135000 | 3 | Off | Off | On | On |
+| Low Latency | Single-Node | 8 | 8 | 1 | 4 | 5500 | 3 | Off | Off | Off | On |
 
 > **Note**: BS (Batch Size) and Concurrency values depend on the specific workload and request pattern. Refer to the reference configurations below for detailed `cudagraph_capture_sizes` and `pa_shape_list` settings.
 

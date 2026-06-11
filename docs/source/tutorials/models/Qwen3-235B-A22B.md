@@ -36,7 +36,32 @@ These are the recommended numbers of cards, which can be adjusted according to t
 
 ### 3.2 Model Quantization (Optional)
 
-If you wish to quantize the model yourself, refer to the [MindStudio ModelSlim documentation](https://gitcode.com/Ascend/msmodelslim) for W8A8 quantization procedures. Pre-converted quantized weights are also available for download (see [3.1 Model Weight](#31-model-weight)).
+**Install msmodelslim:**
+
+```shell
+# 1. Clone the msmodelslim repository.
+git clone https://gitcode.com/Ascend/msmodelslim.git
+
+# 2. Enter the msmodelslim directory and run the installation script.
+cd msmodelslim
+bash install.sh
+
+# The following message indicates that msmodelslim has been installed successfully.
+Successfully installed msmodelslim-{version}
+```
+
+**Run quantization:**
+
+```shell
+cd examples/Qwen3-MOE
+# Run the following command to quantize the model.
+python3 quant_qwen_moe_w8a8.py --model_path /path/to/your/Qwen3-235B-A22B \
+--save_path /path/to/your/Qwen3-235B-A22B-W8A8-rot \
+--anti_dataset ../common/qwen3-moe_anti_prompt_50.json \
+--calib_dataset ../common/qwen3-moe_calib_prompt_50.json \
+--trust_remote_code True \
+--rot
+```
 
 ### 3.3 Verify Multi-node Communication
 
@@ -158,7 +183,7 @@ export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export TASK_QUEUE_ENABLE=1
 
-vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
+vllm serve your_model_path \
     --host <host_ip> \
     --port <port> \
     --tensor-parallel-size 8 \
@@ -167,7 +192,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
     --quantization ascend \
     --served-model-name qwen3 \
     --max-num-seqs 32 \
-    --max-model-len 133000 \
+    --max-model-len 131072 \
     --max-num-batched-tokens 8096 \
     --enable-expert-parallel \
     --trust-remote-code \
@@ -463,18 +488,18 @@ After several minutes, you will get the performance evaluation result.
 |----------|----------------|-------------|----------------|---------------------|
 | High Throughput | Single-Node (TP4, DP4) | 16 (A3) | W8A8 | DP and TP distribute MoE experts across 16 NPUs for maximum throughput |
 | High Throughput | PD Disaggregation (3 nodes) | 48 (3×A3) | W8A8 | 3-node PD separation balances prefill and decode resources for high throughput |
-| Low Latency | PD Hybrid (TP16) | 16 (A3) | W8A8 | 16-NPU TP minimizes per-token latency with speculative decoding |
-| Long Context | PD Hybrid (TP8, CP2) | 16 (A3) | W8A8 | 8-NPU TP with Context Parallelism extends context to 135K tokens |
+| Low Latency | Single-Node (TP16) | 16 (A3) | W8A8 | 16-NPU TP minimizes per-token latency with speculative decoding |
+| Long Context | Single-Node (TP8, CP2) | 16 (A3) | W8A8 | 8-NPU TP with Context Parallelism extends context to 135K tokens |
 
 > **Note**: `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|----|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
-| High Throughput | Single-Node (TP4, DP4) | 16 | 4 | 4 | 128 | 128 | 40960 | none | On | On | On | On |
-| Low Latency | PD Hybrid (TP16) | 16 | 16 | 1 | 128 | 128 | 32768 | 3 | Off | On | On | On |
-| Long Context | PD Hybrid (TP8, CP2) | 16 | 8 | 1 | 32 | 32 | 135000 | none | On | On | On | On |
+| Scenario | Configuration | #NPUs | TP | DP  | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
+| High Throughput | Single-Node | 16 | 4 | 4 | 140 | 32768 | none | On | On | On | On |
+| Low Latency | Single-Node | 16 | 16 | 1 | 1 | 32768 | 3 | Off | On | On | On |
+| Long Context | Single-Node | 16 | 8 | 1 | 1 | 135000 | none | On | On | On | Off |
 
 > **Note**: For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment) 
 
