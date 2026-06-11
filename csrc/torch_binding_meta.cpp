@@ -722,7 +722,10 @@ std::tuple<at::Tensor, at::Tensor> npu_attention_update_v2_meta(
     int64_t update_type)
 {
     at::Tensor out = at::empty({local_out.size(1), local_out.size(2)}, local_out.options());
-    at::Tensor lse_out = at::empty({lse.size(1)}, lse.options().dtype(at::kFloat));
+    at::Tensor lse_out;
+    if (update_type == 1) {
+        lse_out = at::empty({lse.size(1)}, lse.options().dtype(at::kFloat));
+    }
     return {out, lse_out};
 }
 
