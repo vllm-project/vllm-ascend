@@ -1591,27 +1591,56 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         key = self._nz_5d_view(self.key_cache, block_size)
         value = self._nz_5d_view(self.value_cache, block_size)
 
-        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-            query[:batch_size].unsqueeze(2),
-            key,
-            value,
-            key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
-            value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
-            block_table=attn_metadata.block_tables,
-            actual_seq_lengths_kv=attn_metadata.seq_lens_list,
-            num_heads=self.num_heads,
-            num_key_value_heads=self.num_kv_heads,
-            input_layout="BNSD",
-            scale=self.scale,
-            block_size=block_size,
-            antiquant_mode=0,
-            key_antiquant_mode=0,
-            value_antiquant_mode=0,
-            inner_precise=1,
-            sparse_mode=0,
-        )
-        attn_output = attn_output.squeeze(2)
-        output[:batch_size] = attn_output
+        num_tokens = query.shape[0]
+        max_q_len = num_tokens // batch_size
+        if max_q_len > 1:
+            # MTP multi-token decode: reshape to proper BNSD
+            query_bnsd = query[:num_tokens].reshape(batch_size, max_q_len, self.num_heads, self.head_size).transpose(1, 2).contiguous()
+            actual_seq_lengths_q = [max_q_len] * batch_size
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                query_bnsd,
+                key,
+                value,
+                key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
+                value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
+                block_table=attn_metadata.block_tables,
+                actual_seq_lengths=actual_seq_lengths_q,
+                actual_seq_lengths_kv=attn_metadata.seq_lens_list,
+                atten_mask=attn_metadata.attn_mask,
+                num_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="BNSD",
+                scale=self.scale,
+                block_size=block_size,
+                antiquant_mode=0,
+                key_antiquant_mode=0,
+                value_antiquant_mode=0,
+                inner_precise=1,
+                sparse_mode=3,
+            )
+            attn_output = attn_output.transpose(1, 2).contiguous().view(num_tokens, self.num_heads, self.head_size)
+        else:
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                query[:batch_size].unsqueeze(2),
+                key,
+                value,
+                key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
+                value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
+                block_table=attn_metadata.block_tables,
+                actual_seq_lengths_kv=attn_metadata.seq_lens_list,
+                num_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="BNSD",
+                scale=self.scale,
+                block_size=block_size,
+                antiquant_mode=0,
+                key_antiquant_mode=0,
+                value_antiquant_mode=0,
+                inner_precise=1,
+                sparse_mode=0,
+            )
+            attn_output = attn_output.squeeze(2)
+        output[:num_tokens] = attn_output
         return output
 
     def _forward_c8_chunked_prefill(
@@ -1639,26 +1668,55 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             kv_k = self._nz_5d_view(self.key_cache, block_size)
             kv_v = self._nz_5d_view(self.value_cache, block_size)
 
-            attn_out, _ = torch_npu.npu_fused_infer_attention_score(
-                query[:num_decode_tokens].unsqueeze(2),
-                kv_k,
-                kv_v,
-                key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
-                value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
-                block_table=attn_metadata.block_tables[:num_decodes],
-                actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
-                num_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                input_layout="BNSD",
-                scale=self.scale,
-                block_size=block_size,
-                antiquant_mode=0,
-                key_antiquant_mode=0,
-                value_antiquant_mode=0,
-                inner_precise=1,
-                sparse_mode=0,
-            )
-            output[:num_decode_tokens] = attn_out.squeeze(2)
+            max_q_len = num_decode_tokens // num_decodes
+            if max_q_len > 1:
+                # MTP multi-token decode: reshape to proper BNSD
+                query_bnsd = query[:num_decode_tokens].reshape(num_decodes, max_q_len, self.num_heads, self.head_size).transpose(1, 2).contiguous()
+                actual_seq_lengths_q = [max_q_len] * num_decodes
+                attn_out, _ = torch_npu.npu_fused_infer_attention_score(
+                    query_bnsd,
+                    kv_k,
+                    kv_v,
+                    key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
+                    value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
+                    block_table=attn_metadata.block_tables[:num_decodes],
+                    actual_seq_lengths=actual_seq_lengths_q,
+                    actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
+                    atten_mask=attn_metadata.attn_mask,
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="BNSD",
+                    scale=self.scale,
+                    block_size=block_size,
+                    antiquant_mode=0,
+                    key_antiquant_mode=0,
+                    value_antiquant_mode=0,
+                    inner_precise=1,
+                    sparse_mode=3,
+                )
+                attn_out = attn_out.transpose(1, 2).contiguous().view(num_decode_tokens, self.num_heads, self.head_size)
+            else:
+                attn_out, _ = torch_npu.npu_fused_infer_attention_score(
+                    query[:num_decode_tokens].unsqueeze(2),
+                    kv_k,
+                    kv_v,
+                    key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
+                    value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
+                    block_table=attn_metadata.block_tables[:num_decodes],
+                    actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
+                    num_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="BNSD",
+                    scale=self.scale,
+                    block_size=block_size,
+                    antiquant_mode=0,
+                    key_antiquant_mode=0,
+                    value_antiquant_mode=0,
+                    inner_precise=1,
+                    sparse_mode=0,
+                )
+                attn_out = attn_out.squeeze(2)
+            output[:num_decode_tokens] = attn_out
 
         if attn_metadata.num_prefills > 0:
             prefill_q = query[num_decode_tokens:num_tokens]
