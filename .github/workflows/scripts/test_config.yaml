@@ -206,6 +206,7 @@
   tests:
     - tests/ut/distributed
     - tests/e2e/pull_request/two_card/test_data_parallel.py
+    - tests/e2e/pull_request/two_card/test_data_parallel_rank_header.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
     - tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py
@@ -509,6 +510,7 @@
     - tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py
     - tests/e2e/pull_request/one_card/test_guided_decoding.py
     - tests/e2e/pull_request/one_card/test_multi_instance.py
+    - tests/e2e/pull_request/one_card/test_token_in_token_out.py
     - tests/e2e/pull_request/one_card/model_runner_v2
     - tests/e2e/pull_request/two_card/test_external_launcher.py
     - tests/e2e/pull_request/two_card/test_offline_weight_load.py
