@@ -164,9 +164,6 @@ class KVPoolWorker:
         if self.use_layerwise and self.num_kv_cache_groups > 1:
             raise NotImplementedError("AscendStore layerwise mode does not yet support hybrid KV cache groups.")
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
-        self.h2d_stagger_group_size = int(extra_config.get("h2d_stagger_group_size", 0))
-        self.h2d_stagger_dynamic_addrs_per_us = int(extra_config.get("h2d_stagger_dynamic_addrs_per_us", 0))
-        self.h2d_stagger_max_us = int(extra_config.get("h2d_stagger_max_us", 0))
         self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
         self.layerwise_max_transfer_bytes = int(extra_config.get("layerwise_max_transfer_bytes", 0))
 
@@ -439,9 +436,6 @@ class KVPoolWorker:
                     self.layer_save_finished_events,
                     self.num_layers,
                     self.h2d_stagger_us,
-                    self.h2d_stagger_group_size,
-                    self.h2d_stagger_dynamic_addrs_per_us,
-                    self.h2d_stagger_max_us,
                     self.layerwise_max_transfer_blocks,
                     self.layerwise_max_transfer_bytes,
                 )
