@@ -168,10 +168,10 @@ jobs:
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
           .github/workflows/scripts/run_selected_tests.sh \
+            ${{ inputs.enable-coverage && '--enable-coverage' || '' }} \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "with-device" \
-            ${{ inputs.enable-coverage && '--enable-coverage' || '' }} \
             ${{ matrix.group.tests }}
 
       - name: Run selected tests without device
@@ -181,10 +181,10 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           .github/workflows/scripts/run_selected_tests.sh \
+            ${{ inputs.enable-coverage && '--enable-coverage' || '' }} \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "without-device" \
-            ${{ inputs.enable-coverage && '--enable-coverage' || '' }} \
             ${{ matrix.group.tests }}
 
       - name: Upload selected test logs
