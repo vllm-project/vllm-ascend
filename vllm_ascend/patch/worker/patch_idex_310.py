@@ -37,9 +37,7 @@ if vllm_version_is("0.21.0"):
     GatedDeltaNetAttention._forward_core = AscendGatedDeltaNetAttention310._forward_core
     GatedDeltaNetAttention.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 else:
-    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # type: ignore[import-not-found]
-        QwenGatedDeltaNetAttention,
-    )
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 
     QwenGatedDeltaNetAttention._warmup_prefill_kernels = lambda self, qkv_or_qkvz, v_dim: None  # type: ignore[method-assign]
     QwenGatedDeltaNetAttention._forward_core = AscendGatedDeltaNetAttention310._forward_core
