@@ -67,19 +67,6 @@ from vllm_ascend.memcache_comm_fence import (
     reset_attention_compute_start_gate,
 )
 
-_shared_layer_transfer_events: list[threading.Event] | None = None
-
-
-def get_shared_layer_transfer_events() -> list[threading.Event] | None:
-    return _shared_layer_transfer_events
-
-
-def ensure_shared_layer_transfer_events(num_layers: int) -> list[threading.Event]:
-    global _shared_layer_transfer_events
-    if _shared_layer_transfer_events is None:
-        _shared_layer_transfer_events = [threading.Event() for _ in range(num_layers)]
-    return _shared_layer_transfer_events
-
 
 class KVPoolWorker:
     # The main class for the cache engine.
@@ -296,7 +283,6 @@ class KVPoolWorker:
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for i in range(self.num_layers)]
         self.layer_load_finished_events: list[threading.Event] | None = None
         self.layer_save_finished_events: list[threading.Event] | None = None
-        self.layer_transfer_finished_events: list[threading.Event] | None = None
 
         self.kv_transfer_thread_cpus: list[int] = []
         if get_ascend_config().enable_cpu_binding:
