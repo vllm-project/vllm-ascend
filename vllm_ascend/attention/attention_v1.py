@@ -95,8 +95,18 @@ def _get_graph_param_kind(param: AttentionGraphParam) -> GraphParamKind:
     return kind
 
 
-def _uses_sliding_window_attention(vllm_config: VllmConfig) -> bool:
-    return getattr(vllm_config.model_config.hf_text_config, "sliding_window", None) is not None
+def _is_sliding_window_graph_param(pre_tokens: int | None) -> bool:
+    return pre_tokens not in (None, SWA_INT_MAX)
+
+
+def _is_sliding_window_v2_graph_param(sliding_window: int | None) -> bool:
+    return sliding_window is not None
+
+
+def _expand_attn_keys_for_graph_params(attn_keys: list[str], graph_param_count: int) -> list[str]:
+    if len(attn_keys) == 0:
+        return []
+    return [attn_keys[index % len(attn_keys)] for index in range(graph_param_count)]
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -428,6 +438,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_hamming_sparse = is_enable_hamming_sparse()
         self._layer_name: str | None = None
 
+    def _get_graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
+        layer_name = layer.layer_name if layer is not None else self._layer_name
+        return self.kv_sharing_target_layer_name or layer_name
+
     @staticmethod
     def update_graph_params(
         update_stream,
@@ -452,9 +466,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if uses_paged_attention_params or (using_paged_attention(num_tokens, vllm_config) and len(attn_params) == 0):
             # Paged Attention update logic
+            attn_keys = list(forward_context.attn_metadata)
+            attn_keys = _expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
+            if len(attn_keys) == 0:
+                return
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
-                    forward_context.attn_metadata,
+                    attn_keys,
                     graph_params.attn_params[num_tokens],
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
@@ -524,6 +542,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+            else:
+                attn_keys = _expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
@@ -561,6 +581,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         metadata_key = layer_name if layer_name in attn_metadata else key
                         seq_lens = attn_metadata[metadata_key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
+                        if not _is_sliding_window_v2_graph_param(sliding_window):
+                            block_tables = attn_metadata[metadata_key].block_tables
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score_v2.out(
@@ -609,6 +631,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+            else:
+                attn_keys = _expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
@@ -705,11 +729,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[metadata_key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
                         # SWA full-graph replay keeps the captured block table
-                        # tensor. Rebinding it from per-step metadata has been
-                        # observed to corrupt SWA decode replay on NPU.
-                        # Non-SWA models preserve the previous behavior and
-                        # refresh block tables from current metadata.
-                        if not _uses_sliding_window_attention(vllm_config):
+                        # tensor. Mixed local/global models still need global
+                        # layers to refresh their runtime block table.
+                        if not _is_sliding_window_graph_param(pre_tokens):
                             block_tables = attn_metadata[metadata_key].block_tables
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
@@ -838,9 +860,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event.wait(stream)
         event.reset(stream)
         graph_params.events[num_tokens].append(event)
-        # Record the owning layer so graph replay can refresh metadata by the
-        # real attention layer instead of relying on dict iteration order.
-        layer_name = layer.layer_name if layer is not None else self._layer_name
+        # Record the metadata layer so graph replay can refresh by layer name
+        # instead of relying on dict iteration order.
+        layer_name = self._get_graph_metadata_layer_name(layer)
         attn_params = (
             weak_ref_tensors(query),
             weak_ref_tensors(key),
@@ -963,7 +985,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     weak_ref_tensors(softmax_lse),
                     weak_ref_tensors(workspace),
                 ),
-                self._layer_name,
+                self._get_graph_metadata_layer_name(),
             )
         )
         torch.npu.graph_task_group_begin(stream)
@@ -1037,7 +1059,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         attn_metadata.seq_lens,
                         weak_ref_tensors(output),
                     ),
-                    self._layer_name,
+                    self._get_graph_metadata_layer_name(),
                 )
             )
 
