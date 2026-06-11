@@ -48,8 +48,8 @@ P_EAGLE_MODELS = {
 
 VWN_EAGLE3_MODELS = {
     "vwn_eagle3": {
-        "main": "/mnt/weight/Qwen3-30B-A3B",
-        "spec": "/mnt/share/t00886357/eagle3_weights/vwn_eagle3_full_m_4_r_1_5",
+        "main": "Qwen/Qwen3-30B-A3B",
+        "spec": "vllm-ascend/Qwen3-30B-A3B-vwn-eagle-model",
     },
 }
 
