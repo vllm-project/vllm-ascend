@@ -68,7 +68,10 @@ jobs:
           else
             matrix=$(python .github/workflows/scripts/generate_cache_matrix.py)
           fi
+<<<<<<< HEAD
 
+=======
+>>>>>>> dcab0e20 ([Fix])
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------------
@@ -148,14 +151,44 @@ jobs:
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
+
           arch=$(uname -i)
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib"
 
           if [ "${{ matrix.os_type }}" = "openeuler" ]; then
-            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
+            echo "===== AICPU toolchain probe ====="
+
+            AICPU_CXX="$(find /usr/local/Ascend -path '*/toolkit/toolchain/hcc/bin/aarch64-target-linux-gnu-g++' -type f | head -n 1)"
+
+            if [ -z "${AICPU_CXX}" ] || [ ! -x "${AICPU_CXX}" ]; then
+              echo "AICPU compiler not found"
+              echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-<empty>}"
+              echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME:-<empty>}"
+              echo "Searching possible AICPU compiler paths:"
+              find /usr/local/Ascend -path '*aarch64-target-linux-gnu-g++' -type f -print || true
+              exit 1
+            fi
+
+            echo "AICPU_CXX=${AICPU_CXX}"
+            "${AICPU_CXX}" --version
+
+            echo "===== relevant include environment ====="
+            env | grep -E '^(CPLUS_INCLUDE_PATH|CPATH|CXXFLAGS|CFLAGS)=' || true
+
+            echo "===== AICPU predefined macros ====="
+            "${AICPU_CXX}" -dM -E -x c++ /dev/null | grep -E "__GNUC__|__GNUC_MINOR__|__GNUC_PATCHLEVEL__|__cplusplus|__has_builtin" || true
+
+            echo "===== AICPU include search path ====="
+            echo | "${AICPU_CXX}" -x c++ -E -v - 2>&1 | sed -n '/#include <...> search starts here:/,/End of search list./p'
+
+            echo "===== minimal cstdio preprocess ====="
+            printf '%s\n' '#include <cstdio>' 'int main() { return 0; }' > /tmp/aicpu_probe.cpp
+            "${AICPU_CXX}" -E /tmp/aicpu_probe.cpp > /tmp/aicpu_probe.i
+            echo "AICPU cstdio preprocess passed"
           fi
 
           pip install uc-manager
+
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
           # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
           # (does not append to) the env var and would drop the ascend repo.
