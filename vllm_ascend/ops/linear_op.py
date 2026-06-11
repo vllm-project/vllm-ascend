@@ -513,7 +513,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             return tensor_model_parallel_all_reduce(output_parallel)
 
         pad_size = _EXTRA_CTX.pad_size
-        if pad_size > 0 and not (enable_dsa_cp() and "o_proj" in self.layer.prefix):
+        dsa_cp_attn_out = enable_dsa_cp() and ("o_proj" in self.layer.prefix or "wo_b" in self.layer.prefix)
+        if pad_size > 0 and not dsa_cp_attn_out:
             x = F.pad(x, (0, 0, 0, pad_size))
 
         world_size = self.layer.tp_size
@@ -681,6 +682,7 @@ def _get_row_parallel_op(
             "out_proj",  # attn output linear of Qwen3 Next
             "down_proj",  # second MLP of most LLMs
             "attention.dense",  # attn output linear of Bailing
+            "wo_b",  # attn output linear of v4
         ]
         for a_prefix in sp_row_prefixes:
             if a_prefix in prefix:

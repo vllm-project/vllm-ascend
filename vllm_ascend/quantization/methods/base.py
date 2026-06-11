@@ -62,11 +62,12 @@ class AscendLinearScheme(ABC):
         """
         ...
 
-    def get_pertensor_param(self, params_dtype: torch.dtype) -> dict[str, Any]:
+    def get_pertensor_param(self, params_dtype: torch.dtype, **kwargs: Any) -> dict[str, Any]:
         """Return per-tensor parameter specifications (e.g., input_scale).
 
         Args:
             params_dtype: Data type for parameters.
+            **kwargs: Additional keyword arguments for subclass extensions
 
         Returns:
             Dictionary mapping parameter names to empty tensors.
@@ -255,6 +256,7 @@ class AscendMoEScheme(ABC):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
+        tid2eid: Any | None = None,
     ) -> torch.Tensor:
         """Forward computation for MoE layer.
 

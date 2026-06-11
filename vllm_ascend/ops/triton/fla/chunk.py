@@ -14,12 +14,12 @@ import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 
-from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
+from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
-from .chunk_o import chunk_fwd_o
-from .chunk_o_update import chunk_fwd_o_update
+from .chunk_o import chunk_fwd_o  # noqa: F401
 from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
@@ -85,16 +85,29 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices_chunk64,
     )
-    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
-        k=k,
-        w=w,
-        u=u,
-        g=g,
+
+    k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
+    w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
+    u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
+    g_ascendc = g.transpose(1, 2).contiguous()
+    q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
+
+    cu_seqlens = cu_seqlens.to(torch.int64)
+    chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
+    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+        k_ascendc,
+        w_ascendc,
+        u_ascendc,
+        g=g_ascendc,
+        gk=None,
         initial_state=initial_state,
-        output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices_chunk64,
-        chunk_offsets=chunk_offsets_chunk64,
+        output_final_state=True,
+        chunk_size=64,
+        save_new_value=True,
+        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
+        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
+        use_exp2=False,
+        transpose_state_layout=False,
     )
 
     if get_pcp_group().world_size > 1:
@@ -131,26 +144,41 @@ def chunk_gated_delta_rule_fwd(
         else:
             updated_h_state = updated_state[get_pcp_group().rank_in_group - 1, ...]
 
-        h = chunk_fwd_o_update(
-            q=q,
-            v=v_new,
-            h=h,
-            h_update=h_update,
-            updated_h_state=updated_h_state,
-            cu_seqlens=cu_seqlens,
-            chunk_offsets=chunk_offsets_chunk64,
-        )
+        if get_pcp_group().rank_in_group > 0:
+            rerun_initial_state = initial_state.clone()
+            prefill_slice = slice(num_decodes, final_state.shape[0])
+            rerun_initial_state[prefill_slice] = updated_h_state[prefill_slice]
+            h, v_new, _ = chunk_gated_delta_rule_fwd_h(
+                k=k,
+                w=w,
+                u=u,
+                g=g,
+                initial_state=rerun_initial_state,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices_chunk64,
+                chunk_offsets=chunk_offsets_chunk64,
+            )
+            h = h.transpose(1, 2).contiguous()
+            v_new = v_new.transpose(1, 2).contiguous()
 
-    o = chunk_fwd_o(
-        q=q,
-        k=k,
-        v=v_new,
-        h=h,
-        g=g,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_offsets=chunk_offsets_chunk64,
+    o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
+        q_ascendc,
+        k_ascendc,
+        v_new,
+        h,
+        scale,
+        g=g_ascendc,
+        g_gamma=None,
+        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
+        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
+        chunk_size=64,
+        transpose_state_layout=False,
     )
+
+    o = o_ascendc.to(torch.bfloat16).transpose(1, 2).contiguous()
+    v_new = v_new.to(torch.bfloat16).transpose(1, 2).contiguous()
+    h = h.to(torch.bfloat16).transpose(1, 2).contiguous()
 
     if SUPPRESS_LEVEL < 3:
         return g, o, A, final_state, None, None, None
@@ -175,6 +203,22 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         prebuilt_meta=None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
+        logger.debug(
+            "[TritonOps] chunk_gated_delta_rule_fwd: q.shape=%s, k.shape=%s, "
+            "v.shape=%s, g.shape=%s, beta.shape=%s, scale=%s, "
+            "initial_state.shape=%s, output_final_state=%s, cu_seqlens_shape=%s, "
+            "use_qk_l2norm_in_kernel=%s.",
+            q.shape,
+            k.shape,
+            v.shape,
+            g.shape,
+            beta.shape,
+            scale,
+            initial_state.shape if initial_state is not None else None,
+            output_final_state,
+            cu_seqlens.shape if cu_seqlens is not None else None,
+            use_qk_l2norm_in_kernel,
+        )
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
@@ -209,6 +253,9 @@ def chunk_gated_delta_rule(
     prebuilt_meta=None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
+    core_attn_out: torch.Tensor | None = None,
 ):
     r"""
     Args:

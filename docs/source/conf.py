@@ -25,12 +25,10 @@
 #
 import json
 import os
+import sys
+from pathlib import Path
 
-from docutils.parsers.rst import directives
-from sphinx.directives.code import CodeBlock
-
-# import sys
-# sys.path.insert(0, os.path.abspath('.'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # -- Project information -----------------------------------------------------
 
@@ -39,7 +37,7 @@ copyright = "2025, vllm-ascend team"
 author = "the vllm-ascend team"
 
 # The full version, including alpha/beta/rc tags
-release = ""
+release = "0.20.2rc1"
 
 # -- General configuration ---------------------------------------------------
 
@@ -60,38 +58,45 @@ extensions = [
     "sphinx_design",
     "sphinx_togglebutton",
     "sphinx_substitution_extensions",
+    "tools.docs_codegen.sphinx_extension",
 ]
 
 myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
 # Change this when cut down release
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_VLLM_MAIN_VERIFIED_COMMIT_PATH = _REPO_ROOT / ".github" / "vllm-main-verified.commit"
+_VLLM_RELEASE_TAG_PATH = _REPO_ROOT / ".github" / "vllm-release-tag.commit"
+_VLLM_MAIN_VERIFIED_COMMIT = _VLLM_MAIN_VERIFIED_COMMIT_PATH.read_text(encoding="utf-8").strip()
+_VLLM_RELEASE_TAG = _VLLM_RELEASE_TAG_PATH.read_text(encoding="utf-8").strip()
+
 myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.19.1",
+    "vllm_version": "v0.20.2",
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    "vllm_ascend_version": "v0.19.1rc1",
+    "vllm_ascend_version": "v0.20.2rc1",
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    "pip_vllm_ascend_version": "0.19.1rc1",
-    "pip_vllm_version": "0.19.1",
-    # CANN image tag
-    "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
+    "pip_vllm_ascend_version": "0.20.2rc1",
+    "pip_vllm_version": "0.20.2",
+    # CANN image tag paired with the vllm_ascend_version above
+    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.11",
     # vLLM commit hash for main branch
-    "main_vllm_commit": "c7aa186d67b6f051680831418e957c67f34ba7a2",
+    "main_vllm_commit": _VLLM_MAIN_VERIFIED_COMMIT,
     # vLLM tag for main branch
-    "main_vllm_tag": "v0.20.1",
+    "main_vllm_tag": _VLLM_RELEASE_TAG,
     # Python version for main branch
-    "main_python_version": ">= 3.10, < 3.12",
+    "main_python_version": ">= 3.10, < 3.13",
     # CANN version for main branch
-    "main_cann_version": "8.5.0",
+    "main_cann_version": "9.0.0",
     # PyTorch/torch_npu version for main branch
-    "main_pytorch_torch_npu_version": "2.9.0 / 2.9.0",
+    "main_pytorch_torch_npu_version": "2.10.0 / 2.10.0",
     # Triton Ascend version for main branch
-    "main_triton_ascend_version": "3.2.0",
+    "main_triton_ascend_version": "3.2.1",
 }
 
 # For cross-file header anchors
@@ -171,21 +176,6 @@ if READTHEDOCS_VERSION_TYPE == "tag":
     # (readthedocs build both HTML and PDF versions separately)
     if os.path.exists(header_file):
         os.remove(header_file)
-
-
-class SyncMetadataCodeBlock(CodeBlock):
-    """Code block supporting docs-to-YAML sync metadata."""
-
-    option_spec = CodeBlock.option_spec | {
-        "sync-yaml": directives.unchanged_required,
-        "sync-target": directives.unchanged_required,
-        "sync-class": directives.unchanged_required,
-    }
-
-
-def setup(app):
-    app.add_directive("test", SyncMetadataCodeBlock)
-
 
 if __name__ == "__main__":
     print(json.dumps(myst_substitutions))

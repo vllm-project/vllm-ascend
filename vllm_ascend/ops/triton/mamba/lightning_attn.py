@@ -25,6 +25,7 @@ used in BailingMoELinearAttention:
 
 import torch
 from einops import rearrange
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 
@@ -544,6 +545,16 @@ def lightning_attention_npu(
     kv_history: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """lightning attention forward pass (NPU-friendly)."""
+    logger.debug(
+        "[TritonOps] lightning_attention_npu: q.shape=%s, k.shape=%s, v.shape=%s, ed.shape=%s, "
+        "block_size=%s, kv_history.shape=%s",
+        q.shape,
+        k.shape,
+        v.shape,
+        ed.shape,
+        block_size,
+        kv_history.shape if kv_history is not None else None,
+    )
     d = q.shape[-1]
     e = v.shape[-1]
 
@@ -575,7 +586,7 @@ def lightning_attention_npu(
     return output, kv
 
 
-class LightningAttentionKernelNPU:
+class AscendLightningAttentionKernel:
     """NPU-friendly lightning attention kernel for BailingMoE prefill.
 
     Replaces ``MiniMaxText01LinearKernel`` by providing an NPU-friendly
@@ -583,7 +594,7 @@ class LightningAttentionKernelNPU:
     """
 
     @staticmethod
-    def jit_linear_forward_prefix_npu(
+    def jit_linear_forward_prefix(
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,

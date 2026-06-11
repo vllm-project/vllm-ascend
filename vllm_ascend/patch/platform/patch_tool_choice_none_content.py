@@ -19,14 +19,63 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from openai.types.responses import ToolChoiceFunction
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
+    ChatCompletionResponse,
+    ChatCompletionStreamResponse,
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.parser.abstract_parser import DelegatingParser
 
 _NO_FORCED_TOOL_CALL = "_vllm_ascend_no_forced_tool_call"
+
+_original_chat_completion_response_model_dump = ChatCompletionResponse.model_dump
+_original_chat_completion_stream_response_model_dump = ChatCompletionStreamResponse.model_dump
+
+
+def _omit_empty_tool_calls(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return payload
+
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        for field_name in ("message", "delta"):
+            message = choice.get(field_name)
+            if isinstance(message, dict) and message.get("tool_calls") == []:
+                message.pop("tool_calls")
+
+    return payload
+
+
+def _patched_chat_completion_response_model_dump(self, *args, **kwargs):
+    return _omit_empty_tool_calls(_original_chat_completion_response_model_dump(self, *args, **kwargs))
+
+
+def _patched_chat_completion_stream_response_model_dump(self, *args, **kwargs):
+    return _omit_empty_tool_calls(_original_chat_completion_stream_response_model_dump(self, *args, **kwargs))
+
+
+def _patched_chat_completion_stream_response_model_dump_json(self, *args, **kwargs):
+    dump_kwargs = dict(kwargs)
+    indent = dump_kwargs.pop("indent", None)
+    ensure_ascii = dump_kwargs.pop("ensure_ascii", False)
+    payload = _patched_chat_completion_stream_response_model_dump(self, *args, **dump_kwargs)
+    separators = None if indent is not None else (",", ":")
+    return json.dumps(payload, ensure_ascii=ensure_ascii, indent=indent, separators=separators)
+
+
+ChatCompletionResponse.model_dump = _patched_chat_completion_response_model_dump
+ChatCompletionStreamResponse.model_dump = _patched_chat_completion_stream_response_model_dump
+ChatCompletionStreamResponse.model_dump_json = _patched_chat_completion_stream_response_model_dump_json
 
 
 def _is_forced_tool_choice(request) -> bool:

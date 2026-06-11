@@ -1,0 +1,61 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index eef6626..c054264 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -18,6 +18,9 @@
+ # As of 2022-09-06, CMake 3.10 is the minimum supported version.
+ cmake_minimum_required(VERSION 3.10)
+ 
++# NOTICE: force using static libraries
++set(BUILD_SHARED_LIBS OFF)
++
+ # Compiler id for Apple Clang is now AppleClang.
+ if (POLICY CMP0025)
+   cmake_policy(SET CMP0025 NEW)
+@@ -219,6 +222,7 @@ if(ABSL_ENABLE_INSTALL)
+       PATTERN "*.h"
+       PATTERN "copts" EXCLUDE
+       PATTERN "testdata" EXCLUDE
++      PATTERN "options.h" EXCLUDE
+     )
+ 
+   file(READ "absl/base/options.h" ABSL_INTERNAL_OPTIONS_H_CONTENTS)
+diff --git a/absl/base/options.h b/absl/base/options.h
+index f308e1b..09617e0 100644
+--- a/absl/base/options.h
++++ b/absl/base/options.h
+@@ -200,7 +200,7 @@
+ // allowed.
+ 
+ #define ABSL_OPTION_USE_INLINE_NAMESPACE 1
+-#define ABSL_OPTION_INLINE_NAMESPACE_NAME lts_20230802
++#define ABSL_OPTION_INLINE_NAMESPACE_NAME lts_ascend_private
+ 
+ // ABSL_OPTION_HARDENED
+ //
+diff --git a/absl/hash/internal/hash.cc b/absl/hash/internal/hash.cc
+index 11451e5..75886d3 100644
+--- a/absl/hash/internal/hash.cc
++++ b/absl/hash/internal/hash.cc
+@@ -44,7 +44,7 @@ uint64_t MixingHashState::CombineLargeContiguousImpl64(
+                                std::integral_constant<int, 8>{});
+ }
+ 
+-ABSL_CONST_INIT const void* const MixingHashState::kSeed = &kSeed;
++ABSL_CONST_INIT const void* const MixingHashState::kSeed = 0;
+ 
+ // The salt array used by LowLevelHash. This array is NOT the mechanism used to
+ // make absl::Hash non-deterministic between program invocations.  See `Seed()`
+diff --git a/absl/hash/internal/hash.h b/absl/hash/internal/hash.h
+index ef3f366..7714cdb 100644
+--- a/absl/hash/internal/hash.h
++++ b/absl/hash/internal/hash.h
+@@ -1159,7 +1159,7 @@ class ABSL_DLL MixingHashState : public HashStateBase<MixingHashState> {
+ #if (!defined(__clang__) || __clang_major__ > 11) && \
+     (!defined(__apple_build_version__) ||            \
+      __apple_build_version__ >= 19558921)  // Xcode 12
+-    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&kSeed));
++    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(kSeed));
+ #else
+     // Workaround the absence of
+     // https://github.com/llvm/llvm-project/commit/bc15bf66dcca76cc06fe71fca35b74dc4d521021.

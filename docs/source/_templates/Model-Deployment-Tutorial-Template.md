@@ -1,4 +1,8 @@
-# Deployment Tutorial Template Based on the XXX Model
+# Technical Documentation Template for Deployment Tutorials Based on the XXX Model
+
+<p align="center">
+  <a href="Model-Deployment-Tutorial-Template.md"><b>English</b></a> | <a href="Model-Deployment-Tutorial-Template.zh.md"><b>中文</b></a>
+</p>
 
 This template is based on deployment tutorials for models such as DeepSeek-V3.2 and Qwen-VL-Dense, and is intended to serve as a reference for technical documentation writing. Users can systematically construct relevant technical documentation by following the guidelines provided in this template.
 
@@ -39,7 +43,7 @@ This section introduces the features supported by the model, including supported
 | DeepSeek V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
 | Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | ✅ | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
 
-**Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
+>**Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
 
 **Example 2: Reference Citation**
 
@@ -47,7 +51,7 @@ Please refer to the [Supported Features List](../user_guide/support_matrix/suppo
 
 Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for feature configuration information.
 
-## 3 Environment Preparation
+## 3 Prerequisites
 
 ### 3.1 Model Weight
 
@@ -58,7 +62,7 @@ Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for fe
 - `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
 - `DeepSeek-V3.2-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
-It is recommended to download the model weight to a shared directory across multiple nodes (e.g., `/root/.cache/`).
+It is recommended to download the model weight to a shared directory across multiple nodes.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -71,7 +75,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 **Content Writing Requirements:**
 
 - Provide specific installation steps and commands (parameters should be explained with meaning, value range, units, etc.).
-- Add comments for version numbers in code examples indicating that they should be filled in according to the actual version used.
+- **Version Number Writing Specification:** Prefer using placeholders (values are centrally configured). If a fixed value is used and it differs from the documented validation version, a comment MUST be added stating: "Please replace with your actual version."
 - Provide verification commands and expected status: guide users to check the installation result by executing commands (e.g., docker ps), specifying success criteria such as status codes or output characteristics.
 
 ### 4.1 Docker Image Installation
@@ -91,6 +95,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Describe the architectural characteristics and applicable scenarios of single-node deployment.
 - Provide startup command templates and key parameter descriptions.
 - Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK).
+- Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
 
 **Example:**
 
@@ -101,6 +106,8 @@ Startup Command:
 ```bash
 # Omitted
 ```
+
+Common Issues Tip: If you encounter XXX issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 Service Verification:
 
@@ -117,6 +124,7 @@ Expected Result: Omitted (fill in according to actual output).
 - Describe the principles of PD separation architecture and applicable scenarios.
 - Provide startup procedures, key configurations, and **deployment verification instructions**.
 - Indicate performance metrics.
+- Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
 
 **Example:** Omitted
 
@@ -178,26 +186,63 @@ lm_eval \
 
 Omitted. Requirements are the same as for Accuracy Evaluation.
 
-## 9 Best Practices
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
 
 **Content Writing Requirements:**
 
-Provide recommended configurations for three scenarios (long sequence, low latency, high throughput) for each model that can achieve optimal performance, but do not provide specific performance data.
-
-## 10 Performance Tuning (Optional)
-
-**Content Writing Requirements:**
-
-- Summarize key optimization techniques and parameter tuning experiences for the model to help users achieve optimal performance in specific scenarios. Include optimization technique descriptions, enablement methods, parameter tuning recommendations, and typical configuration examples.
-- Hyperlinks to the features guide may be used to allow users to view detailed descriptions of specific features.
-
-### 10.1 Key Optimization Points
-
-In this section, we will introduce the key optimization points that can significantly improve the performance of the XX model. These techniques aim to improve throughput and efficiency in various scenarios.
-
-#### 10.1.1 Basic Optimizations
+Provide recommended configurations for three typical scenarios (long context, low latency, high throughput). Clearly state that the configurations are not globally optimal and guide users to perform tuning based on their actual circumstances.
 
 **Example:**
+
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+#### Table 1: Scenario Overview
+
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
+|----------|----------------|-------------|----------------|------------------------|
+| High Throughput<br>(32K context → 1K output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For short-sequence high throughput, try adjusting xxx parameters |
+| Long Context | | | | |
+| Low Latency | | | | |
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes.
+
+#### Table 2: Detailed Node Configuration
+
+| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|-----------|-----------|--------------|------------------|
+| High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 64 | 30k | 3 | Off | On | On | On |
+| High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 64 | 30k | 12 | Off | On | Off | On |
+| Long Context | Server-P Node / Single Machine | | | | | | | | | | | |
+| Long Context | Server-D Node | | | | | | | | | | | |
+| Low Latency | Server-P Node / Single Machine | | | | | | | | | | | |
+| Low Latency | Server-D Node | | | | | | | | | | | |
+
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in Chapter 5.
+
+### 9.2 Tuning Guidelines (Optional)
+
+#### 9.2.1 General Tuning Reference
+
+**Content Writing Requirements:**
+
+If no special tuning is involved, directly provide a feature combination table and a link to the public performance tuning documentation.
+
+**Example:**
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+#### 9.2.2 Model-Specific Optimizations
+
+**Documentation Requirements:**
+
+If the model has specific optimizations, summarize the key optimization techniques and tuning experience for this model.
+
+**Example:**
+
+#### Optimizations Enabled by Default
 
 The following optimizations are enabled by default and require no additional configuration:
 
@@ -208,29 +253,17 @@ The following optimizations are enabled by default and require no additional con
 | Zero-like Elimination | Removes unnecessary zero-tensor operations in Attention forward pass | Reduces memory footprint, improves matrix operation efficiency |
 | FullGraph Optimization | Captures and replays the entire decoding graph at once using `compilation_config={"cudagraph_mode":"FULL_DECODE_ONLY"}` | Significantly reduces scheduling latency, stabilizes multi-device performance |
 
-#### 10.1.2 Advanced Optimizations (Require Explicit Enablement)
+#### Optimizations That Require Explicit Enabling
 
-**Example:**
+| Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
+| --------------------- | -------------------- | ----------------- | ------------------- | ----------- |
+| FlashComm_v1 | High-concurrency, Tensor Parallelism (TP) scenarios | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | Threshold protection: Only takes effect when the actual number of tokens exceeds the threshold to avoid performance degradation in low-concurrency scenarios |
+| Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling FlashComm_v1 | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as FlashComm_v1, has threshold protection |
+| Weight Prefetch | MLP-intensive scenarios (Dense models) | `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | Utilizes vector computation time to prefetch MLP weights into L2 cache in advance | Requires coordination with prefetch buffer size adjustment |
 
-| Optimization Technique | Technical Principle | Enablement Method | Applicable Scenarios | Precautions |
-| --------- | --------- | --------- | --------- | --------- |
-| FlashComm_v1 | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | High-concurrency, Tensor Parallelism (TP) scenarios | Threshold protection: Only takes effect when the actual number of tokens exceeds the threshold to avoid performance degradation in low-concurrency scenarios |
-| Matmul-ReduceScatter Fusion | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Automatically enabled after enabling FlashComm_v1 | Large-scale distributed environments | Same as FlashComm_v1, has threshold protection |
-| Weight Prefetch | Utilizes vector computation time to prefetch MLP weights into L2 cache in advance | `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | MLP-intensive scenarios (Dense models) | Requires coordination with prefetch buffer size adjustment |
-| Asynchronous Scheduling | Non-blocking task scheduling to improve concurrent processing capability | `--async-scheduling` | Large-scale models, high-concurrency scenarios | Should be used in coordination with FullGraph optimization |
-
-### 10.2 Optimization Highlights
+## 10 FAQ
 
 **Content Writing Requirements:**
 
-Summarize the most noteworthy optimization points during the actual tuning process, distill core experiences, and provide readers with tuning ideas for getting started quickly.
-
-**Example:**
-
-During the actual tuning process, the following points are most critical for performance improvement: The prefetch buffer size needs to be determined through empirical measurement to find the optimal overlap between computation and prefetching; the setting of `max-num-batched-tokens` needs to balance throughput and video memory to avoid excessive chunking or OOM risk; `cudagraph_capture_sizes` must be manually specified and cover the target concurrency; when FlashComm_v1 is enabled, it is also necessary to ensure that the values are multiples of TP; `pa_shape_list` is a temporary tuning parameter that only takes effect for specific batch sizes, requiring attention to version evolution for timely adjustments. The coordinated configuration of the above parameters and environment variables is key to achieving extreme performance.
-
-## 11 FAQ
-
-**Content Writing Requirements:**
-
-Provide solutions to common problems, including but not limited to problem phenomenon description, cause analysis, and solution measures.
+- Add a note at the beginning of the section: For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+- For **model-specific issues**, provide the following elements: problem phenomenon description, cause analysis, and solution measures.

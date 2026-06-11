@@ -12,7 +12,11 @@ def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Con
     if hasattr(config, "num_nextn_predict_layers") and config.num_nextn_predict_layers > 0:
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}.") or weight_name.startswith(MTP_ROT_WEIGHT_NAME):
+            if (
+                weight_name.startswith(f"model.layers.{layer_idx + i}.")
+                or weight_name.startswith(MTP_ROT_WEIGHT_NAME)
+                or weight_name.startswith(f"layers.{layer_idx + i}.")
+            ):
                 return layer_idx + i
     return None
 
@@ -59,5 +63,6 @@ class AscendDeepSeekMTP(DeepSeekMTP):
 
 vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
 vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
+
 vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer = AscendDeepSeekMultiTokenPredictorLayer
 vllm.model_executor.models.deepseek_mtp.DeepSeekMTP = AscendDeepSeekMTP

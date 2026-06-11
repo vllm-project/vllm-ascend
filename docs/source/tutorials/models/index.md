@@ -24,6 +24,8 @@ Qwen3.5-27B.md
 Qwen3.5-397B-A17B.md
 DeepSeek-V3.1.md
 DeepSeek-V3.2.md
+DeepSeek-V4-Flash.md
+DeepSeek-V4-Pro.md
 DeepSeek-R1.md
 DeepSeekOCR2.md
 GLM4.x.md
@@ -33,6 +35,12 @@ Kimi-K2.5.md
 PaddleOCR-VL.md
 MiniMax-M2.5.md
 Hunyuan-A13B-Instruct.md
+Hy3-preview.md
 Minitron-8B-Base.md
 LLaVA-OneVision-Qwen2-0.5B-OV.md
+gpt-oss-120b.md
+Mixtral-8x7B-Instruct-v0.1.md
+Qwen3-ASR-1.7B.md
+Qwen2.5-Math-RM-72B.md
+InternVL3.5
 :::

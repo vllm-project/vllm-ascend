@@ -17,6 +17,6 @@ tasks:
     value: 0.52
 
 num_fewshot: 0
-apply_chat_template: false
+apply_chat_template: true
 fewshot_as_multiturn: false
 batch_size: 32

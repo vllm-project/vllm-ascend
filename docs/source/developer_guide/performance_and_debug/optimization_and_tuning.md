@@ -68,7 +68,7 @@ Make sure your vLLM and vLLM Ascend are installed after your Python configuratio
 
 ### 1. Compilation Optimization
 
-#### 1.1. Install optimized `python`
+#### 1.1. Install optimized `python` (OUT OF DATE)
 
 Python supports **LTO** and **PGO** optimization starting from version `3.6` and above, which can be enabled at compile time. And we have offered optimized `python` packages directly to users for the sake of convenience. You can also reproduce the `python` build following this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) according to your specific scenarios.
 
@@ -84,6 +84,7 @@ wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libssl.so.1.1
 wget https://repo.oepkgs.net/ascend/pytorch/vllm/python/py311_bisheng.tar.gz
 
 # Configure python and pip
+
 cp ./*.so* /usr/local/lib
 tar -zxvf ./py311_bisheng.tar.gz -C /usr/local/
 mv  /usr/local/py311_bisheng/  /usr/local/python

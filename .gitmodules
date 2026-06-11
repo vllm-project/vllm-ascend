@@ -1,4 +1,5 @@
 [submodule "csrc/third_party/catlass"]
 	path = csrc/third_party/catlass
 	url = https://gitcode.com/cann/catlass.git
-	branch = main
+	branch = master
+	commit = 41bf90da655bba3c66d0acd7e00abe33960ecfd6
