@@ -5,6 +5,11 @@ Batch invariance is currently in beta. Some features are still under active deve
 Track progress and planned improvements at <https://github.com/vllm-project/vllm-ascend/issues/5487>
 ```
 
+```{note}
+To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.
+For installation instructions, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python>
+```
+
 This document shows how to enable batch invariance in vLLM-Ascend. Batch invariance ensures that the output of a model is deterministic and independent of the batch size or the order of requests in a batch.
 
 ## Motivation
@@ -23,8 +28,7 @@ We will support Atlas A5 and other NPUs in the future.
 
 ## Software Requirements
 
-Batch invariance requires a custom operator library for Atlas A2 and A3 inference products.
-The operator library is automatically installed as part of the standard vllm-ascend installation process.
+Batch invariance requires a custom operator library for Atlas A2 and A3 inference products, and users need to set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
 
 ## Enabling Batch Invariance
 
@@ -107,7 +111,7 @@ for output in outputs:
 Batch invariance has been tested and verified on the following models:
 
 - **Qwen3 (Dense)**: `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`
-- **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`
+- **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-235B-A22B`
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm-ascend/issues/new/choose).
 
