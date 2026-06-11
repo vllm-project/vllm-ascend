@@ -17,7 +17,14 @@
 #define DISPATCH_FFN_COMBINE_TORCH_ADPT_H
 
 namespace vllm_ascend {
-std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
+
+// Profiling buffer sizing — must match op_host infer constants
+constexpr int64_t kMaxInferGetBlockNumUb = 128;
+constexpr int64_t kMixAic12SlotsPerGroup = 3;
+constexpr int64_t kProfSizePerCore = 2048;
+constexpr int64_t kProfilingElems = kMaxInferGetBlockNumUb * kMixAic12SlotsPerGroup * kProfSizePerCore;
+
+std::tuple<at::Tensor&, at::Tensor&, at::Tensor> dispatch_ffn_combine(
     const at::Tensor& x,
     const at::TensorList& weight1,
     const at::TensorList& weight2,
@@ -37,6 +44,10 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     char *group_ep_ptr = const_cast<char *>(group.data());
     bool is_int8 = weight1[0].dtype() == at::kChar;
     bool is_int4 = weight1[0].dtype() == at::kInt;
+
+    auto opts = x.options();
+    at::Tensor profilingData = at::zeros({kProfilingElems}, opts.dtype(at::kLong));
+
     if (is_int8) {
         EXEC_NPU_CMD(aclnnDispatchFFNCombine,
                  x,
@@ -51,7 +62,8 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  max_output_size,
                  swiglu_limit,
                  out,
-                 expert_token_nums);
+                 expert_token_nums,
+                 profilingData);
     } else if (is_int4){
         EXEC_NPU_CMD(aclnnDispatchFFNCombineW4A8,
                  x,
@@ -82,8 +94,8 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  max_output_size,
                  out,
                  expert_token_nums);
-    }    
-    return {out, expert_token_nums};
+    }
+    return {out, expert_token_nums, profilingData};
 }
 }
 #endif

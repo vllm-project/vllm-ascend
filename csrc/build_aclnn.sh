@@ -284,6 +284,31 @@ log_selected_ops
 
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
+
+  # TRACE_PREPROCESSOR_HOOK_START
+  # -----------------------------------------------------------------
+  # Run trace_preprocessor.py on op_kernel source directories BEFORE
+  # compilation to replace TRACE_POINT strings with unique integer
+  # IDs and generate point_map.json for Chrome trace decoding.
+  # The script modifies source files IN PLACE — git checkout restores
+  # the originals after build.
+  # Set TRACE_DISABLE=1 to skip this step.
+  # -----------------------------------------------------------------
+  if [[ -z "${TRACE_DISABLE:-}" ]] && [[ -f "${ROOT_DIR}/csrc/trace_preprocessor.py" ]]; then
+      _TRACE_BUILD_OUT="${BUILD_DIR}/trace_preprocess_out"
+      for _op_kernel_dir in "${ROOT_DIR}/csrc/mc2/dispatch_ffn_combine/op_kernel"; do
+          if [[ -d "${_op_kernel_dir}" ]]; then
+              log "trace_preprocessor: processing ${_op_kernel_dir} -> ${_TRACE_BUILD_OUT}"
+              mkdir -p "${_TRACE_BUILD_OUT}"
+              python3 "${ROOT_DIR}/csrc/trace_preprocessor.py" \
+                  "${_op_kernel_dir}" "${_TRACE_BUILD_OUT}" --modify \
+                  && log "trace_preprocessor: OK, point_map.json -> ${_TRACE_BUILD_OUT}/point_map.json" \
+                  || log "trace_preprocessor: WARNING — preprocessing skipped (python3 missing or script error)"
+          fi
+      done
+  fi
+  # TRACE_PREPROCESSOR_HOOK_END
+
   bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
   log "build.sh finished"
 

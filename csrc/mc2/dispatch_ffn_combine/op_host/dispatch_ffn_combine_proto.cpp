@@ -23,16 +23,25 @@ namespace ops {
 const size_t ATTR_GROUP = 0;
 const size_t ATTR_RANK_SIZE = 1;
 const size_t SUPPORT_DIM_SIZE = 2;
+const size_t OUTPUT_PROFILING_DATA = 2;
+
+// Profiling buffer sizing — upper bound for infer (no GetBlockNum at infer time)
+constexpr uint32_t MAX_INFER_GETBLOCKNUM_UB = 128;
+constexpr uint32_t MIX_AIC_1_2_SLOTS_PER_GROUP = 3;
+constexpr uint32_t MAX_PROFILING_CORE_SLOTS = MAX_INFER_GETBLOCKNUM_UB * MIX_AIC_1_2_SLOTS_PER_GROUP;
+constexpr uint32_t PROF_SIZE_PER_CORE = 2048;
 
 static ge::graphStatus InferShapeDispatchFFNCombine(gert::InferShapeContext* context) {
-  (void) context;
+  gert::Shape *profilingShape = context->GetOutputShape(OUTPUT_PROFILING_DATA);
+  if (profilingShape != nullptr) {
+    profilingShape->SetDimNum(1);
+    profilingShape->SetDim(0, static_cast<int64_t>(MAX_PROFILING_CORE_SLOTS) * PROF_SIZE_PER_CORE);
+  }
   return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus InferDataTypeDispatchFFNCombine(gert::InferDataTypeContext* context) {
-  (void) context;
-  // auto d_type = context->GetInputDataType(0);
-  // context->SetOutputDataType(0, d_type);
+  context->SetOutputDataType(OUTPUT_PROFILING_DATA, ge::DT_INT64);
   return ge::GRAPH_SUCCESS;
 }
 

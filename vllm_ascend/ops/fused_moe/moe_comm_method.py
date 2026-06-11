@@ -306,7 +306,7 @@ class FusedMC2CommImpl(MoECommMethod):
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
             out = torch.empty_like(fused_experts_input.hidden_states)
-            torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
+            _out, _expert_token_nums, _profiling_data = torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=fused_experts_input.hidden_states,
                 weight1=fused_experts_input.weights.w1,
                 weight2=fused_experts_input.weights.w2,
@@ -324,6 +324,8 @@ class FusedMC2CommImpl(MoECommMethod):
                 expert_token_nums=self.expert_token_nums,
             )
             expert_tokens = self.expert_token_nums
+            # Store profiling_data to keep the tensor alive until next invocation
+            self._profiling_data = _profiling_data
         elif get_ascend_config().enable_fused_mc2 == 2:
             assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
             out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore

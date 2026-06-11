@@ -47,6 +47,7 @@ extern aclnnStatus aclnnInnerDispatchFFNCombineGetWorkspaceSize(const aclTensor*
                                                          const char* group, int64_t maxOutputSize,
                                                          bool transB, bool weightNz, double swigluLimit,
                                                          const aclTensor* out, const aclTensor* expertTokenNums,
+                                                         const aclTensor* profilingData,
                                                          uint64_t* workspaceSize, aclOpExecutor** executor);
 extern aclnnStatus aclnnInnerDispatchFFNCombine(void *workspace, uint64_t workspaceSize,
                                             aclOpExecutor *executor, aclrtStream stream);
@@ -59,6 +60,7 @@ aclnnStatus aclnnDispatchFFNCombineGetWorkspaceSize(const aclTensor* x, const ac
                                                     const aclTensor* probs, const aclTensor* xActiveMask,
                                                     const char* group, int64_t maxOutputSize, double swigluLimit,
                                                     const aclTensor* out, const aclTensor* expertTokenNums,
+                                                    const aclTensor* profilingData,
                                                     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     bool transB = false;
@@ -66,7 +68,7 @@ aclnnStatus aclnnDispatchFFNCombineGetWorkspaceSize(const aclTensor* x, const ac
 
     aclnnStatus ret = aclnnInnerDispatchFFNCombineGetWorkspaceSize(x, weight1, weight2, expertId, scale1, scale2, probs, xActiveMask, group,
                                                                     maxOutputSize, transB, weightNz, swigluLimit,
-                                                                    out, expertTokenNums, workspaceSize, executor);
+                                                                    out, expertTokenNums, profilingData, workspaceSize, executor);
     return ret;
 }
 

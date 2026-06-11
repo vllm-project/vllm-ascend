@@ -120,7 +120,7 @@ class TestDispatchFFNCombine:
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
         expert_token_nums = self.generate_random_tensor((1, e), dtype=torch.int32).npu()
 
-        torch.ops._C_ascend.dispatch_ffn_combine(
+        _out, _expert_token_nums, _profiling_data = torch.ops._C_ascend.dispatch_ffn_combine(
             x=x,
             weight1=weight1_nz_npu,
             weight2=weight2_nz_npu,
@@ -172,7 +172,7 @@ class TestDispatchFFNCombine:
         out = self.generate_random_tensor((m, k), dtype=torch.bfloat16).npu()
         expert_token_nums = self.generate_random_tensor((1, e), dtype=torch.int32).npu()
 
-        torch.ops._C_ascend.dispatch_ffn_combine(
+        _out, _expert_token_nums, _profiling_data = torch.ops._C_ascend.dispatch_ffn_combine(
             x=x,
             weight1=weight1_nz_npu,
             weight2=weight2_nz_npu,
