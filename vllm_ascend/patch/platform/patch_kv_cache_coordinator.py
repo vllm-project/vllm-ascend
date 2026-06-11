@@ -136,7 +136,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if self.dcp_world_size * self.pcp_world_size > 1:
             block_size *= self.dcp_world_size * self.pcp_world_size
         if hasattr(kv_cache_spec, "compress_ratio"):
-            compress_ratio = kv_cache_spec.compress_ratio if kv_cache_spec.compress_ratio >= 1 else 1
+            compress_ratio = kv_cache_spec.compress_ratio or 1
+            compress_ratio = compress_ratio if compress_ratio >= 1 else 1
             block_size *= compress_ratio
         return block_size
 
@@ -210,10 +211,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
 
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
-            effective_block_size = self._get_effective_block_size(kv_cache_spec)
-            if kv_cache_spec.block_size == self.hash_block_size:
+            target_block_size = kv_cache_spec.block_size
+            if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
+                target_block_size *= self.dcp_world_size * self.pcp_world_size
+            if target_block_size == self.hash_block_size:
                 return block_hashes
-            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, effective_block_size)
+            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, target_block_size)
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
