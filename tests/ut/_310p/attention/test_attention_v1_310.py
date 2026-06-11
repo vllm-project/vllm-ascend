@@ -212,11 +212,16 @@ class TestAscendAttentionBackendImpl310(TestBase):
 
         mock_paged_attention.assert_called_once()
 
-    def test_forward_mtp_310(self):
+    @patch("vllm_ascend._310p.attention.attention_v1.AscendAttentionBackendImpl310.forward_chunked_prefill_310")
+    def test_forward_mtp_310(self, mock_chunked_prefill):
         query = torch.randn(4, 8 * 64)
         key, value = None, None
         output = torch.empty_like(query)
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.SpecDecoding
-        with self.assertRaises(NotImplementedError):
-            output = self.impl.forward_impl(query, key, value, None, metadata, output)
+        mock_chunked_prefill.return_value = output
+
+        result = self.impl.forward_impl(query, key, value, None, metadata, output)
+
+        mock_chunked_prefill.assert_called_once_with(query, metadata, output)
+        self.assertIs(result, output)

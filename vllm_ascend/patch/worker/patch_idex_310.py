@@ -1,15 +1,29 @@
 import vllm
 
-from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+import vllm_ascend.ops.gdn as gdn_ops
+from vllm_ascend._310p.ops.fla.gdn_310 import (
+    AscendGatedDeltaNetAttention310,
+    update_conv1d_graph_params_310p,
+)
 from vllm_ascend._310p.ops.fla.idex import (
     prepare_chunk_indices_310,
     prepare_chunk_offsets_310,
 )
+from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.utils import vllm_version_is
 
 vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices = prepare_chunk_indices_310
 
 vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets = prepare_chunk_offsets_310
+
+# 310P GDN causal conv1d uses buffer_replay; keep shared gdn.py unchanged.
+gdn_ops.update_conv1d_graph_params = update_conv1d_graph_params_310p
+
+# 310P: skip NPU index_fill_ when there are no discarded requests.
+AscendSpecDecodeBaseProposer.prepare_next_token_ids_padded = (  # type: ignore[method-assign]
+    AscendSpecDecodeBaseProposer310.prepare_next_token_ids_padded
+)
 
 # Patch _warmup_prefill_kernels to no-op on 310P: triton.next_power_of_2 does
 # not exist in the triton version used on 310P CI, and NPU does not use these

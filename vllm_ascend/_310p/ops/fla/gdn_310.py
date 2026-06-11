@@ -22,7 +22,9 @@ import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
-from vllm_ascend.utils import enable_sp, vllm_version_is
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params
+from vllm_ascend.utils import enable_sp, vllm_version_is, weak_ref_tensors
 
 if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
@@ -37,6 +39,84 @@ from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_r
 from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 
+_CONV1D_310_OP_BACKEND = "310"
+_CONV1D_310_BUFFER_REPLAY = "buffer_replay"
+
+
+def _copy_host_tuple_to_int64_buffer(
+    buffer: torch.Tensor,
+    host_tuple: tuple[int, ...],
+) -> None:
+    if not host_tuple:
+        return
+    num_elements = len(host_tuple)
+    cpu_values = torch.tensor(host_tuple, dtype=torch.int64, device="cpu", pin_memory=buffer.is_pinned())
+    buffer[:num_elements].copy_(cpu_values, non_blocking=True)
+
+
+def _as_int64_device_view(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.dtype == torch.int64:
+        return tensor
+    return tensor.to(torch.int64)
+
+
+def _get_spec_causal_conv1d_device_args(
+    attn_metadata: GDNAttentionMetadata,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_spec_decodes = attn_metadata.num_spec_decodes
+    query_start_loc_buf = _as_int64_device_view(attn_metadata.spec_query_start_loc)
+    cache_indices_buf = _as_int64_device_view(attn_metadata.spec_state_indices_tensor[:, 0])
+    num_accepted_buf = _as_int64_device_view(attn_metadata.num_accepted_tokens)
+    return (
+        query_start_loc_buf[: num_spec_decodes + 1],
+        cache_indices_buf[:num_spec_decodes],
+        num_accepted_buf[:num_spec_decodes],
+        query_start_loc_buf,
+        cache_indices_buf,
+        num_accepted_buf,
+    )
+
+
+def _register_310_conv1d_buffer_replay(
+    graph_params,
+    num_actual_tokens: int,
+    *,
+    mixed_qkv,
+    conv_weights,
+    conv_state,
+    bias,
+    activation_num: int,
+    run_mode: int,
+    branch: str,
+    layer_prefix: str,
+    qsl_dev: torch.Tensor,
+    cidx_dev: torch.Tensor,
+    nat_dev: torch.Tensor | None,
+    q_per_seq: int,
+) -> None:
+    graph_params.conv1d_params[num_actual_tokens].append(
+        (
+            None,
+            weak_ref_tensors(mixed_qkv),
+            weak_ref_tensors(conv_weights),
+            weak_ref_tensors(conv_state),
+            bias,
+            activation_num,
+            PAD_SLOT_ID,
+            run_mode,
+            branch,
+            layer_prefix,
+            weak_ref_tensors(qsl_dev),
+            weak_ref_tensors(cidx_dev),
+            weak_ref_tensors(nat_dev) if nat_dev is not None else None,
+            q_per_seq,
+            _CONV1D_310_OP_BACKEND,
+            _CONV1D_310_BUFFER_REPLAY,
+        )
+    )
+    graph_params.conv1d_handles[num_actual_tokens].append(None)
+    graph_params.conv1d_events[num_actual_tokens].append(None)
+
 
 def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return F.normalize(x.to(torch.float32), p=2, dim=-1, eps=eps).to(x.dtype)
@@ -50,15 +130,29 @@ def _flatten_state_indices(
     if ssm_state_indices.ndim == 1:
         return ssm_state_indices[:total_tokens].to(torch.int32).contiguous()
 
-    seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-    ssm_state_indices = ssm_state_indices[: seq_lens.shape[0]]
-    positions = torch.arange(
-        ssm_state_indices.shape[1],
-        device=ssm_state_indices.device,
-        dtype=seq_lens.dtype,
-    )
-    valid = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
-    return ssm_state_indices.masked_select(valid)[:total_tokens].to(torch.int32).contiguous()
+    num_seqs = (cu_seqlens[1:] - cu_seqlens[:-1]).shape[0]
+    seq_lens = cu_seqlens[1 : num_seqs + 1] - cu_seqlens[:num_seqs]
+    ssm_state_indices = ssm_state_indices[:num_seqs]
+
+    # Uniform spec-decode ACL graph uses fixed q_len per request; reshape avoids
+    # NPU masked_select which breaks stream capture (aclnnMaskedSelect / 107027).
+    if _EXTRA_CTX.capturing or (seq_lens.numel() > 0 and torch.all(seq_lens == seq_lens[0])):
+        q_per_seq = ssm_state_indices.shape[1]
+        flat = ssm_state_indices[:, :q_per_seq].reshape(-1)
+        return flat[:total_tokens].to(torch.int32).contiguous()
+
+    # Eager mixed batches with variable seq_lens: compact on CPU, copy back async.
+    ssm_cpu = ssm_state_indices.cpu()
+    seq_lens_cpu = seq_lens.cpu()
+    q_per_seq = ssm_cpu.shape[1]
+    positions = torch.arange(q_per_seq)
+    valid = positions.unsqueeze(0) < seq_lens_cpu.unsqueeze(1)
+    flat_cpu = ssm_cpu.masked_select(valid).to(torch.int32).contiguous()[:total_tokens]
+    if not flat_cpu.is_pinned:
+        flat_cpu = flat_cpu.pin_memory()
+    flat_dev = torch.empty(flat_cpu.numel(), dtype=torch.int32, device=ssm_state_indices.device)
+    flat_dev.copy_(flat_cpu, non_blocking=True)
+    return flat_dev.contiguous()
 
 
 def npu_recurrent_gated_delta_rule_310(
@@ -106,6 +200,33 @@ def _310p_get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
 
 
 _original_get_state_dtype = GatedDeltaNetAttention.get_state_dtype
+
+
+def _merge_spec_and_non_spec_outputs_310(
+    core_attn_out: torch.Tensor,
+    num_actual_tokens: int,
+    spec_token_indx: torch.Tensor,
+    non_spec_token_indx: torch.Tensor,
+    core_attn_out_spec: torch.Tensor,
+    core_attn_out_non_spec: torch.Tensor,
+) -> None:
+    """Merge spec/non-spec GDN outputs back into the batch layout.
+
+    Avoid NPU ``index_copy_`` (IndexPutV2) which fails on some layouts; use
+    direct indexing instead. Validate lengths so mixed prefill+spec batches
+    do not pass mismatched tensors from spec ops.
+    """
+    spec_out = core_attn_out_spec.squeeze(0)
+    non_spec_out = core_attn_out_non_spec.squeeze(0)
+    n_spec = spec_token_indx.numel()
+    n_non_spec = non_spec_token_indx.numel()
+    if spec_out.shape[0] != n_spec:
+        raise RuntimeError(f"GDN spec output length {spec_out.shape[0]} != spec_token_indx {n_spec}")
+    if non_spec_out.shape[0] != n_non_spec:
+        raise RuntimeError(f"GDN non-spec output length {non_spec_out.shape[0]} != non_spec_token_indx {n_non_spec}")
+    out = core_attn_out[:num_actual_tokens]
+    out[spec_token_indx] = spec_out
+    out[non_spec_token_indx] = non_spec_out
 
 
 class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
@@ -171,19 +292,59 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
-                mixed_qkv_spec,
-                conv_weights,
-                bias=self.conv1d.bias,
-                conv_states=conv_state,
-                query_start_loc=spec_query_start_loc.to(torch.int64),
-                cache_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes].to(torch.int64),
-                initial_state_mode=None,
-                num_accepted_tokens=num_accepted_tokens.to(torch.int64),
-                activation_mode=activation_num,
-                pad_slot_id=PAD_SLOT_ID,
-                run_mode=1,
-            )
+            # Align with spec sub-batch only (mixed prefill+spec has fewer spec decodes
+            # than total requests; full-batch tensor fails tiling / wrong state offset).
+            spec_num_accepted = num_accepted_tokens[: attn_metadata.num_spec_decodes].to(torch.int64)
+            uniform_spec_only = attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0
+            if _EXTRA_CTX.capturing and uniform_spec_only:
+                qsl_dev, cidx_dev, nat_dev, qsl_buf, cidx_buf, nat_buf = _get_spec_causal_conv1d_device_args(
+                    attn_metadata
+                )
+                spec_q_per_seq = int(attn_metadata.spec_state_indices_tensor.size(-1))
+                graph_params = get_draft_graph_params() if _EXTRA_CTX.is_draft_model else get_graph_params()
+                _register_310_conv1d_buffer_replay(
+                    graph_params,
+                    num_actual_tokens,
+                    mixed_qkv=mixed_qkv_spec,
+                    conv_weights=conv_weights,
+                    conv_state=conv_state,
+                    bias=self.conv1d.bias,
+                    activation_num=activation_num,
+                    run_mode=1,
+                    branch="spec",
+                    layer_prefix=self.prefix,
+                    qsl_dev=qsl_buf,
+                    cidx_dev=cidx_buf,
+                    nat_dev=nat_buf,
+                    q_per_seq=spec_q_per_seq,
+                )
+                mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
+                    mixed_qkv_spec,
+                    conv_weights,
+                    bias=self.conv1d.bias,
+                    conv_states=conv_state,
+                    query_start_loc=qsl_dev,
+                    cache_indices=cidx_dev,
+                    initial_state_mode=None,
+                    num_accepted_tokens=nat_dev,
+                    activation_mode=activation_num,
+                    pad_slot_id=PAD_SLOT_ID,
+                    run_mode=1,
+                )
+            else:
+                mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
+                    mixed_qkv_spec,
+                    conv_weights,
+                    bias=self.conv1d.bias,
+                    conv_states=conv_state,
+                    query_start_loc=spec_query_start_loc.to(torch.int64),
+                    cache_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes].to(torch.int64),
+                    initial_state_mode=None,
+                    num_accepted_tokens=spec_num_accepted,
+                    activation_mode=activation_num,
+                    pad_slot_id=PAD_SLOT_ID,
+                    run_mode=1,
+                )
 
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
@@ -252,7 +413,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     state=ssm_state,
                     cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
                     ssm_state_indices=spec_state_indices_tensor,
-                    num_accepted_tokens=num_accepted_tokens,
+                    num_accepted_tokens=spec_num_accepted,
                     use_qk_l2norm_in_kernel=True,
                 )
             else:
@@ -309,17 +470,14 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             )
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            merged_out = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_non_spec.dtype,
-                device=core_attn_out_non_spec.device,
+            _merge_spec_and_non_spec_outputs_310(
+                core_attn_out,
+                num_actual_tokens,
+                spec_token_indx,
+                non_spec_token_indx,
+                core_attn_out_spec,
+                core_attn_out_non_spec,
             )
-            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            if not enable_sp():
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
-            else:
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)[:num_actual_tokens]
         elif spec_sequence_masks is not None:
             if not enable_sp():
                 core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
@@ -331,3 +489,95 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
             else:
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
         maybe_save_kv_layer_to_connector("", [])
+
+
+def _get_spec_causal_conv1d_update_host_args_310p(
+    attn_metadata: GDNAttentionMetadata,
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    """Build spec conv1d host args from GDN metadata without patch_gdn_attn."""
+    from vllm_ascend.ops.gdn import to_int64_tuple
+
+    num_spec_decodes = attn_metadata.num_spec_decodes
+    return (
+        to_int64_tuple(attn_metadata.spec_query_start_loc[: num_spec_decodes + 1]),
+        to_int64_tuple(attn_metadata.spec_state_indices_tensor[:, 0][:num_spec_decodes]),
+        to_int64_tuple(attn_metadata.num_accepted_tokens[:num_spec_decodes]),
+    )
+
+
+def update_conv1d_graph_params_310p(
+    update_stream,
+    forward_context,
+    num_tokens,
+    vllm_config,
+    is_draft_model=False,
+    draft_attn_metadatas=None,
+):
+    """310P uniform spec-decode GDN conv1d graph replay via device buffer updates."""
+    from vllm_ascend.ops.gdn import _pad_conv1d_host_args_to_capture
+
+    graph_params = get_draft_graph_params() if is_draft_model else get_graph_params()
+
+    if (
+        graph_params is None
+        or num_tokens not in graph_params.conv1d_params
+        or len(graph_params.conv1d_params[num_tokens]) == 0
+    ):
+        return
+
+    attn_metadata = forward_context.attn_metadata
+    if is_draft_model and draft_attn_metadatas is not None:
+        attn_metadata = draft_attn_metadatas
+
+    with torch.npu.stream(update_stream):
+        for param in graph_params.conv1d_params[num_tokens]:
+            param_list = list(param)
+            if len(param_list) < 16:
+                continue
+            op_backend = param_list[14]
+            replay_mode = param_list[15]
+            if op_backend != _CONV1D_310_OP_BACKEND or replay_mode != _CONV1D_310_BUFFER_REPLAY:
+                continue
+
+            (
+                _output,
+                mixed_qkv,
+                _conv_weights,
+                _conv_state,
+                _bias,
+                _activation_num,
+                _pad_slot_id,
+                run_mode,
+                branch,
+                layer_prefix,
+                qsl_dev,
+                cidx_dev,
+                nat_dev,
+                q_per_seq,
+            ) = param_list[:14]
+
+            if run_mode != 1 or branch != "spec" or attn_metadata is None:
+                continue
+
+            meta = attn_metadata
+            if isinstance(meta, dict):
+                meta = meta.get(layer_prefix, None)
+            if not isinstance(meta, GDNAttentionMetadata):
+                continue
+            if meta.spec_sequence_masks is None:
+                continue
+
+            cap_x_dim0 = int(mixed_qkv.size(0))
+            qsl_host, cidx_host, num_accepted_host = _get_spec_causal_conv1d_update_host_args_310p(meta)
+            new_query_start_loc, new_cache_indices, new_num_accepted = _pad_conv1d_host_args_to_capture(
+                qsl_host,
+                cidx_host,
+                num_accepted_host,
+                cap_x_dim0=cap_x_dim0,
+                q_per_seq=q_per_seq,
+                with_num_accepted=True,
+            )
+            _copy_host_tuple_to_int64_buffer(qsl_dev, new_query_start_loc)
+            _copy_host_tuple_to_int64_buffer(cidx_dev, new_cache_indices)
+            if nat_dev is not None:
+                _copy_host_tuple_to_int64_buffer(nat_dev, new_num_accepted)
