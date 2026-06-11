@@ -37,17 +37,18 @@ jobs:
       - name: Check user authorization
         id: auth
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
           PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
           if [ "$ACTOR" = "$PR_AUTHOR" ]; then
+            echo "User $ACTOR is the PR author, authorized."
             echo "authorized=true" >> "$GITHUB_OUTPUT"
           else
-            PERMISSION=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission')
-            case "$PERMISSION" in
+            ROLE_NAME=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.role_name' 2>/dev/null || true)
+            case "$ROLE_NAME" in
               triage|write|maintain|admin)
                 echo "authorized=true" >> "$GITHUB_OUTPUT"
                 ;;
@@ -59,19 +60,22 @@ jobs:
           fi
 
       - name: Post unauthorized comment
-        if: steps.auth.outputs.authorized != 'true'
+        if: steps.auth.outputs.authorized == 'false'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
-          issue-number: ${{ github.event.client_payload.github.payload.issue.number }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
             [Bot]: rerun command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /rerun.
           reactions: confused
 
+      - name: Fail if unauthorized
+        if: steps.auth.outputs.authorized == 'false'
+        run: exit 1
+
       - name: Re-run failed jobs
         id: rerun
-        if: steps.auth.outputs.authorized == 'true'
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
@@ -99,7 +103,6 @@ jobs:
           echo "rerun_count=$COUNT" >> "$GITHUB_OUTPUT"
 
       - name: Comment result on PR
-        if: steps.auth.outputs.authorized == 'true'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}

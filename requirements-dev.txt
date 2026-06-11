@@ -24,3 +24,4 @@ mindstudio-probe>=8.3.0
 xlite==0.1.0rc10.dev210
 uc-manager
 coverage
+ninja
