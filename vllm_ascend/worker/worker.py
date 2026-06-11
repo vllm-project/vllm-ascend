@@ -722,11 +722,7 @@ class NPUWorker(WorkerBase):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> (
-        dict[int, KVConnectorHandshakeMetadata]
-        | dict[tuple[int, int], KVConnectorHandshakeMetadata]
-        | None
-    ):
+    ) -> dict[int, KVConnectorHandshakeMetadata] | dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
         """Get KV connector metadata from this worker if available."""
         if not has_kv_transfer_group():
             return None
