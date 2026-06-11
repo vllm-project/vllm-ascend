@@ -18,6 +18,12 @@
 name: 'Cache csrc Build Directory'
 
 on:
+<<<<<<< HEAD
+=======
+  schedule:
+    # UTC+8: 2am every day
+    - cron: '0 18 * * *'
+>>>>>>> a7eb5b16 ([Fix])
   workflow_dispatch:
 
 defaults:

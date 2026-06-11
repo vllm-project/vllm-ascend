@@ -15,168 +15,185 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: Verify csrc Build Cache
-
+name: 'Cache csrc Build Directory'
 on:
-  pull_request:
+  push:
     branches:
       - main
-    paths:
-      - '.github/workflows/scripts/generate_cache_matrix.py'
-      - '.github/workflows/schedule_cache_csrc_build.yaml'
-      - '.github/workflows/test_csrc_build_cache.yaml'
+  schedule:
+    # UTC+8: 2am every day
+    - cron: '0 18 * * *'
+  workflow_dispatch:
 
 defaults:
   run:
     shell: bash -el {0}
 
+concurrency:
+  group: ascend-csrc-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+  UV_HTTP_TIMEOUT: 120
+  UV_NO_CACHE: 1
+  UV_SYSTEM_PYTHON: 1
+  # CI-internal CANN image registry mirror — this is infrastructure configuration,
+  # not a per-image dependency. All consumers use the same registry prefix.
+  IMAGE_REGISTRY: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann
+
 jobs:
-  validate-generator:
-    name: Validate cache matrix generator
-    runs-on: ubuntu-latest
+  # -------------------------------------------------------------------------
+  # Job 1: dynamically build the matrix from Dockerfiles
+  # -------------------------------------------------------------------------
+  setup-matrix:
+    name: Setup build matrix
+    runs-on: linux-aarch64-a2b3-0
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install dependencies
+      - name: Generate build matrix from Dockerfiles
+        id: generate
         run: |
           python3 -m pip install pyyaml
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            matrix=$(python3 .github/workflows/scripts/generate_cache_matrix.py --branch-filter "${GITHUB_REF_NAME}")
+          else
+            matrix=$(python3 .github/workflows/scripts/generate_cache_matrix.py)
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
-      - name: Run generate_cache_matrix.py (full matrix)
+  # -------------------------------------------------------------------------
+  # Job 2: build csrc cache for all branches × dockerfiles × archs
+  # -------------------------------------------------------------------------
+  build-cache:
+    name: ${{ matrix.branch_normalized }}-${{ matrix.dockerfile }}-${{ matrix.arch }}
+    needs: setup-matrix
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
+
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.branch }}
+
+      - name: Config mirrors (ubuntu)
+        if: matrix.os_type == 'ubuntu'
         run: |
-          python3 .github/workflows/scripts/generate_cache_matrix.py \
-            | tee /tmp/full_matrix.json
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt-get install -y git zstd
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
-          echo "::group::Full matrix pretty JSON"
-          python3 -m json.tool /tmp/full_matrix.json
-          echo "::endgroup::"
-
-      - name: Validate full matrix is valid JSON with entries
+      - name: Config mirrors (openeuler)
+        if: matrix.os_type == 'openeuler'
         run: |
-          python3 <<'PY'
-          import json
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
+          yum install -y git zstd
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
-          with open("/tmp/full_matrix.json") as fh:
-              data = json.load(fh)
-
-          assert "include" in data, "missing include key"
-          assert len(data["include"]) > 0, "empty matrix"
-
-          required = [
-              "branch", "branch_normalized", "dockerfile", "image",
-              "image_tag", "soc_version", "os_type", "arch", "runner",
-          ]
-          for entry in data["include"]:
-              missing = [k for k in required if k not in entry]
-              assert not missing, "entry missing keys: {}".format(missing)
-              # Verify image matches consumer CSRC_BUILD_CACHE_IMAGE format
-              assert ":" in entry["image"], \
-                  "image missing tag: {}".format(entry["image"])
-
-          print("Valid: {} entries".format(len(data["include"])))
-          PY
-
-      - name: Run generate_cache_matrix.py (branch-filter)
+      - name: Install system dependencies (ubuntu)
+        if: matrix.os_type == 'ubuntu'
         run: |
-          python3 .github/workflows/scripts/generate_cache_matrix.py \
-            --branch-filter main \
-            | tee /tmp/filtered_matrix.json
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15 ninja-build
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
-          echo "::group::Filtered matrix pretty JSON"
-          python3 -m json.tool /tmp/filtered_matrix.json
-          echo "::endgroup::"
-
-      - name: Validate filtered matrix only contains main
+      - name: Install system dependencies (openeuler)
+        if: matrix.os_type == 'openeuler'
         run: |
-          python3 <<'PY'
-          import json
+          yum install -y gcc gcc-c++ cmake numactl-devel clang ninja-build
+          pip install uv
 
-          with open("/tmp/filtered_matrix.json") as fh:
-              data = json.load(fh)
-
-          branches = {e["branch"] for e in data["include"]}
-          assert branches == {"main"}, \
-              "expected only main, got: {}".format(branches)
-          assert len(data["include"]) > 0, "filtered matrix is empty"
-
-          print("Filter valid: {} entries, branches={}".format(
-              len(data["include"]), branches))
-          PY
-
-      - name: Test --branch-filter with nonexistent branch (must fail)
+      - name: Get current cache hour
+        id: get_cache_time
         run: |
-          set +e
-          output=$(python3 .github/workflows/scripts/generate_cache_matrix.py \
-            --branch-filter __nonexistent__ 2>&1)
-          status=$?
-          set -e
+          cache_time=$(date -u +'%Y%m%d%H')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
 
-          echo "Exit status: $status"
-          echo "$output"
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ steps.get_cache_time.outputs.cache_time }}
+          restore-keys: |
+            vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-
 
-          if [[ "$status" -eq 0 ]]; then
-            echo "::error::Expected --branch-filter __nonexistent__ to fail, but it succeeded"
-            exit 1
+      - name: Install vllm-ascend
+        env:
+          SOC_VERSION: ${{ matrix.soc_version }}
+          MAX_JOBS: "16"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source /usr/local/Ascend/nnal/atb/set_env.sh
+
+          arch=$(uname -i)
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib"
+
+          if [ "${{ matrix.os_type }}" = "openeuler" ]; then
+            echo "===== AICPU toolchain probe ====="
+
+            AICPU_CXX="$(find /usr/local/Ascend -path '*/toolkit/toolchain/hcc/bin/aarch64-target-linux-gnu-g++' -type f | head -n 1)"
+
+            if [ -z "${AICPU_CXX}" ] || [ ! -x "${AICPU_CXX}" ]; then
+              echo "AICPU compiler not found"
+              echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-<empty>}"
+              echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME:-<empty>}"
+              echo "Searching possible AICPU compiler paths:"
+              find /usr/local/Ascend -path '*aarch64-target-linux-gnu-g++' -type f -print || true
+              exit 1
+            fi
+
+            echo "AICPU_CXX=${AICPU_CXX}"
+            "${AICPU_CXX}" --version
+
+            echo "===== relevant include environment ====="
+            env | grep -E '^(CPLUS_INCLUDE_PATH|CPATH|CXXFLAGS|CFLAGS)=' || true
+
+            echo "===== AICPU predefined macros ====="
+            "${AICPU_CXX}" -dM -E -x c++ /dev/null | grep -E "__GNUC__|__GNUC_MINOR__|__GNUC_PATCHLEVEL__|__cplusplus|__has_builtin" || true
+
+            echo "===== AICPU include search path ====="
+            echo | "${AICPU_CXX}" -x c++ -E -v - 2>&1 | sed -n '/#include <...> search starts here:/,/End of search list./p'
+
+            echo "===== minimal cstdio preprocess ====="
+            printf '%s\n' '#include <cstdio>' 'int main() { return 0; }' > /tmp/aicpu_probe.cpp
+            "${AICPU_CXX}" -E /tmp/aicpu_probe.cpp > /tmp/aicpu_probe.i
+            echo "AICPU cstdio preprocess passed"
           fi
 
-          echo "Nonexistent branch filter failed as expected"
+          pip install uc-manager
 
-      - name: Verify cache key consistency (producer vs consumer)
-        run: |
-          python3 <<'PY'
-          import json
+          # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
+          # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
+          # (does not append to) the env var and would drop the ascend repo.
+          uv pip install -r requirements-dev.txt
+          uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+          uv pip install -e .
 
-          with open("/tmp/full_matrix.json") as fh:
-              data = json.load(fh)
-
-          prefix = "vllm-ascend-build-ninja-v1"
-          cache_time = "2026061018"
-
-          for entry in data["include"]:
-              bn = entry["branch_normalized"]
-              runner = entry["runner"]
-              arch = entry["arch"]
-              image = entry["image"]
-
-              # Producer key
-              producer_key = "{}-{}-{}-{}-{}-{}".format(
-                  prefix, bn, runner, arch, image, cache_time)
-              assert producer_key.startswith(prefix), \
-                  "bad key: {}".format(producer_key)
-
-              # Consumer restore prefix
-              restore_prefix = "{}-{}-{}-{}-{}-".format(
-                  prefix, bn, runner, arch, image)
-              assert restore_prefix.startswith(prefix), \
-                  "bad restore prefix: {}".format(restore_prefix)
-              assert restore_prefix.endswith("-"), \
-                  "restore prefix must end with -: {}".format(restore_prefix)
-
-              # The restore prefix must be a prefix of the producer key
-              assert producer_key.startswith(restore_prefix), (
-                  "restore prefix {!r} does not match producer key {!r}"
-                  .format(restore_prefix, producer_key))
-
-          print("Cache key consistency OK: {} entries checked".format(
-              len(data["include"])))
-          PY
-
-      - name: Validate normalize_branch function
-        run: |
-          python3 <<'PY'
-          import sys
-          sys.path.insert(0, ".github/workflows/scripts")
-          import generate_cache_matrix as gcm
-
-          tests = [
-              ("main", "main"),
-              ("releases/v0.20.2rc", "releases-v0.20.2rc"),
-              ("feature/my-branch@v1", "feature-my-branch-v1"),
-              ("", "unknown-branch"),
-              ("!!!", "unknown-branch"),
-          ]
-          for inp, expected in tests:
-              result = gcm.normalize_branch(inp)
-              assert result == expected, \
-                  "{!r} -> {!r}, expected {!r}".format(inp, result, expected)
-          print("normalize_branch: all OK")
-          PY
+      - name: Save vllm-ascend csrc build cache
+        if: success() && steps.restore-csrc-build-cache.outputs.cache-hit != 'true'
+        uses: runs-on/cache/save@v5
+        with:
+          path: |
+            csrc/build
+          key: vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ steps.get_cache_time.outputs.cache_time }}
