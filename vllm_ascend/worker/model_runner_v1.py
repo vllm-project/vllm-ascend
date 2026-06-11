@@ -761,6 +761,7 @@ class NPUModelRunner(GPUModelRunner):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+        
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
