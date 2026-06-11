@@ -646,7 +646,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             "value_antiquant_mode": 0,
                             "inner_precise": 1,
                         }
-                        input_layout = "BNSD_BSND"
+                        input_layout = "BNSD"
                         # actual_seq_lengths_q from attn_metadata is TND cumulative;
                         # BNSD input needs per-batch values.
                         max_q_len = int(actual_seq_lengths_q[0])
@@ -734,10 +734,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = self._nz_5d_view(self.key_cache, block_size)
             value = self._nz_5d_view(self.value_cache, block_size)
 
-            # Use BNSD_BSND: input BNSD, FIA internally converts output to
-            # BSND [B,S,N,D] which shares memory order with TND [B*S,N,D],
-            # so a plain .view() gives the correct token arrangement.
-            input_layout = "BNSD_BSND"
+            # BNSD layout: each batch entry is independent; Q_S dimension
+            # carries the per-request query token count (1 for pure decode,
+            # >1 for MTP / spec decode).
+            input_layout = "BNSD"
             num_batches = len(actual_seq_lengths_kv)
             max_q_len = num_tokens // num_batches
             # [B*S, N, D] -> [B, N, S, D]
@@ -837,10 +837,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             **extra_args,
         )
 
-        output = output.view(num_tokens, self.num_heads, self.head_size)
-
         handle = torch.npu.graph_task_group_end(stream)
         graph_params.handles[num_tokens].append(handle)
+
+        # BNSD output [B,N,S,D] must be converted to TND [B*S,N,D].
+        # This runs in a *separate* graph task group so that
+        # graph_task_update_begin/end only touches the FIA group above.
+        if input_layout == "BNSD":
+            torch.npu.graph_task_group_begin(stream)
+            output = output.transpose(1, 2).contiguous().view(num_tokens, self.num_heads, self.head_size)
+            torch.npu.graph_task_group_end(stream)
+        else:
+            output = output.view(num_tokens, self.num_heads, self.head_size)
+
         return output, num_tokens
 
     def full_graph_fia_v2(
