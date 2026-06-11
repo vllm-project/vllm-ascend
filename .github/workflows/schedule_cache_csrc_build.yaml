@@ -182,7 +182,6 @@ jobs:
           uv pip install -r requirements-dev.txt
           uv pip install setuptools wheel packaging ninja
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-<<<<<<< HEAD
           if uv pip install -e . --no-build-isolation; then
             echo "vllm-ascend installed successfully"
           else
@@ -192,70 +191,7 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
           
-=======
 
-
-
-          # Add jitter and retry around the source build because csrc build may download
-          # third-party release artifacts from external services that can temporarily
-          # throttle bursty requests.
-          initial_jitter=$((RANDOM % 60))
-          echo "Initial jitter before source build: ${initial_jitter}s"
-          sleep "$initial_jitter"
-
-          for attempt in 1 2 3 4; do
-            echo "===== uv pip install -v -e . --no-build-isolation attempt ${attempt}/4 ====="
-
-            if [ -d csrc/build ]; then
-              echo "[attempt ${attempt}] csrc/build exists before build"
-              du -sh csrc/build || true
-              if [ -f csrc/build/CMakeCache.txt ]; then
-                echo "[attempt ${attempt}] CMakeCache important entries before build:"
-                grep -E '^(CMAKE_GENERATOR|CMAKE_HOME_DIRECTORY|CMAKE_BUILD_TYPE|CMAKE_C_COMPILER|CMAKE_CXX_COMPILER|Python3_EXECUTABLE|Python_EXECUTABLE|ASCEND_COMPUTE_UNIT|ASCEND_OP_NAME|ASCEND_CANN_PACKAGE_PATH|CUSTOM_ASCEND_CANN_PACKAGE_PATH)' csrc/build/CMakeCache.txt || true
-              fi
-            else
-              echo "[attempt ${attempt}] csrc/build does not exist before build"
-            fi
-
-            if uv pip install -e . --no-build-isolation; then
-              echo "uv pip install -e . --no-build-isolation succeeded"
-
-              echo "===== csrc/build status after success ====="
-              du -sh csrc/build || true
-              find csrc/build -maxdepth 2 -type f \( -name 'CMakeCache.txt' -o -name 'build.ninja' \) -print || true
-              if [ -f csrc/build/CMakeCache.txt ]; then
-                echo "----- CMakeCache important entries after success -----"
-                grep -E '^(CMAKE_GENERATOR|CMAKE_HOME_DIRECTORY|CMAKE_BUILD_TYPE|CMAKE_C_COMPILER|CMAKE_CXX_COMPILER|Python3_EXECUTABLE|Python_EXECUTABLE|ASCEND_COMPUTE_UNIT|ASCEND_OP_NAME|ASCEND_CANN_PACKAGE_PATH|CUSTOM_ASCEND_CANN_PACKAGE_PATH)' csrc/build/CMakeCache.txt || true
-                echo "-----------------------------------------------------"
-              fi
-              echo "=========================================="
-
-              break
-            fi
-
-            echo "::warning::uv pip install -e . --no-build-isolation failed at attempt ${attempt}"
-
-            if [[ "$attempt" == "4" ]]; then
-              echo "::error::uv pip install -e . --no-build-isolation failed after 4 attempts"
-              exit 1
-            fi
-
-            echo "===== clean csrc/build before retry ====="
-            if [ -d csrc/build ]; then
-              echo "remove dirty csrc/build after failed attempt ${attempt}"
-              du -sh csrc/build || true
-              rm -rf csrc/build
-            else
-              echo "csrc/build already absent after failed attempt ${attempt}"
-            fi
-            echo "========================================"
-
-            backoff_seconds=$((attempt * 120 + RANDOM % 60))
-            echo "retrying after ${backoff_seconds}s"
-            sleep "$backoff_seconds"
-          done
-
->>>>>>> 48b32e52 ([Feature][Revert] Delete part of features that fails to advoid further impact on other PR)
       - name: Save vllm-ascend csrc build cache
         if: success() && steps.restore-csrc-build-cache.outputs.cache-hit != 'true'
         uses: runs-on/cache/save@v5
