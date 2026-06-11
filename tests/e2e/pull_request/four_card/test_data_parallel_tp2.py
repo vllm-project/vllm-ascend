@@ -34,7 +34,6 @@ def test_qwen3_inference_dp2_tp2(model, max_tokens):
         "--node-rank",
         "0",
         "--trust-remote-code",
-        "--enforce-eager",
     ]
 
     print(f"Running subprocess: {' '.join(cmd)}")
