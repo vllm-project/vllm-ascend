@@ -5,8 +5,6 @@
 test_cases:
   - name: "DeepSeek-V4-Flash-W8A8-A3"
     model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
-    special_dependencies:
-      transformers: "5.9.0"
     envs:
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
