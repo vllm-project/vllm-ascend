@@ -646,8 +646,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             "value_antiquant_mode": 0,
                             "inner_precise": 1,
                         }
-                        input_layout = "BNSD"
-                        sparse_mode = 0
+                        input_layout = "BNSD_BSND"
+                        # actual_seq_lengths_q from attn_metadata is TND cumulative;
+                        # BNSD input needs per-batch values.
+                        max_q_len = int(actual_seq_lengths_q[0])
+                        actual_seq_lengths_q = [max_q_len] * len(seq_lens)
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
                         key=key_cache,
@@ -731,12 +734,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = self._nz_5d_view(self.key_cache, block_size)
             value = self._nz_5d_view(self.value_cache, block_size)
 
-            # TODO: change layerout from BNSD to TND.
-            input_layout = "BNSD"
-            query = query.unsqueeze(2)
-            output = output.unsqueeze(2)
-            attn_mask = None
-            sparse_mode = 0
+            # Use BNSD_BSND: input BNSD, FIA internally converts output to
+            # BSND [B,S,N,D] which shares memory order with TND [B*S,N,D],
+            # so a plain .view() gives the correct token arrangement.
+            input_layout = "BNSD_BSND"
+            num_batches = len(actual_seq_lengths_kv)
+            max_q_len = num_tokens // num_batches
+            # [B*S, N, D] -> [B, N, S, D]
+            query = query.reshape(num_batches, max_q_len, self.num_heads, self.head_size).transpose(1, 2).contiguous()
+            output = output.reshape(num_batches, max_q_len, self.num_heads, self.head_size).transpose(1, 2).contiguous()
+            actual_seq_lengths_q = [max_q_len] * num_batches
+
+            # BNSD with C8: single-token decode (max_q_len==1) can use
+            # sparse_mode=0 (causal handled implicitly when Q_S=1).
+            # Multi-token (MTP) requires sparse_mode=3 with a 2048x2048
+            # causal atten_mask per the NPU FIA documentation.
+            if max_q_len > 1:
+                attn_mask = attn_metadata.attn_mask
+                sparse_mode = 3
+            else:
+                attn_mask = None
+                sparse_mode = 0
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
