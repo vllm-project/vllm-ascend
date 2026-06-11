@@ -9,15 +9,20 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OF ANY KIND, either express or implied.
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
 
 name: 'Cache csrc Build Directory'
-
 on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
   schedule:
     # UTC+8: 2am every day
     - cron: '0 18 * * *'
@@ -55,21 +60,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
       - name: Generate build matrix from Dockerfiles
         id: generate
         run: |
-          python --version
-          python -m pip --version
-          python -m pip install pyyaml
-
+          python3 -m pip install pyyaml
           if [[ "${{ github.event_name }}" == "push" ]]; then
-            matrix=$(python .github/workflows/scripts/generate_cache_matrix.py --branch-filter "${GITHUB_REF_NAME}")
+            matrix=$(python3 .github/workflows/scripts/generate_cache_matrix.py --branch-filter "${GITHUB_REF_NAME}")
           else
-            matrix=$(python .github/workflows/scripts/generate_cache_matrix.py)
+            matrix=$(python3 .github/workflows/scripts/generate_cache_matrix.py)
           fi
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
@@ -127,10 +125,10 @@ jobs:
           yum install -y gcc gcc-c++ cmake numactl-devel clang ninja-build
           pip install uv
 
-      - name: Get current cache time
+      - name: Get current cache hour
         id: get_cache_time
         run: |
-          cache_time=$(date -u +'%Y%m%d%H%M%S')
+          cache_time=$(date -u +'%Y%m%d%H')
           echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
 
       - name: Restore vllm-ascend csrc build cache
@@ -193,31 +191,7 @@ jobs:
           # (does not append to) the env var and would drop the ascend repo.
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-
-          # Add jitter and retry around the source build because csrc build may download
-          # third-party release artifacts from external services that can temporarily
-          # throttle bursty requests.
-          initial_jitter=$((RANDOM % 60))
-          echo "Initial jitter before source build: ${initial_jitter}s"
-          sleep "$initial_jitter"
-
-          for attempt in 1 2 3 4; do
-            echo "uv pip install -e . attempt ${attempt}/4"
-
-            if uv pip install -e .; then
-              echo "uv pip install -e . succeeded"
-              break
-            fi
-
-            if [[ "$attempt" == "4" ]]; then
-              echo "::error::uv pip install -e . failed after 4 attempts"
-              exit 1
-            fi
-
-            backoff_seconds=$((attempt * 120 + RANDOM % 60))
-            echo "uv pip install -e . failed, retrying after ${backoff_seconds}s"
-            sleep "$backoff_seconds"
-          done
+          uv pip install -e .
 
       - name: Save vllm-ascend csrc build cache
         if: success() && steps.restore-csrc-build-cache.outputs.cache-hit != 'true'
