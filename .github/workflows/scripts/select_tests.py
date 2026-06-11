@@ -520,7 +520,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Determine test scope based on changed files",
     )
-    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group = parser.add_mutually_exclusive_group()
     input_group.add_argument(
         "--changed-files",
         nargs="+",
@@ -544,9 +544,18 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if not args.run_all_modules and not args.diff_base and not args.changed_files:
+        parser.error("One of --diff-base or --changed-files is required (or use --run-all-modules)")
+
     config = _resolve_config_inheritance(yaml.safe_load(args.config.read_text()))
 
-    changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
+    if args.diff_base:
+        changed_files = _get_changed_files(args.diff_base)
+    elif args.changed_files:
+        changed_files = args.changed_files
+    else:
+        changed_files = []
     matched_modules = (
         [module["name"] for module in config] if args.run_all_modules else _match_modules(changed_files, config)
     )

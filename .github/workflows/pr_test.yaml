@@ -128,11 +128,13 @@ jobs:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
+              - 'requirements-torch-cpu.txt'
             src:
               - 'vllm_ascend/**'
               - 'setup.py'
               - 'csrc/**'
               - 'requirements.txt'
+              - 'requirements-torch-cpu.txt'
               - 'pyproject.toml'
               - 'cmake/**'
               - '.github/**'
@@ -188,7 +190,8 @@ jobs:
           git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }}
+            --diff-base origin/${{ github.base_ref }} \
+            --run-all-modules
 
       - name: Set no-tests output when source paths unchanged
         id: noop
@@ -202,7 +205,7 @@ jobs:
 
   run-selected-tests:
     needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' }}
     strategy:
       matrix:
         vllm_version:

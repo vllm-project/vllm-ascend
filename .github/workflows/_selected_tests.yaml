@@ -52,7 +52,7 @@ jobs:
       fail-fast: false
       matrix:
         group: ${{ fromJSON(inputs.test_groups) }}
-    runs-on: ${{ matrix.group.runner }}
+    runs-on: ["${{ matrix.group.runner }}", "gy-005"]
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
@@ -61,7 +61,7 @@ jobs:
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
         UV_HTTP_TIMEOUT: 120
@@ -86,6 +86,7 @@ jobs:
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install uv
+          pip install pyyaml
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -106,12 +107,12 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
 
-      - name: Rebase on latest main
-        run: |
-          git config user.name "vllm-ascend-ci"
-          git config user.email "vllm-ascend-ci@users.noreply.github.com"
-          git fetch origin main
-          git rebase origin/main
+#      - name: Rebase on latest main
+#        run: |
+#          git config user.name "vllm-ascend-ci"
+#          git config user.email "vllm-ascend-ci@users.noreply.github.com"
+#          git fetch origin main
+#          git rebase origin/main
 
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -137,9 +138,9 @@ jobs:
         run: |
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
           pip install uc-manager
+          # uv pip install -r requirements-torch-cpu.txt --extra-index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          uv pip install -e .
+          uv pip install -e . --no-build-isolation
 
       - name: Install vllm-project/vllm-ascend no device
         if: ${{ matrix.group.npu_type == 'cpu' }}
@@ -148,8 +149,9 @@ jobs:
           COMPILE_CUSTOM_KERNELS: 0
         run: |
           pip install uc-manager
+          uv pip install -r requirements-torch-cpu.txt --extra-index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          uv pip install -e . --no-build-isolation
 
       - name: Uninstall Triton for 310P tests
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
