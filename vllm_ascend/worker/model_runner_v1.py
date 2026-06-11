@@ -466,7 +466,7 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
-            kernel_block_sizes=[[self.cache_config.block_size]],
+            kernel_block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
@@ -4056,10 +4056,10 @@ class NPUModelRunner(GPUModelRunner):
 
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
-                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    shapes_with_blocks = tuple((num_blocks, *shape) for shape in kv_cache_spec.shapes)
                     state_tensors = self._adjust_kv_layout(
                         raw_tensor,
-                        kv_cache_spec.shapes,
+                        shapes_with_blocks,
                         kv_cache_spec.dtypes,
                         kv_cache_spec.page_size_bytes
                     )
@@ -4140,7 +4140,7 @@ class NPUModelRunner(GPUModelRunner):
                     if self.vllm_config.speculative_config
                     else 0
                 ),
-                kernel_block_sizes=self.kernel_block_sizes,
+                kernel_block_sizes=kernel_block_sizes,
                 max_num_blocks_per_req=max_num_blocks,
                 kv_cache_groups=kv_cache_config.kv_cache_groups,
             )
@@ -4276,7 +4276,7 @@ class NPUModelRunner(GPUModelRunner):
                 # or enable more requests to be processed simultaneously.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
-            elif self.use_compress or isinstance(attn_module, Attention):
+            elif self.use_compress or isinstance(attn_module, Attention) or isinstance(attn_module, MambaBase):
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec

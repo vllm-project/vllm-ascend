@@ -523,7 +523,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                     prefix = ".".join(parts)
 
         # TODO: remove it when vllm fixes the WeightsMapper bug of qwen3-vl.
-        if model_type in ["qwen3_vl"] and prefix == "lm_head":
+        if prefix == "lm_head" and (model_type in ["qwen3_vl"] or model_type.startswith("qwen3_5")):
             prefix = "language_model.lm_head"
         if model_type in ["bailing_hybrid"]:
             # Adapt to bailing_hybrid architecture: update layer names to MoE convention
