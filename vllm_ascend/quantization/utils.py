@@ -164,6 +164,11 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     Args:
         vllm_config: A ``vllm.config.VllmConfig`` instance (mutable).
     """
+    import vllm_ascend.envs as envs_ascend
+
+    if not envs_ascend.VLLM_ASCEND_AUTO_DETECT_QUANTIZATION:
+        return
+
     model_config = vllm_config.model_config
     model = model_config.model
     revision = model_config.revision
