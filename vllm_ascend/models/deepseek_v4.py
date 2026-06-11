@@ -80,6 +80,7 @@ from vllm_ascend.utils import (
     get_dsv4_compress_ratio,
     vllm_version_is,
 )
+from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
 if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache  # type:ignore
@@ -524,7 +525,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=8,
+                block_size=DSV4_BLOCK_SIZES[cache_config.block_size][0][2],
             )
         elif compress_ratio == 128:
             self.state_cache = CompressorStateCache(
@@ -532,7 +533,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=16 if get_ascend_device_type() in {AscendDeviceType.A5} else 32,
+                block_size=DSV4_BLOCK_SIZES[cache_config.block_size][0][3],
             )
         else:
             raise ValueError(

@@ -683,7 +683,7 @@ class BaseDeviceAdaptor:
     @staticmethod
     def get_dsa_kernel_block_sizes():
         """Non-A5: return supported kernel block sizes."""
-        return [8, 32, 128]
+        return [2, 4, 8, 16, 32, 64, 128]
 
     @staticmethod
     def chunk_scaled_dot_kkt_fwd(
@@ -1326,7 +1326,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def get_dsa_kernel_block_sizes():
         """A5: return supported kernel block sizes."""
-        return [8, 16, 128]
+        return [2, 4, 8, 16, 32, 64, 128]
 
     @staticmethod
     def sfa_preprocess_with_mlapo(
