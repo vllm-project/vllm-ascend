@@ -45,7 +45,6 @@ permissions:
   pull-requests: write
   issues: write
 
-
 jobs:
   selected-tests:
     name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
@@ -126,10 +125,10 @@ jobs:
           fi
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Get current cache hour
+      - name: Get current cache time
         id: get_cache_time
         run: |
-          cache_time=$(date -u +'%Y%m%d%H')
+          cache_time=$(date -u +'%Y%m%d%H%M%S')
           echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
 
       - name: Get csrc build cache arch
@@ -179,7 +178,6 @@ jobs:
             "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
 
           pip show mooncake-transfer-engine-ascend || true
-
 
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
