@@ -273,7 +273,7 @@ function(add_ops_compile_options)
     endif()
 
     if(NOT OP_COMPILE_OP_NAME)
-        message(FATAL_ERROR "Error: add_ops_compile_options requires OP_NAME")
+        set(OP_COMPILE_COMPUTE_UNIT ${ASCEND_COMPUTE_UNIT})
     endif()
 
     if(NOT OP_COMPILE_COMPUTE_UNIT)
