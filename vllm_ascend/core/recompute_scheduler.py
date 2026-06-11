@@ -64,7 +64,6 @@ from vllm_ascend.utils import vllm_version_is
 # an additional key in spec_manager_map (if the module is already loaded).
 def register_ascend_mla_spec_in_manager():
     from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
 
     if vllm_version_is("0.21.0"):
@@ -73,15 +72,6 @@ def register_ascend_mla_spec_in_manager():
         _stm = _sys.modules.get("vllm.v1.core.single_type_kv_cache_manager")
         if _stm is not None and AscendMLAAttentionSpec not in _stm.spec_manager_map:
             _stm.spec_manager_map[AscendMLAAttentionSpec] = FullAttentionManager
-        return
-
-    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-
-    KVCacheSpecRegistry.register(
-        AscendMLAAttentionSpec,
-        FullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec,
-    )
 
 
 @dataclass

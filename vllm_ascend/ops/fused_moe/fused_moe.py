@@ -50,7 +50,7 @@ from vllm_ascend.utils import (
 )
 
 if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map  # type: ignore[import-not-found]
+    from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map
 else:
 
     def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
@@ -181,9 +181,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             if vllm_version_is("0.21.0"):
                 # In 0.21.0, capturer is a process-wide singleton.
-                from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (  # type: ignore[import-not-found]
-                    get_global_experts_capturer,
-                )
+                from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_global_experts_capturer
 
                 capturer = get_global_experts_capturer()
             else:
