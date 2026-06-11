@@ -22,8 +22,8 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-30B-A3B (BF16) | Atlas 800I A2 or A3 (64G, 1~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) |
-| Qwen3-30B-A3B-W8A8 | Atlas 800I A2 or A3 (64G, 1~4 cards) | [Download](https://modelscope.cn/models/vllm-ascend/Qwen3-30B-A3B-W8A8) |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) |
+| Qwen3-30B-A3B-W8A8 | Atlas 800I A3 (64G, 1~4 cards) | [Download](https://modelscope.cn/models/vllm-ascend/Qwen3-30B-A3B-W8A8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -152,7 +152,7 @@ vllm serve your_model_path \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
-    --port 1025
+    --port 8000
 ```
 
 **Key Parameter Description:**
@@ -171,11 +171,11 @@ vllm serve your_model_path \
 | `--max-num-batched-tokens` | Maximum tokens processed in a single batch. Balances prefill chunking with memory usage. |
 | `--max-num-seqs` | Maximum number of concurrent requests. Adjust based on workload and available KV cache memory. |
 | `--no-enable-prefix-caching` | Disables prefix caching. Recommended for general scenarios to reduce memory overhead. |
-| `--port 1025` | Port number for the API server. Adjust to avoid conflicts with other services. |
+| `--port 8000` | Port number for the API server. Adjust to avoid conflicts with other services. |
 | `--quantization ascend` | Enables W8A8 quantization inference. Remove this parameter when using the BF16 model. |
 | `--served-model-name qwen3` | The model name exposed by the service, used as the `model` field in API calls. |
 | `--speculative-config` | Speculative decoding configuration. Uses eagle3 draft model to reduce decode latency. |
-| `--tensor-parallel-size 4` | Tensor parallelism degree. For Atlas A2 64G, at least 2 is required; 4 is recommended for optimal performance. |
+| `--tensor-parallel-size 4` | Tensor parallelism degree. For Atlas A3 64G, at least 2 is required; 4 is recommended for optimal performance. |
 | `--trust-remote-code` | Allows custom model code to be executed from remote repositories. Required for Modelscope models. |
 
 **Service Verification:**
@@ -183,7 +183,7 @@ vllm serve your_model_path \
 After the service is started, verify it is running:
 
 ```bash
-curl http://localhost:1025/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3",
@@ -203,7 +203,7 @@ After the service is started, the model can be invoked by sending a prompt.
 **Chat Completions API:**
 
 ```shell
-curl http://localhost:1025/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3",
@@ -248,6 +248,32 @@ Using the `gsm8k` dataset as an example, run the accuracy evaluation in online m
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
+When running AISBench with the deployment configurations in Section 9.1, use the following settings as a reference:
+
+:::{tip}
+**High throughput (Section 9.1, TP1)**
+
+- `request_rate`: 0 (max pressure)
+- `batch_size`: 32
+- Input/Output length: adjust based on your target scenario (e.g., 2048/2048 for balanced testing, 3500/1500 for long-input testing)
+:::
+
+:::{tip}
+**Low latency (Section 9.1, TP4+EP)**
+
+- `request_rate`: set to control concurrency (e.g., 1 for single request latency, 8 for moderate load)
+- `batch_size`: 1
+- Input/Output length: 2048/2048 or 3500/1500
+:::
+
+:::{tip}
+**Long context (Section 9.1, TP4+EP, YaRN)**
+
+- `request_rate`: set to control concurrency (e.g., 1–14)
+- `batch_size`: 1
+- Input/Output length: e.g., 65536/1024 or 131072/1024
+:::
+
 ### Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
@@ -258,7 +284,7 @@ Take the `serve` subcommand as an example. The `--random-output-len` parameter c
 vllm bench serve \
     --model vllm-ascend/Qwen3-30B-A3B-W8A8 \
     --served-model-name qwen3 \
-    --port 1025 \
+    --port 8000 \
     --dataset-name random \
     --random-input 200 \
     --random-output-len 2048 \
@@ -323,7 +349,7 @@ vllm serve your_model_path \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
-    --port 1025 \
+    --port 8000 \
     --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
 ```
 
@@ -352,7 +378,7 @@ vllm serve your_model_path \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
-    --port 1025 \
+    --port 8000 \
     --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
 ```
 
@@ -383,7 +409,7 @@ vllm serve your_model_path \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
-    --port 1025 \
+    --port 8000 \
     --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}' \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}'
 ```
@@ -399,7 +425,7 @@ For common environment, installation, and general parameter issues, please refer
 
 ### Q: What hardware is required for Qwen3-30B-A3B?
 
-The model can run on Atlas 800I A2 or A3 with 64G NPUs, typically using 1 to 4 cards. The W8A8 quantized version has similar hardware requirements but uses less memory per card.
+The model can run on Atlas 800I A3 with 64G NPUs, typically using 1 to 4 cards. The W8A8 quantized version has similar hardware requirements but uses less memory per card.
 
 ### Q: Why is `--enable-expert-parallel` required?
 
