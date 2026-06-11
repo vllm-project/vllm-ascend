@@ -274,6 +274,21 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+        # Replace the CUDA PrefetchOffloader set by parent __init__ with NPU version.
+        offload_cfg = vllm_config.offload_config
+        if (offload_cfg is not None
+                and getattr(offload_cfg, "prefetch", None) is not None
+                and getattr(offload_cfg.prefetch, "offload_group_size", 0) > 0):
+            from vllm.model_executor.offloader.base import set_offloader
+
+            from vllm_ascend.model_executor.offloader.prefetch import NPUPrefetchOffloader
+            set_offloader(NPUPrefetchOffloader(
+                group_size=offload_cfg.prefetch.offload_group_size,
+                num_in_group=offload_cfg.prefetch.offload_num_in_group,
+                prefetch_step=offload_cfg.prefetch.offload_prefetch_step,
+                offload_params=offload_cfg.prefetch.offload_params,
+            ))
+
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
         self.query_start_loc = self._make_buffer(
@@ -379,6 +394,15 @@ class NPUModelRunner(GPUModelRunner):
             use_mm_prefix=self.model_config is not None
             and self.model_config.is_mm_prefix_lm,
         )
+
+        # reinit valid_sampled_token_count_cpu with torch.int64 dtype
+        if self.use_async_scheduling and self.num_spec_tokens:
+            self.valid_sampled_token_count_cpu = torch.empty(
+                self.max_num_reqs,
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=self.pin_memory,
+            )
 
         try:
             self.dcp_size = get_dcp_group().world_size
@@ -1024,7 +1048,7 @@ class NPUModelRunner(GPUModelRunner):
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
         if (
             self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
+            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
         ):
             self.prev_positions.copy_to_gpu(num_reqs)
@@ -1036,7 +1060,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_computed_tokens,
                 self.num_accepted_tokens.gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
-                self.valid_sampled_token_count_gpu,
+                self.valid_sampled_token_count_gpu, # type: ignore[has-type]
                 self.prev_num_draft_tokens.gpu,
                 cpu_values,
             )
@@ -1063,7 +1087,7 @@ class NPUModelRunner(GPUModelRunner):
         should_rebuild_async_inputs = (
             self.use_cp
             and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
+            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
             and has_decode_req
         )
@@ -1179,7 +1203,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self._needs_seq_lens_cpu_sync
             and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
+            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
         ):
             self.optimistic_seq_lens_cpu[:num_reqs].copy_(
@@ -1198,7 +1222,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self.use_compress
             and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
+            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
         ):
             # Async spec decode keeps the CPU counter optimistic until after
@@ -1584,8 +1608,8 @@ class NPUModelRunner(GPUModelRunner):
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
         default_stream = torch.npu.current_stream()
-        with torch.npu.stream(self.valid_sampled_token_count_copy_stream):  
-            self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)  
+        with torch.npu.stream(self.valid_sampled_token_count_copy_stream): 
+            self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)
             counts = valid_sampled_tokens_count
             counts_cpu = self.valid_sampled_token_count_cpu
             assert counts_cpu is not None
@@ -1726,6 +1750,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.discard_request_indices.gpu,
                     self.num_discarded_requests,
                 )
+                self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
             req_scheduled_tokens = scheduler_output.num_scheduled_tokens
             if self.use_cp:
@@ -1823,8 +1848,6 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
-            if not self.vllm_config.speculative_config.disable_padded_drafter_batch:
-                self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 
@@ -2984,8 +3007,8 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
-                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]
-
+                self.cpu_slot_mapping = blk_table.slot_mapping.cpu[:maybe_pcp_full_tokens]
+                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]          
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 if self.pcp_size == 1:
@@ -3071,6 +3094,7 @@ class NPUModelRunner(GPUModelRunner):
             max_seq_len=max_seq_len,
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
+            slot_mapping_cpu=self.cpu_slot_mapping,
             causal=True,
             is_prefilling=is_prefilling,
             num_input_tokens=num_tokens_padded,
@@ -3616,6 +3640,9 @@ class NPUModelRunner(GPUModelRunner):
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
+
+        from vllm.model_executor.offloader.base import get_offloader
+        get_offloader().post_init()
 
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():

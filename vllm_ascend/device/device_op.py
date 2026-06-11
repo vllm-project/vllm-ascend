@@ -20,6 +20,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
@@ -31,6 +32,11 @@ from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
+else:
+    triton_q_rms = None  # type: ignore
 
 
 class BaseDeviceAdaptor:
@@ -461,7 +467,22 @@ class BaseDeviceAdaptor:
         )
         return attn_output
 
+    @staticmethod
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
+        if query.dtype == torch.float32:
+            # _npu_flash_attention_unpad does not support FP32.
+            cumulative_seq_lens = seq_lens_cpu.cumsum(0).tolist()
+            return torch_npu.npu_fusion_attention(
+                query=query,
+                key=key,
+                value=value,
+                actual_seq_qlen=cumulative_seq_lens,
+                actual_seq_kvlen=cumulative_seq_lens,
+                head_num=head_num,
+                scale=scale_value,
+                input_layout="TND",
+            )[0]
+
         context_layer = torch.empty_like(query)
 
         torch_npu._npu_flash_attention_unpad(
@@ -593,13 +614,14 @@ class BaseDeviceAdaptor:
     def apply_dsa_q_rms(q, eps, q_norm_without_weight=None):
         """Apply Q RMS norm. Non-A5: triton_q_rms.
         A5: uses q_norm_without_weight callable when provided."""
-        from vllm.triton_utils import HAS_TRITON
-
-        if HAS_TRITON:
-            from vllm_ascend.ops.triton.rms_norm import triton_q_rms
-
+        if triton_q_rms is not None:
             return triton_q_rms(q, eps)
-        return q
+        else:
+            dtype = q.dtype
+            q = q.float()
+            variance = q.square().mean(-1, keepdim=True)
+            q = q * torch.rsqrt(variance + eps)
+            return q.to(dtype)
 
     # ===== KV Cache Helpers =====
 
@@ -1222,13 +1244,15 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         """Apply Q RMS norm. A5: uses q_norm_without_weight callable."""
         if q_norm_without_weight is not None:
             return q_norm_without_weight(q)
-        from vllm.triton_utils import HAS_TRITON
 
-        if HAS_TRITON:
-            from vllm_ascend.ops.triton.rms_norm import triton_q_rms
-
+        if triton_q_rms is not None:
             return triton_q_rms(q, eps)
-        return q
+        else:
+            dtype = q.dtype
+            q = q.float()
+            variance = q.square().mean(-1, keepdim=True)
+            q = q * torch.rsqrt(variance + eps)
+            return q.to(dtype)
 
     # ===== KV Cache Helpers =====
 
@@ -1523,15 +1547,16 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             )
         return attn_output
 
+    @staticmethod
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
-        seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
+        cumulative_seq_lens = seq_lens_cpu.cumsum(0).tolist()
 
         context_layer = torch_npu.npu_fusion_attention(
             query=query,
             key=key,
             value=value,
-            actual_seq_qlen=seq_lens_cpu,
-            actual_seq_kvlen=seq_lens_cpu,
+            actual_seq_qlen=cumulative_seq_lens,
+            actual_seq_kvlen=cumulative_seq_lens,
             head_num=head_num,
             scale=scale_value,
             input_layout="TND",
