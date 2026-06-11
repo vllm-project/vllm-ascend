@@ -39,13 +39,14 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
+from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
+from vllm_ascend._310p.sample.rejection_sampler import AscendRejectionSampler310
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
@@ -57,8 +58,20 @@ _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
 
 class NPUModelRunner310(NPUModelRunner):
+    """
+    310P model runner with a distinct ACL graph capture/replay contract from 910B:
+
+    - Capture: ACLGraphWrapper records the full forward inside ``torch.npu.graph``.
+      310P attention calls NPU ops directly (paged / splitfuse), without mainline
+      ``full_graph_fia`` / ``full_graph_pa`` graph_task registration.
+    - Replay: refresh shared runner buffers (block_table, seq_lens, query_start_loc,
+      slot_mapping via CPU prepare + copy_to_gpu) so tensor addresses stay stable,
+      then ``aclgraph.replay()``.
+    """
+
     # Inherited from parent runner; annotated here to satisfy strict type checks.
     uniform_decode_query_len: int
+    _mtp_spec_dummy_capture: bool = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -83,7 +96,7 @@ class NPUModelRunner310(NPUModelRunner):
         logger.info_once("Weight layout uses FRACTAL_NZ.")
         self.sampler = AscendSampler310()
         if getattr(self, "rejection_sampler", None) is not None:
-            self.rejection_sampler = RejectionSampler(self.sampler)
+            self.rejection_sampler = AscendRejectionSampler310(self.sampler)
         if self.speculative_config is not None and self.speculative_config.method == "ngram":
             # 310P ngram requires decode-only graph shapes to be built with q_len=1.
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.
@@ -137,6 +150,18 @@ class NPUModelRunner310(NPUModelRunner):
         if self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit):
             force_eager = True
 
+        # MTP graph replay is only valid for uniform spec-decode batches (q_len = 1 + K).
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+            and (
+                self.attn_state != AscendAttentionState.SpecDecoding
+                or max_num_scheduled_tokens != self.uniform_decode_query_len
+                or num_tokens != max_num_scheduled_tokens * num_reqs
+            )
+        ):
+            force_eager = True
+
         if force_uniform_decode is None and self.attn_state == AscendAttentionState.DecodeOnly:
             decode_query_len = _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN
             if (
@@ -160,6 +185,13 @@ class NPUModelRunner310(NPUModelRunner):
             force_num_active_loras=force_num_active_loras,
             num_encoder_reqs=num_encoder_reqs,
         )
+
+    def _build_attention_metadata(self, *args: Any, **kwargs: Any):
+        # Parent dummy_run assigns ChunkedPrefill for non-MLA MTP (910B FIA graph).
+        # 310P must capture SpecDecoding + splitfuse for MTP uniform decode graphs.
+        if self._mtp_spec_dummy_capture:
+            self.attn_state = AscendAttentionState.SpecDecoding
+        return super()._build_attention_metadata(*args, **kwargs)
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -193,6 +225,18 @@ class NPUModelRunner310(NPUModelRunner):
 
         self.query_start_loc.copy_to_gpu()
         return num_reqs_padded
+
+    def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
+        attn_state = super()._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+            and not np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0)
+            and np.all(num_scheduled_tokens == self.uniform_decode_query_len)
+        ):
+            attn_state = AscendAttentionState.SpecDecoding
+            self.attn_state = attn_state
+        return attn_state
 
     def _prepare_inputs(  # type: ignore[override]
         self,
@@ -552,22 +596,33 @@ class NPUModelRunner310(NPUModelRunner):
         profile_seq_lens: int | None = None,
     ):
         temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
+        mtp_spec_dummy_capture = (
+            uniform_decode
+            and not is_profile
+            and self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+            and not self.vllm_config.model_config.use_mla
+        )
         with temporary_context:
-            return super()._dummy_run(
-                num_tokens=num_tokens,
-                with_prefill=with_prefill,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                force_attention=force_attention,
-                uniform_decode=uniform_decode,
-                is_profile=is_profile,
-                create_mixed_batch=create_mixed_batch,
-                allow_microbatching=allow_microbatching,
-                skip_eplb=skip_eplb,
-                remove_lora=remove_lora,
-                is_graph_capturing=is_graph_capturing,
-                num_active_loras=num_active_loras,
-                profile_seq_lens=profile_seq_lens,
-            )
+            self._mtp_spec_dummy_capture = mtp_spec_dummy_capture
+            try:
+                return super()._dummy_run(
+                    num_tokens=num_tokens,
+                    with_prefill=with_prefill,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    force_attention=force_attention,
+                    uniform_decode=uniform_decode,
+                    is_profile=is_profile,
+                    create_mixed_batch=create_mixed_batch,
+                    allow_microbatching=allow_microbatching,
+                    skip_eplb=skip_eplb,
+                    remove_lora=remove_lora,
+                    is_graph_capturing=is_graph_capturing,
+                    num_active_loras=num_active_loras,
+                    profile_seq_lens=profile_seq_lens,
+                )
+            finally:
+                self._mtp_spec_dummy_capture = False
 
     def _model_forward(
         self,
@@ -600,6 +655,17 @@ class NPUModelRunner310(NPUModelRunner):
         # naturally consistent there. 310P ngram needs temporary alignment.
         with self.temporary_modify_uniform_decode_query_len():
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
+
+    def _init_kv_zero_meta(self) -> None:
+        """310P uses torch zeroing because Triton is not available."""
+        self._kv_block_zeroer = AscendKVBlockZeroer310(self.device, self.pin_memory)
+        self._kv_block_zeroer.init_meta(
+            attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
+            kernel_block_sizes=self.kernel_block_sizes,
+            cache_dtype=self.cache_config.cache_dtype,
+            runner_only_attn_layers=self.runner_only_attn_layers,
+            static_forward_context=(self.compilation_config.static_forward_context),
+        )
 
     def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
@@ -766,7 +832,7 @@ class NPUModelRunner310(NPUModelRunner):
                 prev_common_req_indices.append(prev_index)
                 draft_len = len(scheduled_spec_tokens.get(req_id, ()))
                 total_num_spec_tokens += draft_len
-                flattened_index = cu_num_tokens[cur_index].item() - 1
+                flattened_index = int(cu_num_tokens[cur_index]) - 1
                 sample_flattened_indices.append(flattened_index - draft_len)
                 spec_flattened_indices.extend(range(flattened_index - draft_len + 1, flattened_index + 1))
                 start = prev_index * self.num_spec_tokens
