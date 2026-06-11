@@ -11,6 +11,7 @@ on:
       - 'requirements-lint.txt'
       - 'requirements-dev.txt'
       - 'requirements.txt'
+      - 'requirements-torch-cpu.txt'
 
 # only cancel in-progress runs of the same workflow
 concurrency:
