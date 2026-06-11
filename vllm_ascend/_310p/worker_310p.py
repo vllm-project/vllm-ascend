@@ -20,18 +20,12 @@ import subprocess
 import psutil
 import torch
 import torch_npu
-from vllm.config import CUDAGraphMode
 from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
+from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
-from vllm.v1.worker.worker_base import CompilationTimes
 
-from vllm_ascend._310p.compile_warmup import build_piecewise_compile_warmup_sizes
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.cpu_binding import bind_cpus
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 _IS_RC_DEVICE: bool | None = None
@@ -146,90 +140,6 @@ class NPUWorker310(NPUWorker):
     def _warm_up_atb(self):
         # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops
         logger.info_once("Skip warm-up atb ops for 310P device.")
-
-    def compile_or_warm_up_model(self) -> CompilationTimes:
-        warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
-        cg_capture_sizes: list[int] = []
-        if not self.model_config.enforce_eager:
-            if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-                cg_capture_sizes = [] if cg_sizes is None else cg_sizes
-
-            compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
-            warmup_sizes = build_piecewise_compile_warmup_sizes(
-                self.vllm_config,
-                warmup_sizes,
-                cg_capture_sizes,
-                compile_ranges,
-            )
-
-        for size in sorted(warmup_sizes, reverse=True):
-            logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size)
-
-        npugraph_memory_bytes = 0
-        if not self.model_config.enforce_eager:
-            npugraph_memory_bytes = self.model_runner.capture_model()
-
-        if hasattr(self, "npugraph_memory_estimate") and self.npugraph_memory_estimate > 0:
-            GiB = lambda b: round(b / GiB_bytes, 2)
-            diff = abs(npugraph_memory_bytes - self.npugraph_memory_estimate)
-            logger.info(
-                "ACL graph pool memory: %s GiB (actual), %s GiB (estimated), difference: %s GiB (%.1f%%).",
-                GiB(npugraph_memory_bytes),
-                GiB(self.npugraph_memory_estimate),
-                GiB(diff),
-                100 * diff / max(npugraph_memory_bytes, 1),
-            )
-
-        if self.cache_config.kv_cache_memory_bytes is None and hasattr(self, "peak_activation_memory"):
-            redundancy_buffer = 150 * (1 << 20)
-            non_kv_memory = (
-                self.model_runner.model_memory_usage
-                + self.peak_activation_memory
-                + self.non_torch_memory
-                + npugraph_memory_bytes
-            )
-            self.npugraph_memory_bytes = npugraph_memory_bytes
-            suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
-            suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
-            msg = (
-                f"Free memory on device "
-                f"({format_gib(self.init_snapshot.free_memory)}/"
-                f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
-                f"Desired GPU memory utilization is "
-                f"({self.cache_config.gpu_memory_utilization}, "
-                f"{format_gib(self.requested_memory)} GiB). "
-                f"Actual usage: {format_gib(self.model_runner.model_memory_usage)} GiB "
-                f"for weights, {format_gib(self.peak_activation_memory)} GiB for peak "
-                f"activation, {format_gib(self.non_torch_memory)} GiB for non-torch "
-                f"memory, {format_gib(npugraph_memory_bytes)} GiB for NPU graph memory. "
-                f"Replace gpu_memory_utilization with "
-                f"`--kv-cache-memory={suggested_to_requested}` "
-                f"({format_gib(suggested_to_requested)} GiB) to fit into requested "
-                f"memory, or `--kv-cache-memory={suggested_to_gpu_limit}` "
-                f"({format_gib(suggested_to_gpu_limit)} GiB) to fully utilize NPU "
-                f"free memory. Current KV cache memory: "
-                f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
-            )
-            logger.info(msg)
-
-        if get_ascend_device_type() != AscendDeviceType.A5:
-            self._warm_up_atb()
-        if get_ascend_config().enable_cpu_binding:
-            try:
-                bind_cpus(self.local_rank)
-            except Exception as e:
-                logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
-        set_random_seed(self.model_config.seed)
-        return CompilationTimes(
-            language_model=self.vllm_config.compilation_config.compilation_time,
-            encoder=getattr(
-                self.vllm_config.compilation_config,
-                "encoder_compilation_time",
-                0.0,
-            ),
-        )
 
     def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
