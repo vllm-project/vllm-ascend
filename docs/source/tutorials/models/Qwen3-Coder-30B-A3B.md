@@ -130,7 +130,7 @@ If deploying a multi-node environment, set up the environment on each node.
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-Coder-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
 
 ```bash
-
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export VLLM_USE_MODELSCOPE=True
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
@@ -249,32 +249,6 @@ Using the `openai_humaneval` dataset as an example, run the accuracy evaluation 
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-When running AISBench with the deployment configurations in Section 9.1, use the following settings as a reference:
-
-:::{tip}
-**High throughput (Section 9.1, TP1)**
-
-- `request_rate`: 0 (max pressure)
-- `batch_size`: 32
-- Input/Output length: adjust based on your target scenario (e.g., 2048/2048 for balanced testing, 3500/1500 for long-input testing)
-:::
-
-:::{tip}
-**Low latency (Section 9.1, TP4+EP)**
-
-- `request_rate`: set to control concurrency (e.g., 1 for single request latency, 8 for moderate load)
-- `batch_size`: 1
-- Input/Output length: 2048/2048 or 3500/1500
-:::
-
-:::{tip}
-**Long context (Section 9.1, TP4+EP)**
-
-- `request_rate`: set to control concurrency (e.g., 1–14)
-- `batch_size`: 1
-- Input/Output length: e.g., 65536/1024 or 131072/1024
-:::
-
 ### Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
@@ -295,8 +269,6 @@ vllm bench serve \
     --result-dir ./
 ```
 
-<!-- TODO: Add performance evaluation results when available -->
-
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
@@ -307,9 +279,9 @@ vllm bench serve \
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|-------------|----------------|------------------------|
-| High Throughput | Single-Node (TP1) | 1 (A2) | W8A8 | Single-card deployment maximizes concurrent request processing |
-| Low Latency | Single-Node (TP4) | 4 (A2) | W8A8 | Multi-card TP reduces per-token latency with expert parallelism |
-| Long Context | Single-Node (TP4) | 4 (A2) | W8A8 | Reduces concurrent sequences to accommodate longer max-model-len |
+| High Throughput | Single-Node (TP1) | 1 (A3) | W8A8 | Single-card deployment maximizes concurrent request processing |
+| Low Latency | Single-Node (TP4) | 4 (A3) | W8A8 | Multi-card TP reduces per-token latency with expert parallelism |
+| Long Context | Single-Node (TP4) | 4 (A3) | W8A8 | Reduces concurrent sequences to accommodate longer max-model-len |
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
@@ -326,8 +298,7 @@ vllm bench serve \
 **Low Latency Configuration:**
 
 ```shell
-
-export ASCEND_RT_VISIBLE_DEVICES=12,13,14,15
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
@@ -354,11 +325,18 @@ vllm serve your_model_path \
     --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-Coder-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
 ```
 
+:::{tip}
+Recommended AISBench settings for this configuration:
+
+- `request_rate`: 0
+- `batch_size`: 32
+- Input/Output length: 2048/2048 or 3500/1500
+:::
+
 **High Throughput Configuration:**
 
 ```shell
-
-export ASCEND_RT_VISIBLE_DEVICES=15
+export ASCEND_RT_VISIBLE_DEVICES=0
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
@@ -383,11 +361,18 @@ vllm serve your_model_path \
     --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-Coder-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
 ```
 
+:::{tip}
+Recommended AISBench settings for this configuration:
+
+- `request_rate`: 0
+- `batch_size`: 32
+- Input/Output length: 2048/2048 or 3500/1500
+:::
+
 **Long Context Configuration:**
 
 ```shell
-
-export ASCEND_RT_VISIBLE_DEVICES=12,13,14,15
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
@@ -413,6 +398,14 @@ vllm serve your_model_path \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-Coder-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
 ```
+
+:::{tip}
+Recommended AISBench settings for this configuration:
+
+- `request_rate`: 0
+- `batch_size`: 32
+- Input/Output length: 65536/1024 or 131072/1024
+:::
 
 ### 9.2 Tuning Guidelines
 
