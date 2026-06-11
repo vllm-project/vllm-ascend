@@ -740,6 +740,16 @@
 #       Rotary quant is a unique feature of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+#   4. `vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM.load_weights`
+#    Why:
+#       After vllm PR #41706, GlmMoeDsaForCausalLM.load_weights uses `AutoWeightsLoader` which
+#       does not skip `rot.weight`, and will cause ValueError while loading weights.
+#    How：
+#       Use the `skip_prefixes` parameter to skip certain weight tensors.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/41706
+#    Future Plan:
+#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
 # ** 20. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
