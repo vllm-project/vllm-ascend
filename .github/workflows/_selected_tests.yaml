@@ -62,7 +62,7 @@ jobs:
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: https://repo.huaweicloud.com/ascend/repos/pypi
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
         UV_HTTP_TIMEOUT: 120
@@ -192,7 +192,7 @@ jobs:
           fi
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
           pip install uc-manager
-          uv pip install -r requirements-torch-cpu.txt --extra-index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
+          # uv pip install -r requirements-torch-cpu.txt --extra-index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
           uv pip install -r requirements-dev.txt
           uv pip install -e . --no-build-isolation
 
