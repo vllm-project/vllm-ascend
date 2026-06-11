@@ -233,6 +233,10 @@ If you are building in a CPU-only environment where `npu-smi` is unavailable, yo
 - Atlas A5: `export SOC_VERSION=<value starting with "ascend950">`
 ```
 
+```{note}
+To enable the batch invariance feature, set the environment variable `VLLM_BATCH_INVARIANT=1` before building `vllm-ascend`. And the `batch_invariant_ops` will be compiled and installed after setting `VLLM_BATCH_INVARIANT=1`. For usage guidance on the batch invariance feature, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>
+```
+
 ## Set up using Docker
 
 `vllm-ascend` offers Docker images for deployment. You can just pull the **prebuilt image** from the image repository [ascend/vllm-ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and run it with bash.

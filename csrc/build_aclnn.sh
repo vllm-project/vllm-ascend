@@ -308,4 +308,20 @@ log_selected_ops
   log "installer finished"
   log "installed files under ${custom_ops_install_dir} (maxdepth=4, first 120 entries):"
   { find "${custom_ops_install_dir}" -mindepth 1 -maxdepth 4 -print | sort | head -n 120 | sed 's#^#[build_aclnn] install: #'; } || true
+
+  # install batch_invariant run package and whl package
+  if [[ "${VLLM_BATCH_INVARIANT:-0}" == "1" ]]; then
+    log "VLLM_BATCH_INVARIANT=1, installing batch_invariant run package and whl package..."
+
+    # call separate installation script
+    batch_invariant_script="${ROOT_DIR}/csrc/build_batch_invariant_ops.sh"
+    if [[ -f "${batch_invariant_script}" ]]; then
+      log "Calling batch_invariant_ops build script: ${batch_invariant_script}"
+      bash "${batch_invariant_script}" "${SOC_ARG}"
+    else
+      log "Warning: batch_invariant_ops build script not found at ${batch_invariant_script}"
+    fi
+  else
+    log "VLLM_BATCH_INVARIANT is not set to 1, skipping batch_invariant ops build"
+  fi
 )

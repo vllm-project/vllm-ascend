@@ -60,7 +60,8 @@ ARG COMPILE_CUSTOM_KERNELS=1
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
-    OMP_NUM_THREADS=1
+    OMP_NUM_THREADS=1 \
+    VLLM_BATCH_INVARIANT=1
 COPY . /vllm-workspace/vllm-ascend/
 
 RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi" && \

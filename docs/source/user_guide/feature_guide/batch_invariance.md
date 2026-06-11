@@ -18,13 +18,13 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance currently requires Ascend Atlas A2 inference products NPUs, because only the Atlas A2 inference products supports batch invariance with HCCL communication for now.
-We will support other NPUs in the future.
+Batch invariance currently requires Ascend Atlas A2 and A3 inference products NPUs.
+We will support Atlas A5 and other NPUs in the future.
 
 ## Software Requirements
 
-Batch invariance requires a custom operator library for Atlas A2 inference products.
-We will release the customized operator library in future versions.
+Batch invariance requires a custom operator library for Atlas A2 and A3 inference products.
+The operator library is automatically installed as part of the standard vllm-ascend installation process.
 
 ## Enabling Batch Invariance
 
