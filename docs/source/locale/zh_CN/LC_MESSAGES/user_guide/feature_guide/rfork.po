@@ -123,7 +123,7 @@ msgid ""
 "topology-compatible instances are matched together."
 msgstr ""
 "**拓扑感知部署**：RFork 将 `kv_role`、`node_rank`、`tp_rank` 和可选的 `draft` 角色编码到种子键中，"
-因此只有拓扑兼容的实例才会被匹配在一起。"
+"因此只有拓扑兼容的实例才会被匹配在一起。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:32
 msgid "Usage"
@@ -151,7 +151,7 @@ msgid ""
 "mock planner script is provided at "
 "[`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py)."
 msgstr ""
-运行一个实现 RFork 种子协议的规划器服务。一个简单的模拟规划器脚本位于 "
+"运行一个实现 RFork 种子协议的规划器服务。一个简单的模拟规划器脚本位于 "
 "[`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py)。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:41
@@ -307,7 +307,7 @@ msgid ""
 "A simple planner implementation is provided at "
 "[`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py)."
 msgstr ""
-一个简单的规划器实现位于 [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py)。"
+"一个简单的规划器实现位于 [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py)。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:86
 msgid "3. Start vLLM Instances"
@@ -325,7 +325,7 @@ msgid ""
 "so RFork falls back to the default loader. After loading finishes, that "
 "instance starts its local seed service and reports itself to the planner."
 msgstr ""
-对于第一个实例，规划器通常还没有兼容的种子，因此 RFork 会回退到默认加载器。加载完成后，该实例会启动其本地种子服务，并向规划器上报自身。"
+"对于第一个实例，规划器通常还没有兼容的种子，因此 RFork 会回退到默认加载器。加载完成后，该实例会启动其本地种子服务，并向规划器上报自身。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:92
 msgid ""
@@ -333,7 +333,7 @@ msgid ""
 " will try to transfer weights from the existing seed instance before "
 "falling back to the default loader."
 msgstr ""
-对于后续实例，如果规划器能分配到一个兼容的种子，RFork 会在回退到默认加载器之前尝试从现有种子实例传输权重。"
+"对于后续实例，如果规划器能分配到一个兼容的种子，RFork 会在回退到默认加载器之前尝试从现有种子实例传输权重。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:109
 msgid "Placeholder Descriptions"
@@ -395,5 +395,5 @@ msgid ""
 "management, or production-grade availability behavior, implement your own"
 " planner based on the RFork seed protocol."
 msgstr ""
-示例 [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py) 只是一个简单的模拟实现。"
-如果您需要更强的调度、容量管理或生产级可用性行为，请基于 RFork 种子协议实现您自己的规划器。"
+"示例 [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py) 只是一个简单的模拟实现。"
+"如果您需要更强的调度、容量管理或生产级可用性行为，请基于 RFork 种子协议实现您自己的规划器。"
