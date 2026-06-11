@@ -169,11 +169,18 @@ jobs:
 
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
+
+          if [ "${{ matrix.os_type }}" = "openeuler" ]; then
+            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
+          fi
+
           pip install uc-manager
+
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
           # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
           # (does not append to) the env var and would drop the ascend repo.
           uv pip install -r requirements-dev.txt
+          uv pip install setuptools wheel packaging ninja
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
           if uv pip install -e . --no-build-isolation; then
             echo "vllm-ascend installed successfully"
