@@ -126,7 +126,7 @@ jobs:
             libcurl4
           ldconfig
 
-          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.8.post1-cp312-cp312-manylinux_2_17_aarch64.manylinux_2_35_aarch64.whl"
+          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.9-cp312-cp312-manylinux_2_35_aarch64.whl"
           pip install --no-cache-dir --no-deps \
             "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
 
