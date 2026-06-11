@@ -2594,15 +2594,6 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
-        if (
-            self.supports_mm_inputs
-            and model_inputs["input_ids"] is None
-            and inputs_embeds is not None
-        ):
-            # NPU graph compilation may still inspect input_ids shape even when
-            # the multimodal model consumes inputs_embeds. Keep a real tensor to
-            # avoid tracing None through the compiled language-model boundary.
-            model_inputs["input_ids"] = self.input_ids.gpu[:num_tokens_padded]
         run_model = partial(self.model, **model_inputs)
 
         if self.enable_enpu:
@@ -3297,14 +3288,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
-            model_kwargs = self._init_model_kwargs()
-            if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
-                input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
-                model_kwargs = {
-                    **model_kwargs,
-                    **self._dummy_mm_kwargs(num_reqs),
-                }
-            elif self.enable_prompt_embeds:
+            if self.supports_mm_inputs and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             else:
@@ -3371,12 +3355,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids=input_ids,
             ):
                 outputs = self._model_forward(
-                    num_tokens_padded,
-                    input_ids,
-                    positions,
-                    intermediate_tensors,
-                    inputs_embeds,
-                    **model_kwargs,
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
