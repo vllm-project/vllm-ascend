@@ -234,6 +234,8 @@ jobs:
   select-full-tests:
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
     runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
       has_tests: ${{ steps.full-scope.outputs.has_tests }}
       test_groups: ${{ steps.full-scope.outputs.test_groups }}
