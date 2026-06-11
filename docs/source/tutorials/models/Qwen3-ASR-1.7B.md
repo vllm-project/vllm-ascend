@@ -89,11 +89,11 @@ The current evaluation results are:
 
 |NPU| Category | Dataset | Metric | Result |
 |----------|----------|---------|--------|--------|
-|910B| Accuracy | librispeech_asr / clean / test | Total Samples | 500 |
-|910B| Accuracy | librispeech_asr / clean / test | Success | 500 |
-|910B| Accuracy | librispeech_asr / clean / test | Failure | 0 |
-|910B| Accuracy | librispeech_asr / clean / test | WER | 0.035 |
-|310P| Accuracy | ai-shell1 / wav / test | CER | 0.0272 |
+|Atlas 300I A2 2UP| Accuracy | librispeech_asr / clean / test | Total Samples | 500 |
+|Atlas 300I A2 2UP| Accuracy | librispeech_asr / clean / test | Success | 500 |
+|Atlas 300I A2 2UP| Accuracy | librispeech_asr / clean / test | Failure | 0 |
+|Atlas 300I A2 2UP| Accuracy | librispeech_asr / clean / test | WER | 0.035 |
+|Atlas 300I DUO| Accuracy | ai-shell1 / wav / test | CER | 0.0272 |
 
 ## Performance
 
@@ -103,10 +103,10 @@ In the current evaluation, **Qwen3-ASR-1.7B** processed **100 samples** in appro
 
 |NPU| Category | Dataset | Metric | Result |
 |----------|----------|---------|--------|--------|
-|910B| Performance | LibriSpeech test/clean (100 samples) | Total Samples | 100 |
-|910B| Performance | LibriSpeech test/clean (100 samples) | Total Runtime | 57 s |
-|910B| Performance | LibriSpeech test/clean (100 samples) | Average Throughput | 1.73 samples/s |
-|310P| Performance | aishell wav/test (7176 samples) | Total Runtime | 3182 s |
+|Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Total Samples | 100 |
+|Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Total Runtime | 57 s |
+|Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Average Throughput | 1.73 samples/s |
+|Atlas 300I DUO| Performance | aishell wav/test (7176 samples) | Total Runtime | 3182 s |
 
 ### Remarks
 
