@@ -1,5 +1,6 @@
 from typing import Any
 
+from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.distributed.parallel_state import get_shard_weight_group
@@ -53,6 +54,11 @@ class Flashcomm2OShardManager:
         if is_hidden_layer(layer):
             layer_idx = extract_layer_index(layer.prefix)
             self._shard_layers[layer_idx] = layer
+            logger.debug(
+                "OShard: Registering o_proj layer at index %d (prefetch_step=%d)",
+                layer_idx,
+                prefetch_step,
+            )
 
             register_layer_to_shard_weight_series(
                 series_name="o_proj", group=get_shard_weight_group(), layer=layer, prefetch_step=prefetch_step
@@ -86,12 +92,14 @@ class Flashcomm2OShardManager:
         # Ensure the layer exists and meets the sharding criteria.
         if target_layer and is_hidden_layer(target_layer):
             reach_layer_for_shard_weight_series(target_layer)
+            logger.debug("OShard: Broadcast triggered for layer %s", layer_prefix)
 
     def post_process_after_loading(self):
         """Performs post-processing on all registered layers after weight loading.
 
         This should be called once after the model weights have been fully loaded.
         """
+        logger.info("OShard: post_process_after_loading for %d shard layers", len(self._shard_layers))
         if self._shard_layers:
             # Pick any layer (e.g., the first one) to trigger the shard post-processing
             any_layer = next(iter(self._shard_layers.values()))

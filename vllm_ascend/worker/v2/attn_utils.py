@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.logger import logger
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
@@ -181,6 +182,13 @@ def build_attn_state(
         attn_state = AscendAttentionState.ChunkedPrefill
     else:
         attn_state = AscendAttentionState.PrefillCacheHit
+    logger.debug(
+        "build_attn_state: %s (num_reqs=%d, num_scheduled=%s, num_valid=%s)",
+        attn_state,
+        num_reqs,
+        num_scheduled_tokens,
+        num_valid_tokens,
+    )
     return attn_state
 
 

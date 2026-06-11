@@ -24,6 +24,7 @@ import torch
 import vllm
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -139,6 +140,11 @@ class AscendEagleSpeculator(EagleSpeculator):
         generate_draft.
         """
         self.input_batch = input_batch
+        logger.debug(
+            "EagleSpeculator.propose: num_reqs=%d, num_tokens=%d",
+            input_batch.num_reqs,
+            input_batch.num_tokens,
+        )
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with build_attn_metadata_wrapper(), torch_gather_wrapper():
@@ -199,6 +205,12 @@ class AscendEagleSpeculator(EagleSpeculator):
             cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         ):
             """Override GPU EagleSpeculator.generate_draft for Ascend NPUs."""
+            logger.debug(
+                "EagleSpeculator.generate_draft: num_reqs=%d, num_tokens_padded=%d, cg_mode=%s",
+                num_reqs,
+                num_tokens_padded,
+                cudagraph_runtime_mode,
+            )
             self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
             idx_mapping = self.idx_mapping[:num_reqs]
             positions = self.input_buffers.positions[:num_reqs]
@@ -267,6 +279,12 @@ class AscendEagleSpeculator(EagleSpeculator):
             cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         ) -> None:
             """Override AutoRegressiveSpeculator._generate_draft for Ascend NPUs."""
+            logger.debug(
+                "EagleSpeculator._generate_draft: num_reqs=%d, num_tokens_padded=%d, cg_mode=%s",
+                num_reqs,
+                num_tokens_padded,
+                cudagraph_runtime_mode,
+            )
             self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
             super()._generate_draft(
                 num_reqs,
@@ -328,6 +346,7 @@ class AscendEagleSpeculator(EagleSpeculator):
             for attn_meta in attn_metadata.values():
                 attn_meta.seq_lens = attn_meta.seq_lens + 1
                 attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
+            logger.debug("EagleSpeculator.run_model: incremented seq_lens for %d attn entries", len(attn_metadata))
 
     def _init_decode_attn_metadata(self, attn_metadata: dict[str, Any] | None, num_reqs: int):
         """Initialize attention metadata for decode phase on Ascend NPUs."""
@@ -423,6 +442,7 @@ def build_attn_metadata_wrapper():
 # the bug is reported to huawei CANN team, but not fixed yet.
 # NOTE(drslark): make a temporary patch only for `torch.gather`
 _original_gather = torch.gather
+logger.info("Patching torch.gather for CANN cache bug workaround (torch.gather pollutes buffer caches).")
 
 
 def gather(input, dim, index, *, sparse_grad=False, out=None):

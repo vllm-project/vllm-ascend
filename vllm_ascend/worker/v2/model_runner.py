@@ -22,6 +22,7 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -152,6 +153,11 @@ class NPUModelRunner(GPUModelRunner):
         override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
         """
         mc2_tokens_capacity = get_mc2_tokens_capacity()
+        logger.debug(
+            "profile_run: mc2_tokens_capacity=%s, max_num_tokens=%d",
+            mc2_tokens_capacity,
+            self.max_num_tokens,
+        )
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
@@ -159,6 +165,7 @@ class NPUModelRunner(GPUModelRunner):
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
+                logger.debug("profile_run: running MC2 dummy run (capacity=%s)", mc2_tokens_capacity)
                 self._dummy_run(mc2_tokens_capacity, skip_attn=True, is_profile=True)
             super().profile_run()
 
@@ -176,6 +183,13 @@ class NPUModelRunner(GPUModelRunner):
         assert num_tokens > 0
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
+        logger.debug(
+            "prepare_inputs: num_tokens=%d, num_tokens_padded=%d, num_reqs=%d, cg_mode=%s",
+            num_tokens,
+            num_tokens_after_padding,
+            num_reqs,
+            batch_desc.cg_mode,
+        )
 
         # Decode first, then prefill.
         # batch_idx -> req_id
@@ -428,6 +442,7 @@ class NPUModelRunner(GPUModelRunner):
         req_ids: list[str],
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        logger.debug("_update_seq_lens_cpu: %d requests", len(req_ids))
         # wait for num_computed_tokens copy to cpu stream to finish.
         self.num_computed_tokens_event.synchronize()
         for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
