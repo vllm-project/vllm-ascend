@@ -78,7 +78,6 @@ jobs:
             matrix=$(python .github/workflows/scripts/generate_cache_matrix.py --branch-filter "${GITHUB_REF_NAME}")
           elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
             # PR validation should not fan out to all release branches.
-            # Keep the producer validation small to reduce third-party download flooding.
             matrix=$(python .github/workflows/scripts/generate_cache_matrix.py --branch-filter "${GITHUB_BASE_REF}")
           else
             matrix=$(python .github/workflows/scripts/generate_cache_matrix.py)
