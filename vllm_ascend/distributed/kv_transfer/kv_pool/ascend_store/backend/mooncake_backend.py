@@ -230,13 +230,13 @@ class MooncakeBackend(Backend):
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             res_list = list(res)
+            failed_count = sum(1 for value in res_list if value < 0)
             logger.debug(
                 "MooncakeBackend.get result keys=%d result_sample=%s negative_count=%d",
                 len(keys),
                 res_list[:12],
-                sum(1 for value in res_list if value < 0),
+                failed_count,
             )
-            failed_count = sum(1 for value in res_list if value < 0)
             if failed_count:
                 logger.error(
                     "Failed to get %d keys out of %d. Check key existence and memory state.",
