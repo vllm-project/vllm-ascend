@@ -8,11 +8,17 @@ Module identification is inferred from record.pathname.
 """
 
 import logging
+import os
+from datetime import datetime, timedelta
 
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = "%(levelname)s %(asctime)s [%(fileinfo)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
+
+_LOG_DIR = os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
+_LOG_RETENTION_DAYS = 7
+_LOG_MAX_BYTES = 20 * 1024 * 1024
 
 
 def _is_ascend_module(pathname: str) -> bool:
@@ -76,6 +82,100 @@ def _patch_handler(handler: logging.Handler) -> None:
         handler.formatter = AscendColoredFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
     elif isinstance(handler.formatter, NewLineFormatter):
         handler.formatter = AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
+
+
+class RotatingAscendFileHandler(logging.FileHandler):
+    """FileHandler that rotates log files when they exceed a size limit.
+
+    Naming convention:
+        vllm_ascend_{timestamp}_{pid}.log          <- first file
+        vllm_ascend_{timestamp}_{pid}_002.log       <- second file
+        vllm_ascend_{timestamp}_{pid}_003.log       <- third file
+    """
+
+    def __init__(self, log_dir: str, max_bytes: int = _LOG_MAX_BYTES) -> None:
+        self._log_dir = log_dir
+        self._max_bytes = max_bytes
+        self._sequence = 1
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._base_name = f"vllm_ascend_{timestamp}_{os.getpid()}"
+        log_file = os.path.join(log_dir, f"{self._base_name}.log")
+        super().__init__(log_file, encoding="utf-8")
+
+    def emit(self, record) -> None:
+        try:
+            if self.stream is not None and os.path.isfile(self.baseFilename):
+                if os.path.getsize(self.baseFilename) >= self._max_bytes:
+                    self._rotate()
+        except OSError:
+            pass
+        super().emit(record)
+
+    def _rotate(self) -> None:
+        self.stream.close()
+        self.stream = None  # type: ignore[assignment]
+        self._sequence += 1
+        new_file = os.path.join(self._log_dir, f"{self._base_name}_{self._sequence:03d}.log")
+        self.baseFilename = new_file
+        self.stream = self._open()
+
+
+_file_logging_configured = False
+_file_handler: logging.Handler | None = None
+
+
+def _cleanup_old_logs(log_dir: str, retention_days: int) -> None:
+    cutoff = datetime.now() - timedelta(days=retention_days)
+    try:
+        for entry in os.scandir(log_dir):
+            if not entry.is_file():
+                continue
+            if not entry.name.startswith("vllm_ascend_") or not entry.name.endswith(".log"):
+                continue
+            mtime = datetime.fromtimestamp(entry.stat().st_mtime)
+            if mtime < cutoff:
+                os.remove(entry.path)
+    except OSError:
+        pass
+
+
+def _setup_file_logging(log_dir: str | None = None) -> None:
+    global _file_logging_configured, _file_handler
+    if _file_logging_configured:
+        return
+    target_dir = log_dir or _LOG_DIR
+    os.makedirs(target_dir, exist_ok=True)
+    _cleanup_old_logs(target_dir, _LOG_RETENTION_DAYS)
+    file_handler = RotatingAscendFileHandler(target_dir)
+    vllm_logger = logging.getLogger("vllm")
+    log_level = logging.INFO
+    if vllm_logger.handlers:
+        log_level = vllm_logger.handlers[0].level
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT))
+    vllm_logger.addHandler(file_handler)
+    _file_handler = file_handler
+    _file_logging_configured = True
+
+
+def configure_ascend_file_logging() -> None:
+    global _file_logging_configured, _file_handler
+    log_dir = _LOG_DIR
+    try:
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        ascend_config = get_ascend_config()
+        log_dir = ascend_config.ascend_log_path
+    except Exception:
+        pass
+    if log_dir != _LOG_DIR:
+        vllm_logger = logging.getLogger("vllm")
+        if _file_handler is not None:
+            vllm_logger.removeHandler(_file_handler)
+            _file_handler.close()
+            _file_handler = None
+        _file_logging_configured = False
+    _setup_file_logging(log_dir)
 
 
 def _patch_vllm_formatter() -> None:

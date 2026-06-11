@@ -131,3 +131,107 @@ class TestLoggerModule(TestBase):
         result = fmt.format(record)
         self.assertIn("[vllm-ascend] [compilation]", result)
         self.assertIn("colored test", result)
+
+    def test_log_dir_constant(self):
+        from vllm_ascend.logger import _LOG_DIR, _LOG_RETENTION_DAYS
+
+        self.assertIn("ascend", _LOG_DIR)
+        self.assertIn("vllm_ascend", _LOG_DIR)
+        self.assertEqual(_LOG_RETENTION_DAYS, 7)
+
+    def test_setup_file_logging_creates_handler(self):
+        import os
+        import tempfile
+
+        import regex as re
+
+        import vllm_ascend.logger as logger_module
+        from vllm_ascend.logger import RotatingAscendFileHandler, _setup_file_logging
+
+        logger_module._file_logging_configured = False
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                log_dir = os.path.join(tmpdir, "ascend", "log", "vllm_ascend")
+                vllm_logger = logging.getLogger("vllm")
+                if not vllm_logger.handlers:
+                    vllm_logger.addHandler(logging.StreamHandler())
+                expected_level = vllm_logger.handlers[0].level
+                handler_count_before = len(vllm_logger.handlers)
+
+                _setup_file_logging(log_dir)
+
+                handler_count_after = len(vllm_logger.handlers)
+                self.assertEqual(handler_count_after, handler_count_before + 1)
+
+                new_handler = vllm_logger.handlers[-1]
+                self.assertIsInstance(new_handler, RotatingAscendFileHandler)
+                self.assertEqual(new_handler.level, expected_level)
+                self.assertTrue(os.path.exists(log_dir))
+
+                base = os.path.basename(new_handler.baseFilename)  # type: ignore[attr-defined]
+                pattern = r"^vllm_ascend_\d{8}_\d{6}_\d+\.log$"
+                self.assertTrue(re.match(pattern, base), f"Filename '{base}' does not match pattern")
+
+                vllm_logger.removeHandler(new_handler)
+        finally:
+            logger_module._file_logging_configured = False
+
+    def test_rotating_handler_rotates_on_size(self):
+        import os
+        import tempfile
+
+        from vllm_ascend.logger import RotatingAscendFileHandler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = RotatingAscendFileHandler(tmpdir, max_bytes=100)
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            logger = logging.getLogger("test_rotate")
+            logger.addHandler(handler)
+            logger.setLevel(logging.DEBUG)
+
+            for i in range(200):
+                logger.info("line %04d padding to fill size", i)
+
+            handler.close()
+            logger.removeHandler(handler)
+
+            files = sorted(os.listdir(tmpdir))
+            self.assertGreaterEqual(len(files), 2)
+            self.assertTrue(files[0].endswith(".log"))
+            self.assertNotIn("_002", files[0])
+            self.assertIn("_002", files[1])
+
+    def test_cleanup_old_logs(self):
+        import os
+        import tempfile
+        from datetime import datetime, timedelta
+
+        from vllm_ascend.logger import _cleanup_old_logs
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_file = os.path.join(tmpdir, "vllm_ascend_20260601_0000_12345.log")
+            old_rotated = os.path.join(tmpdir, "vllm_ascend_20260601_0000_12345_002.log")
+            recent_file = os.path.join(tmpdir, "vllm_ascend_20260610_0000_99999.log")
+            non_log_file = os.path.join(tmpdir, "other_file.txt")
+
+            with open(old_file, "w") as f:
+                f.write("old")
+            with open(old_rotated, "w") as f:
+                f.write("old rotated")
+            with open(recent_file, "w") as f:
+                f.write("recent")
+            with open(non_log_file, "w") as f:
+                f.write("other")
+
+            old_time = (datetime.now() - timedelta(days=10)).timestamp()
+            recent_time = datetime.now().timestamp()
+            os.utime(old_file, (old_time, old_time))
+            os.utime(old_rotated, (old_time, old_time))
+            os.utime(recent_file, (recent_time, recent_time))
+
+            _cleanup_old_logs(tmpdir, 7)
+
+            self.assertFalse(os.path.exists(old_file))
+            self.assertFalse(os.path.exists(old_rotated))
+            self.assertTrue(os.path.exists(recent_file))
+            self.assertTrue(os.path.exists(non_log_file))
