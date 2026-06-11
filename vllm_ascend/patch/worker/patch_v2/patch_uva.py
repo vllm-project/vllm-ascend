@@ -94,35 +94,22 @@ class UvaBufferWrapper:
     Ascend NPU doesn't support UVA tensors directly.
     This is a wrapper class that provides CPU and NPU views of a UVA tensor.
     However if users add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True' to environment,
-    UVA feature is Supported.
+    UVA feature is Supported.(This environment will be added automatically)
     """
 
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         key = "PYTORCH_NPU_ALLOC_CONF"
-        self._cpu: torch.Tensor
-        self._np: np.ndarray
+        self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+        self._np: np.ndarray = self._cpu.numpy()
         self._uva: torch.Tensor
         if key in os.environ:
             value = os.environ[key]
             if "pinned_mem_register:True" not in value:
-                error_info = (
-                    f"UVA is not available, because environment_param {key} "
-                    f"lack value 'pinned_mem_register:True', "
-                    f"try to add os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'"
-                )
-                raise RuntimeError(error_info)
-            self._cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-            if not self._cpu.is_pinned():
-                error_info = (
-                    "UVA is not available, because cpu tensor is not pinned, "
-                    "try to use .pin_memory() to cpu_tensor wantted to use uva feature"
-                )
-                raise RuntimeError(error_info)
-            self._np = self._cpu.numpy()
-            self._uva = self._cpu
+                self._uva = torch.zeros_like(self._cpu, device="npu")
+                self._modified_indices: set[int] = set()
+            else:
+                self._uva = self._cpu
         else:
-            self._cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-            self._np = self._cpu.numpy()
             self._uva = torch.zeros_like(self._cpu, device="npu")
             self._modified_indices: set[int] = set()
 
