@@ -1109,19 +1109,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             page_size_bytes,
         )
 
-    def _wait_for_pd_transfer(self, layer_id: int) -> None:
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
-            get_shared_layer_transfer_events,
-        )
-
-        events = get_shared_layer_transfer_events()
-        if events is None:
-            return
-        is_finish = events[layer_id].wait(timeout=30)
-        if not is_finish:
-            logger.error("Layerwise %d PD transfer wait timed out", layer_id)
-        events[layer_id].clear()
-
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
@@ -1157,7 +1144,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         shared = task.shared_block_data
         if shared is None:
             layer_id = task.layer_id
-            self._wait_for_pd_transfer(layer_id)
             assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
             logger.debug(">>>>>>>>>>>>>>>>>>>> set save layer %d", layer_id)
             self.layer_save_finished_events[layer_id].set()
@@ -1180,8 +1166,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             self.max_transfer_blocks,
             self.max_transfer_bytes,
         )
-        # wait for KV transfer (PD)
-        self._wait_for_pd_transfer(layer_id)
         if res != 0:
             logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
         for req_id in req_meta.req_ids:
