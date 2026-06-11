@@ -716,6 +716,19 @@ std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_meta(
     return std::make_tuple(g, beta_output);
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_attention_update_v2_meta(
+    const at::Tensor& lse,
+    const at::Tensor& local_out,
+    int64_t update_type)
+{
+    at::Tensor out = at::empty({local_out.size(1), local_out.size(2)}, local_out.options());
+    at::Tensor lse_out;
+    if (update_type == 1) {
+        lse_out = at::empty({lse.size(1)}, lse.options().dtype(at::kFloat));
+    }
+    return {out, lse_out};
+}
+
 std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::Tensor x,
     at::Tensor weight,
@@ -1649,6 +1662,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // recurrent_gated_delta_rule meta implementation
     ops.impl("npu_recurrent_gated_delta_rule", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_meta);
+    // attention_update_v2 meta implementation
+    ops.impl("npu_attention_update_v2", &vllm_ascend::meta::npu_attention_update_v2_meta);
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors

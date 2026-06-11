@@ -120,6 +120,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
+        "attention_update_v2"
         "store_kv_block"
     )
 
@@ -184,6 +185,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
+        "attention_update_v2"
         "store_kv_block"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
