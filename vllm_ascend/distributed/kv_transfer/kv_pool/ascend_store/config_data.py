@@ -327,24 +327,6 @@ class ChunkedTokenDatabase:
             size_list.append(size)
         return block_id, size_list
 
-    def prepare_addr_from_block_id(self, block_id: int, layer_id: int) -> list[int]:
-        block_len = self.group_block_len.get(0, [])
-        kv_caches_base_addr = self.group_kv_caches_base_addr.get(0, [])
-        length = len(block_len)
-        base_offset = layer_id * length
-        return [kv_caches_base_addr[base_offset + i] + block_id * block_len[i] for i in range(length)]
-
-    def prepare_addrs_from_block_ids(self, block_ids: list[int], layer_id: int) -> list[int]:
-        block_len = self.group_block_len.get(0, [])
-        kv_caches_base_addr = self.group_kv_caches_base_addr.get(0, [])
-        length = len(block_len)
-        base_offset = layer_id * length
-        return [
-            kv_caches_base_addr[base_offset + i] + block_id * block_len[i]
-            for block_id in block_ids
-            for i in range(length)
-        ]
-
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         group_block_size = self.get_block_size(0)
         block_id = block_ids[start // group_block_size]
@@ -354,7 +336,7 @@ class ChunkedTokenDatabase:
         length = len(group_block_len)
         for i in range(length):
             block_stride = group_block_stride[i] if group_block_stride else group_block_len[i]
-            addr = group_addrs[layer_id * length] + block_id * block_stride
+            addr = group_addrs[layer_id * length + i] + block_id * block_stride
             size = int(group_block_len[i] / group_block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
