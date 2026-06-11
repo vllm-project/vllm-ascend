@@ -69,7 +69,16 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
-_ATTN_KEYS_BUFFER = None
+
+
+def _expand_attn_keys_for_graph_params(attn_keys: list[str], graph_param_count: int) -> list[str]:
+    if len(attn_keys) == 0:
+        return []
+    return [attn_keys[index % len(attn_keys)] for index in range(graph_param_count)]
+
+
+def _metadata_key(attn_metadata: dict, fallback_key: str, layer_name: str | None) -> str:
+    return layer_name if layer_name in attn_metadata else fallback_key
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -384,6 +393,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32, device="npu")
         self.alibi_slopes = alibi_slopes
         self.attn_type = attn_type
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -398,6 +408,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.sinks = sinks
         self.layerIndex = 0
         self.enable_hamming_sparse = is_enable_hamming_sparse()
+        self._layer_name: str | None = None
+
+    def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
+        layer_name = layer.layer_name if layer is not None else self._layer_name
+        return self.kv_sharing_target_layer_name or layer_name
 
     @staticmethod
     def update_graph_params(
@@ -418,9 +433,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params = get_draft_graph_params()
             else:
                 graph_params = get_graph_params()
+            attn_keys = list(forward_context.attn_metadata)
+            attn_keys = _expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
+            if len(attn_keys) == 0:
+                return
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
-                    forward_context.attn_metadata,
+                    attn_keys,
                     graph_params.attn_params[num_tokens],
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
@@ -435,8 +454,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         block_table,
                         seq_lens,
                         output,
+                        *maybe_layer_name,
                     ) = param
-                    seq_lens = forward_context.attn_metadata[key].seq_lens
+                    layer_name = maybe_layer_name[0] if maybe_layer_name else None
+                    metadata_key = _metadata_key(forward_context.attn_metadata, key, layer_name)
+                    block_table = forward_context.attn_metadata[metadata_key].block_tables
+                    seq_lens = forward_context.attn_metadata[metadata_key].seq_lens
 
                     workspace = torch_npu._npu_paged_attention_get_workspace(
                         query=query,
@@ -486,6 +509,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+            else:
+                attn_keys = _expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
@@ -509,7 +534,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         sinks,
                         attn_output,
                         softmax_lse,
+                        *maybe_layer_name,
                     ) = param
+                    layer_name = maybe_layer_name[0] if maybe_layer_name else None
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -517,8 +544,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                         attn_count = attn_count + 1
                     else:
-                        seq_lens = attn_metadata[key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        metadata_key = _metadata_key(attn_metadata, key, layer_name)
+                        seq_lens = attn_metadata[metadata_key].seq_lens_list
+                        actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score_v2.out(
@@ -556,22 +584,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
-                # In some speculative methods (such as DFlash), the order of attn_keys in the Target model
-                # will be disrupted instead of increasing by layer index, so need regular expressions to
-                # reorder the attn_keys and stor the results in _ATTN_KEYS_BUFFER.
-                attn_keys_length = len(graph_params.attn_params[num_tokens])
-                global _ATTN_KEYS_BUFFER
-                if _ATTN_KEYS_BUFFER is None:
-                    import regex as re
-
-                    def extract_layer_index(key: str) -> int:
-                        match = re.search(r"(\d+)", key)
-                        return int(match.group(1)) if match else 0
-
-                    attn_keys_tmp = attn_keys[:attn_keys_length]
-                    attn_keys_tmp.sort(key=extract_layer_index)
-                    _ATTN_KEYS_BUFFER = attn_keys_tmp
-                attn_keys[:attn_keys_length] = _ATTN_KEYS_BUFFER
             # For Qwen3-next, since the kv_cache_config has already categorized
             # linear_attn and self_attn, the attn_metadata is first arranged with
             # self_attn followed by linear_attn. Therefore, using zip directly
@@ -584,6 +596,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+            else:
+                attn_keys = _expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
@@ -613,7 +627,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         c8_k_aq_offset,
                         c8_v_aq_scale,
                         c8_v_aq_offset,
+                        *maybe_layer_name,
                     ) = param
+                    layer_name = maybe_layer_name[0] if maybe_layer_name else None
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -624,8 +640,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         if not attn_metadata[draft_step][key].causal:
                             sparse_mode = 0
                     else:
-                        seq_lens = attn_metadata[key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        metadata_key = _metadata_key(attn_metadata, key, layer_name)
+                        seq_lens = attn_metadata[metadata_key].seq_lens_list
+                        actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -635,7 +652,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # Non-SWA models preserve the original behavior and continue to refresh
                         # block_tables from attn_metadata.
                         if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
-                            block_tables = attn_metadata[key].block_tables
+                            block_tables = attn_metadata[metadata_key].block_tables
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
@@ -797,6 +814,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )  # type: ignore
         else:
             attn_params = attn_params + (None, None, None, None)  # type: ignore
+        attn_params = attn_params + (self._graph_metadata_layer_name(layer),)  # type: ignore
         graph_params.attn_params[num_tokens].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
@@ -894,6 +912,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sinks,
                 weak_ref_tensors(output),
                 weak_ref_tensors(softmax_lse),
+                self._graph_metadata_layer_name(),
             )
         )
         torch.npu.graph_task_group_begin(stream)
@@ -964,6 +983,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     attn_metadata.block_tables,
                     attn_metadata.seq_lens,
                     weak_ref_tensors(output),
+                    self._graph_metadata_layer_name(),
                 )
             )
 
@@ -1302,6 +1322,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if self.enable_hamming_sparse:
             self.layerIndex = int(layer.layer_name.split(".")[2])
+        self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")
@@ -1365,6 +1386,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+        self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendC8AttentionBackendImpl")
