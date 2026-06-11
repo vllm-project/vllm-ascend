@@ -56,7 +56,7 @@ from vllm.v1.worker.utils import extract_layer_index
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
-    get_shared_layer_transfer_events,
+    ensure_shared_layer_transfer_events,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -1323,7 +1323,7 @@ class MooncakeLayerwiseConnectorWorker:
                 resharding_stream=self.resharding_stream,
                 callback_func=self.send_done_send_signal,
                 layer_transfer_finished_events=(
-                    self.layer_transfer_finished_events or get_shared_layer_transfer_events()
+                    self.layer_transfer_finished_events or ensure_shared_layer_transfer_events(self.total_layers)
                 ),
             )
             self.kv_send_layer_thread.start()

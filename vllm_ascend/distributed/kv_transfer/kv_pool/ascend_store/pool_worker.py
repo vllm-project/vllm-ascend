@@ -74,6 +74,13 @@ def get_shared_layer_transfer_events() -> list[threading.Event] | None:
     return _shared_layer_transfer_events
 
 
+def ensure_shared_layer_transfer_events(num_layers: int) -> list[threading.Event]:
+    global _shared_layer_transfer_events
+    if _shared_layer_transfer_events is None:
+        _shared_layer_transfer_events = [threading.Event() for _ in range(num_layers)]
+    return _shared_layer_transfer_events
+
+
 class KVPoolWorker:
     # The main class for the cache engine.
 
@@ -388,7 +395,6 @@ class KVPoolWorker:
                     self.layer_save_finished_events,
                     self.sync_save_events,
                     self.enable_kv_events,
-                    self.layer_transfer_finished_events,
                     self.layerwise_max_transfer_blocks,
                     self.layerwise_max_transfer_bytes,
                 )

@@ -62,6 +62,8 @@ class LayerBatchBuilder:
             token_database.group_kv_caches_base_addr[0],
             dtype=np.int64,
         )
+        group_block_stride = token_database.group_block_stride.get(0, token_database.group_block_len[0])
+        self._block_stride_np = np.asarray(group_block_stride, dtype=np.int64)
         self._full_block_inner_offsets_np = np.concatenate(
             (
                 np.zeros(1, dtype=np.int64),
@@ -137,7 +139,7 @@ class LayerBatchBuilder:
         layer_base_addrs = self._kv_caches_base_addr_np[base_offset : base_offset + length]
         rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
 
-        addr_arr = layer_base_addrs[None, :] + block_ids_arr[:, None] * block_len_np[None, :]
+        addr_arr = layer_base_addrs[None, :] + block_ids_arr[:, None] * self._block_stride_np[None, :]
         size_arr = np.broadcast_to(block_len_np, addr_arr.shape)
         gvas_arr = base_gvas_arr[:, None] + rank_layer_offset + self._full_block_inner_offsets_np[None, :]
 
@@ -1122,7 +1124,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         layer_save_finished_events: list[threading.Event],
         sync_save_events: list[torch.npu.Event],
         enable_kv_event: bool = False,
-        layer_transfer_finished_events=None,
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
     ):
@@ -1145,7 +1146,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.layerwise_event_lock = threading.Lock()
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
-        self.layer_transfer_finished_events = layer_transfer_finished_events
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
         self.layer_batch_builder = LayerBatchBuilder(
@@ -1154,6 +1154,19 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             num_ranks_per_layer,
             page_size_bytes,
         )
+
+    def _wait_for_pd_transfer(self, layer_id: int) -> None:
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+            get_shared_layer_transfer_events,
+        )
+
+        events = get_shared_layer_transfer_events()
+        if events is None:
+            return
+        is_finish = events[layer_id].wait(timeout=30)
+        if not is_finish:
+            logger.error("Layerwise %d PD transfer wait timed out", layer_id)
+        events[layer_id].clear()
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -1238,11 +1251,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             req_meta = self.layer_batch_builder.build(task)
         if req_meta is None:
             layer_id = task.layer_id
-            if self.layer_transfer_finished_events is not None:
-                is_finish = self.layer_transfer_finished_events[layer_id].wait(timeout=30)
-                if not is_finish:
-                    logger.error("Layerwise %d PD transfer wait timed out", layer_id)
-                self.layer_transfer_finished_events[layer_id].clear()
+            self._wait_for_pd_transfer(layer_id)
             assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
             logger.debug(">>>>>>>>>>>>>>>>>>>> set save layer %d", layer_id)
             self.layer_save_finished_events[layer_id].set()
@@ -1267,11 +1276,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self.max_transfer_bytes,
             )
             # wait for KV transfer (PD)
-            if self.layer_transfer_finished_events is not None:
-                is_finish = self.layer_transfer_finished_events[layer_id].wait(timeout=30)
-                if not is_finish:
-                    logger.error("Layerwise %d PD transfer wait timed out", layer_id)
-                self.layer_transfer_finished_events[layer_id].clear()
+            self._wait_for_pd_transfer(layer_id)
             if res != 0:
                 logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
             else:
