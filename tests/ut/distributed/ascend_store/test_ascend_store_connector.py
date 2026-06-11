@@ -344,5 +344,92 @@ class TestAscendStoreConnector(unittest.TestCase):
         self.assertIsInstance(result, AscendStoreKVEvents)
 
 
+class TestAscendStoreConnectorLayerwise(unittest.TestCase):
+    """Test connector methods that are specific to layerwise mode."""
+
+    @classmethod
+    def setUpClass(cls):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector
+
+        cls.connector_mod = ascend_store_connector
+
+    def test_requires_piecewise_for_cudagraph_enabled(self):
+        self.assertTrue(
+            self.connector_mod.AscendStoreConnector.requires_piecewise_for_cudagraph({"use_layerwise": True})
+        )
+
+    def test_requires_piecewise_for_cudagraph_disabled(self):
+        self.assertFalse(
+            self.connector_mod.AscendStoreConnector.requires_piecewise_for_cudagraph({"use_layerwise": False})
+        )
+
+    def test_requires_piecewise_for_cudagraph_missing(self):
+        self.assertFalse(self.connector_mod.AscendStoreConnector.requires_piecewise_for_cudagraph({}))
+
+    def test_wait_for_save_layerwise_returns_early(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        with (
+            patch.object(self.connector_mod, "KVPoolWorker") as mock_worker_cls,
+            patch.object(self.connector_mod, "LookupKeyServer") as _mock_lookup_cls,
+        ):
+            config = MagicMock()
+            config.kv_transfer_config.kv_role = "kv_producer"
+            config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+            config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
+            config.parallel_config.rank = 0
+
+            connector = self.connector_mod.AscendStoreConnector(
+                vllm_config=config,
+                role=KVConnectorRole.WORKER,
+                kv_cache_config=None,
+            )
+            connector.wait_for_save()
+            mock_worker_cls.return_value.wait_for_save.assert_not_called()
+
+    def test_save_kv_layer_layerwise_producer(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        with (
+            patch.object(self.connector_mod, "KVPoolWorker") as mock_worker_cls,
+            patch.object(self.connector_mod, "LookupKeyServer") as _mock_lookup_cls,
+        ):
+            config = MagicMock()
+            config.kv_transfer_config.kv_role = "kv_producer"
+            config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+            config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
+            config.parallel_config.rank = 0
+
+            connector = self.connector_mod.AscendStoreConnector(
+                vllm_config=config,
+                role=KVConnectorRole.WORKER,
+                kv_cache_config=None,
+            )
+            connector._get_connector_metadata = MagicMock(return_value=MagicMock())
+            connector.save_kv_layer("layer_0", MagicMock(), MagicMock())
+            mock_worker_cls.return_value.save_kv_layer.assert_called_once()
+
+    def test_wait_for_layer_load_layerwise(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        with (
+            patch.object(self.connector_mod, "KVPoolWorker") as mock_worker_cls,
+            patch.object(self.connector_mod, "LookupKeyServer") as _mock_lookup_cls,
+        ):
+            config = MagicMock()
+            config.kv_transfer_config.kv_role = "kv_consumer"
+            config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+            config.kv_transfer_config.kv_connector_extra_config = {"use_layerwise": True}
+            config.parallel_config.rank = 0
+
+            connector = self.connector_mod.AscendStoreConnector(
+                vllm_config=config,
+                role=KVConnectorRole.WORKER,
+                kv_cache_config=None,
+            )
+            connector.wait_for_layer_load("layer_0")
+            mock_worker_cls.return_value.wait_for_layer_load.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

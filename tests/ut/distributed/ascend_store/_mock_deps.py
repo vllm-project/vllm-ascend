@@ -83,6 +83,7 @@ _vllm_mock_modules = [
     "vllm.v1.attention",
     "vllm.v1.attention.backend",
     "vllm.v1.core",
+    "vllm.v1.core.block_pool",
     "vllm.v1.core.kv_cache_manager",
     "vllm.v1.core.kv_cache_utils",
     "vllm.v1.core.sched",
@@ -106,6 +107,7 @@ _base_mod.KVConnectorWorkerMetadata = type("KVConnectorWorkerMetadata", (), {}) 
 _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
 _base_mod.KVConnectorRole.WORKER = "WORKER"
+_base_mod.SupportsHMA = type("SupportsHMA", (), {})  # type: ignore[attr-defined]
 
 _events_mod = sys.modules["vllm.distributed.kv_events"]
 _events_mod.KVCacheEvent = type("KVCacheEvent", (), {})  # type: ignore[attr-defined]
@@ -204,9 +206,33 @@ _backend_pkg = _make_pkg(
     os.path.join(os.path.abspath(_ascend_store_real_path), "backend"),
 )
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] = _backend_pkg
+_backend_pkg.backend_map = {  # type: ignore[attr-defined]
+    "mooncake": {"name": "MooncakeBackend", "path": "..."},
+    "memcache": {"name": "MemcacheBackend", "path": "..."},
+    "yuanrong": {"name": "YuanrongBackend", "path": "..."},
+}
 
 if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascend.utils"], "AscendDeviceType"):
     _ascend_utils = MagicMock()
     _ascend_utils.AscendDeviceType = MagicMock()
     _ascend_utils.get_ascend_device_type = MagicMock()
     sys.modules["vllm_ascend.utils"] = _ascend_utils
+
+# Mock additional vllm_ascend modules needed by layerwise tests
+for _mod_name in [
+    "vllm_ascend.memcache_comm_fence",
+    "vllm_ascend.ascend_config",
+    "vllm_ascend.cpu_binding",
+]:
+    if _mod_name not in sys.modules:
+        sys.modules[_mod_name] = MagicMock()
+
+sys.modules["vllm_ascend.ascend_config"].get_ascend_config = MagicMock()  # type: ignore[attr-defined]
+sys.modules["vllm_ascend.memcache_comm_fence"].AttentionComputeStartGate = type(  # type: ignore[attr-defined]
+    "AttentionComputeStartGate", (), {}
+)
+sys.modules["vllm_ascend.memcache_comm_fence"].get_attention_compute_start_gate = MagicMock()  # type: ignore[attr-defined]
+sys.modules["vllm_ascend.memcache_comm_fence"].reset_attention_compute_start_gate = MagicMock()  # type: ignore[attr-defined]
+sys.modules["vllm_ascend.cpu_binding"].get_cpu_binding_rank = MagicMock(return_value=0)  # type: ignore[attr-defined]
+sys.modules["vllm_ascend.cpu_binding"].get_memcache_client_cpus = MagicMock(return_value=[0, 1])  # type: ignore[attr-defined]
+sys.modules["vllm_ascend.cpu_binding"].bind_thread_to_cpus = MagicMock()  # type: ignore[attr-defined]
