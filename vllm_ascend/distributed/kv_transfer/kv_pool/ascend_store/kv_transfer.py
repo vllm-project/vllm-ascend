@@ -5,7 +5,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -1123,7 +1123,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         num_layers: int,
         layer_save_finished_events: list[threading.Event],
         sync_save_events: list[torch.npu.Event],
-        enable_kv_event: bool = False,
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
     ):
@@ -1139,11 +1138,8 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         )
         self.final_layer_id = num_layers - 1
         self.put_step = put_step
-        self.enable_kv_event = enable_kv_event
-        self.layerwise_event_starts: dict[str, set[int]] = defaultdict(set)
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.done_task_lock = threading.Lock()
-        self.layerwise_event_lock = threading.Lock()
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
         self.max_transfer_blocks = max_transfer_blocks
@@ -1181,49 +1177,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         with self.done_task_lock:
             if req_id in self.stored_requests:
                 del self.stored_requests[req_id]
-        with self.layerwise_event_lock:
-            self.layerwise_event_starts.pop(req_id, None)
-
-    def _record_layerwise_event_starts(self, req_meta: LayerMultiBlockReqMeta, starts: list[int]) -> None:
-        if self.enable_kv_event:
-            with self.layerwise_event_lock:
-                self.layerwise_event_starts[req_meta.req_id].update(starts)
-
-    def _build_stored_events(self, req_meta: LayerMultiBlockReqMeta) -> list[BlockStored]:
-        if not self.enable_kv_event or req_meta.layer_id != self.final_layer_id:
-            return []
-        block_size = (
-            req_meta.original_block_size[req_meta.kv_cache_group_id]
-            if isinstance(req_meta.original_block_size, list)
-            else req_meta.original_block_size
-        )
-        if block_size is None:
-            return []
-        stored_events: list[BlockStored] = []
-        group_block_size = self._get_block_size(req_meta.kv_cache_group_id)
-        new_block_hashes = [maybe_convert_block_hash(bh) for bh in req_meta.block_hashes]
-        with self.layerwise_event_lock:
-            starts_set = self.layerwise_event_starts.pop(req_meta.req_id, set())
-        for start in sorted(starts_set):
-            block_idx = start // group_block_size
-            if block_idx >= len(new_block_hashes):
-                continue
-            block_hash = new_block_hashes[block_idx]
-            parent_block_hash = new_block_hashes[block_idx - 1] if block_idx > 0 else None
-            end = min(start + group_block_size, len(req_meta.token_ids or []))
-            token_ids = req_meta.token_ids[start:end] if req_meta.token_ids is not None else None
-            stored_event = BlockStored(
-                block_hashes=[block_hash],
-                parent_block_hash=parent_block_hash,
-                token_ids=token_ids,
-                block_size=block_size,
-                lora_id=None,
-                medium="cpu",
-                lora_name=None,
-            )
-            stored_events.append(stored_event)
-            logger.debug("Added layerwise kv cache event '%s' to kv cache events queue", stored_event)
-        return stored_events
 
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
         """Pre-compute shared block data for all layers (GVA path)."""
@@ -1244,12 +1197,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             raise ValueError(f"Expected at most one layer transfer task, got {len(transfer_tasks)}")
         task = transfer_tasks[0]
         shared = task.shared_block_data
-        req_meta: LayerBatchReqMeta | None
-        if shared is not None:
-            req_meta = self.layer_batch_builder.build_addrs(shared, task.layer_id)
-        else:
-            req_meta = self.layer_batch_builder.build(task)
-        if req_meta is None:
+        if shared is None:
             layer_id = task.layer_id
             self._wait_for_pd_transfer(layer_id)
             assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
@@ -1257,131 +1205,35 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             self.layer_save_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
+        req_meta = self.layer_batch_builder.build_addrs(shared, task.layer_id)
         layer_id = req_meta.layer_id
-        if shared is not None:
-            # GVA-based path
-            rank_start = self.tp_rank % self.put_step
-            addr_array = req_meta.addr_array[rank_start :: self.put_step]
-            size_array = req_meta.size_array[rank_start :: self.put_step]
-            gvas_array = req_meta.gvas_array[rank_start :: self.put_step]
-            for req_id in req_meta.req_ids:
-                self.dec_stored_request(req_id)
-            self.sync_save_events[layer_id].synchronize()
-            res = self._batch_copy_with_limits(
-                gvas_array,
-                addr_array,
-                size_array,
-                0,
-                self.max_transfer_blocks,
-                self.max_transfer_bytes,
-            )
-            # wait for KV transfer (PD)
-            self._wait_for_pd_transfer(layer_id)
-            if res != 0:
-                logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
-            else:
-                for req_id in req_meta.req_ids:
-                    if self.try_finish_and_delete_stored_request(req_id):
-                        self.set_finished_request(req_id)
-            assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
-            logger.debug(">>>>>>>>>>>>>>>>>>>> set save layer %d", layer_id)
-            self.layer_save_finished_events[layer_id].set()
-            transfer_tasks.clear()
-
-            self.request_queue.task_done()
-        else:
-            # Key-lookup based path
-            multi_req = cast(LayerMultiBlockReqMeta, req_meta)
-            keys = multi_req.keys
-            starts = multi_req.starts
-            ends = multi_req.ends
-            current_event = multi_req.current_event
-            total_block = len(keys)
-            is_last_chunk = multi_req.is_last_chunk
-            with self.done_task_lock:
-                if multi_req.req_id not in self.stored_requests:
-                    self.request_queue.task_done()
-                    return
-            if not self.dcp_size > 1:
-                starts = starts[self.tp_rank % self.put_step :: self.put_step]
-                ends = ends[self.tp_rank % self.put_step :: self.put_step]
-                keys = keys[self.tp_rank % self.put_step :: self.put_step]
-
-            if not keys:
-                if layer_id == self.final_layer_id:
-                    stored_events = self._build_stored_events(multi_req)
-                    if stored_events:
-                        self.update_kv_event(stored_events)
-                if is_last_chunk and layer_id == self.final_layer_id:
-                    self.dec_stored_request(multi_req.req_id)
-                    self.set_finished_request(multi_req.req_id)
-                self.request_queue.task_done()
-                return
-
-            key_list = []
-            for key in keys:
-                key_list.append(key.to_string())
-
-            exists_states = self.lookup(key_list)
-            missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
-
-            if not missing_indices:
-                if layer_id == self.final_layer_id:
-                    stored_events = self._build_stored_events(multi_req)
-                    if stored_events:
-                        self.update_kv_event(stored_events)
-                if is_last_chunk and layer_id == self.final_layer_id:
-                    self.dec_stored_request(multi_req.req_id)
-                    self.set_finished_request(multi_req.req_id)
-                self.request_queue.task_done()
-                return
-
-            starts = [starts[index] for index in missing_indices]
-            ends = [ends[index] for index in missing_indices]
-            key_list = [key_list[index] for index in missing_indices]
-
-            addr_list = []
-            size_list = []
-            for index, key in enumerate(key_list):
-                addr, size, _ = self.token_database.prepare_value_layer(
-                    starts[index], ends[index], multi_req.block_ids_by_group[0], layer_id
-                )
-                addr_list.append(addr)
-                size_list.append(size)
-
-            if current_event is not None:
-                current_event.synchronize()
-            self.m_store.put(key_list, addr_list, size_list)
-            self._record_layerwise_event_starts(multi_req, starts)
-            stored_events = self._build_stored_events(multi_req)
-            if stored_events:
-                self.update_kv_event(stored_events)
-
-            if layer_id == self.final_layer_id and is_last_chunk:
-                with self.layerwise_event_lock:
-                    self.layerwise_event_starts.pop(multi_req.req_id, None)
-                self.dec_stored_request(multi_req.req_id)
-                self.set_finished_request(multi_req.req_id)
-            self.request_queue.task_done()
-
-            if layer_id == self.final_layer_id:
-                logger.info(
-                    "Storing KV cache layerwise for %d out of %d blocks (missing_count=%d) for request %s, layer %d",
-                    len(key_list),
-                    total_block,
-                    len(missing_indices),
-                    multi_req.req_id,
-                    layer_id,
-                )
-            else:
-                logger.debug(
-                    "Storing KV cache layerwise for %d out of %d blocks (missing_count=%d) for request %s, layer %d",
-                    len(key_list),
-                    total_block,
-                    len(missing_indices),
-                    multi_req.req_id,
-                    layer_id,
-                )
+        rank_start = self.tp_rank % self.put_step
+        addr_array = req_meta.addr_array[rank_start :: self.put_step]
+        size_array = req_meta.size_array[rank_start :: self.put_step]
+        gvas_array = req_meta.gvas_array[rank_start :: self.put_step]
+        for req_id in req_meta.req_ids:
+            self.dec_stored_request(req_id)
+        self.sync_save_events[layer_id].synchronize()
+        res = self._batch_copy_with_limits(
+            gvas_array,
+            addr_array,
+            size_array,
+            0,
+            self.max_transfer_blocks,
+            self.max_transfer_bytes,
+        )
+        # wait for KV transfer (PD)
+        self._wait_for_pd_transfer(layer_id)
+        if res != 0:
+            logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
+        for req_id in req_meta.req_ids:
+            if self.try_finish_and_delete_stored_request(req_id):
+                self.set_finished_request(req_id)
+        assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
+        logger.debug(">>>>>>>>>>>>>>>>>>>> set save layer %d", layer_id)
+        self.layer_save_finished_events[layer_id].set()
+        transfer_tasks.clear()
+        self.request_queue.task_done()
 
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
@@ -1435,6 +1287,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             page_size_bytes,
         )
 
+    def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
+        """Pre-compute shared block data for all layers (GVA path)."""
+        return self.layer_batch_builder.build_shared(task)
+
     def add_request(  # type: ignore[override]
         self, req_meta: LayerLoadTask
     ) -> torch.Tensor:
@@ -1481,7 +1337,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
         if len(transfer_tasks) > 1:
             raise ValueError(f"Expected at most one layer transfer task, got {len(transfer_tasks)}")
-        req_meta = self.layer_batch_builder.build(transfer_tasks[0])
+        task = transfer_tasks[0]
+        shared = task.shared_block_data
+        if shared is not None:
+            req_meta = self.layer_batch_builder.build_addrs(shared, task.layer_id)
+        else:
+            req_meta = self.layer_batch_builder.build(task)
         if req_meta is None:
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug(">>>>>>>>>>>>>>>>>>>> set load layer %d", layer_id)
@@ -1523,7 +1384,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         )
         if res != 0:
             logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
-        elif layer_id == self.final_layer_id:
+        if layer_id == self.final_layer_id:
             for req_id, is_last_chunk in zip(req_meta.req_ids, req_meta.is_last_chunks):
                 if is_last_chunk:
                     self.set_finished_request(req_id)

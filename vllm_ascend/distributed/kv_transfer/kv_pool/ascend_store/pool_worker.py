@@ -394,7 +394,6 @@ class KVPoolWorker:
                     self.num_layers,
                     self.layer_save_finished_events,
                     self.sync_save_events,
-                    self.enable_kv_events,
                     self.layerwise_max_transfer_blocks,
                     self.layerwise_max_transfer_bytes,
                 )
@@ -889,6 +888,23 @@ class KVPoolWorker:
                     for task in self.layer_save_tasks[layer_id]:
                         task.cached_process_tokens = cached
 
+    def _build_shared_load_data(self) -> None:
+        """Build shared block data once and attach to all layer load tasks."""
+        if not isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread):
+            return
+        first_task = None
+        for layer_id in range(self.num_layers):
+            if self.layer_load_tasks[layer_id]:
+                first_task = self.layer_load_tasks[layer_id][0]
+                break
+        if first_task is None:
+            return
+        shared = self.kv_recv_thread.build_shared_data(first_task)
+        if shared is not None:
+            for layer_id in range(self.num_layers):
+                for task in self.layer_load_tasks[layer_id]:
+                    task.shared_block_data = shared
+
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
             return
@@ -897,6 +913,7 @@ class KVPoolWorker:
         self._build_shared_save_data()
         for layer_id in range(self.num_layers):
             self._process_load_for_layer_batch(requests, layer_id)
+        self._build_shared_load_data()
 
     def _submit_ready_layer_loads(self) -> None:
         assert self.kv_recv_thread is not None
