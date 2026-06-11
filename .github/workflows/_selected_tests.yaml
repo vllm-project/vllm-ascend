@@ -89,6 +89,7 @@ jobs:
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install uv
+          pip install pyyaml
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
