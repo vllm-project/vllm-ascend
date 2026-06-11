@@ -637,7 +637,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         actual_seq_lengths = None
         input_layout = "BNSD"
-        output_unpad_indices = None
 
         if (
             attn_metadata.attn_state
@@ -650,48 +649,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
         ):
             input_layout = "BSND"
             num_decodes = attn_metadata.num_decodes
-            assert attn_metadata.query_lens is not None
-            decode_query_lens = attn_metadata.query_lens[:num_decodes]
-            max_decode_query_len = max(decode_query_lens)
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
-            if num_tokens == num_decodes * max_decode_query_len:
-                q_nope = q_nope.view(num_decodes, -1, q_nope.shape[1], q_nope.shape[-1]).contiguous()
-                q_pe = q_pe.view(num_decodes, -1, q_pe.shape[1], q_pe.shape[-1])
-            else:
-                assert sum(decode_query_lens) == num_tokens
-                padded_q_nope = q_nope.new_zeros(
-                    num_decodes,
-                    max_decode_query_len,
-                    q_nope.shape[1],
-                    q_nope.shape[-1],
-                )
-                padded_q_pe = q_pe.new_zeros(
-                    num_decodes,
-                    max_decode_query_len,
-                    q_pe.shape[1],
-                    q_pe.shape[-1],
-                )
-                unpad_indices: list[int] = []
-                src_start = 0
-                for req_idx, query_len in enumerate(decode_query_lens):
-                    src_end = src_start + query_len
-                    padded_q_nope[req_idx, :query_len].copy_(q_nope[src_start:src_end])
-                    padded_q_pe[req_idx, :query_len].copy_(q_pe[src_start:src_end])
-                    unpad_indices.extend(
-                        range(
-                            req_idx * max_decode_query_len,
-                            req_idx * max_decode_query_len + query_len,
-                        )
-                    )
-                    src_start = src_end
-                q_nope = padded_q_nope.contiguous()
-                q_pe = padded_q_pe
-                output_unpad_indices = torch.tensor(
-                    unpad_indices,
-                    dtype=torch.int64,
-                    device=q_nope.device,
-                )
-            num_tokens = q_nope.shape[0] * q_nope.shape[1]
+            q_nope = q_nope.view(num_decodes, -1, q_nope.shape[1], q_nope.shape[-1]).contiguous()
+            q_pe = q_pe.view(num_decodes, -1, q_pe.shape[1], q_pe.shape[-1])
             sparse_mode = 0
             spec_attn_mask = attn_metadata.decode.dcp_mtp_attn_mask  # type:ignore
             actual_seq_lengths = attn_metadata.query_lens
@@ -788,9 +748,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
         if input_layout == "BSND":
             attn_output = attn_output.view(-1, attn_output.shape[2], attn_output.shape[3])
             softmax_lse = softmax_lse.transpose(1, 2).reshape(-1, softmax_lse.shape[1], 1)
-            if output_unpad_indices is not None:
-                attn_output = attn_output.index_select(0, output_unpad_indices)
-                softmax_lse = softmax_lse.index_select(0, output_unpad_indices)
 
         if input_layout == "BNSD":
             B_attn, N_attn, S, D = attn_output.shape
