@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path, make_zmq_socket
 from vllm_ascend.recovery.exception_handler import ExceptionHandlerFactory, NetworkExceptionHandler
-from vllm_ascend.recovery.types import ExceptionInfo, FaultReport, RecoveryPlan, StepResult, WorkerStepDispatch
+from vllm_ascend.recovery.types import ExceptionInfo, FaultReport, NetworkCheck, RecoveryPlan, RecoveryStep, StepResult, WorkerStepDispatch
 from vllm_ascend.recovery.utils import get_engine_recovery_bind_address
 
 class WorkerMonitor:
@@ -38,6 +38,7 @@ class WorkerMonitor:
         
         self._exception_decoder = msgspec.msgpack.Decoder(ExceptionInfo)
         self._recovery_decoder = msgspec.msgpack.Decoder(WorkerStepDispatch)
+        self._network_check_decoder = msgspec.msgpack.Decoder(NetworkCheck)
         self._monitor_thread = threading.Thread | None
     
     def build_exception_handler_factory(self) -> ExceptionHandlerFactory:
@@ -47,6 +48,32 @@ class WorkerMonitor:
         exception_handler_factory._register_handler(network_handler)
         
         return exception_handler_factory
+
+    def _do_network_check(self):
+        def _sync_and_report():
+            try:
+                logger.info("[WorkerMonitor] NetworkCheck sync begin")
+                torch.npu.current_stream().synchronize()
+            except Exception as e:
+                logger.error(
+                    "[WorkerMonitor] NetworkCheck synchronize detected error: %s",
+                    e,
+                )
+                exception_info = ExceptionInfo(
+                    exception_type=type(e).__name__,
+                    exception_msg=str(e),
+                )
+                try:
+                    self._worker.worker_input_socket.send(
+                        msgspec.msgpack.encode(exception_info)
+                    )
+                except Exception:
+                    logger.exception(
+                        "[WorkerMonitor] Failed to send exception via worker_input_socket"
+                    )
+
+        t = threading.Thread(target=_sync_and_report, name="NetworkCheckSync", daemon=True)
+        t.start()
 
     def start(self):
         self._monitor_thread = threading.Thread(
@@ -117,25 +144,38 @@ class WorkerMonitor:
                         core_report_socket.send(report_encode)
 
                 if core_input_socket in events:
-                    logger.info("[WorkerMonitor] Receive recovery_step from EngineCoreProc")
                     buffer = core_input_socket.recv()
                     try:
-                        recovery_step_with_cfg = self._recovery_decoder.decode(buffer)
-                    except msgspec.DecodeError as e:
-                        logger.error("[WorkerMonitor] Failed to decode recovery plan from enginecore: %s", e)
+                        msg = msgspec.msgpack.decode(buffer)
+                        msg_type = msg[0]
+                        msg_data = msg[1]
+                    except Exception:
+                        logger.exception("Failed to deserialize recovery msg")
                         continue
-
-                    recovery_step = recovery_step_with_cfg.step
-                    cfg = recovery_step_with_cfg.cfg
-                    cfg, is_success = recovery_step.execute(self._worker, cfg)
-                    step_result = StepResult(
-                        step_name=recovery_step.name,
-                        success=is_success,
-                        worker_rank=self._worker.rank,
-                        cfg=cfg
-                    )
-                    step_result_encode = msgspec.msgpack.encode(step_result)
-                    core_result_socket.send(step_result_encode)
+                    if msg is not None:
+                        if msg_type == "networkcheck":
+                            network_check = msgspec.msgpack.decode(msg_data, type=NetworkCheck)
+                            logger.info(
+                                "[WorkerMonitor] Received NetworkCheck from engine %d, "
+                                "starting synchronize check",
+                                network_check.engine_index,
+                            )
+                            self._do_network_check(worker_input_socket)
+                            continue
+                        elif msg_type == "recoverystep":
+                            recovery_step_with_cfg = self._recovery_decoder.decode(buffer, type=WorkerStepDispatch)
+                            logger.info("[WorkerMonitor] Receive recovery_step from EngineCoreProc")
+                            recovery_step = recovery_step_with_cfg.step
+                            cfg = recovery_step_with_cfg.cfg
+                            cfg, is_success = recovery_step.execute(self._worker, cfg)
+                            step_result = StepResult(
+                                step_name=recovery_step.name,
+                                success=is_success,
+                                worker_rank=self._worker.rank,
+                                cfg=cfg
+                            )
+                            step_result_encode = msgspec.msgpack.encode(step_result)
+                            core_result_socket.send(step_result_encode)
     
 
 def create_worker_monitor(worker, vllm_config:VllmConfig):

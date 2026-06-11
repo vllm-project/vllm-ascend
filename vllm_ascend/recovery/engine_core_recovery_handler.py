@@ -9,6 +9,7 @@ from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm_ascend.recovery.types import (
     FaultReport,
+    NetworkCheck,
     RecoveryPlan,
     RecoveryComplete,
     RecoveryPlanResult,
@@ -229,6 +230,16 @@ class RecoveryHandler:
             if not self.is_recovering:
                 self._begin_recovery()
             self._execute_recovery(recovery_plan)
+        elif msg_type == "networkcheck":
+            network_check = msgspec.convert(msg_data, type=NetworkCheck)
+            logger.info(
+                "[RecoveryHandler][engine=%d] Received NetworkCheck from "
+                "engine %d, dispatching to workers",
+                self._engine_index, network_check.engine_index,
+            )
+            self._recover_step_pub_sock.send(
+                msgspec.msgpack.encode(("networkcheck", network_check))
+            )
         elif msg_type == "recoverycomplete":
             recovery_complete = msgspec.convert(msg_data, type=RecoveryComplete)
             self._handle_recovery_complete(recovery_complete)
@@ -362,7 +373,7 @@ class RecoveryHandler:
             self._engine_index, step.name, self._worker_count,
         )
         self._recover_step_pub_sock.send(
-            msgspec.msgpack.encode(WorkerStepDispatch(step=step, cfg=cfg))
+            msgspec.msgpack.encode(("workerstepdispatch", WorkerStepDispatch(step=step, cfg=cfg)))
         )
 
         received = 0

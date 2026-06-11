@@ -14,6 +14,7 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context
 from vllm_ascend.recovery.types import (
     FaultReport,
+    NetworkCheck,
     RecoveryComplete,
     RecoveryPlanResult,
 )
@@ -406,6 +407,14 @@ def _patched_process_input_socket(
                                 current_wave,
                             )
                             
+                    elif msg_type == "networkcheck":
+                        network_check = msgspec.convert(msg_data, type=NetworkCheck)
+                        logger.info(
+                            "[RAS] Received NetworkCheck from engine %d, "
+                            "broadcasting to all engines",
+                            network_check.engine_index,
+                        )
+                        recovery_pub.send(msgspec.msgpack.encode(("networkcheck", network_check)))
                     else:
                         logger.warning(
                             "[RAS] Unknown recovery msg type: %s", msg_type
