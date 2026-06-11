@@ -70,40 +70,14 @@ class LayerBatchBuilder:
                 np.cumsum(self._block_len_np[:-1], dtype=np.int64),
             )
         )
-        self._block_ids_scratch_np: np.ndarray | None = None
-        self._block_gvas_scratch_np: np.ndarray | None = None
-        self._last_block_ids_scratch_np: np.ndarray | None = None
-        self._last_gvas_scratch_np: np.ndarray | None = None
+        self._block_ids_buf: np.ndarray | None = None
+        self._block_gvas_buf: np.ndarray | None = None
 
-    def _ensure_scratch_array(self, attr_name: str, capacity: int) -> np.ndarray:
-        array = getattr(self, attr_name, None)
-        if array is None or array.shape[0] < capacity:
-            array = np.empty(capacity, dtype=np.int64)
-            setattr(self, attr_name, array)
-        return array[:capacity]
-
-    def _get_transfer_scratch_arrays(
-        self,
-        total_blocks: int,
-        total_last_blocks: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        return (
-            self._ensure_scratch_array("_block_ids_scratch_np", total_blocks),
-            self._ensure_scratch_array("_block_gvas_scratch_np", total_blocks),
-            self._ensure_scratch_array("_last_block_ids_scratch_np", total_last_blocks),
-            self._ensure_scratch_array("_last_gvas_scratch_np", total_last_blocks),
-        )
-
-    @staticmethod
-    def _concat_transfer_arrays(
-        first: np.ndarray,
-        second: np.ndarray,
-    ) -> np.ndarray:
-        if first.size == 0:
-            return second
-        if second.size == 0:
-            return first
-        return np.concatenate((first, second))
+    def _ensure_buf(self, capacity: int) -> tuple[np.ndarray, np.ndarray]:
+        if self._block_ids_buf is None or len(self._block_ids_buf) < capacity:
+            self._block_ids_buf = np.empty(capacity, dtype=np.int64)
+            self._block_gvas_buf = np.empty(capacity, dtype=np.int64)
+        return self._block_ids_buf[:capacity], self._block_gvas_buf[:capacity]
 
     @staticmethod
     def _dedupe_transfer_blocks(
@@ -163,31 +137,25 @@ class LayerBatchBuilder:
         if not task.block_ranges:
             return None
 
-        total_blocks = 0
-        total_last_blocks = 0
+        total = 0
         for block_range in task.block_ranges:
-            total_blocks += block_range.end_block - block_range.start_block
+            total += block_range.end_block - block_range.start_block
             if block_range.partial_block_index is not None:
-                total_last_blocks += 1
+                total += 1
 
-        (
-            block_ids_arr,
-            block_gvas_arr,
-            last_block_ids_arr,
-            last_gvas_arr,
-        ) = self._get_transfer_scratch_arrays(total_blocks, total_last_blocks)
-        req_ids = []
-        is_last_chunks = []
+        block_ids_arr, block_gvas_arr = self._ensure_buf(total)
+        req_ids: list[str] = []
+        is_last_chunks: list[bool | None] = []
         offset = 0
-        last_offset = 0
+
         for block_range in task.block_ranges:
             request = block_range.request
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
-            num_blocks = block_range.end_block - block_range.start_block
             block_ids_np, block_gvas_np = self._require_request_arrays(block_range)
+
+            num_blocks = block_range.end_block - block_range.start_block
             if num_blocks > 0:
-                end = offset + num_blocks
                 gva_start = block_range.start_block - request.gva_block_offset
                 gva_end = block_range.end_block - request.gva_block_offset
                 if gva_start < 0 or gva_end > len(block_gvas_np):
@@ -196,28 +164,18 @@ class LayerBatchBuilder:
                         f"range [{block_range.start_block}, {block_range.end_block}) "
                         f"with offset {request.gva_block_offset}"
                     )
+                end = offset + num_blocks
                 block_ids_arr[offset:end] = block_ids_np[block_range.start_block : block_range.end_block]
                 block_gvas_arr[offset:end] = block_gvas_np[gva_start:gva_end]
                 offset = end
 
             if block_range.partial_block_index is not None:
                 assert request.last_block_gva is not None
-                last_block_ids_arr[last_offset] = block_ids_np[block_range.partial_block_index]
-                last_gvas_arr[last_offset] = request.last_block_gva
-                last_offset += 1
+                block_ids_arr[offset] = block_ids_np[block_range.partial_block_index]
+                block_gvas_arr[offset] = request.last_block_gva
+                offset += 1
 
-        block_ids_arr = self._concat_transfer_arrays(
-            block_ids_arr,
-            last_block_ids_arr,
-        )
-        block_gvas_arr = self._concat_transfer_arrays(
-            block_gvas_arr,
-            last_gvas_arr,
-        )
-        block_ids_arr, block_gvas_arr = self._dedupe_transfer_blocks(
-            block_ids_arr,
-            block_gvas_arr,
-        )
+        block_ids_arr, block_gvas_arr = self._dedupe_transfer_blocks(block_ids_arr[:offset], block_gvas_arr[:offset])
 
         return SharedBlockData(
             block_ids_arr=block_ids_arr,
@@ -1254,9 +1212,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         layer_save_finished_events: list[threading.Event],
         num_layers: int,
         h2d_stagger_us: int = 0,
-        h2d_stagger_group_size: int = 0,
-        h2d_stagger_dynamic_addrs_per_us: int = 0,
-        h2d_stagger_max_us: int = 0,
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
     ):
@@ -1275,9 +1230,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.layer_save_finished_events = layer_save_finished_events
         self.final_layer_id = num_layers - 1
         self.h2d_stagger_us = h2d_stagger_us
-        self.h2d_stagger_group_size = h2d_stagger_group_size
-        self.h2d_stagger_dynamic_addrs_per_us = h2d_stagger_dynamic_addrs_per_us
-        self.h2d_stagger_max_us = h2d_stagger_max_us
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
         self.layer_batch_builder = LayerBatchBuilder(
@@ -1296,24 +1248,19 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
-    def _get_h2d_stagger_delay_us(self, layer_id: int, num_addrs: int) -> int:
+    def _get_h2d_stagger_delay_us(self, layer_id: int) -> int:
         if self.h2d_stagger_us <= 0:
             return 0
-        group_size = self.h2d_stagger_group_size or self.tp_size
-        group_size = max(1, group_size)
-        slot = (self.tp_rank + layer_id) % group_size
+        slot = (self.tp_rank + layer_id) % self.tp_size
+        return slot * self.h2d_stagger_us
 
-        stagger_us = self.h2d_stagger_us
-        if self.h2d_stagger_dynamic_addrs_per_us > 0:
-            stagger_us += num_addrs // self.h2d_stagger_dynamic_addrs_per_us
-        if self.h2d_stagger_max_us > 0:
-            stagger_us = min(stagger_us, self.h2d_stagger_max_us)
-        return slot * stagger_us
-
-    def _stagger_h2d_submit(self, layer_id: int, num_addrs: int) -> None:
-        delay_us = self._get_h2d_stagger_delay_us(layer_id, num_addrs)
-        if delay_us > 0:
-            time.sleep(delay_us / 1_000_000)
+    def _stagger_h2d_submit(self, layer_id: int) -> None:
+        delay_us = self._get_h2d_stagger_delay_us(layer_id)
+        if delay_us <= 0:
+            return
+        deadline = time.perf_counter() + delay_us / 1_000_000
+        while time.perf_counter() < deadline:
+            pass
 
     def _handle_request(  # type: ignore[override]
         self, data: LayerLoadTask
@@ -1373,7 +1320,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             req_meta.size_array,
             (self.tp_rank * len(req_meta.size_array)) // self.tp_size,
         )
-        self._stagger_h2d_submit(layer_id, len(gvas_array))
+        self._stagger_h2d_submit(layer_id)
         res = self._batch_copy_with_limits(
             gvas_array,
             addr_array,
