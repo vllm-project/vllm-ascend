@@ -165,27 +165,45 @@ jobs:
         if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          ENABLE_COVERAGE: ${{ inputs.enable-coverage }}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          .github/workflows/scripts/run_selected_tests.sh \
-            ${{ inputs.enable-coverage && '--enable-coverage' || '' }} \
-            "${{ matrix.group.npu_type }}" \
-            "${{ matrix.group.num_npus }}" \
-            "with-device" \
-            ${{ matrix.group.tests }}
+          if [ "$ENABLE_COVERAGE" = "true" ]; then
+            .github/workflows/scripts/run_selected_tests.sh \
+              --enable-coverage \
+              "${{ matrix.group.npu_type }}" \
+              "${{ matrix.group.num_npus }}" \
+              "with-device" \
+              ${{ matrix.group.tests }}
+          else
+            .github/workflows/scripts/run_selected_tests.sh \
+              "${{ matrix.group.npu_type }}" \
+              "${{ matrix.group.num_npus }}" \
+              "with-device" \
+              ${{ matrix.group.tests }}
+          fi
 
       - name: Run selected tests without device
         if: ${{ matrix.group.npu_type == 'cpu' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+          ENABLE_COVERAGE: ${{ inputs.enable-coverage }}
         run: |
-          .github/workflows/scripts/run_selected_tests.sh \
-            ${{ inputs.enable-coverage && '--enable-coverage' || '' }} \
-            "${{ matrix.group.npu_type }}" \
-            "${{ matrix.group.num_npus }}" \
-            "without-device" \
-            ${{ matrix.group.tests }}
+          if [ "$ENABLE_COVERAGE" = "true" ]; then
+            .github/workflows/scripts/run_selected_tests.sh \
+              --enable-coverage \
+              "${{ matrix.group.npu_type }}" \
+              "${{ matrix.group.num_npus }}" \
+              "without-device" \
+              ${{ matrix.group.tests }}
+          else
+            .github/workflows/scripts/run_selected_tests.sh \
+              "${{ matrix.group.npu_type }}" \
+              "${{ matrix.group.num_npus }}" \
+              "without-device" \
+              ${{ matrix.group.tests }}
+          fi
 
       - name: Upload selected test logs
         if: always()
