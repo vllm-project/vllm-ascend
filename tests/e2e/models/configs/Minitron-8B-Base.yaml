@@ -2,21 +2,6 @@ model_name: "nv-community/Minitron-8B-Base"
 model_type: "vllm"
 hardware: "Atlas A2 Series"
 
-test_cases:
-  - model: "nv-community/Minitron-8B-Base"
-    server_cmd:
-      - --served-model-name
-      - minitron-8b-base
-      - --tensor-parallel-size
-      - "1"
-      - --max-model-len
-      - "4096"
-      - --gpu-memory-utilization
-      - "0.9"
-      - --enforce-eager
-      - --port
-      - "8000"
-
 serve:
   tensor_parallel_size: 1
   dtype: auto

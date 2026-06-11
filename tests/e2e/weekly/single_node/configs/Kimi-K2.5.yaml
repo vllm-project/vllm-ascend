@@ -24,7 +24,6 @@ _server_cmd: &server_cmd
   - "4"
   - "--port"
   - "$SERVER_PORT"
-  - "--async-scheduling"
   - "--quantization"
   - "ascend"
   - "--trust-remote-code"
@@ -274,7 +273,6 @@ test_cases:
       - "0.9"
       - "--seed"
       - "1024"
-      - "--async-scheduling"
       - "--enable-prefix-caching"
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[4,8,16], "cudagraph_mode":"FULL_DECODE_ONLY"}'

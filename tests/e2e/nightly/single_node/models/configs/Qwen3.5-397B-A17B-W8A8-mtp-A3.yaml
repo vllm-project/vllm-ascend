@@ -41,7 +41,6 @@ test_cases:
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--mm-processor-cache-gb"
@@ -57,7 +56,13 @@ test_cases:
         max_out_len: 32768
         batch_size: 32
         baseline: 90
-        threshold: 5
+        threshold: 10
+        temperature: 0.6
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3

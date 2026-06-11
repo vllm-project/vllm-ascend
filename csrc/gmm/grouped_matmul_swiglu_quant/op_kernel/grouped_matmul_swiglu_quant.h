@@ -467,12 +467,14 @@ __aicore__ inline void GMMSwigluCompute<mmType, sync, CHANNELDTYPE>::Swiglu(uint
     LocalTensor<float> src0Local =
         _inMMLocal[loopIdx * gmmSwiglu->tokenLen + gmmSwiglu->tokenLen / SWIGLU_REDUCE_FACTOR];
     LocalTensor<float> src1Local = _inMMLocal[loopIdx * gmmSwiglu->tokenLen];
-    Mins(src0Local, src0Local, limited, gmmSwiglu->tokenLen / 2);
-    PipeBarrier<PIPE_V>();
-    Maxs(src0Local, src0Local, (-1.0f * limited), gmmSwiglu->tokenLen / 2);
-    PipeBarrier<PIPE_V>();
-    Mins(src1Local, src1Local, limited, gmmSwiglu->tokenLen / 2);
-    PipeBarrier<PIPE_V>();
+    if (limited > 0.0f) {
+        Mins(src0Local, src0Local, limited, gmmSwiglu->tokenLen / 2);
+        PipeBarrier<PIPE_V>();
+        Maxs(src0Local, src0Local, (-1.0f * limited), gmmSwiglu->tokenLen / 2);
+        PipeBarrier<PIPE_V>();
+        Mins(src1Local, src1Local, limited, gmmSwiglu->tokenLen / 2);
+        PipeBarrier<PIPE_V>();
+    }
     SwiGLU<float, false>(workspaceLocal, src0Local, src1Local, beta, gmmSwiglu->tokenLen / SWIGLU_REDUCE_FACTOR);
     PipeBarrier<PIPE_ALL>();
     DataCopyParams repeatParams{1, static_cast<uint16_t>((gmmSwiglu->tokenLen / SWIGLU_REDUCE_FACTOR) / ALIGN_8_ELE), 0,

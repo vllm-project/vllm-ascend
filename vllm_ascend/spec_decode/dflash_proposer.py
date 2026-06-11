@@ -167,6 +167,8 @@ class AscendDflashProposer(AscendEagleProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
 
+        if not self.use_cuda_graph:
+            aclgraph_runtime_mode = CUDAGraphMode.NONE
         num_query_per_req = 1 + self.num_speculative_tokens
         num_query_total = num_reqs * num_query_per_req
 
@@ -206,6 +208,8 @@ class AscendDflashProposer(AscendEagleProposer):
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata_dflash
             multi_steps_attn_metadata.append(per_layer_attn_metadata)
+
+        self.token_indices_to_sample.fill_(0)
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,

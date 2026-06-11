@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
@@ -22,6 +23,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import enable_dsa_cp
 
 from .deepseek_v4 import (
     DeepseekV2DecoderLayer,
@@ -59,8 +61,12 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.config = config
         quant_config = vllm_config.quant_config
 
-        self.e_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
-        self.h_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.e_proj = ReplicatedLinear(
+            config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False
+        )
+        self.h_proj = ReplicatedLinear(
+            config.hidden_size, config.hidden_size, bias=False, quant_config=quant_config, return_bias=False
+        )
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -196,6 +202,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         self.model = DeepSeekMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp"))
         # Set MoE hyperparameters
         self.set_moe_parameters()
@@ -272,6 +279,14 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+
+            if self.quant_config is not None and self.quant_config.get_name() == "fp8":
+                if name == "embed.weight":
+                    name = "mtp.0.emb.tok_emb.weight"
+
+                if name == "head.weight":
+                    name = "mtp.0.head.weight"
+
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
@@ -290,6 +305,9 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 name = name.replace(".w2.", ".down_proj.")
             if ".w3." in name:
                 name = name.replace(".w3.", ".up_proj.")
+
+            if name.endswith(".scale"):
+                name = name.replace(".scale", ".weight_scale")
 
             if ".head." in name:
                 name = name.replace(".head.", ".shared_head.head.")
@@ -313,10 +331,13 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:
-                # Handle attention sinks (distributed across ranks)
                 param = params_dict[name]
-                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                param.data.copy_(narrow_weight)
+                if enable_dsa_cp():
+                    param.data.copy_(loaded_weight)
+                else:
+                    # Handle attention sinks (distributed across ranks)
+                    narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                    param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue
 

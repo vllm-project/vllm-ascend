@@ -111,6 +111,9 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuantTensorList(gert::TilingContext*
   const int64_t row = CalRows(compileInfoPtr->ubSize_, n);
   auto attrs = context->GetAttrs();
   float swiglu_limit = *attrs->GetFloat(0);
+  OPS_ERR_IF(!(swiglu_limit >= 0.0f),
+             OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "swiglu_limit should be non-negative"),
+             return GRAPH_FAILED);
 
   tilingData.gmmSwigluTensorListBaseParams.set_groupNum(groupNum);
   tilingData.gmmSwigluTensorListBaseParams.set_coreNum(compileInfoPtr->aicNum_);

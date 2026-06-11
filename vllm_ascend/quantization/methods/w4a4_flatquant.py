@@ -20,6 +20,7 @@ from typing import Any
 
 import torch
 import torch_npu
+from vllm.logger import logger
 
 from .base import AscendLinearScheme
 from .registry import register_scheme
@@ -92,7 +93,9 @@ class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         if input_size % 8 != 0:
-            raise ValueError(f"input_size ({input_size}) must be divisible by 8 for int4 packing")
+            err_msg = f"input_size ({input_size}) must be divisible by 8 for int4 packing"
+            logger.error(err_msg)
+            raise ValueError(err_msg)
         AscendW4A4FlatQuantDynamicLinearMethod.input_size = input_size
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
         return params_dict
@@ -128,10 +131,12 @@ class AscendW4A4FlatQuantDynamicLinearMethod(AscendLinearScheme):
         left_dim = layer.left_trans.shape[0]
         right_dim = layer.right_trans.shape[0]
         if left_dim * right_dim != in_features:
-            raise ValueError(
+            err_msg = (
                 f"FlatQuant transform matrices dimension mismatch: "
                 f"left_dim({left_dim}) * right_dim({right_dim}) != in_features({in_features})"
             )
+            logger.error(err_msg)
+            raise ValueError(err_msg)
         left_trans_matched = layer.left_trans.to(original_dtype)
         right_trans_matched = layer.right_trans.to(original_dtype)
         x_reshaped = x.view(-1, left_dim, right_dim)

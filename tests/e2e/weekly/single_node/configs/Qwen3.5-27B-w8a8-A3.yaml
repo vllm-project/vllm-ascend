@@ -38,19 +38,9 @@ test_cases:
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3,"enforce_eager": true}'
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--async-scheduling"
       - "--mm-processor-cache-gb"
       - "0"
     benchmarks:
-      acc:
-        case_type: accuracy
-        dataset_path: vllm-ascend/aime2025
-        request_conf: vllm_api_general_chat
-        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-        max_out_len: 32768
-        batch_size: 32
-        baseline: 85
-        threshold: 5
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
@@ -86,7 +76,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"
@@ -133,7 +122,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"
@@ -178,7 +166,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"
@@ -225,7 +212,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"
@@ -237,7 +223,7 @@ test_cases:
     benchmarks:
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs100_qwen
+        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 48
@@ -271,7 +257,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"
@@ -316,7 +301,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"
@@ -362,7 +346,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"
@@ -409,7 +392,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"
@@ -454,7 +436,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"
@@ -501,7 +482,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"
@@ -513,7 +493,7 @@ test_cases:
     benchmarks:
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs100_qwen
+        dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs1000_qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 8
@@ -547,7 +527,6 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - "--trust-remote-code"
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--quantization"

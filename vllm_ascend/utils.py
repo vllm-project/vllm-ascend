@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import math
 import os
 from contextlib import nullcontext
@@ -46,6 +47,7 @@ else:
 COMPILATION_PASS_KEY = "graph_fusion_manager"
 ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
+FP8_METHOD = "fp8"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 
@@ -119,6 +121,10 @@ def clear_enable_sp():
 
 def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
+
+
+def is_950():
+    return get_ascend_device_type() == AscendDeviceType.A5
 
 
 def _mark_op_side_effectful(op: Any) -> None:
@@ -205,6 +211,10 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.dtype == torch.float32:
         return False
 
+    # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
+    if weight.is_meta:
+        return False
+
     # 310P always converts to NZ.
     if is_310p():
         return True
@@ -229,6 +239,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - 310P: always convert supported weights to FRACTAL_NZ
 # - non-310P: follow VLLM_ASCEND_ENABLE_NZ
 # - FP32: never convert
+# - meta tensor: never convert
 def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
@@ -388,10 +399,20 @@ def enable_custom_op():
                 _CUSTOM_OP_ENABLED = True
             except ImportError:
                 _CUSTOM_OP_ENABLED = False
-                logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+                logger.warning(
+                    "Failed to register custom ops, all custom ops will be disabled. "
+                    "The custom ops library might not be installed or the environment is not configured correctly. "
+                    "Please check the custom ops installation and environment variables."
+                )
         else:
             _CUSTOM_OP_ENABLED = False
-            logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+            logger.warning(
+                "Failed to register custom ops, all custom ops will be disabled. "
+                "error=%s. "
+                "The custom ops library might not be installed or the environment is not configured correctly. "
+                "Please check the custom ops installation and environment variables.",
+                e,
+            )
     return _CUSTOM_OP_ENABLED
 
 
@@ -494,6 +515,45 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
+def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
+    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
+    if kv_transfer_config is None:
+        return
+
+    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
+    if visible_devices is None:
+        from vllm_ascend.cpu_binding import DeviceInfo
+
+        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
+    else:
+        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
+
+    extra_config = kv_transfer_config.kv_connector_extra_config or {}
+    local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
+    if not local_comm_res_path:
+        return
+
+    if not devices:
+        raise ValueError("No NPU devices found or specified in ASCEND_RT_VISIBLE_DEVICES.")
+    if local_rank < 0 or local_rank >= len(devices):
+        raise ValueError(f"local_rank {local_rank} is out of bounds for the available NPU devices: {devices}")
+
+    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[local_rank]}.json")
+    try:
+        with open(local_comm_res_file) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Endpoint config file not found: {local_comm_res_file}. "
+            "Please set ascend_local_comm_res_path in kv_connector_extra_config "
+            "to a directory containing ub_endpoint_npu_*.json endpoint configuration files."
+        )
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse endpoint config file: {local_comm_res_file}") from e
+
+    os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
@@ -546,7 +606,11 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
                 f"cudagraph_capture_sizes(={valid_max_size})"
             )
         logger.warning(
-            "Truncating max_cudagraph_capture_size to %d",
+            "Truncating max_cudagraph_capture_size. "
+            "original_size=%d, truncated_size=%d. "
+            "The max_cudagraph_capture_size does not match the max value of cudagraph_capture_sizes. "
+            "Please check the compilation_config for consistency.",
+            vllm_config.compilation_config.max_cudagraph_capture_size,
             valid_max_size,
         )
 
@@ -556,146 +620,14 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
         vllm_config.compilation_config.cudagraph_capture_sizes
     ):
         logger.warning(
-            ("cudagraph_capture_sizes specified in compilation_config %s is overridden by config %s"),
+            "cudagraph_capture_sizes specified in compilation_config is overridden. "
+            "compilation_config_sizes=%s, overridden_sizes=%s. "
+            "The sizes are adjusted based on model configuration and resource constraints.",
             vllm_config.compilation_config.cudagraph_capture_sizes,
             cudagraph_capture_sizes,
         )
     vllm_config.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
     vllm_config.compilation_config.post_init_cudagraph_sizes()
-
-
-def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
-    """Update ACL graph capture sizes based on hardware limitations"""
-    # NOTE: Currently, we can only capture 1800 graphs at most,
-    # due to the limitation of ACL graph. This number is bounded by
-    # the number of streams, which is 2048, we save 248 streams
-    # as a buffer.
-    # Maximum number of graphs that can be captured by ACL Graph
-    # TODO: Find out whether we need to solve allreduce function
-    MAX_CAPTURE_SIZE = 1800
-
-    # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
-    CP_ADDITIONAL_STREAM_NUM = 100
-
-    # Store original configuration and temporarily clear it
-    compilation_config = vllm_config.compilation_config
-    original_sizes, compilation_config.cudagraph_capture_sizes = compilation_config.cudagraph_capture_sizes, None
-
-    # Calculate parallel configuration factor
-    if not vllm_config.model_config:
-        logger.warning(
-            "Got empty model config. This typically occurs when an empty vllm_config is "
-            "initialized (e.g., in unit tests), where config updates are intentionally skipped."
-        )
-
-        return
-    hf_config = vllm_config.model_config.hf_text_config
-    if hasattr(hf_config, "num_hidden_layers"):
-        num_hidden_layers = hf_config.num_hidden_layers
-    else:
-        num_hidden_layers = get_max_hidden_layers(hf_config)
-    parallel_config = vllm_config.parallel_config
-
-    # Calculate maximum supported batch sizes considering model architecture
-    resources_per_graph = num_hidden_layers + 1
-    # For suffix decoding, use the suffix path when no draft_model_config is provided.
-    if (spec := vllm_config.speculative_config) and (draft := spec.draft_model_config):
-        # Use get_total_num_hidden_layers() to correctly handle MTP models,
-        # which store layer count in num_nextn_predict_layers or
-        # mtp_num_hidden_layers (for Qwen3.5) instead of num_hidden_layers.
-        resources_per_graph += draft.get_total_num_hidden_layers() + 1
-
-    # TODO: Find out whether we need to take into account the pp_size
-    num_comm_groups = sum(
-        size > 1
-        for size in [
-            parallel_config.data_parallel_size,
-            parallel_config.tensor_parallel_size,
-        ]
-    )
-
-    if os.getenv("HCCL_OP_EXPANSION_MODE") == "AIV":
-        # TODO: Find out whether we need to take into account the pp_size
-        parallel_factor = (
-            1
-            + num_comm_groups
-            + int(parallel_config.enable_expert_parallel)
-            + int(vllm_config.additional_config.get("multistream_overlap_shared_expert", False))
-        )
-        if is_moe_model(vllm_config):
-            parallel_factor += parallel_config.data_parallel_size > 1
-        else:
-            # When AIV mode is enabled, the allreduce operator of the dense
-            # layer model will occupy additional streams, which are buffered here.
-            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - parallel_factor * resources_per_graph
-
-        # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device
-        # Assume the following case:
-        # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
-        # According to the formula, max_num_batch_sizes = math.floor(1920 / (48 + 1) / 2) = 19
-        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE / resources_per_graph / parallel_factor)
-        logger.info("Calculated maximum supported batch sizes for ACL graph: %s", max_num_batch_sizes)
-    else:
-        # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
-        if parallel_config.prefill_context_parallel_size > 1:
-            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
-        if parallel_config.decode_context_parallel_size > 1:
-            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
-
-        # The above describes an empirical formula applicable to the A2 hardware.
-        # Under this configuration, HCCL employs the FFTS+ method for execution unfolding,
-        # which adds only 1 concurrent stream without consuming collective communication execution unfolding streams.
-        # On A3 hardware, HCCL defaults to the AICPU method.
-        # This approach may additionally allocate up to rank_size (max 16) - 1 streams per collective communication
-        # domain on the device (worst case).
-        # Using the default collective communication unfolding method on A3 will lead to a significant reduction
-        # in the maximum supported sizes.
-        # Therefore, the calculation formula has been modified as follows:
-        # Assume the following case:
-        # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
-        # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
-        max_num_batch_sizes = math.floor(
-            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph / (1 + num_comm_groups * 2)
-        )
-        logger.info("Calculated maximum supported batch sizes for ACL graph: %s", max_num_batch_sizes)
-        logger.warning(
-            "Currently, communication is performed using FFTS+ method, which reduces "
-            "the number of available streams and, as a result, limits the range of runtime "
-            "shapes that can be handled. To both improve communication performance and "
-            "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
-        )
-
-    arch_name = vllm_config.model_config.architecture
-
-    # If original sizes exceed maximum, sample a representative subset
-    if max_num_batch_sizes < len(original_sizes):
-        # Sample uniformly from original sizes
-        step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
-        indices = [round(i * step) for i in range(max_num_batch_sizes)]
-
-        # Ensure first and last elements are preserved
-        indices[0], indices[-1] = 0, len(original_sizes) - 1
-
-        sampled_sizes = [original_sizes[i] for i in indices]
-        update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
-        logger.info(
-            "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
-            arch_name,
-            num_hidden_layers,
-            len(original_sizes),
-            len(
-                compilation_config.cudagraph_capture_sizes  # type: ignore[arg-type]
-            ),
-        )
-    else:
-        # No adjustment needed
-        compilation_config.cudagraph_capture_sizes = original_sizes
-        logger.info(
-            "No adjustment needed for ACL graph batch sizes: %s model (layers: %d) with %d sizes",
-            arch_name,
-            num_hidden_layers,
-            len(original_sizes),
-        )
 
 
 # TODO(wxy): Move to ops module
@@ -714,7 +646,11 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         return
     from vllm.model_executor.custom_op import CustomOp
 
-    from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.activation import (
+        AscendQuickGELU,
+        AscendSiluAndMul,
+        AscendSiluAndMulWithClamp,
+    )
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
@@ -748,6 +684,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     REGISTERED_ASCEND_OPS = {
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
+        "SiluAndMulClamp": AscendSiluAndMulWithClamp,
         "RotaryEmbedding": AscendRotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
@@ -773,6 +710,18 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
+
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
+        from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
+
+        REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
@@ -830,7 +779,11 @@ def _init_ascend_device_type():
     global _ascend_device_type
     from vllm_ascend import _build_info  # type: ignore
 
-    _ascend_device_type = AscendDeviceType[_build_info.__device_type__]
+    device_type = getattr(_build_info, "__device_type__", None)
+    if device_type is None:
+        soc_version = getattr(_build_info, "__soc_version__", "ASCEND910B1").upper()
+        device_type = "_310P" if "310P" in soc_version else "A2"
+    _ascend_device_type = AscendDeviceType[device_type]
 
 
 def check_ascend_device_type():
@@ -915,7 +868,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
-            logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
+            logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
 
     return bool(_ENABLE_SP)
 
@@ -923,10 +876,6 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
-
-
-def prefill_context_parallel_enable() -> bool:
-    return get_ascend_config().enable_context_parallel
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -944,6 +893,10 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
     if _IS_DRAFTER_MOE_MODEL is None:
         model_configs = vllm_config.speculative_config.draft_model_config.hf_text_config.to_dict()
         _IS_DRAFTER_MOE_MODEL = _is_contain_expert(model_configs)
+        if not model_configs or not model_configs.get("architectures"):
+            return _IS_DRAFTER_MOE_MODEL
+        if "Eagle3DeepseekV2ForCausalLM" in model_configs["architectures"]:
+            _IS_DRAFTER_MOE_MODEL = False
     return _IS_DRAFTER_MOE_MODEL
 
 
@@ -1072,9 +1025,9 @@ def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
 
 def create_hccl_pg_options(group_name: str):
     options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
-    hccl_config = get_hccl_config_for_pg_options(group_name)
-    if hccl_config is not None:
-        options.hccl_config = hccl_config
+    hccl_config = get_hccl_config_for_pg_options(group_name) or {}
+    hccl_config["group_name"] = group_name
+    options.hccl_config = hccl_config
     return options
 
 
@@ -1304,12 +1257,12 @@ def refresh_block_size(vllm_config):
     if cache_config.block_size is None:
         cache_config.block_size = 128
 
+    if not scheduler_config or not model_config:
+        return
+
     if model_config.hf_config.model_type == "deepseek_v4":
         # TODO(qcs): generalize the block_size
         cache_config.block_size = 128
-
-    if not scheduler_config or not model_config:
-        return
 
     if model_config.is_hybrid:
         # Hybrid attention+mamba models rely on the model-specific sizing
@@ -1322,9 +1275,17 @@ def refresh_block_size(vllm_config):
             cache_config.block_size = 128
             return
 
-    ascend_config = get_ascend_config()
-    if ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
-        logger.warning("Setting block size to 128 for xlite compatibility.")
+    try:
+        ascend_config = get_ascend_config()
+    except RuntimeError:
+        ascend_config = None
+    if ascend_config is not None and ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
+        logger.warning(
+            "Setting block size for xlite compatibility. "
+            "original_block_size=%d, new_block_size=128. "
+            "xlite_graph_config requires block_size <= 128.",
+            cache_config.block_size,
+        )
         cache_config.block_size = 128
 
 
@@ -1373,17 +1334,28 @@ def singleton(cls):
     return get_instance
 
 
-# TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32.
-# and subsequent updates will introduce new interfaces. --zzhx1
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    is_ds_v32 = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+    # DSA CP is only applicable to models with indexer (e.g., DSv3.2, DSv4).
+    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
         vllm_config.model_config.hf_text_config, "index_topk"
     )
-    return bool(is_ds_v32 and enable_sp())
+    if not has_indexer:
+        return False
+
+    dsa_cp_enable = False
+    additional_config = getattr(vllm_config, "additional_config", None)
+    if additional_config is not None and "enable_dsa_cp" in additional_config:
+        dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
+
+    if dsa_cp_enable and not enable_sp():
+        raise ValueError(
+            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
+        )
+    return dsa_cp_enable and enable_sp()
 
 
 @lru_cache(maxsize=1)

@@ -128,7 +128,6 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
 --max-model-len 262144 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
---async-scheduling \
 --gpu-memory-utilization 0.9 \
 ```
 
@@ -175,7 +174,6 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
 --max-num-batched-tokens 4096 \
 --enable-expert-parallel \
 --trust-remote-code \
---async-scheduling \
 --gpu-memory-utilization 0.9 \
 ```
 

@@ -47,6 +47,7 @@ def _stream(
     parser: DeepSeekV4ToolParser,
     full_text: str,
     chunk_size: int = 5,
+    tools=None,
 ):
     deltas = []
     previous_text = ""
@@ -63,7 +64,7 @@ def _stream(
             request=ChatCompletionRequest(
                 model="deepseek-ai/DeepSeek-V2-Chat",
                 messages=[],
-                tools=[_tools()],
+                tools=tools or [_tools()],
             ),
         )
         previous_text = current_text
@@ -227,6 +228,118 @@ def test_streaming_full_tool_call_single_chunk_drains_all_deltas():
         "flexible": False,
         "cities": ["Beijing", "Shanghai"],
         "notes": "靠窗座位",
+    }
+
+
+def test_streaming_matches_non_streaming_conversion_fallbacks():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "coerce",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "union_value": {"type": ["null", "string"]},
+                        "bad_int": {"type": "integer"},
+                        "nullable_string": {"type": ["null", "string"]},
+                        "null_string": {"type": "string"},
+                        "whole_number": {"type": "number"},
+                    },
+                },
+            },
+        }
+    ]
+    full_text = (
+        f"{TC_START}\n"
+        f'{INV_START}coerce">\n'
+        f'{PARAM_START}union_value" string="false">hello{PARAM_END}\n'
+        f'{PARAM_START}bad_int" string="false">abc{PARAM_END}\n'
+        f'{PARAM_START}nullable_string" string="false">null{PARAM_END}\n'
+        f'{PARAM_START}null_string" string="false">null{PARAM_END}\n'
+        f'{PARAM_START}whole_number" string="false">3.0{PARAM_END}\n'
+        f"{INV_END}\n"
+        f"{TC_END}"
+    )
+    request = ChatCompletionRequest(
+        model="deepseek-ai/DeepSeek-V2-Chat",
+        messages=[],
+        tools=tools,
+    )
+
+    non_streaming = DeepSeekV4ToolParser(MOCK_TOKENIZER).extract_tool_calls(full_text, request)
+    deltas = _stream(DeepSeekV4ToolParser(MOCK_TOKENIZER), full_text, chunk_size=4, tools=tools)
+
+    stream_args = json.loads(
+        "".join(
+            tc.function.arguments
+            for delta in deltas
+            for tc in delta.tool_calls or []
+            if tc.index == 0 and tc.function and tc.function.arguments is not None
+        )
+    )
+    expected = {
+        "union_value": "hello",
+        "bad_int": "abc",
+        "nullable_string": None,
+        "null_string": "null",
+        "whole_number": 3,
+    }
+    assert stream_args == expected
+    assert json.loads(non_streaming.tool_calls[0].function.arguments) == expected
+
+
+def test_composed_schema_conversion_in_streaming():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "set_timer",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "wait": {
+                            "anyOf": [
+                                {"type": "object"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "patches": {
+                            "allOf": [
+                                {"type": "array", "items": {"type": "object"}},
+                            ],
+                        },
+                    },
+                },
+            },
+        }
+    ]
+    full_text = (
+        f"{TC_START}\n"
+        f'{INV_START}set_timer">\n'
+        f'{PARAM_START}wait" string="false">'
+        f'{{"type":"for","minutes":2880}}'
+        f"{PARAM_END}\n"
+        f'{PARAM_START}patches" string="false">'
+        f'[{{"op":"replace","path":"/schedule","value":"quiet"}}]'
+        f"{PARAM_END}\n"
+        f"{INV_END}\n"
+        f"{TC_END}"
+    )
+
+    deltas = _stream(DeepSeekV4ToolParser(MOCK_TOKENIZER), full_text, chunk_size=5, tools=tools)
+    args = json.loads(
+        "".join(
+            tc.function.arguments
+            for delta in deltas
+            for tc in delta.tool_calls or []
+            if tc.index == 0 and tc.function and tc.function.arguments is not None
+        )
+    )
+
+    assert args == {
+        "wait": {"type": "for", "minutes": 2880},
+        "patches": [{"op": "replace", "path": "/schedule", "value": "quiet"}],
     }
 
 

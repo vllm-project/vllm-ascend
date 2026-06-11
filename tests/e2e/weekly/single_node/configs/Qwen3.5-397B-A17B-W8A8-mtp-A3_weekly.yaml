@@ -34,7 +34,6 @@ _server_cmd: &server_cmd
       - "0.9"
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
-      - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
       - "--mm-processor-cache-gb"
