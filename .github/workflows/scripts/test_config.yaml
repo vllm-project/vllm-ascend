@@ -33,6 +33,13 @@
 #                paths after directory scanning)
 
 # === Modules ===
+# Default CPU UT module - always runs all CPU UTs in every PR
+- name: default_cpu_ut
+  optional: false
+  cpu_only: true
+  tests:
+    - tests/ut
+
 # 310P
 - name: 310p
   optional: true
@@ -233,6 +240,16 @@
     - tests/e2e/pull_request/one_card/lora
     - tests/e2e/pull_request/two_card/lora
 
+# CPU Weight Offloading
+- name: cpu_weight_offload
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/model_executor
+    - vllm_ascend/worker/model_runner_v1.py
+    - vllm_ascend/compilation/acl_graph.py
+  tests:
+    - tests/e2e/pull_request/one_card/test_cpu_weight_offload.py
+
 # Model Loader
 - name: model_loader
   optional: true
@@ -356,6 +373,13 @@
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
 
+- name: patch_mamba_utils_310p
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/patch/worker/patch_mamba_utils.py
+  tests:
+    - tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py::test_qwen3_5_dense_prefix_mamba_cache_tp1_fp16
+
 # Profiler
 - name: profiler
   optional: true
@@ -372,6 +396,7 @@
   tests:
     - tests/ut/quantization
     - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
+    - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
 # Sample
 - name: sample
@@ -544,6 +569,7 @@
     - vllm_ascend/cpu_binding.py
     - vllm_ascend/envs.py
     - vllm_ascend/flash_common3_context.py
+    - vllm_ascend/logger.py
     - vllm_ascend/meta_registration.py
     - vllm_ascend/platform.py
     - vllm_ascend/profiling_config.py
@@ -554,6 +580,7 @@
     - tests/ut/test_ascend_forward_context.py
     - tests/ut/test_cpu_binding.py
     - tests/ut/test_envs.py
+    - tests/ut/test_logger.py
     - tests/ut/test_flash_common3_context.py
     - tests/ut/test_meta_registration.py
     - tests/ut/test_profiling_config.py
@@ -586,6 +613,7 @@
     - vllm_ascend/ops/fused_moe/token_dispatcher.py
   tests:
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
+    - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
 # === Others ===
 - name: _tools

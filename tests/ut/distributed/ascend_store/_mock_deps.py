@@ -23,6 +23,7 @@ Usage at the top of each test file:
     import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 """
 
+import logging
 import os
 import sys
 import types
@@ -96,7 +97,7 @@ for _mod_name in _vllm_mock_modules:
         sys.modules[_mod_name] = MagicMock()
 
 sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
-sys.modules["vllm.logger"].logger = MagicMock()  # type: ignore[attr-defined]
+sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
 
 _base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
 _base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]

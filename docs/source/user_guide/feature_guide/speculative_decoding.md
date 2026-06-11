@@ -225,3 +225,55 @@ Key configuration parameters:
 4. **`kv_role`**: Must be set to `"kv_producer"` for the extraction mode.
 
 5. **`shared_storage_path`**: Directory where hidden states will be saved as `.safetensors` files (one per request).
+
+## Block Verify and Entropy Verify
+
+vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
+
+> [!WARNING]
+> Both Block Verify and Entropy Verify modify the token acceptance criteria and may cause minor precision degradation (e.g., slightly different output tokens compared to the standard rejection sampler). Evaluate the quality impact on your specific workload before enabling them in production.
+
+### Block Verify
+
+Block Verify evaluates all draft tokens as a block using cumulative probability products, rather than checking each token independently. This can improve the acceptance rate and reduce the overhead of rejection sampling, especially when `num_speculative_tokens >= 3`.
+
+### Entropy Verify
+
+Entropy Verify adjusts the acceptance threshold based on the entropy of the target distribution:
+
+- **High entropy** (uncertain distribution) → lower effective threshold → more tokens accepted
+- **Low entropy** (confident distribution) → higher effective threshold → stricter rejection
+
+This entropy-aware threshold is controlled by two parameters:
+
+- **`posterior_threshold`** (default: `0.95`): The upper bound of the modified threshold. Even when entropy is very low, the effective threshold will not exceed this value.
+- **`posterior_alpha`** (default: `0.4`): Controls how strongly entropy influences the threshold. A higher alpha makes the threshold more sensitive to entropy changes, resulting in a higher acceptance rate for speculative tokens but also greater precision loss. You need to tune this value based on your specific model and dataset.
+
+### Usage
+
+- Online inference
+
+    ```shell
+    vllm serve <model> --additional-config \
+        '{"rejection_sampler_config": {"enable_block_verify": true, \
+        "enable_entropy_verify": true, "posterior_threshold": 0.95, \
+        "posterior_alpha": 0.4}}'
+    ```
+
+- Offline inference
+
+    ```python
+    llm = LLM(
+        model,
+        additional_config={
+            "rejection_sampler_config": {
+                "enable_block_verify": True,
+                "enable_entropy_verify": True,
+                "posterior_threshold": 0.95,
+                "posterior_alpha": 0.4,
+            }
+        },
+    )
+    ```
+
+Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.

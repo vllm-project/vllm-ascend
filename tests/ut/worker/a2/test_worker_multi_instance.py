@@ -17,6 +17,7 @@
 
 from unittest.mock import MagicMock, patch
 
+from vllm.config import CUDAGraphMode
 from vllm.utils.mem_constants import GiB_bytes
 
 from tests.ut.base import TestBase
@@ -48,6 +49,10 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
         worker.model_runner = MagicMock()
         worker.model_runner.model_memory_usage = model_memory_usage
+
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        worker.vllm_config = mock_vllm_config
 
         mock_cache_config = MagicMock()
         mock_cache_config.kv_cache_memory_bytes = None
