@@ -12,8 +12,6 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from .op_kda import exp
-
 
 @triton.heuristics(
     {
@@ -129,10 +127,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         # [BV, BK]
         if not IS_KDA:
             b_g = tl.load(p_g).to(tl.float32)
-            b_h *= exp(b_g)
+            b_h *= tl.exp(b_g)
         else:
             b_gk = tl.load(p_gk).to(tl.float32)
-            b_h *= exp(b_gk[None, :])
+            b_h *= tl.exp(b_gk[None, :])
         # [BV]
         b_v -= tl.sum(b_h * b_k[None, :], 1)
         if IS_BETA_HEADWISE:
@@ -320,7 +318,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     g_val = -tl.exp(A_log_val) * softplus_x
     beta_val = tl.sigmoid(b_val).to(b.dtype.element_ty).to(tl.float32)
 
-    b_h *= exp(g_val)
+    b_h *= tl.exp(g_val)
     b_v -= tl.sum(b_h * b_k[None, :], 1)
     b_v *= beta_val
     b_h += b_v[:, None] * b_k[None, :]

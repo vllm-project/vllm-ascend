@@ -12,14 +12,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from .index_kda import (
-    prepare_chunk_indices as prepare_chunk_indices_kda,
-)
-from .index_kda import (
-    prepare_chunk_offsets as prepare_chunk_offsets_kda,
-)
-from .op_kda import exp
-from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices, prepare_chunk_offsets, safe_exp, use_cuda_graph
+from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices, prepare_chunk_offsets, safe_exp
 
 _CONDITIONS = ("seq7168",)
 
@@ -266,20 +259,9 @@ NUM_WARPS = [2, 4, 8, 16]
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-# @triton.autotune(
-#     configs=[
-#         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-#         for num_warps in [2, 4]
-#         for num_stages in [2, 3, 4]
-#         for BV in [32, 64]
-#     ],
-#     key=["H", "K", "V", "BT"],
-#     use_cuda_graph=use_cuda_graph,
-# )
 @triton.autotune(
     configs=[triton.Config({"BV": 64}, num_warps=4, num_stages=3)],
     key=["H", "K", "V", "BT"],
-    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
@@ -432,8 +414,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_v = b_v * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
-            b_g_last = exp(b_g_last)
+            b_v = b_v * tl.where(m_t, tl.exp(b_g_last - b_g), 0)[:, None]
+            b_g_last = tl.exp(b_g_last)
             b_h1 *= b_g_last
             if K > 64:
                 b_h2 *= b_g_last
@@ -449,7 +431,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
                 mask=(o_k1 < K),
                 other=0.0,
             )
-            b_h1 *= exp(b_gk_last1)[None, :]
+            b_h1 *= tl.exp2(b_gk_last1)[None, :]
             if K > 64:
                 o_k2 = 64 + o_k1
                 b_gk_last2 = tl.load(
@@ -457,7 +439,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
                     mask=(o_k2 < K),
                     other=0.0,
                 )
-                b_h2 *= exp(b_gk_last2)[None, :]
+                b_h2 *= tl.exp2(b_gk_last2)[None, :]
             if K > 128:
                 o_k3 = 128 + o_k1
                 b_gk_last3 = tl.load(
@@ -465,7 +447,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
                     mask=(o_k3 < K),
                     other=0.0,
                 )
-                b_h3 *= exp(b_gk_last3)[None, :]
+                b_h3 *= tl.exp2(b_gk_last3)[None, :]
             if K > 192:
                 o_k4 = 192 + o_k1
                 b_gk_last4 = tl.load(
@@ -473,7 +455,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_kda(
                     mask=(o_k4 < K),
                     other=0.0,
                 )
-                b_h4 *= exp(b_gk_last4)[None, :]
+                b_h4 *= tl.exp2(b_gk_last4)[None, :]
         b_v = b_v.to(k.dtype.element_ty)
 
         p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
@@ -527,14 +509,14 @@ def chunk_gated_delta_rule_fwd_h_kda(
     BT = chunk_size
 
     if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices_kda(cu_seqlens, chunk_size)
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N, NT = len(cu_seqlens) - 1, len(chunk_indices)
         if chunk_offsets is None:
-            chunk_offsets = prepare_chunk_offsets_kda(cu_seqlens, BT)
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     h = k.new_empty(B, NT, H, V, K)
