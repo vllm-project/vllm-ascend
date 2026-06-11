@@ -96,7 +96,6 @@ jobs:
     strategy:
       fail-fast: false
       # Avoid flooding GitCode third-party release downloads from concurrent matrix jobs.
-      max-parallel: 1
       matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
 
     container:
