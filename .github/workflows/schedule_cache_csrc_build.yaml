@@ -169,26 +169,6 @@ jobs:
 
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
-          if [ "${{ matrix.os_type }}" = "openeuler" ]; then
-            echo "===== AICPU toolchain probe ====="
-            echo "CPLUS_INCLUDE_PATH=${CPLUS_INCLUDE_PATH:-<empty>}"
-
-            AICPU_CXX="$(find /usr/local/Ascend -path '*/toolkit/toolchain/hcc/bin/aarch64-target-linux-gnu-g++' -type f | head -n 1)"
-            if [ -z "${AICPU_CXX}" ] || [ ! -x "${AICPU_CXX}" ]; then
-              echo "AICPU compiler not found"
-              find /usr/local/Ascend -path '*aarch64-target-linux-gnu-g++' -type f -print || true
-              exit 1
-            fi
-
-            echo "AICPU_CXX=${AICPU_CXX}"
-            "${AICPU_CXX}" --version
-            echo | "${AICPU_CXX}" -x c++ -E -v - 2>&1 | sed -n '/#include <...> search starts here:/,/End of search list./p'
-
-            printf '%s\n' '#include <cstdio>' 'int main() { return 0; }' > /tmp/aicpu_probe.cpp
-            "${AICPU_CXX}" -E /tmp/aicpu_probe.cpp > /tmp/aicpu_probe.i
-            echo "AICPU cstdio preprocess passed"
-          fi
-
           pip install uc-manager
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
           # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
