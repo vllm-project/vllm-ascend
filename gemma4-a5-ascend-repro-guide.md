@@ -463,42 +463,120 @@ curl --noproxy localhost http://127.0.0.1:8000/v1/chat/completions \
 
 ## 7. Error Logs
 
-### 7.1 `npu_moe_distribute_dispatch_v2` crash (graph mode, 26B MoE)
+### 7.1 Operator-level errors (DRV/OP/NNOP layer)
 
+**DRV-level error** — `svm_dbi_query_npage_size`:
+```
+[ERROR] DRV(pid): [svm_dbi.c:40][ascend][drv][devmm][svm_dbi_query_npage_size]<errno:22, 8> Invalid device. (devid=1)
+```
+Repeated bursts during model loading; indicates NPU device state issue (likely residual from zombie processes or invalid device visibility).
+
+**OP-level root error** — `aclnnFusedInferAttentionScoreV5` workspace mismatch (error 161002):
+```
+[ERROR] OP(pid): [individual_op_api.cpp:176][NNOP][NnopbaseRunWithWorkspace] errno[1771230784]
+  OpName:[FusedInferAttentionScore_0] Value 55664128 for parameter workspaceLen is invalid.
+  Reason: The passed workspace size 55664128 does not meet the workspace size 104871936 actually required by the operator.
+[ERROR] OP(pid): [individual_op_api.cpp:34][NNOP][NnopbaseOpLogE] errno[161002]
+  OpName:[FusedInferAttentionScore_0] Check NnopbaseRunWithWorkspace(executor, stream, workspace, workspaceSize) failed
+```
+```
+[ERROR] APP(pid): ExecFuncOpApi:OpParamMaker.cpp:458: "[PTA]:Custom hand error:operator():../third_party/op-plugin/op_plugin/ops/opapi/FusedInferAttentionScoreKernelNpuOpApi.cpp:536 NPU function error: device error type 0, error code is 161002"
+[ERROR] APP(pid): ExecFuncOpApi:OpParamMaker.cpp:462: "[PTA]:Custom hand fail! name=aclnnFusedInferAttentionScoreV5, ret=100000"
+Invalid_Argument(EZ1010): Value 55664128 for parameter workspaceLen is invalid. Reason: The passed workspace size 55664128 does not meet the workspace size 104871936 actually required by the operator.
+```
+
+**Cascading RUNTIME-level error** — `rtStreamEndCapture` (error 107033):
+```
+[ERROR] RUNTIME(pid): [context_aclgraph.cc:289] CheckCaptureModelValidity:A task group is not closed in the capture module, model_id=63.
+[ERROR] RUNTIME(pid): [context_aclgraph.cc:449] StreamEndCapture:Failed to verify the validity of the capture model, retCode=0x7030021.
+[ERROR] RUNTIME(pid): [api_c_standard_soc.cc:724] rtStreamEndCapture:ErrCode=107033, desc=[task group status error], InnerCode=0x7030021
+[ERROR] RUNTIME(pid): FuncErrorReason:rtStreamEndCapture execution failed, reason=task group status error
+[ERROR] ASCENDCL(pid): [model_ri.cpp:113] aclmdlRICaptureEndImpl:end capture stream failed, runtime result = 107033
+EE9999: rtStreamEndCapture execution failed, reason=task group status error[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:65]
+       end capture stream failed, runtime result = 107033[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:148]
+```
+
+**Error chain**: 161002 (FIA workspace mismatch) → task group not closed → 107033 (rtStreamEndCapture failed) → capture_end fails
+
+### 7.2 Framework-level errors (Python/vllm traceback)
+
+**Primary exception** — `aclnnFusedInferAttentionScoreV5` inside `torch.npu.graph()` capture:
+```
+File "/home/tongpan/vllm-ascend_tp/vllm_ascend/compilation/acl_graph.py", line 202, in __call__
+    output = self.runnable(*args, **kwargs)
+File "vllm/model_executor/models/gemma4_mm.py", line 1364, in forward
+    hidden_states = self.language_model.model(...)
+File "vllm/model_executor/models/gemma4.py", line 1272, in forward
+File "vllm/model_executor/layers/attention/attention.py", line 723, in unified_attention_with_output
+    self.impl.forward(...)
+File "/home/tongpan/vllm-ascend_tp/vllm_ascend/attention/attention_v1.py", line 1443, in forward
+    attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
+File "/home/tongpan/vllm-ascend_tp/vllm_ascend/attention/attention_v1.py", line 1378, in forward_impl
+    output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
+File "/home/tongpan/vllm-ascend_tp/vllm_ascend/attention/attention_v1.py", line 1159, in forward_fused_infer_attention
+    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
+File "/home/tongpan/vllm-ascend_tp/vllm_ascend/attention/attention_v1.py", line 916, in full_graph_fia
+    handle = torch.npu.graph_task_group_end(stream)
+RuntimeError: The Inner error is reported as above. The current working operator name is aclnnFusedInferAttentionScoreV5.
+```
+
+**Cascading capture_end failure** — `NPUGraph.cpp:247`:
+```
+File "/home/tongpan/vllm-ascend_tp/vllm_ascend/compilation/acl_graph.py", line 200, in __call__
+    with torch.npu.graph(aclgraph, pool=self.graph_pool):
+File "torch_npu/npu/graphs.py", line 533, in __exit__
+    self.npu_graph.capture_end()
+File "torch_npu/npu/graphs.py", line 370, in capture_end
+    super().capture_end()
+RuntimeError: capture_end:../torch_npu/csrc/core/npu/NPUGraph.cpp:247 NPU function error: device error type 0, error code is 107033
+```
+
+**Cascading framework wrapper re-throws**:
+```
+File "vllm_ascend/worker/model_runner_v1.py", line 4780, in _replace_gpu_model_runner_function_wrapper
+    raise RuntimeError(f"NPUModelRunner failed, error is {e}")
+RuntimeError: NPUModelRunner failed, error is capture_end:...error code is 107033
+
+File "vllm_ascend/worker/model_runner_v1.py", line 4753, in _torch_cuda_wrapper
+    raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
+RuntimeError: NPUModelRunner init failed, error is NPUModelRunner failed, error is capture_end:...error code is 107033
+```
+
+**Full cascading failure sequence**:
+```
+aclnnFusedInferAttentionScoreV5 workspace mismatch (161002)
+  → torch.npu.graph_task_group_end fails
+    → NPUGraph.capture_end fails (107033)
+      → acl_graph.__call__ context manager __exit__ raises RuntimeError
+        → _replace_gpu_model_runner_function_wrapper re-throws as "NPUModelRunner failed"
+          → _torch_cuda_wrapper re-throws as "NPUModelRunner init failed"
+            → WorkerProc dies
+              → EngineCore failed to start
+                → Worker proc VllmWorker-0 died unexpectedly
+                  → APIServer RuntimeError: Engine core initialization failed
+                    → ERR99999 UNKNOWN application exception
+```
+
+**Notable**: This crash occurs during `profile_cudagraph_memory()` → `_warmup_and_capture()` → `_dummy_run()` inside `torch.npu.graph()` capture context (acl_graph.py line 200). The `custom_ops=["all"]` (not `["none"]`) was used, and the code path goes through `npugraph_ex/npu_fx_compiler.py` line 507 → `acl_graph.py` line 823 `fx_run_eagerly`.
+
+### 7.3 Other operator errors observed
+
+**`npu_moe_distribute_dispatch_v2` crash** (earlier vllm 0.20.2, error 561002):
+```
+RuntimeError: npu_moe_distribute_dispatch_v2: NPU function error: device error type 0, error code is 561002
+EZ9999: The input of xActiveMask dim0 = 16 is not equal to x dim0 = 1024. [moe_distribute_dispatch_v2_tiling.cpp:350]
+  params shape is invalid. [moe_distribute_dispatch_v2_tiling.cpp:1374]
+  Tiling check param failed. [MoeDistributeDispatchA3TilingFuncImplPublic][moe_distribute_dispatch_v2_tiling.cpp:1674]
+```
 Full log: `/home/tongpan/gemma/error.log`
 
-```
-RuntimeError: npu_moe_distribute_dispatch_v2:
-  NPU function error: device error type 0, error code is 561002
-EZ9999: The input of xActiveMask dim0 = 16 is not equal to x dim0 = 1024.
-  [moe_distribute_dispatch_v2_tiling.cpp:350]
-  params shape is invalid. [moe_distribute_dispatch_v2_tiling.cpp:1374]
-  Tiling check param failed. [moe_distribute_dispatch_v2_tiling.cpp:1674]
-```
-
-Call chain: `profile_run` → `_dummy_run` → `_model_forward` → `acl_graph.__call__` → `npu_moe_distribute_dispatch_v2` FAIL → WorkerProc dies → EngineCoreProc fails → APIServer RuntimeError
-
-Other operator errors observed:
-
-**1. `aclnnFusedInferAttentionScoreV5` (FIA) graph capture failure**:
-- Workspace mismatch: allocated 55664128 vs required 104871936 bytes
-- Root error 161002 → cascading 107033 (`rtStreamEndCapture` failed, task group status error)
-- Traceback: `forward_impl → forward_fused_infer_attention → full_graph_fia → aclnnFusedInferAttentionScoreV5 fails inside torch.npu.graph() capture → capture_end error 107033`
-- This is the primary reason graph mode cannot work with FIA on A5
-
-**2. `npu_paged_attention` not supported on A5**:
+**`npu_paged_attention` not supported on A5**:
 - `PagedAttentionOperation setup failed!` — A5 (soc_version=260) is `AscendDeviceType.A5`, `using_paged_attention()` returns False (attention/utils.py line 48)
 
-**3. `copy_between_host_and_device_opapi` error 107030**:
+**`copy_between_host_and_device_opapi` error 107030**:
 - CPU→NPU `.to(device)` inside graph capture is not allowed; attempted during block_table shift workaround
 
-**4. `svm_dbi_query_npage_size Invalid device (devid=1)`**:
-- DRV-level NPU device state issue, likely residual from zombie processes
-
-**Framework-level cascading failure sequence**:
-`NPUModelRunner init failed` → `Engine core initialization failed` → `EngineCoreProc dies` → `APIServer RuntimeError`
-
-### 7.2 Successful eager mode startup (31B Dense)
+### 7.4 Successful eager mode startup (31B Dense)
 
 Full log: `/home/tongpan/gemma/gemma_graph_run_31.log`
 
