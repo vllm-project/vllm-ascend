@@ -55,6 +55,8 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+from vllm_ascend.recovery.worker_monitor import create_worker_monitor, WorkerMonitor
+from vllm_ascend.recovery.worker_decorator import fault_recovery_decorator
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
@@ -164,6 +166,8 @@ class NPUWorker(WorkerBase):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
+        create_worker_monitor(self, vllm_config)
+        self.worker_monitor.start()
 
     def uninstall_static_kernel(self):
         import fcntl
@@ -330,7 +334,7 @@ class NPUWorker(WorkerBase):
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
-
+        
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -460,6 +464,7 @@ class NPUWorker(WorkerBase):
             self.torch_allocated / GiB_bytes,
         )
 
+    @fault_recovery_decorator()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -526,6 +531,7 @@ class NPUWorker(WorkerBase):
         output.kv_connector_output = kv_connector_output
         return output
 
+    @fault_recovery_decorator()
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
@@ -817,7 +823,8 @@ class NPUWorker(WorkerBase):
 
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
-
+    
+    @fault_recovery_decorator()
     def execute_dummy_batch(self) -> None:
         self.profile_memory()
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
