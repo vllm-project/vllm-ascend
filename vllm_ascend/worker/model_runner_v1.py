@@ -83,13 +83,13 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (  # type: ignore[import-not-found]
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
         extract_routed_experts_for_current_batch,
         get_global_experts_capturer,
         issue_routing_d2h_copy,
     )
 else:
-    from vllm.v1.outputs import RoutedExpertsLists  # type: ignore[import-not-found]
+    from vllm.v1.outputs import RoutedExpertsLists
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
@@ -553,7 +553,6 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -1619,7 +1618,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.use_async_spec_decode:
             # Stash for GPU-side correction in _prepare_inputs.
-            self.valid_sampled_token_count_gpu = valid_sampled_tokens_count
+            self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
@@ -2373,7 +2372,7 @@ class NPUModelRunner(GPUModelRunner):
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
 
-        self.valid_sampled_token_count_gpu = None
+        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -3376,6 +3375,7 @@ class NPUModelRunner(GPUModelRunner):
         if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
+            num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
@@ -3411,21 +3411,12 @@ class NPUModelRunner(GPUModelRunner):
             self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
 
             cum_num_tokens = self._get_cumsum_and_arange(
-                num_scheduled_tokens, self.query_pos.np
-            )
-            self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
-            self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(
-                cum_num_tokens[-1]
-            )
+            num_scheduled_tokens, self.query_pos.np)
+            self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
             if self._has_gdn:
-                self.gdn_query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
-                self.gdn_query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(
-                    cum_num_tokens[-1]
-                )
+                self.gdn_query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
                 self.gdn_query_start_loc.copy_to_gpu()
-
-            self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
             if not profile_cpp:
                 num_reqs_padded = self._pad_query_start_loc_for_fia(

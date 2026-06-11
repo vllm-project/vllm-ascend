@@ -29,7 +29,7 @@ if vllm_version_is("0.21.0"):
         GatedDeltaNetAttention,
     )
 else:
-    from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention  # type: ignore[import-not-found]
+    from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.triton_utils import triton
