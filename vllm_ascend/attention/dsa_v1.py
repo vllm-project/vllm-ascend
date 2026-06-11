@@ -1742,7 +1742,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        return q, qr, qr_quant, qr_pertoken_scale
+        return q, qr, qr_pertoken_scale
 
     def _forward_prefill(
         self,
