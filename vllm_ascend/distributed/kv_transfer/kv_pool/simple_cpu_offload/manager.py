@@ -174,11 +174,17 @@ class SimpleCPUOffloadScheduler:
     ) -> None:
         if num_external_tokens <= 0:
             return
-        self._prepare_preempt_load_after_alloc(
+        prepared = self._prepare_preempt_load_after_alloc(
             request,
             blocks.get_block_ids(),
             num_external_tokens,
         )
+        if not prepared:
+            raise RuntimeError(
+                "Failed to prepare recompute H2D load after KV block "
+                f"allocation: req_id={request.request_id}, "
+                f"num_external_tokens={num_external_tokens}"
+            )
 
     def update_state_before_preempt(
         self,
@@ -350,8 +356,24 @@ class SimpleCPUOffloadScheduler:
             load_start_tokens + num_external_tokens,
             state.num_computed_tokens,
         )
+        if load_end_tokens - load_start_tokens != num_external_tokens:
+            raise RuntimeError(
+                "Recompute H2D token range does not match the scheduler "
+                f"allocation: req_id={request.request_id}, "
+                f"start={load_start_tokens}, end={load_end_tokens}, "
+                f"external={num_external_tokens}, "
+                f"stored={state.num_computed_tokens}"
+            )
         if load_end_tokens <= load_start_tokens:
             return False
+
+        if len(block_ids_by_group) != len(state.cpu_block_ids):
+            raise RuntimeError(
+                "Recompute H2D KV group count mismatch: "
+                f"req_id={request.request_id}, "
+                f"gpu_groups={len(block_ids_by_group)}, "
+                f"cpu_groups={len(state.cpu_block_ids)}"
+            )
 
         gpu_block_ids: list[int] = []
         cpu_block_ids: list[int] = []
@@ -367,12 +389,23 @@ class SimpleCPUOffloadScheduler:
                 cdiv(load_end_tokens, group_block_size),
             )
             if end_block <= start_block:
-                continue
+                raise RuntimeError(
+                    "Recompute H2D produced an empty block range: "
+                    f"req_id={request.request_id}, group={g}, "
+                    f"start_block={start_block}, end_block={end_block}, "
+                    f"gpu_blocks={len(block_ids_by_group[g])}, "
+                    f"cpu_blocks={len(group_cpu_ids)}"
+                )
             cpu_block_ids.extend(group_cpu_ids[start_block:end_block])
             gpu_block_ids.extend(block_ids_by_group[g][start_block:end_block])
 
-        if not cpu_block_ids:
-            return False
+        if not cpu_block_ids or len(cpu_block_ids) != len(gpu_block_ids):
+            raise RuntimeError(
+                "Recompute H2D block mapping is incomplete: "
+                f"req_id={request.request_id}, "
+                f"gpu_blocks={len(gpu_block_ids)}, "
+                f"cpu_blocks={len(cpu_block_ids)}"
+            )
 
         assert self._gpu_block_pool is not None
         self._gpu_block_pool.touch(

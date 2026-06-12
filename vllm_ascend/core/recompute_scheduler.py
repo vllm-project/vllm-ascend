@@ -152,6 +152,68 @@ class RecomputeScheduler(Scheduler):
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
+    def _update_waiting_for_remote_kv(self, request: Request) -> None:
+        """
+        KV Connector: update request state after async recv is finished.
+
+        The finished_recving_kv_req_ids list is populated
+        on the previous steps()'s update_from_output based
+        on the worker side connector.
+
+        When the kv transfer is ready, we cache the blocks
+        and the request state will be moved back to WAITING from
+        WAITING_FOR_REMOTE_KV.
+
+        NOTE: The check for whether request.request_id is in
+        finished_recving_kv_req_ids is now done by the caller
+        (_try_promote_blocked_waiting_request in the parent Scheduler),
+        so this method is only called when the recv is confirmed finished.
+        """
+        assert self.connector is not None
+
+        if request.request_id in self.failed_recving_kv_req_ids:
+            # Request had KV load failures; num_computed_tokens was already
+            # updated in _update_requests_with_invalid_blocks
+            if request.num_computed_tokens:
+                # Cache any valid computed tokens.
+                self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+            else:
+                # No valid computed tokens, release allocated blocks.
+                # There may be a local cache hit on retry.
+                self.kv_cache_manager.free(request)
+
+            self.failed_recving_kv_req_ids.remove(request.request_id)
+        else:
+            # Preserve the exact token position recorded when the H2D load was
+            # scheduled. Deriving it from allocated block count would round a
+            # partially filled tail block up to the next block boundary.
+            num_computed_tokens = min(
+                request.num_computed_tokens,
+                request.num_tokens,
+            )
+            # On a full hit, recompute the last token to produce logits.
+            if num_computed_tokens == request.num_tokens:
+                num_computed_tokens -= 1
+            # This will cache the blocks iff caching is enabled.
+            self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
+
+            # Update the request state for scheduling.
+            request.num_computed_tokens = num_computed_tokens
+
+            # Preemption clears spec_token_ids. Refill placeholders after the
+            # recompute H2D completes so the first resumed decode can match the
+            # MTP full graph instead of running a one-token eager step.
+            if (
+                self.is_mtp_kv_consumer
+                and request.num_preemptions > 0
+                and not request.spec_token_ids
+                and self.max_model_len
+                >= request.num_tokens + self.num_spec_tokens
+            ):
+                request.spec_token_ids = [PLACEHOLDER_TOKEN_ID] * self.num_spec_tokens
+
+        self.finished_recving_kv_req_ids.remove(request.request_id)
+
     def schedule(self) -> RecomputeSchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
