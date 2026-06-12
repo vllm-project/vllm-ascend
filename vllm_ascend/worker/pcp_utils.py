@@ -151,6 +151,12 @@ class PCPManager:
         self._local_num_scheduled_tokens: np.ndarray | None = None
         self._local_total_num_scheduled_tokens: int | None = None
 
+        # Full pre-PCP token layout used to rebuild draft slot mapping
+        # after async scheduling corrects num_computed_tokens.
+        self.async_rebuild_req_indices_full = None
+        self.async_rebuild_cu_num_tokens_full = None
+        self.async_rebuild_num_tokens_full = 0
+
     def _get_cumsum_and_arange(
         self,
         num_scheduled_tokens: np.ndarray,
@@ -865,6 +871,7 @@ class PCPManager:
         draft_token_ids=None,
         scheduler_output=None,
         num_spec_tokens=None,
+        precomputed_positions_np=None,
     ):
         """
         While pcp > 1, model inputs (input_ids, position, etc.) are split across pcp group,
@@ -885,7 +892,17 @@ class PCPManager:
         )
         arange_pcp_full = arange_np[:total_num_scheduled_tokens_pcp_full] - cumsums_offsets_pcp_full
         positions_pcp_full_np = self.positions_pcp_full_np[:total_num_scheduled_tokens_pcp_full]
-        np.add(input_batch.num_computed_tokens_cpu[req_indices_pcp_full], arange_pcp_full, out=positions_pcp_full_np)
+        if precomputed_positions_np is None:
+            np.add(
+                input_batch.num_computed_tokens_cpu[req_indices_pcp_full],
+                arange_pcp_full,
+                out=positions_pcp_full_np,
+            )
+        else:
+            np.copyto(
+                positions_pcp_full_np,
+                precomputed_positions_np[:total_num_scheduled_tokens_pcp_full],
+            )
         token_indices_pcp_full = positions_pcp_full_np + req_indices_pcp_full * input_batch.token_ids_cpu.shape[1]
         torch.index_select(
             input_batch.token_ids_cpu_tensor.flatten(),
@@ -905,6 +922,14 @@ class PCPManager:
         self.query_start_loc_pcp_full.copy_to_gpu()
         self.input_ids_pcp_full.copy_to_gpu(total_num_scheduled_tokens_pcp_full)
         self.cu_num_tokens_pcp_full = cu_num_tokens_pcp_full
+
+        if self.use_async_scheduling and precomputed_positions_np is None:
+            # Save full pre-CP layout so async scheduling can rebuild
+            # speculative inputs with corrected num_computed_tokens.
+            self.async_rebuild_req_indices_full = req_indices.copy()
+            self.async_rebuild_cu_num_tokens_full = cu_num_tokens.copy()
+            self.async_rebuild_num_tokens_full = total_num_scheduled_tokens
+
         # For mtpx, pre-allocate mtp slot_mapping here
         if self.decode_threshold > 2 and not with_prefill:
             num_tokens_ori = sum(list(num_scheduled_tokens.values()))
@@ -1047,6 +1072,7 @@ class PCPManager:
         block_table_tensor: torch.Tensor,
         num_reqs_padded: int,
         num_reqs: int,
+        fixed_decode_seq_lens_cpu: np.ndarray | None = None,
     ):
         from vllm_ascend.attention.utils import AscendPrefillContextParallelMetadata
 
@@ -1059,10 +1085,13 @@ class PCPManager:
         ori_query_lens_cpu = self.query_lens_pcp_full.cpu[:num_reqs_padded]
         if self.pcp_world_size * self.dcp_world_size > 1:
             assert num_scheduled_tokens is not None
-            decode_context_lens = (
-                input_batch.num_computed_tokens_cpu[: self.num_decode_reqs]
-                + num_scheduled_tokens[: self.num_decode_reqs]
-            )
+            if fixed_decode_seq_lens_cpu is not None:
+                decode_context_lens = fixed_decode_seq_lens_cpu[: self.num_decode_reqs]
+            else:
+                decode_context_lens = (
+                    input_batch.num_computed_tokens_cpu[: self.num_decode_reqs]
+                    + num_scheduled_tokens[: self.num_decode_reqs]
+                )
             prefill_context_lens = input_batch.num_computed_tokens_cpu[self.num_decode_reqs : self.num_reqs]
             context_lens = np.concatenate([decode_context_lens, prefill_context_lens])
 
@@ -1235,8 +1264,13 @@ class PCPManager:
                 and num_scheduled_tokens is not None
             ):
                 # Extract decode request info from input_batch and num_scheduled_tokens
-                decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
                 decode_num_scheduled_tokens = num_scheduled_tokens[: self.num_decode_reqs]
+                if fixed_decode_seq_lens_cpu is not None:
+                    decode_num_computed_tokens = (
+                        fixed_decode_seq_lens_cpu[: self.num_decode_reqs] - decode_num_scheduled_tokens
+                    ).tolist()
+                else:
+                    decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
 
                 dcp_mtp_attn_mask = self.generate_mtp_attention_mask_for_decode(
                     decode_num_computed_tokens, decode_num_scheduled_tokens

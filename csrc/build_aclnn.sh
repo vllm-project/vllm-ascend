@@ -2,6 +2,7 @@
 
 ROOT_DIR=$1
 SOC_VERSION=$2
+: "${ROOT_DIR:?ROOT_DIR is not set}"
 
 log() {
     echo "[build_aclnn] $*"
@@ -79,7 +80,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    export CPATH="${ABSOLUTE_CATLASS_PATH}${CPATH:+:${CPATH}}"
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
@@ -119,13 +120,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
+        "store_kv_block"
     )
 
-<<<<<<< HEAD
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
-=======
-    CUSTOM_OPS="moe_grouped_matmul;grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer_vllm;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;add_rms_norm_bias;apply_top_k_top_p_custom;transpose_kv_cache_by_block;copy_and_expand_eagle_inputs;causal_conv1d;lightning_indexer_quant;hamming_dist_top_k;reshape_and_cache_bnsd;recurrent_gated_delta_rule;slot_mapping;"
->>>>>>> c1703487 ([Performance] change slot_mapping to ascend c op)
     SOC_ARG="ascend910b"
 elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     log "matched SOC branch: ascend910_93"
@@ -182,14 +180,12 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
-<<<<<<< HEAD
         "fused_gdn_gating"
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
-=======
         "slot_mapping"
->>>>>>> c1703487 ([Performance] change slot_mapping to ascend c op)
+        "store_kv_block"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
@@ -213,7 +209,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         cd - || exit 1
     fi
     ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    export CPATH="${ABSOLUTE_CATLASS_PATH}${CPATH:+:${CPATH}}"
     log "catlass include=${ABSOLUTE_CATLASS_PATH}"
 
     CUSTOM_OPS_ARRAY=(
@@ -264,13 +260,14 @@ log_selected_ops
 (
   set -euo pipefail
 
-  log "subshell cwd before cd=$(pwd)"
-  cd csrc
-  log "subshell cwd after cd=$(pwd)"
-  log "cleaning csrc build dirs"
-  rm -rf -- build output build_out
-
   : "${ROOT_DIR:?ROOT_DIR is not set}"
+
+  log "subshell cwd before cd=$(pwd)"
+  cd "${ROOT_DIR}/csrc"
+  log "subshell cwd after cd=$(pwd)"
+  log "preserving csrc/build and cleaning output dirs"
+  rm -rf -- output build_out
+
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
@@ -312,4 +309,20 @@ log_selected_ops
   log "installer finished"
   log "installed files under ${custom_ops_install_dir} (maxdepth=4, first 120 entries):"
   { find "${custom_ops_install_dir}" -mindepth 1 -maxdepth 4 -print | sort | head -n 120 | sed 's#^#[build_aclnn] install: #'; } || true
+
+  # install batch_invariant run package and whl package
+  if [[ "${VLLM_BATCH_INVARIANT:-0}" == "1" ]]; then
+    log "VLLM_BATCH_INVARIANT=1, installing batch_invariant run package and whl package..."
+
+    # call separate installation script
+    batch_invariant_script="${ROOT_DIR}/csrc/build_batch_invariant_ops.sh"
+    if [[ -f "${batch_invariant_script}" ]]; then
+      log "Calling batch_invariant_ops build script: ${batch_invariant_script}"
+      bash "${batch_invariant_script}" "${SOC_ARG}"
+    else
+      log "Warning: batch_invariant_ops build script not found at ${batch_invariant_script}"
+    fi
+  else
+    log "VLLM_BATCH_INVARIANT is not set to 1, skipping batch_invariant ops build"
+  fi
 )

@@ -1162,6 +1162,7 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
+            worker.vllm_config.speculative_config = None
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
 
@@ -1192,6 +1193,7 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
+            worker.vllm_config.speculative_config = None
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = False
 

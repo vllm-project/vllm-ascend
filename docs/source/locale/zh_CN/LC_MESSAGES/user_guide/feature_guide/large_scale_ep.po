@@ -270,11 +270,11 @@ msgstr "基准测试"
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:366
 msgid ""
 "We recommend using aisbench tool to assess performance. "
-"[aisbench](https://gitee.com/aisbench/benchmark). Execute the following "
+"[aisbench](https://github.com/AISBench/benchmark). Execute the following "
 "commands to install aisbench"
 msgstr ""
 "我们建议使用 aisbench "
-"工具来评估性能。[aisbench](https://gitee.com/aisbench/benchmark)。执行以下命令安装 "
+"工具来评估性能。[aisbench](https://github.com/AISBench/benchmark)。执行以下命令安装 "
 "aisbench"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:374
@@ -307,10 +307,10 @@ msgstr "以 gsm8k 数据集为例，执行以下命令评估性能。"
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:415
 msgid ""
 "For more details on commands and parameters for aisbench, refer to "
-"[aisbench](https://gitee.com/aisbench/benchmark)"
+"[aisbench](https://github.com/AISBench/benchmark)"
 msgstr ""
 "有关 aisbench 命令和参数的更多详细信息，请参阅 "
-"[aisbench](https://gitee.com/aisbench/benchmark)"
+"[aisbench](https://github.com/AISBench/benchmark)"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:417
 msgid "Prefill & Decode Configuration Details"

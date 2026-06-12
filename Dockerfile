@@ -18,7 +18,7 @@
 FROM quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-ARG MOONCAKE_TAG="v0.3.8.post1"
+ARG MOONCAKE_TAG="v0.3.9"
 
 WORKDIR /workspace
 
@@ -60,7 +60,8 @@ ARG COMPILE_CUSTOM_KERNELS=1
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
-    OMP_NUM_THREADS=1
+    OMP_NUM_THREADS=1 \
+    VLLM_BATCH_INVARIANT=1
 COPY . /vllm-workspace/vllm-ascend/
 
 RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
