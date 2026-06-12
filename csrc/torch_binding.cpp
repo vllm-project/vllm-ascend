@@ -2125,6 +2125,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                               Tensor? gk=None) -> Tensor");
     ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
 
+    ops.def("device_print(str msg) -> ()");
+    ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
+             static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
+
+    ops.def("device_print_tensor(Tensor tensor) -> ()");
+    ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
+
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
