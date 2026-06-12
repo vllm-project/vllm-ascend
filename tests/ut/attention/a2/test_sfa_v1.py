@@ -126,6 +126,17 @@ class TestAscendSFAMetadataBuilder(TestBase):
         self.patcher = patch("vllm.config.get_current_vllm_config", return_value=self.mock_cfg)
         self.patcher.start()
 
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.c8_enable_reshape_optim = False
+        mock_ascend_config.enable_mlapo = True
+        mock_ascend_config.enable_shared_expert_dp = False
+        mock_ascend_config.layer_sharding = None
+        self.ascend_config_patcher = patch(
+            "vllm_ascend.attention.sfa_v1.get_ascend_config",
+            return_value=mock_ascend_config,
+        )
+        self.ascend_config_patcher.start()
+
         # Mock parent class __init__ to avoid complex initialization,
         # but still set the essential attributes that child class needs
         def mock_parent_init(
@@ -153,6 +164,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     def tearDown(self):
         self.patcher.stop()
+        self.ascend_config_patcher.stop()
         self.parent_init_patcher.stop()
 
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
