@@ -17,20 +17,61 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     KVCacheBlock,
 )
-from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    SingleTypeKVCacheManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowSpec,
 )
+from vllm.v1.request import Request
 
+from vllm_ascend import envs
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+
+try:
+    from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+except ImportError:  # pragma: no cover - older vLLM without DSv4 MLA SWA spec
+    SlidingWindowMLASpec = SlidingWindowSpec
+
+# SWA-family specs that honor the prefix-cache retention knob (incl. DSv4
+# SlidingWindowMLASpec), so validation does not wrongly report "no SWA group".
+_SLIDING_WINDOW_SPECS = (SlidingWindowSpec, SlidingWindowMLASpec)
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
+
+def _validate_prefix_cache_retention_interval(
+    retention_interval: int | None,
+    alignment_tokens: int,
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    """Validate VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL (vLLM PR #43447 (3)).
+
+    No-op when unset. When set, the model must have at least one sliding-window
+    KV cache group (otherwise retention has no effect), and the value must be a
+    non-negative multiple of the cache-hit alignment (``lcm_block_size``).
+    """
+    if retention_interval is None:
+        return
+    if not any(isinstance(g.kv_cache_spec, _SLIDING_WINDOW_SPECS) for g in kv_cache_config.kv_cache_groups):
+        raise ValueError(
+            "VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL is set but this "
+            "model has no sliding-window KV cache group, so retention has no "
+            "effect."
+        )
+    if retention_interval < 0 or retention_interval % alignment_tokens != 0:
+        raise ValueError(
+            f"VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL ({retention_interval}) "
+            f"must be non-negative and a multiple of the cache-hit alignment "
+            f"({alignment_tokens})."
+        )
 
 def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
     if getattr(kv_cache_spec, "model_version", None) == "deepseek_v4":
