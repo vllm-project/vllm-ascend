@@ -10,6 +10,8 @@ from vllm_ascend.attention.attention_v1 import (
 
 
 class AscendFABackend(AttentionBackend):
+    accept_output_buffer: bool = True
+
     def __init__(self):
         super().__init__()
 
