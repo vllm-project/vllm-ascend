@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Logging configuration for vLLM-Ascend.
 
-Approach A: Minimal — replace vLLM handler formatters to add
-[vllm-ascend] [module] prefix. No module code changes required.
-Module identification is inferred from record.pathname.
+Provides two logging mechanisms:
+1. Console: A dedicated handler on the vllm_ascend logger with
+   [vllm-ascend] [module] prefix. No modification to vLLM's global
+   logging state — safe for upstream tests and multiprocessing.
+2. File: A rotating file handler on both vllm and vllm_ascend loggers,
+   capturing all logs with Ascend formatting.
 """
 
 import logging
@@ -156,12 +159,14 @@ def _setup_file_logging(log_dir: str | None = None) -> None:
     _cleanup_old_logs(target_dir, _LOG_RETENTION_DAYS)
     file_handler = RotatingAscendFileHandler(target_dir)
     vllm_logger = logging.getLogger("vllm")
+    ascend_logger = logging.getLogger("vllm_ascend")
     log_level = logging.INFO
     if vllm_logger.handlers:
         log_level = vllm_logger.handlers[0].level
     file_handler.setLevel(log_level)
     file_handler.setFormatter(AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT))
     vllm_logger.addHandler(file_handler)
+    ascend_logger.addHandler(file_handler)
     _file_handler = file_handler
     _file_logging_configured = True
 
@@ -178,8 +183,10 @@ def configure_ascend_file_logging() -> None:
         pass
     if log_dir != _LOG_DIR:
         vllm_logger = logging.getLogger("vllm")
+        ascend_logger = logging.getLogger("vllm_ascend")
         if _file_handler is not None:
             vllm_logger.removeHandler(_file_handler)
+            ascend_logger.removeHandler(_file_handler)
             _file_handler.close()
             _file_handler = None
         _file_logging_configured = False
