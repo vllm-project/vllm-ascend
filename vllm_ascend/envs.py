@@ -110,6 +110,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Retain sparse sliding-window KV checkpoints for prefix caching.
+    # Unset (None, default): dense local checkpointing (current behavior, byte-for-byte).
+    # 0: keep only the latest completed prompt (replay) boundary.
+    # >0: keep one tail per interval-sized segment (must be a multiple of
+    #     scheduler_block_size). Applies to SWA only, not Mamba/linear attn.
+    "VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
+        int(os.environ["VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL"])
+        if "VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
+        else None
+    ),
 }
 
 # end-env-vars-definition
