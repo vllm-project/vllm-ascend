@@ -63,14 +63,8 @@ class D2DExpertWeightLoader:
                 self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send]
             )
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
-                # Explicitly cast FRACTAL_NZ → ND before sending. On Ascend,
-                # .contiguous() on a FRACTAL_NZ slice may not fully convert to
-                # standard (ND) format, causing accumulated precision loss over
-                # multiple D2D transfers.
-                src_nd = src_tensor.new_empty(src_tensor.size())
-                src_nd.copy_(src_tensor)
                 self.comm_op_list.append(
-                    dist.P2POp(dist.isend, src_nd, self.comm_group.ranks[dst_rank], group=self.comm_group.device_group)
+                    dist.P2POp(dist.isend, src_tensor, self.comm_group.ranks[dst_rank], group=self.comm_group.device_group)
                 )
 
         for buffer_tensor_id, recv_info in enumerate(expert_recv_info):
