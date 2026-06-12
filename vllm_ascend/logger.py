@@ -13,7 +13,7 @@ Provides two logging mechanisms:
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from vllm import envs
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
@@ -22,7 +22,6 @@ _FORMAT = "%(levelname)s %(asctime)s [%(fileinfo)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 _LOG_DIR = os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
-_LOG_RETENTION_DAYS = 7
 _LOG_MAX_BYTES = 20 * 1024 * 1024
 
 
@@ -135,28 +134,12 @@ _file_logging_configured = False
 _file_handler: logging.Handler | None = None
 
 
-def _cleanup_old_logs(log_dir: str, retention_days: int) -> None:
-    cutoff = datetime.now() - timedelta(days=retention_days)
-    try:
-        for entry in os.scandir(log_dir):
-            if not entry.is_file():
-                continue
-            if not entry.name.startswith("vllm_ascend_") or not entry.name.endswith(".log"):
-                continue
-            mtime = datetime.fromtimestamp(entry.stat().st_mtime)
-            if mtime < cutoff:
-                os.remove(entry.path)
-    except OSError:
-        pass
-
-
 def _setup_file_logging(log_dir: str | None = None) -> None:
     global _file_logging_configured, _file_handler
     if _file_logging_configured:
         return
     target_dir = log_dir or _LOG_DIR
     os.makedirs(target_dir, exist_ok=True)
-    _cleanup_old_logs(target_dir, _LOG_RETENTION_DAYS)
     file_handler = RotatingAscendFileHandler(target_dir)
     vllm_logger = logging.getLogger("vllm")
     ascend_logger = logging.getLogger("vllm_ascend")
