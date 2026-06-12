@@ -236,13 +236,6 @@ class MooncakeBackend(Backend):
             failed_codes = [int(value) for value in res_list if value < 0]
             failed_count = len(failed_codes)
             error_codes = sorted(set(failed_codes))
-            logger.debug(
-                "MooncakeBackend.get result keys=%d result_sample=%s negative_count=%d error_codes=%s",
-                len(keys),
-                res_list[:12],
-                failed_count,
-                error_codes,
-            )
             if failed_count:
                 logger.error(
                     "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
