@@ -73,6 +73,7 @@ def _validate_prefix_cache_retention_interval(
             f"({alignment_tokens})."
         )
 
+
 def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
     if getattr(kv_cache_spec, "model_version", None) == "deepseek_v4":
         return True
