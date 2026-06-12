@@ -36,7 +36,6 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
     """Verify DeepSeek V4 W4A8 basic greedy generation with TP4 and EP."""
     example_prompts = [
         "Hello, my name is",
-        "The capital of France is",
         "What is the meaning of life?",
     ]
     max_tokens = 5
@@ -56,13 +55,18 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
         },
+        speculative_config={"num_speculative_tokens": 1, "method": "mtp", "enforce_eager": True},
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-
+        expected_token_ids = [
+            [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
+            [3085, 344, 270, 5281, 294, 1988, 33, 3955, 361, 582, 3085, 344],
+        ]
         assert len(outputs) == len(example_prompts)
-        for output_ids, output_str in outputs:
+        for i, (output_ids, output_str) in enumerate(outputs):
             assert len(output_str) > 0
             assert len(output_ids) > 0
+            assert output_ids == expected_token_ids[i]
 
 
 @patch.dict(
