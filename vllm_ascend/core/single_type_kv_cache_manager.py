@@ -278,5 +278,10 @@ def get_manager_for_kv_cache_spec(
                 max_num_batched_tokens=max_num_batched_tokens,
                 max_model_len=max_model_len,
             )
+    # vllm PR #44165 added ``scheduler_block_size`` to
+    # ``SingleTypeKVCacheManager.__init__``. On v0.20.2 (pre-PR #44165) the
+    # constructor doesn't accept it; drop it from kwargs there.
+    if vllm_version_is("0.20.2"):
+        kwargs.pop("scheduler_block_size", None)
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
