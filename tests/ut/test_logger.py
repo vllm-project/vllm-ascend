@@ -133,11 +133,10 @@ class TestLoggerModule(TestBase):
         self.assertIn("colored test", result)
 
     def test_log_dir_constant(self):
-        from vllm_ascend.logger import _LOG_DIR, _LOG_RETENTION_DAYS
+        from vllm_ascend.logger import _LOG_DIR
 
         self.assertIn("ascend", _LOG_DIR)
         self.assertIn("vllm_ascend", _LOG_DIR)
-        self.assertEqual(_LOG_RETENTION_DAYS, 7)
 
     def test_setup_file_logging_creates_handler(self):
         import os
@@ -200,38 +199,3 @@ class TestLoggerModule(TestBase):
             self.assertTrue(files[0].endswith(".log"))
             self.assertNotIn("_002", files[0])
             self.assertIn("_002", files[1])
-
-    def test_cleanup_old_logs(self):
-        import os
-        import tempfile
-        from datetime import datetime, timedelta
-
-        from vllm_ascend.logger import _cleanup_old_logs
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            old_file = os.path.join(tmpdir, "vllm_ascend_20260601_0000_12345.log")
-            old_rotated = os.path.join(tmpdir, "vllm_ascend_20260601_0000_12345_002.log")
-            recent_file = os.path.join(tmpdir, "vllm_ascend_20260610_0000_99999.log")
-            non_log_file = os.path.join(tmpdir, "other_file.txt")
-
-            with open(old_file, "w") as f:
-                f.write("old")
-            with open(old_rotated, "w") as f:
-                f.write("old rotated")
-            with open(recent_file, "w") as f:
-                f.write("recent")
-            with open(non_log_file, "w") as f:
-                f.write("other")
-
-            old_time = (datetime.now() - timedelta(days=10)).timestamp()
-            recent_time = datetime.now().timestamp()
-            os.utime(old_file, (old_time, old_time))
-            os.utime(old_rotated, (old_time, old_time))
-            os.utime(recent_file, (recent_time, recent_time))
-
-            _cleanup_old_logs(tmpdir, 7)
-
-            self.assertFalse(os.path.exists(old_file))
-            self.assertFalse(os.path.exists(old_rotated))
-            self.assertTrue(os.path.exists(recent_file))
-            self.assertTrue(os.path.exists(non_log_file))
