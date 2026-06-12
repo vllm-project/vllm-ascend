@@ -30,6 +30,7 @@ from vllm_ascend.attention.utils import (
     ascend_chunked_prefill_workspace_size,
     enable_cp,
     maybe_save_kv_layer_to_connector,
+    notify_kv_cache_written,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
@@ -1277,9 +1278,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             k_li = self._get_full_kv(k_li, attn_metadata)
 
         if kv_cache is not None:
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event = torch.npu.Event()
-
             if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
                 dsa_k_cache_idx = 1
                 dsa_k_scale_cache_idx = 2
@@ -1323,9 +1321,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
-
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event.record()
+            notify_kv_cache_written(self.layer_name)
 
         wait_for_kv_layer_from_connector(layer_name)
         topk_num_tokens = num_input_tokens or hidden_states.shape[0]
