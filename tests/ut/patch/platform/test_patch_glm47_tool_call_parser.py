@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.parser.abstract_parser import _WrappedParser
 from vllm.reasoning.deepseek_v3_reasoning_parser import (
     DeepSeekV3ReasoningWithThinkingParser,
@@ -79,6 +80,10 @@ def test_glm47_streaming_inline_zero_arg_tool_call_waits_until_complete():
     assert second.tool_calls
     assert second.tool_calls[0].function.name == "get_current_time"
     assert json.loads(_collect_tool_args(second.tool_calls)) == {}
+
+    finished = OpenAIServingChat._create_remaining_args_delta(second, "", 0)
+    assert finished.tool_calls[0].function.name == "get_current_time"
+    assert json.loads(_collect_tool_args(finished.tool_calls)) == {}
 
 
 def test_glm45_reasoning_glm47_streaming_inline_zero_arg_tool_call():
