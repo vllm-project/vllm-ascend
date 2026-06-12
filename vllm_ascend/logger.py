@@ -9,8 +9,10 @@ Module identification is inferred from record.pathname.
 
 import logging
 import os
+import sys
 from datetime import datetime, timedelta
 
+from vllm import envs
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = "%(levelname)s %(asctime)s [%(fileinfo)s:%(lineno)d] %(message)s"
@@ -19,6 +21,19 @@ _DATE_FORMAT = "%m-%d %H:%M:%S"
 _LOG_DIR = os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
 _LOG_RETENTION_DAYS = 7
 _LOG_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _use_color() -> bool:
+    """Determine if colored output should be used."""
+    if envs.NO_COLOR or envs.VLLM_LOGGING_COLOR == "0":
+        return False
+    if envs.VLLM_LOGGING_COLOR == "1":
+        return True
+    if envs.VLLM_LOGGING_STREAM == "ext://sys.stdout":
+        return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    elif envs.VLLM_LOGGING_STREAM == "ext://sys.stderr":
+        return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+    return False
 
 
 def _is_ascend_module(pathname: str) -> bool:
@@ -75,13 +90,6 @@ class AscendColoredFormatter(ColoredFormatter):
 
     def format(self, record):
         return _format_with_ascend_prefix(self, record, super().format)
-
-
-def _patch_handler(handler: logging.Handler) -> None:
-    if isinstance(handler.formatter, ColoredFormatter):
-        handler.formatter = AscendColoredFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
-    elif isinstance(handler.formatter, NewLineFormatter):
-        handler.formatter = AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT)
 
 
 class RotatingAscendFileHandler(logging.FileHandler):
@@ -178,68 +186,33 @@ def configure_ascend_file_logging() -> None:
     _setup_file_logging(log_dir)
 
 
-def _patch_vllm_formatter() -> None:
-    """Replace vLLM handler formatters with ascend-aware versions.
+def configure_ascend_logging() -> None:
+    """Configure vllm_ascend logger with Ascend formatters.
 
-    Handlers added after this call are also patched via addHandler monkey-patch,
-    making the patch robust against import order.
+    Creates a dedicated handler for the vllm_ascend logger namespace,
+    avoiding any modification to vLLM's global logging state.
+    This approach is safe for upstream tests and multiprocessing.
     """
-    vllm_logger = logging.getLogger("vllm")
+    ascend_logger = logging.getLogger("vllm_ascend")
+    if ascend_logger.handlers:
+        return
 
-    for handler in vllm_logger.handlers:
-        _patch_handler(handler)
+    # Parse stream parameter
+    if envs.VLLM_LOGGING_STREAM == "ext://sys.stdout":
+        stream = sys.stdout
+    elif envs.VLLM_LOGGING_STREAM == "ext://sys.stderr":
+        stream = sys.stderr
+    else:
+        stream = sys.stderr
 
-    _original_add_handler = vllm_logger.addHandler
+    handler = logging.StreamHandler(stream)
+    handler.setLevel(envs.VLLM_LOGGING_LEVEL)
 
-    def _patched_add_handler(handler: logging.Handler) -> None:
-        _patch_handler(handler)
-        _original_add_handler(handler)
+    if _use_color():
+        handler.setFormatter(AscendColoredFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT))
+    else:
+        handler.setFormatter(AscendFormatter(fmt=_FORMAT, datefmt=_DATE_FORMAT))
 
-    vllm_logger.addHandler = _patched_add_handler  # type: ignore[method-assign,assignment]
-
-
-def _should_configure_logging() -> bool:
-    """Determine if logging should be configured in the current process.
-    
-    Returns False for child processes (EngineCore) to avoid initialization failures.
-    """
-    import os
-    
-    # Skip configuration in child processes
-    if hasattr(os, 'getppid'):
-        try:
-            current_pid = os.getpid()
-            parent_pid = os.getppid()
-            
-            # In normal scenarios, the main process has ppid == 1 only in containers
-            # For child processes spawned by multiprocessing, ppid will be the parent's pid
-            # We skip configuration if we detect we're not in the main process
-            if parent_pid != 1 and current_pid != 1:
-                # Check if this is likely a child process by looking at process name
-                try:
-                    if hasattr(os, 'readlink'):
-                        # Linux: /proc/{pid}/comm
-                        proc_name = os.readlink(f'/proc/{current_pid}/comm')
-                        if 'worker' in proc_name.lower() or 'engine' in proc_name.lower():
-                            return False
-                    elif os.name == 'nt':
-                        # Windows: use wmic to get process name
-                        import subprocess
-                        result = subprocess.run(
-                            ['wmic', 'process', 'where', f'processid={current_pid}', 'get', 'name'],
-                            capture_output=True, text=True
-                        )
-                        if result.returncode == 0:
-                            proc_name = result.stdout.strip()
-                            if 'worker' in proc_name.lower() or 'engine' in proc_name.lower():
-                                return False
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    
-    return True
-
-
-if _should_configure_logging():
-    _patch_vllm_formatter()
+    ascend_logger.addHandler(handler)
+    ascend_logger.setLevel(envs.VLLM_LOGGING_LEVEL)
+    ascend_logger.propagate = False
