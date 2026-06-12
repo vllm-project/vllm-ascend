@@ -640,7 +640,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         graph_params.handles[num_tokens].append(handle)
         return output, num_tokens
 
-
     def full_graph_pa(
         self,
         query: torch.Tensor,
