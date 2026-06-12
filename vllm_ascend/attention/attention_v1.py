@@ -478,21 +478,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params.events[num_tokens],
                 ):
                     (
-                    query,
-                    key_cache,
-                    value,
-                    block_tables,
-                    attn_mask,
-                    block_size,
-                    seq_lens,
-                    query_start_loc,
-                    num_kv_heads,
-                    num_heads,
-                    scale,
-                    sparse_mode,
-                    attn_output,
-                    softmax_lse,
-                ) = param
+                        query,
+                        key_cache,
+                        value,
+                        block_tables,
+                        attn_mask,
+                        block_size,
+                        seq_lens,
+                        query_start_loc,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
+                        sparse_mode,
+                        attn_output,
+                        softmax_lse,
+                    ) = param
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
