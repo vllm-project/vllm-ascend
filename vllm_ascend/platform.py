@@ -611,7 +611,8 @@ class NPUPlatform(Platform):
 
     @classmethod
     def _validate_fa3_backend(cls, key, attn_selector_config):
-        if not envs_vllm.VLLM_BATCH_INVARIANT:
+        enable_batch_invariant = int(os.getenv("VLLM_BATCH_INVARIANT", "0")) != 0
+        if not enable_batch_invariant:
             logger.info(
                 "FA3 will not be enabled when not in training-inference consistency scenario. "
                 "Note that Ascend NPU will use its registered plugin backend instead."
