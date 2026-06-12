@@ -26,13 +26,7 @@ import vllm.v1.worker.gpu.buffer_utils
 
 def is_uva_available() -> bool:
     """check if uva feature is supported in this environment"""
-    result = False
-    key = "PYTORCH_NPU_ALLOC_CONF"
-    if key in os.environ:
-        value = os.environ[key]
-        if "pinned_mem_register:True" in value:
-            result = True
-    return result
+    return "pinned_mem_register:True" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", {})
 
 def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int]:
     """get the set of row indices involved in the given key."""
