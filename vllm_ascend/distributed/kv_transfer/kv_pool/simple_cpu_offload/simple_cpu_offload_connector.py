@@ -14,7 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -36,13 +36,11 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-logger = init_logger(__name__)
-
 # Default CPU capacity: 8 GB
 DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
 
 
-class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
+class SimpleCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache preservation for recompute-preempted requests."""
 
     def __init__(

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
@@ -29,8 +29,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
-
-logger = init_logger(__name__)
 
 
 @dataclass

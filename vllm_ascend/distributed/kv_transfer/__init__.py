@@ -65,7 +65,7 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
-        "SimpleCPUOffloadConnector",
+        "RecomputeCPUOffloadConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.simple_cpu_offload_connector",
-        "SimpleCPUOffloadConnector",
+        "SimpleCPUOffloadConnectorV1",
     )

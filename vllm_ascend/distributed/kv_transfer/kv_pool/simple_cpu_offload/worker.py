@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.metadata import (
     SimpleCPUOffloadMetadata,
@@ -15,8 +15,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.metadata imp
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
-
-logger = init_logger(__name__)
 
 
 class SimpleCPUOffloadWorker:
@@ -58,49 +56,26 @@ class SimpleCPUOffloadWorker:
             logger.warning("No KV caches to offload.")
             return
 
-        def _repr_tensor(value: Any) -> torch.Tensor:
-            if isinstance(value, torch.Tensor):
-                return value
-            assert isinstance(value, list)
-            assert value
-            return value[0]
-
-        any_tensor = _repr_tensor(next(iter(kv_caches.values())))
+        any_tensor = next(iter(kv_caches.values()))
+        if isinstance(any_tensor, (tuple, list)):
+            any_tensor = any_tensor[0]
         self.device = any_tensor.device
 
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
 
-        seen_ptrs: dict[int, tuple[str, torch.Tensor]] = {}
-        for name, value in kv_caches.items():
-            tensor = _repr_tensor(value)
-            ptr = tensor.untyped_storage().data_ptr()
-            if ptr not in seen_ptrs:
-                seen_ptrs[ptr] = (name, tensor)
-
         unique_gpu_caches: dict[str, torch.Tensor] = {}
-        for name, tensor in seen_ptrs.values():
-            storage = tensor.untyped_storage()
-            raw = torch.empty(0, dtype=torch.int8, device=self.device).set_(
-                storage,
-                0,
-                (storage.nbytes(),),
-            )
-            element_size = tensor.element_size()
-            page_size_bytes = storage.nbytes() // num_blocks
-            outer_dims = [
-                dim
-                for dim in range(tensor.ndim)
-                if tensor.stride(dim) * element_size > page_size_bytes
-            ]
-            if not outer_dims:
-                unique_gpu_caches[name] = raw.view(num_blocks, -1)
+        register_cache_ptrs = []
+        for layer_name, layer_tensor in kv_caches.items():
+            if isinstance(layer_tensor, (tuple, list)):
+                for idx, single_tensor in enumerate(layer_tensor):
+                    if single_tensor.data_ptr() not in register_cache_ptrs:
+                        unique_gpu_caches[f"{layer_name}.{idx}"] = single_tensor.view(single_tensor.shape[0], -1)
+                        register_cache_ptrs.append(single_tensor.data_ptr())
             else:
-                segment_stride = tensor.stride(outer_dims[0]) * element_size
-                for idx in range(tensor.shape[outer_dims[0]]):
-                    offset = idx * segment_stride
-                    chunk = raw[offset : offset + segment_stride]
-                    unique_gpu_caches[f"{name}.{idx}"] = chunk.view(num_blocks, -1)
+                if layer_tensor.data_ptr() not in register_cache_ptrs:
+                    unique_gpu_caches[layer_name] = layer_tensor.view(layer_tensor.shape[0], -1)
+                    register_cache_ptrs.append(layer_tensor.data_ptr())
 
         per_tensor_bytes_per_block = [
             tensor.stride(0) * tensor.element_size()
@@ -116,6 +91,7 @@ class SimpleCPUOffloadWorker:
             self.cpu_kv_caches[name] = torch.zeros(
                 cpu_shape,
                 dtype=gpu_tensor.dtype,
+                pin_memory=True,
                 device="cpu",
             )
 
