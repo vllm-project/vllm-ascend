@@ -148,7 +148,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
             )
 
-    def refresh_hccl_group_for_sleep_wakeup(self) -> None:
+    def refresh_hccl_group(self) -> None:
         """Refresh MC2 communicator metadata after HCCL groups are recreated."""
         device_group = get_mc2_group().device_group
         local_rank = torch.distributed.get_rank(group=device_group)

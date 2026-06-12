@@ -170,7 +170,7 @@ class HcclSleepWakeupManager:
 
         for comm_method in _MoECommMethods.values():
             dispatcher = getattr(comm_method, "token_dispatcher", None)
-            refresh_fn = getattr(dispatcher, "refresh_hccl_group_for_sleep_wakeup", None)
+            refresh_fn = getattr(dispatcher, "refresh_hccl_group", None)
             if callable(refresh_fn):
                 refresh_fn()
 
