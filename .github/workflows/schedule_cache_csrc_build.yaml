@@ -186,7 +186,11 @@ jobs:
             echo "start clean build for vllm-ascend at $(date -u +'%Y-%m-%d %H:%M:%S')"
             echo "Failed to install vllm-ascend with incremental build, falling back to clean build"
             rm -rf csrc/build
-            rm -rf csrc/third_party
+            find csrc/third_party -mindepth 1 \
+              ! -path 'csrc/third_party/catlass' \
+              ! -path 'csrc/third_party/catlass/*' \
+              -depth \
+              -exec rm -rf {} +
             uv pip install -e . --no-build-isolation
           fi
           echo "vllm-ascend installation completed at $(date -u +'%Y-%m-%d %H:%M:%S')"
