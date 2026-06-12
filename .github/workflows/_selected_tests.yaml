@@ -45,7 +45,6 @@ permissions:
   pull-requests: write
   issues: write
 
-
 jobs:
   selected-tests:
     name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
@@ -62,21 +61,21 @@ jobs:
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
         UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
         UV_HTTP_TIMEOUT: 120
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
+    env:
+      CSRC_BUILD_CACHE_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
     steps:
       - name: Check NPU availability
         id: check_npu
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
-          if npu-smi info > /dev/null 2>&1; then
-            echo "has_npu=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_npu=false" >> $GITHUB_OUTPUT
-          fi
+          npu-smi info
+          echo "has_npu=true" >> "$GITHUB_OUTPUT"
 
       - name: Install packages
         run: |
@@ -84,7 +83,9 @@ jobs:
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
-          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd clang-15 ninja-build
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install uv
 
@@ -98,7 +99,7 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install . ${{ steps.check_npu.outputs.has_npu == 'false' && '--extra-index-url https://download.pytorch.org/whl/cpu' || '' }}
+          VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
@@ -114,29 +115,54 @@ jobs:
           git fetch origin main
           git rebase origin/main
 
-      - name: Get csrc hash
-        id: get_csrc_hash
+      - name: Get csrc build cache base branch
+        id: get_csrc_build_cache_base_branch
         run: |
-          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
-            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
+          if [ -z "$base_branch" ]; then
+            base_branch="unknown-branch"
+          fi
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
 
-      - name: Cache vllm-ascend csrc
-        id: cache-csrc
+      - name: Get current cache time
+        id: get_cache_time
+        run: |
+          cache_time=$(date -u +'%Y%m%d%H%M%S')
+          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
+
+      - name: Get csrc build cache arch
+        id: get_csrc_build_cache_arch
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "$arch" in
+            aarch64|arm64)
+              cache_arch="ARM64"
+              ;;
+            x86_64|amd64)
+              cache_arch="X64"
+              ;;
+            *)
+              cache_arch="$arch"
+              ;;
+          esac
+          echo "cache_arch=$cache_arch" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vllm-ascend csrc build cache
+        id: restore-csrc-build-cache
         if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
-        uses: runs-on/cache@v5
+        uses: runs-on/cache/restore@v5
         with:
           path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            csrc/build
+            csrc/third_party
+          key: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
 
       - name: Install Mooncake wheel
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           set -euxo pipefail
 
@@ -148,48 +174,42 @@ jobs:
             libcurl4
           ldconfig
 
-          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.8.post1-cp312-cp312-manylinux_2_17_aarch64.manylinux_2_35_aarch64.whl"
+          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.9-cp312-cp312-manylinux_2_35_aarch64.whl"
           pip install --no-cache-dir --no-deps \
             "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
 
           pip show mooncake-transfer-engine-ascend || true
 
       - name: Install vllm-project/vllm-ascend with device
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
-
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            uv pip install -e .
-          fi
+          uv pip install -e . --no-build-isolation
 
       - name: Install vllm-project/vllm-ascend no device
-        if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
+        if: ${{ matrix.group.npu_type == 'cpu' }}
         env:
           SOC_VERSION: ascend910b1
           COMPILE_CUSTOM_KERNELS: 0
         run: |
           pip install uc-manager
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          pip install . --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi
-          pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi
+          uv pip install -r requirements-dev.txt
+          uv pip install -e .
 
       - name: Uninstall Triton for 310P tests
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' && matrix.group.npu_type == '310p' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
         run: |
           pip uninstall -y triton-ascend triton
 
       - name: Run selected tests with device
-        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
@@ -197,12 +217,11 @@ jobs:
             ${{ matrix.group.tests }}
 
       - name: Run selected tests without device
-        if: ${{ steps.check_npu.outputs.has_npu == 'false' }}
+        if: ${{ matrix.group.npu_type == 'cpu' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \

@@ -45,9 +45,8 @@ Usage:
     python select_tests.py --changed-files file1.py file2.py
 
 Flags:
-    --run-all-cpu   Run ALL CPU (undecorated) UT tests regardless of module
-                    filtering.  NPU tests and E2E tests are still filtered
-                    by module.
+    --run-all-modules   Run tests for all configured modules regardless of
+                        changed files
 """
 
 from __future__ import annotations
@@ -231,18 +230,32 @@ def _match_modules(
 def _collect_test_dirs(
     module_names: list[str],
     config: list[dict],
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Collect test paths (directories or files) for the given modules.
+
+    Returns (normal_dirs, cpu_only_dirs). *cpu_only_dirs* are from modules
+    with ``cpu_only: true`` and should skip NPU convention subdirectories.
 
     Deduplicates parent/child paths: if both ``a/b`` and ``a/b/c`` are
     present, only ``a/b`` is kept.
     """
     module_map = {m["name"]: m for m in config}
-    raw: set[str] = set()
+    normal: set[str] = set()
+    cpu_only: set[str] = set()
     for name in module_names:
-        for path in module_map[name].get("tests", []):
-            raw.add(path.rstrip("/"))
-    sorted_paths = sorted(raw)
+        mod = module_map[name]
+        target = cpu_only if mod.get("cpu_only") else normal
+        for path in mod.get("tests", []):
+            target.add(path.rstrip("/"))
+    normal_list = _dedup_paths(normal)
+    cpu_only_list = _dedup_paths(cpu_only)
+    # Remove cpu_only paths that are already covered by a normal parent path
+    cpu_only_list = [p for p in cpu_only_list if not any(p.startswith(n + "/") for n in normal_list)]
+    return normal_list, cpu_only_list
+
+
+def _dedup_paths(paths: set[str]) -> list[str]:
+    sorted_paths = sorted(paths)
     result: list[str] = []
     for path in sorted_paths:
         if not any(path != other and path.startswith(other + "/") for other in sorted_paths):
@@ -300,12 +313,15 @@ def _is_e2e_path(path: str) -> bool:
 def _scan_ut_test_dir(
     dir_path: str,
     groups: dict[RunnerKey, list[str]],
+    cpu_only: bool = False,
 ) -> None:
     """Scan a UT directory and route tests by directory convention.
 
     Walks the directory tree. Each test file is routed individually based on
     its path — files under convention directories (e.g. ``a2/``, ``a3_2/``)
     go to the corresponding NPU runner, others go to the CPU group.
+
+    If *cpu_only* is True, files under NPU convention directories are skipped.
 
     Always emits individual file paths to avoid test pollution when pytest
     runs a whole directory.
@@ -317,6 +333,8 @@ def _scan_ut_test_dir(
 
     if path.is_file():
         key = _route_ut_dir(dir_path)
+        if cpu_only and key != _DEFAULT_KEY:
+            return
         groups[key].append(dir_path)
         return
 
@@ -324,6 +342,8 @@ def _scan_ut_test_dir(
         if any(part in ("__pycache__",) for part in f.parts):
             continue
         key = _route_ut_dir(str(f))
+        if cpu_only and key != _DEFAULT_KEY:
+            continue
         groups[key].append(str(f))
 
 
@@ -518,11 +538,6 @@ def main():
         help="Path to test_config.yaml",
     )
     parser.add_argument(
-        "--run-all-cpu",
-        action="store_true",
-        help="Run all CPU UT tests regardless of module filtering",
-    )
-    parser.add_argument(
         "--run-all-modules",
         action="store_true",
         help="Run tests for all configured modules regardless of changed files",
@@ -535,7 +550,7 @@ def main():
     matched_modules = (
         [module["name"] for module in config] if args.run_all_modules else _match_modules(changed_files, config)
     )
-    test_dirs = _collect_test_dirs(matched_modules, config)
+    test_dirs, cpu_only_dirs = _collect_test_dirs(matched_modules, config)
 
     skip_tests: set[str] = set()
     for module in config:
@@ -551,6 +566,7 @@ def main():
     ]
 
     ut_dirs = [d for d in test_dirs if _is_ut_path(d)]
+    cpu_only_ut_dirs = [d for d in cpu_only_dirs if _is_ut_path(d)]
     e2e_dirs = [d for d in test_dirs if _is_e2e_path(d)]
 
     all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
@@ -562,18 +578,14 @@ def main():
             all_groups[key].append(dir_path)
         else:
             _scan_ut_test_dir(dir_path, all_groups)
-
-    if args.run_all_cpu:
-        all_module_names = [m["name"] for m in config]
-        all_ut_dirs = [d for d in _collect_test_dirs(all_module_names, config) if _is_ut_path(d)]
-        cpu_groups: dict[RunnerKey, list[str]] = defaultdict(list)
-        for dir_path in all_ut_dirs:
-            p = Path(_pytest_node_file_path(dir_path))
-            if p.is_file():
-                cpu_groups[_DEFAULT_KEY].append(dir_path)
-            else:
-                _scan_ut_test_dir(dir_path, cpu_groups)
-        all_groups[_DEFAULT_KEY] = cpu_groups[_DEFAULT_KEY]
+    for dir_path in cpu_only_ut_dirs:
+        p = Path(_pytest_node_file_path(dir_path))
+        if p.is_file():
+            key = _route_ut_dir(dir_path)
+            if key == _DEFAULT_KEY:
+                all_groups[key].append(dir_path)
+        else:
+            _scan_ut_test_dir(dir_path, all_groups, cpu_only=True)
 
     for dir_path in e2e_dirs:
         _scan_e2e_test_dir(dir_path, all_groups)

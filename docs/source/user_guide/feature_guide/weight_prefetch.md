@@ -10,9 +10,9 @@ Use `--additional-config '{"weight_prefetch_config": {"enabled": true}}'` to ena
 
 ## Fine-tune Prefetch Ratio
 
-Since weight prefetch use vector computations to hide the weight prefetching pipeline, the setting of the prefetch size is crucial. If the size is too small, the optimization benefits will not be fully realized, while a larger size may lead to resource contention, resulting in performance degradation. To accommodate different scenarios, we have added `prefetch_ratio` to allow for flexible size configuration based on the specific workload, details as follows:
+Since weight prefetch uses vector computations to hide the weight prefetching pipeline, the setting of the prefetch size is crucial. If the size is too small, the optimization benefits will not be fully realized, while a larger size may lead to resource contention, resulting in performance degradation. To accommodate different scenarios, we have added `prefetch_ratio` to allow for flexible size configuration based on the specific workload, details as follows:
 
-With `prefetch_ratio` in `"weight_prefetch_config"` to custom the weight prefetch ratio for specific linear layers.
+With `prefetch_ratio` in `"weight_prefetch_config"` to customize the weight prefetch ratio for specific linear layers.
 
 The “attn” and “moe” configuration options are used for MoE model, details as follows:
 
@@ -22,7 +22,7 @@ The “mlp” configuration option is used to optimize the performance of the De
 
  `"mlp": {"gate_up": 1.0, "down": 1.0}`
 
-Above value are the default config, the default value has a good performance for Qwen3-235B-A22B-W8A8 when `--max-num-seqs` is 144, for Qwen3-32B-W8A8 when `--max-num-seqs` is 72.
+Above values are the default config, the default value has a good performance for Qwen3-235B-A22B-W8A8 when `--max-num-seqs` is 144, for Qwen3-32B-W8A8 when `--max-num-seqs` is 72.
 
 However, this may not be the optimal configuration for your scenario. For higher concurrency, you can try increasing the prefetch size. For lower concurrency, prefetching may not offer any advantages, so you can decrease the size or disable prefetching. Determine if the prefetch size is appropriate by collecting profiling data. Specifically, check if the time required for the prefetch operation (e.g., MLP Down Proj weight prefetching) overlaps with the time required for parallel vector computation operators (e.g., SwiGlu computation), and whether the prefetch operation is no later than the completion time of the vector computation operator. In the profiling timeline, a prefetch operation appears as a CMO operation on a single stream; this CMO operation is the prefetch operation.
 
