@@ -57,18 +57,6 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
     quantization implementations.
     """
 
-    def __new__(cls, *args, **kwargs):
-        if not args and not kwargs:
-            err_msg = (
-                "The model you are trying to load does not contain a valid "
-                "compressed-tensors quantization configuration. "
-                "Please ensure the model was quantized with compressed-tensors, "
-                "or remove '--quantization' if loading an unquantized float model."
-            )
-            logger.error(err_msg)
-            raise ValueError(err_msg)
-        return super().__new__(cls)
-
     def __init__(
         self,
         target_scheme_map: dict[str, Any],
@@ -96,7 +84,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
-        return []
+        # Return config.json so vLLM's file-based config loading path
+        # (weight_utils.py:387-421) reads the HF config and calls from_config(),
+        # instead of falling back to no-arg quant_cls() which bypasses validation.
+        return ["config.json"]
 
     def _add_fused_moe_to_target_scheme_map(self):
         """
@@ -111,6 +102,25 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AscendCompressedTensorsConfig":
+        # Two call paths:
+        #   Path 1 (weight_utils.py:318): config is the quantization_config sub-dict
+        #   Path 2 (weight_utils.py:421): config is the full HF config.json
+        #
+        # Detect full HF config by checking for quantization-specific keys.
+        if "config_groups" not in config and "format" not in config:
+            quant_config = config.get("quantization_config")
+            if quant_config is not None:
+                config = quant_config
+            else:
+                err_msg = (
+                    "The model you are trying to load does not contain a valid "
+                    "compressed-tensors quantization configuration. "
+                    "Please ensure the model was quantized with compressed-tensors, "
+                    "or remove '--quantization' if loading an unquantized float model."
+                )
+                logger.error(err_msg)
+                raise ValueError(err_msg)
+
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
         target_scheme_map = cls._quantization_scheme_map_from_config(config=config)
