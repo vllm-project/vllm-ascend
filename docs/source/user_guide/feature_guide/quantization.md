@@ -151,7 +151,6 @@ python -m vllm.entrypoints.api_server \
     --tensor-parallel-size 2 \
     --data-parallel-size 1 \
     --served-model-name quantized_model \
-    --quantization ascend \
     --trust-remote-code 
 ```
 
