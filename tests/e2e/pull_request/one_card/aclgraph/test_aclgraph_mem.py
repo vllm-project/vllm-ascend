@@ -24,6 +24,7 @@ import torch
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+from tests.e2e.utils import fork_new_process_for_each_test
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
@@ -31,6 +32,7 @@ MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4])
+@fork_new_process_for_each_test
 @patch.dict(os.environ, {"VLLM_ENABLE_V1_MULTIPROCESSING": "0"})
 @patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "0"})
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
