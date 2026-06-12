@@ -200,6 +200,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 )
             else:
                 manager.cache_blocks(request, num_computed_tokens)
+
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
