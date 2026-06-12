@@ -67,8 +67,6 @@ class D2DExpertWeightLoader:
                 self.comm_op_list.append(
                     dist.P2POp(dist.irecv, buffer_tensor, self.comm_group.ranks[recv_rank], group=self.comm_group.device_group)
                 )
-            # Convert global expert ID to local slot index using the updated
-            # (post-update) expert map.
             local_expert_to_replace = self.updated_expert_map[global_expert_id_to_recv].item()
             self.recv_expert_list.append((local_expert_to_replace, buffer_tensor_id))
 
@@ -117,7 +115,7 @@ class D2DExpertWeightLoader:
 
         if self.layer_id == self.eplb_adaptor.num_moe_layers - 1:
             logger.info("[EPLB] finished update expert weight.")
-            
+
         self.recv_expert_list = []
         self.updated_expert_map = None
         self.layer_id = -1
