@@ -67,7 +67,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Generate build matrix from Dockerfiles
         id: generate
@@ -99,7 +99,14 @@ jobs:
 
     container:
       image: ${{ matrix.image }}
-
+    env:
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+        UV_HTTP_TIMEOUT: 120
+        UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
     steps:
       - name: Checkout repo
         uses: actions/checkout@v6
@@ -133,6 +140,7 @@ jobs:
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           pip install uv
+      
 
       - name: Install system dependencies (openeuler)
         if: matrix.os_type == 'openeuler'
