@@ -125,5 +125,8 @@ By predefining the maximum amount of KV cache processed per round, we sequential
 
 - slot_mapping computation: `vllm_ascend/worker/block_table.py`
 - sequences splitting and metadata prepare: `vllm_ascend/worker/model_runner_v1.py`
-- GQA backend: `vllm_ascend/attention/attention_cp.py`
-- MLA backend: `vllm_ascend/attention/mla_cp.py`
+- PCP token splitting and metadata generation: `vllm_ascend/worker/pcp_utils.py`
+- GQA backend: `vllm_ascend/attention/context_parallel/attention_cp.py`
+- MLA backend: `vllm_ascend/attention/context_parallel/mla_cp.py`
+- DSA backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`
+- SFA backend: `vllm_ascend/attention/context_parallel/sfa_cp.py`
