@@ -115,9 +115,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 0: keep only the latest completed prompt (replay) boundary.
     # >0: keep one tail per interval-sized segment (must be a multiple of
     #     scheduler_block_size). Applies to SWA only, not Mamba/linear attn.
-    "VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
-        int(os.environ["VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL"])
-        if "VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
+    "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
+        int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
+        if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
         else None
     ),
 }
