@@ -10,7 +10,6 @@
 # ruff: noqa: E501
 # mypy: ignore-errors
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -150,16 +149,6 @@ def fused_qkvzba_split_reshape_cat(
     head_qk,
     head_v,
 ):
-    logger.debug(
-        "[TritonOps] fused_qkvzba_split_reshape_cat: mixed_qkvz.shape=%s, mixed_ba.shape=%s, "
-        "num_heads_qk=%s, num_heads_v=%s, head_qk=%s, head_v=%s",
-        mixed_qkvz.shape,
-        mixed_ba.shape,
-        num_heads_qk,
-        num_heads_v,
-        head_qk,
-        head_v,
-    )
     batch, seq_len = mixed_qkvz.shape[0], 1
     total_rows = batch * seq_len
 

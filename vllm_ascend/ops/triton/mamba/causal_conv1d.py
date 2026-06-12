@@ -13,11 +13,8 @@ import torch
 import torch.nn.functional as F
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
-
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 if not HAS_TRITON:
     from vllm_ascend._310p.ops.causal_conv1d import (
@@ -45,8 +42,7 @@ def causal_conv1d_ref(
     out: (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
-        logger.error("[TritonOps] activation must be None, silu, or swish, got activation=%s.", activation)
-        raise NotImplementedError("activation must be None, silu, or swish, got activation=%s.", activation)
+        raise NotImplementedError("activation must be None, silu, or swish")
     dtype_in = x.dtype
     x = x.to(weight.dtype)
     seqlen = x.shape[-1]
@@ -117,8 +113,7 @@ def causal_conv1d_fn(
         num_decodes = attn_metadata.num_decodes
 
     if activation not in [None, "silu", "swish"]:
-        logger.error("[TritonOps] activation must be None, silu, or swish, got activation=%s.", activation)
-        raise NotImplementedError("[TritonOps] activation must be None, silu, or swish, got activation=%s.", activation)
+        raise NotImplementedError("activation must be None, silu, or swish")
     if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
@@ -590,13 +585,6 @@ def causal_conv1d_update_npu(
             indices 0 and 3
     out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
     """
-    logger.debug(
-        "[TritonOps] causal_conv1d_update_npu: x.shape=%s, conv_state.shape=%s, weight.shape=%s, activation=%s",
-        x.shape,
-        conv_state.shape,
-        weight.shape,
-        activation,
-    )
     if not HAS_TRITON:
         return _pytorch_update(
             x,
@@ -665,7 +653,7 @@ def causal_conv1d_update_npu(
     # keep program count around ~[80..160]
     # vector core 40
     # TODO: use driver to get the vector core num
-    CORE_HINT = get_vectorcore_num()
+    CORE_HINT = 40
     # channel tile: 512 when dim large (reduce tasks), else 256
     block_n = 512 if dim >= 512 else 256
     g = triton.cdiv(dim, block_n)

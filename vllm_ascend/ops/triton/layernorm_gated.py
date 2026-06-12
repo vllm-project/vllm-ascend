@@ -7,7 +7,6 @@
 # mypy: ignore-errors
 
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 
@@ -139,17 +138,7 @@ def layer_norm_fwd_npu(
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
     if group_size > BLOCK_N:
-        logger.error(
-            "[TritonOps] Feature dim too large: group_size=%s exceeds BLOCK_N=%s (MAX_FUSED_SIZE=%s)",
-            group_size,
-            BLOCK_N,
-            MAX_FUSED_SIZE,
-        )
-        raise RuntimeError(
-            "[TritonOps] Feature dim too large: group_size={} exceeds BLOCK_N={} (MAX_FUSED_SIZE={})".format(
-                group_size, BLOCK_N, MAX_FUSED_SIZE
-            )
-        )
+        raise RuntimeError("Feature dim too large.")
 
     # Choose BLOCK_M: e.g., 16, 32, 64 — depends on NPU vector core capacity
     BLOCK_M = 64  # Tune this based on your NPU's register/shared memory

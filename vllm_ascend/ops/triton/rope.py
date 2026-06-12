@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -269,14 +268,6 @@ def rope_forward_triton(
     if not k.is_contiguous():
         k = k.contiguous()
 
-    logger.debug(
-        "[TritonOps] rope_forward_triton: q.shape=%s, k.shape=%s, rope_dim=%s, is_neox_style=%s",
-        q.shape,
-        k.shape,
-        rope_dim,
-        is_neox_style,
-    )
-
     num_tokens, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[1]
     # TODO: use a more robust method to get BLOCK_SIZE_HEAD
@@ -367,14 +358,6 @@ def rope_forward_triton_siso(
     if not qk.is_contiguous():
         qk = qk.contiguous()
 
-    logger.debug(
-        "[TritonOps] rope_forward_triton_siso: qk.shape=%s, cos.shape=%s, sin.shape=%s, rope_dim=%s, is_neox_style=%s",
-        qk.shape,
-        cos.shape if cos is not None else None,
-        sin.shape if sin is not None else None,
-        rope_dim,
-        is_neox_style,
-    )
     num_tokens, n_head, head_dim = qk.shape
     assert rope_dim <= head_dim
     pad_rope_dim = triton.next_power_of_2(rope_dim)

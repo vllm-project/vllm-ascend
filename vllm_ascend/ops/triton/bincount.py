@@ -22,7 +22,6 @@
 
 import torch
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -97,12 +96,6 @@ def get_token_bin_counts_and_mask_triton(
         bin_counts: [num_seqs, vocab_size] int32 counts.
         mask: [num_seqs, vocab_size] bool, True where count > 0.
     """
-    logger.debug(
-        "[TritonOps] get_token_bin_counts_and_mask_triton: tokens.shape=%s, vocab_size=%s, num_seqs=%s",
-        tokens.shape,
-        vocab_size,
-        num_seqs,
-    )
     n_rows, n_cols = tokens.shape
     if num_seqs is not None and num_seqs > 0:
         assert n_rows == num_seqs, f"tokens rows must match num_seqs: tokens.shape[0]={n_rows}, num_seqs={num_seqs}"
