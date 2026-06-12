@@ -2094,6 +2094,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
     );
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
+
+    ops.def("device_print(str msg) -> ()");
+    ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
+             static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
+
+    ops.def("device_print_tensor(Tensor tensor) -> ()");
+    ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
 }
 #else
 // Pybind on other platform
@@ -2124,14 +2132,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                               Tensor? g=None, "
         "                               Tensor? gk=None) -> Tensor");
     ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
-
-    ops.def("device_print(str msg) -> ()");
-    ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
-             static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
-
-    ops.def("device_print_tensor(Tensor tensor) -> ()");
-    ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
-             static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
