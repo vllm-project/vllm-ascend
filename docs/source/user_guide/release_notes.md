@@ -9,7 +9,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 - **DeepSeek-V4 for Ascend950**: Full end-to-end support for DeepSeek-V4 on Ascend950, including piecewise graph mode, DSA attention, KV cache management, and custom GDN operators. [#9757](https://github.com/vllm-project/vllm-ascend/pull/9757) [#9382](https://github.com/vllm-project/vllm-ascend/pull/9382) [#9601](https://github.com/vllm-project/vllm-ascend/pull/9601) [#9935](https://github.com/vllm-project/vllm-ascend/pull/9935)
 - **Hybrid & Mamba Align Prefix Cache**: New alignment-based prefix caching mechanism for Hybrid and Mamba architectures, improving cache hit rates across related sequences. [#9533](https://github.com/vllm-project/vllm-ascend/pull/9533)
 - **GLM4.7-Flash Model Support**: Flash Attention backend support for GLM4.7 models. [#9560](https://github.com/vllm-project/vllm-ascend/pull/9560)
-- **FULL_AND_PIECEWISE Graph Mode**: Introduced a hybrid graph compilation mode combining full-graph and piecewise strategies to balance performance and flexibility. [#9572](https://github.com/vllm-project/vllm-ascend/pull/9572)
+- **FULL_AND_PIECEWISE Graph Mode**: Introduced a hybrid graph compilation mode combining full-graph and piecewise strategies. On HDK 25.5.1+ / CANN 8.5.0+ stacks, the old stream-budget limitation is removed, enabling up to ~32K graphs on A3 and ~64K on A5. [#9572](https://github.com/vllm-project/vllm-ascend/pull/9572) [#9962](https://github.com/vllm-project/vllm-ascend/pull/9962)
 - **Python 3.12 Support**: Dockerfiles and setup.py now officially support Python 3.12, and all base images have been upgraded from `py3.11` to `py3.12`. [#9558](https://github.com/vllm-project/vllm-ascend/pull/9558)
 
 ### Features
@@ -18,7 +18,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 - Added Hybrid & Mamba Align Prefix Cache for improved prefix cache reuse in Hybrid and Mamba architectures. [#9533](https://github.com/vllm-project/vllm-ascend/pull/9533)
 - Added layerwise KV cache event callbacks for finer per-layer observability and control. [#9468](https://github.com/vllm-project/vllm-ascend/pull/9468)
 - Added GLM4.7-Flash model support with Flash Attention backend. [#9560](https://github.com/vllm-project/vllm-ascend/pull/9560)
-- Added `FULL_AND_PIECEWISE` graph mode, a hybrid compilation strategy mixing full-graph and piecewise approaches. [#9572](https://github.com/vllm-project/vllm-ascend/pull/9572)
+- Added `FULL_AND_PIECEWISE` graph mode, a hybrid compilation strategy mixing full-graph and piecewise approaches. On newer HDK (25.5.1+) / CANN (8.5.0+) stacks the old stream-budget limitation is removed, enabling significantly more graph captures — approximately 32K on A3 and 64K on A5. Legacy capture-size pruning has been cleaned up accordingly. [#9572](https://github.com/vllm-project/vllm-ascend/pull/9572) [#9962](https://github.com/vllm-project/vllm-ascend/pull/9962)
 - Added W4A8 MXFP4 quantization support for Ascend950. [#8265](https://github.com/vllm-project/vllm-ascend/pull/8265)
 - Added MXFP8 FlashCommV3 support on Ascend950. [#9671](https://github.com/vllm-project/vllm-ascend/pull/9671)
 - Added NZ layout support for W4A8 MoE compressed tensors and C8 quantization (GQA). [#9625](https://github.com/vllm-project/vllm-ascend/pull/9625) [#9721](https://github.com/vllm-project/vllm-ascend/pull/9721)
