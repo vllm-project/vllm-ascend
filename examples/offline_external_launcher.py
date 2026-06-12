@@ -70,6 +70,7 @@ from vllm.distributed.parallel_state import (  # noqa E402
     destroy_model_parallel,
     get_tp_group,
 )
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_open_port
 
@@ -77,13 +78,34 @@ os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
+def iter_transformer_layers(model):
+    visited_modules = set()
+    pending_modules = [model]
+    while pending_modules:
+        module = pending_modules.pop(0)
+        if id(module) in visited_modules:
+            continue
+        visited_modules.add(id(module))
+
+        layers = getattr(module, "layers", None)
+        if layers is not None:
+            if hasattr(layers, "values"):
+                layers = layers.values()
+            transformer_layers = [layer for layer in layers if hasattr(layer, "mlp")]
+            if transformer_layers:
+                return transformer_layers
+
+        pending_modules.extend(module.children())
+
+    raise ValueError("The provided model does not have transformer layers.")
+
+
 def patch_vllm_moe_model_weight_loader(model):
-    model = getattr(model, "model", None) or getattr(model, "language_model", None)
-    if model is None:
-        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
-    for layer in model.layers:
+    for layer in iter_transformer_layers(model):
         mlp_attr = "mlp"
         mlp = getattr(layer, mlp_attr)
+        if not hasattr(mlp, "experts"):
+            continue
         param_dict = dict(mlp.named_parameters())
         for name, param in param_dict.items():
             if "w13_weight" in name or "w2_weight" in name:
@@ -228,6 +250,10 @@ def main(
             run_model.load_weights(sd.items())
             llm.wake_up(tags=["kv_cache"])
 
+        run_model = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        vllm_config = llm.llm_engine.vllm_config.model_config
+        device = next(run_model.parameters()).device
+        process_weights_after_loading(run_model, vllm_config, device)
         outputs_after_wakeup = llm.generate(prompts, sampling_params)
         if rank == 0:
             # cmp output
