@@ -21,7 +21,6 @@
 # Reference: https://github.com/vllm-project/vllm-ascend/pull/6979
 
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.bincount import get_token_bin_counts_and_mask_triton
@@ -105,13 +104,6 @@ def apply_penalties_triton(
     """Apply penalties to logits in place. Same interface as
     model_executor.layers.utils.apply_penalties.
     """
-    logger.debug(
-        "[TritonOps] apply_penalties_triton: logits.shape=%s, prompt_tokens_tensor.shape=%s, "
-        "output_tokens_tensor.shape=%s",
-        logits.shape,
-        prompt_tokens_tensor.shape,
-        output_tokens_tensor.shape,
-    )
     num_seqs, vocab_size = logits.shape
     _, prompt_mask = get_token_bin_counts_and_mask_triton(prompt_tokens_tensor, vocab_size, num_seqs)
     output_bin_counts, output_mask = get_token_bin_counts_and_mask_triton(
