@@ -15,7 +15,6 @@ from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl, Ascend
 from vllm_ascend.utils import enable_dsa_cp
 
 
-# test on CI
 class TestAscendSFABackend(TestBase):
     def setUp(self):
         self.mock_config = MagicMock()
