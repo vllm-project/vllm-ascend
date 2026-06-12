@@ -16,8 +16,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `DeepSeek-V3.2-Exp-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-- `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
+- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires **1 Atlas 800 A3 (64G × 16) node** or **2 Atlas 800 A2 (64G × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
+- `DeepSeek-V3.2-w8a8` (Quantized version): requires **1 Atlas 800 A3 (64G × 16) node** or **2 Atlas 800 A2 (64G × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -860,8 +860,8 @@ Once your server is started, you can query the model with input prompts:
 
 **Note**:
 
-- `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost).
-- `<port>`: The port number specified in the server startup command (e.g., 8000).
+- `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost). For PD-separated deployment, use the host IP of the node where the proxy script resides.
+- `<port>`: The port number specified in the server startup command (e.g., 8000). For PD-separated deployment, use the port configured in the proxy script.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/completions \
@@ -872,6 +872,12 @@ curl http://<node0_ip>:<port>/v1/completions \
         "max_completion_tokens": 50,
         "temperature": 0
     }'
+```
+
+**Expected Result**:
+
+```json
+{"id":"019eab54ead036b23e53f3a709e09289","object":"chat.completion","created":1780990929,"model":"deepseek_v3.2","choices":[{"index":0,"message":{"role":"assistant","content":"The future of AI is **not a single destination, but a complex, multi-faceted trajectory** that will reshape nearly every aspect of human society, technology, and our understanding of intelligence itself. It can be understood through several interconnected lenses:\n\n### "},"finish_reason":"length"}],"usage":{"prompt_tokens":9,"completion_tokens":50,"total_tokens":59,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens_details":{"cached_tokens":0},"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":9},"system_fingerprint":""}
 ```
 
 ## Accuracy Evaluation
