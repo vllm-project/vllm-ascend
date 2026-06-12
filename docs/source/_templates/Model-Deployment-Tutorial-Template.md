@@ -182,7 +182,7 @@ lm_eval \
   --output_path ./
 ```
 
-## 8 Performance
+## 8 Performance Evaluation
 
 Omitted. Requirements are the same as for Accuracy Evaluation.
 
@@ -210,10 +210,10 @@ Provide recommended configurations for three typical scenarios (long context, lo
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
 |----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|-----------|-----------|--------------|------------------|
-| High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 64 | 30k | 3 | Off | On | On | On |
-| High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 64 | 30k | 12 | Off | On | Off | On |
+| High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 4096 | 30k | 3 | Off | On | On | On |
+| High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 4096 | 30k | 12 | Off | On | Off | On |
 | Long Context | Server-P Node / Single Machine | | | | | | | | | | | |
 | Long Context | Server-D Node | | | | | | | | | | | |
 | Low Latency | Server-P Node / Single Machine | | | | | | | | | | | |
