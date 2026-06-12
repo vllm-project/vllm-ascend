@@ -1591,8 +1591,6 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         key = self._nz_5d_view(self.key_cache, block_size)
         value = self._nz_5d_view(self.value_cache, block_size)
 
-        num_tokens = int(attn_metadata.actual_seq_lengths_q[-1])
-
         # Compute per-request query lengths from TND cumulative format,
         # then pad to uniform max_q layout for BNSD reshape.
         actual_seq_q = attn_metadata.actual_seq_lengths_q
@@ -1600,16 +1598,17 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         for i in range(1, batch_size):
             per_req_q.append(int(actual_seq_q[i]) - int(actual_seq_q[i - 1]))
         max_q = max(per_req_q)
+        n_tokens = sum(per_req_q)
 
         q_lens_t = torch.tensor(per_req_q, dtype=torch.int64, device=query.device)
-        src_pos = torch.arange(num_tokens, dtype=torch.int64, device=query.device)
+        src_pos = torch.arange(n_tokens, dtype=torch.int64, device=query.device)
         req_ids = torch.repeat_interleave(torch.arange(batch_size, dtype=torch.int64, device=query.device), q_lens_t)
         cumsum = torch.cumsum(q_lens_t, dim=0)
         offsets = src_pos - torch.repeat_interleave(cumsum - q_lens_t, q_lens_t)
         dst_pos = req_ids * max_q + offsets
 
         padded = torch.zeros(batch_size * max_q, self.num_heads, self.head_size, dtype=query.dtype, device=query.device)
-        padded[dst_pos] = query[:num_tokens]
+        padded[dst_pos] = query[:n_tokens]
         query_bnsd = padded.reshape(batch_size, max_q, self.num_heads, self.head_size).transpose(1, 2).contiguous()
 
         pre_tokens = self.sliding_window or SWA_INT_MAX
@@ -1640,7 +1639,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         # Unpad output: extract valid tokens per request
         attn_4d = attn_output.transpose(1, 2).contiguous()
         flat_out = attn_4d.reshape(-1, self.num_heads, self.head_size)
-        output[:num_tokens] = flat_out[dst_pos]
+        output[:n_tokens] = flat_out[dst_pos]
         return output
 
     def _forward_c8_chunked_prefill(
@@ -1674,16 +1673,17 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             for i in range(1, num_decodes):
                 per_req_q.append(int(actual_seq_qlen[i]) - int(actual_seq_qlen[i - 1]))
             max_q = max(per_req_q)
+            n_tokens = sum(per_req_q)
 
             q_lens_t = torch.tensor(per_req_q, dtype=torch.int64, device=query.device)
-            src_pos = torch.arange(num_decode_tokens, dtype=torch.int64, device=query.device)
+            src_pos = torch.arange(n_tokens, dtype=torch.int64, device=query.device)
             req_ids = torch.repeat_interleave(torch.arange(num_decodes, dtype=torch.int64, device=query.device), q_lens_t)
             cumsum = torch.cumsum(q_lens_t, dim=0)
             offsets = src_pos - torch.repeat_interleave(cumsum - q_lens_t, q_lens_t)
             dst_pos = req_ids * max_q + offsets
 
             padded = torch.zeros(num_decodes * max_q, self.num_heads, self.head_size, dtype=query.dtype, device=query.device)
-            padded[dst_pos] = query[:num_decode_tokens]
+            padded[dst_pos] = query[:n_tokens]
             query_bnsd = padded.reshape(num_decodes, max_q, self.num_heads, self.head_size).transpose(1, 2).contiguous()
 
             pre_tokens = self.sliding_window or SWA_INT_MAX
@@ -1715,7 +1715,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             attn_4d = attn_out.transpose(1, 2).contiguous()
             flat_out = attn_4d.reshape(-1, self.num_heads, self.head_size)
             attn_out = flat_out[dst_pos]
-            output[:num_decode_tokens] = attn_out
+            output[:n_tokens] = attn_out
 
         if attn_metadata.num_prefills > 0:
             prefill_q = query[num_decode_tokens:num_tokens]
