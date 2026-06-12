@@ -753,7 +753,7 @@ The service returns HTTP 200 OK. The JSON response contains the `choices` field 
 
 ## 7 Accuracy Evaluation
 
-Here are one accuracy evaluation methods.
+Here is one accuracy evaluation method.
 
 ### Using AISBench
 
@@ -767,7 +767,7 @@ Here are one accuracy evaluation methods.
 | GPQA | - | accuracy | gen | 89.90 | 1 Atlas 800 A3 (64G × 16) |
 | MMMU | - | accuracy | gen | 82.67 | 1 Atlas 800 A3 (64G × 16) |
 
-## 8 Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 
@@ -817,7 +817,7 @@ After about several minutes, you can get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-|Scenario|Configuration|#NPUs|TP|DP|Max Context Length|MTP Speculation Num|
+|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
 |High Throughput / Low Latency (16K)|Server / Single Machine|16|8|2|~16K|15|
 |High Throughput / Low Latency (16K)|Server-P Node|16|8|2|~16K|3|
