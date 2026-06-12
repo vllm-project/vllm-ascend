@@ -59,8 +59,6 @@ jobs:
       - name: Generate build matrix from Dockerfiles
         id: generate
         run: |
-          python --version
-          python -m pip --version
           python -m pip install pyyaml
 
           if [[ "${{ github.event_name }}" == "push" ]]; then
@@ -122,7 +120,7 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: matrix.os_type == 'openeuler'
         run: |
-          yum install -y gcc gcc-c++ cmake numactl-devel clang ninja-build
+          yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch
           pip install uv
 
       - name: Get current cache time
@@ -137,6 +135,7 @@ jobs:
         with:
           path: |
             csrc/build
+            csrc/third_party
           key: vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
             vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-
@@ -146,51 +145,32 @@ jobs:
           SOC_VERSION: ${{ matrix.soc_version }}
           MAX_JOBS: "16"
         run: |
+          set -x
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
+
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
-
-          if [ "${{ matrix.os_type }}" = "openeuler" ]; then
-            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
-          fi
-
           pip install uc-manager
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
           # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
           # (does not append to) the env var and would drop the ascend repo.
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-
-          # Add jitter and retry around the source build because csrc build may download
-          # third-party release artifacts from external services that can temporarily
-          # throttle bursty requests.
-          initial_jitter=$((RANDOM % 60))
-          echo "Initial jitter before source build: ${initial_jitter}s"
-          sleep "$initial_jitter"
-
-          for attempt in 1 2 3 4; do
-            echo "uv pip install -e . attempt ${attempt}/4"
-
-            if uv pip install -e .; then
-              echo "uv pip install -e . succeeded"
-              break
-            fi
-
-            if [[ "$attempt" == "4" ]]; then
-              echo "::error::uv pip install -e . failed after 4 attempts"
-              exit 1
-            fi
-
-            backoff_seconds=$((attempt * 120 + RANDOM % 60))
-            echo "uv pip install -e . failed, retrying after ${backoff_seconds}s"
-            sleep "$backoff_seconds"
-          done
-
+          if uv pip install -e . --no-build-isolation; then
+            echo "vllm-ascend installed successfully"
+          else
+            echo "Failed to install vllm-ascend with incremental build, falling back to clean build"
+            rm -rf csrc/build
+            rm -rf csrc/third_party
+            uv pip install -e . --no-build-isolation
+          fi
+          
       - name: Save vllm-ascend csrc build cache
         if: success() && steps.restore-csrc-build-cache.outputs.cache-hit != 'true'
         uses: runs-on/cache/save@v5
         with:
           path: |
             csrc/build
+            csrc/third_party
           key: vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ steps.get_cache_time.outputs.cache_time }}
