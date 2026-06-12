@@ -116,12 +116,15 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         try:
             res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
-            failed_count = sum(1 for value in res if value != 0)
+            failed_codes = [int(value) for value in res if value != 0]
+            failed_count = len(failed_codes)
             if failed_count:
+                error_codes = sorted(set(failed_codes))
                 logger.error(
-                    "Failed to get %d keys out of %d. Check key existence and memory state.",
+                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
                     failed_count,
                     len(key),
+                    error_codes,
                 )
                 logger.debug("Failed to get key details. keys=%s, result=%s", key, res)
             return res
@@ -144,12 +147,15 @@ class MemcacheBackend(Backend):
             self._ensure_initialized()
             assert self.store is not None
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
-            failed_count = sum(1 for value in res if value != 0)
+            failed_codes = [int(value) for value in res if value != 0]
+            failed_count = len(failed_codes)
             if failed_count:
+                error_codes = sorted(set(failed_codes))
                 logger.error(
-                    "Failed to put %d keys out of %d. Check memory and store capacity.",
+                    "Failed to put %d keys out of %d. error_codes=%s. Check memory and store capacity.",
                     failed_count,
                     len(key),
+                    error_codes,
                 )
                 logger.debug("Failed to put key details. keys=%s, result=%s", key, res)
                 if self._lazy_init:

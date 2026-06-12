@@ -186,12 +186,15 @@ class MooncakeBackend(Backend):
                 config.preferred_segment = self.local_seg
             config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
-            failed_count = sum(1 for value in res if value < 0)
+            failed_codes = [int(value) for value in res if value < 0]
+            failed_count = len(failed_codes)
             if failed_count:
+                error_codes = sorted(set(failed_codes))
                 logger.error(
-                    "Failed to put %d keys out of %d. Check memory and store capacity.",
+                    "Failed to put %d keys out of %d. error_codes=%s. Check memory and store capacity.",
                     failed_count,
                     len(keys),
+                    error_codes,
                 )
                 logger.debug("Failed to put key details. keys=%s, result=%s", keys, res)
                 if self._lazy_init:
@@ -230,18 +233,22 @@ class MooncakeBackend(Backend):
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             res_list = list(res)
-            failed_count = sum(1 for value in res_list if value < 0)
+            failed_codes = [int(value) for value in res_list if value < 0]
+            failed_count = len(failed_codes)
+            error_codes = sorted(set(failed_codes))
             logger.debug(
-                "MooncakeBackend.get result keys=%d result_sample=%s negative_count=%d",
+                "MooncakeBackend.get result keys=%d result_sample=%s negative_count=%d error_codes=%s",
                 len(keys),
                 res_list[:12],
                 failed_count,
+                error_codes,
             )
             if failed_count:
                 logger.error(
-                    "Failed to get %d keys out of %d. Check key existence and memory state.",
+                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
                     failed_count,
                     len(keys),
+                    error_codes,
                 )
                 logger.debug("Failed to get key details. keys=%s, result=%s", keys, res_list)
             for i, value in enumerate(res_list):
