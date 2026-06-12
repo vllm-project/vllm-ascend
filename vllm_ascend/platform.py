@@ -586,7 +586,7 @@ class NPUPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
-        if selected_backend == AttentionBackendEnum.FLASH_ATTN and cls._validate_fa3_backend(key, attn_selector_config):
+        if selected_backend == AttentionBackendEnum.FLASH_ATTN and cls._validate_fa3_backend(key):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
         backend_map = {
@@ -610,7 +610,7 @@ class NPUPlatform(Platform):
         return backend_map[key]
 
     @classmethod
-    def _validate_fa3_backend(cls, key, attn_selector_config):
+    def _validate_fa3_backend(cls, key):
         enable_batch_invariant = int(os.getenv("VLLM_BATCH_INVARIANT", "0")) != 0
         if not enable_batch_invariant:
             logger.info(
