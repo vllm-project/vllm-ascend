@@ -24,8 +24,14 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 
-from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder310
-from vllm_ascend._310p.attention.metadata_builder import AscendAttentionMetadataBuilder310
+from vllm_ascend._310p.attention.attention_mask import (
+    AttentionMaskBuilder310,
+    is_compressed_mask_supported,
+)
+from vllm_ascend._310p.attention.metadata_builder import (
+    AscendAttentionMetadataBuilder310,
+    get_query_lens_cpu,
+)
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
@@ -33,6 +39,9 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
     AscendMetadata,
 )
+
+MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION = 3
+MASK_TYPE_NORM_COMPRESS_PAGED_ATTENTION = 5
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -96,6 +105,47 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     optimized for the Ascend 310P architecture.
     """
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.support_compressed_mask = is_compressed_mask_supported()
+
+    def _flash_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor,
+        seq_len: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.support_compressed_mask:
+            torch_npu._npu_flash_attention(
+                query=query,
+                key=key,
+                value=value,
+                mask=mask,
+                seq_len=seq_len,
+                scale_value=self.scale,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                out=output,
+            )
+            return output
+
+        torch_npu._npu_flash_attention_v3(
+            query=query,
+            key=key,
+            value=value,
+            mask=mask,
+            seq_len=seq_len,
+            scale_value=self.scale,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            mask_type=MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION,
+            out=output,
+        )
+        return output
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -104,18 +154,14 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        torch_npu._npu_flash_attention(
-            query=query,
-            key=key,
-            value=value,
-            mask=attn_metadata.attn_mask,
-            seq_len=attn_metadata.seq_lens,
-            scale_value=self.scale,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            out=output,
+        return self._flash_attention(
+            query,
+            key,
+            value,
+            attn_metadata.attn_mask,
+            attn_metadata.seq_lens,
+            output,
         )
-        return output
 
     def forward_paged_attention(
         self,
@@ -184,18 +230,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             seq_len[-1] += delta
 
         mask = attn_metadata.attn_mask
-        torch_npu._npu_flash_attention(
-            query=query,
-            key=key,
-            value=value,
-            mask=mask,
-            seq_len=seq_len,
-            scale_value=self.scale,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            out=output,
-        )
-        return output
+        return self._flash_attention(query, key, value, mask, seq_len, output)
 
     def forward_chunked_prefill_310(self, query, attn_metadata, output):
         """
@@ -212,21 +247,50 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         """
         num_actual_tokens = int(attn_metadata.num_actual_tokens)
         query = query[:num_actual_tokens]
-        output = output[:num_actual_tokens]
+        output_slice = output[:num_actual_tokens]
 
-        # Calculate query lengths from start locations
-        qsl_cpu = attn_metadata.query_start_loc.cpu()
-        qlens = qsl_cpu[1:] - qsl_cpu[:-1]
+        # Host qLens filled in AscendAttentionMetadataBuilder310.build(); eager fallback only.
+        qlens = get_query_lens_cpu(attn_metadata)
+        if qlens is None:
+            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-        context_lens = attn_metadata.seq_lens
+            if _EXTRA_CTX.capturing:
+                raise RuntimeError(
+                    "310P splitfuse requires attn_metadata.query_lens_cpu during graph capture; "
+                    "ensure AscendAttentionMetadataBuilder310.build() ran before forward."
+                )
+            qsl_cpu = attn_metadata.query_start_loc.cpu()
+            qlens = qsl_cpu[1:] - qsl_cpu[:-1]
+
         block_table = attn_metadata.block_tables
+
+        if attn_metadata.seq_lens.device != query.device:
+            attn_metadata.seq_lens = attn_metadata.seq_lens.to(
+                device=query.device,
+                non_blocking=True,
+            )
+
+        if self.support_compressed_mask:
+            # splitfuse_v2 requires fixed ND [2048, 2048]; parent build() may set FRACTAL_NZ mask.
+            mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(query.device)
+            torch_npu._npu_paged_attention_splitfuse_v2(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                mask=mask,
+                block_table=block_table,
+                seq_len=qlens,
+                context_lens=attn_metadata.seq_lens,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                mask_type=MASK_TYPE_NORM_COMPRESS_PAGED_ATTENTION,
+                out=output_slice,
+            )
+            return output
 
         # Generate the specific mask for splitfuse
         mask = AttentionMaskBuilder310.get_splitfuse_mask(attn_metadata, query.device)
-
-        if context_lens.device != query.device:
-            context_lens = context_lens.to(query.device, non_blocking=True)
-
         torch_npu._npu_paged_attention_splitfuse(
             query=query,
             key_cache=self.key_cache,
@@ -234,11 +298,11 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             mask=mask,
             block_table=block_table,
             seq_len=qlens,
-            context_lens=context_lens,
+            context_lens=attn_metadata.seq_lens,
             num_kv_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale_value=self.scale,
-            out=output,
+            out=output_slice,
         )
 
         return output
@@ -269,13 +333,13 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         # Condition for DecodeOnly: Pure decoding phase where each request generates one token
         elif state == AscendAttentionState.DecodeOnly:
             output = self.forward_paged_attention(query, attn_metadata, output)
-        # Condition for ChunkedPrefill:
-        # 1. During speculative decoding scenarios (except mtp)
-        # 2. Processing large prefill requests in chunks
-        # Condition for PrefillCacheHit: Indicates prefill with some cached tokens already processed
-        elif state in [AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit]:
+        # ChunkedPrefill / PrefillCacheHit: chunked prefill or mixed batches.
+        # SpecDecoding: MTP uniform spec verify (splitfuse on 310P).
+        elif (
+            state in [AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit]
+            or state == AscendAttentionState.SpecDecoding
+        ):
             output = self.forward_chunked_prefill_310(query, attn_metadata, output)
-        # Condition for SpecDecoding: Specified for mtp, which is not supported yet.
         else:
             raise NotImplementedError(f"AscendAttentionState: {state} is not supported for 310P currently.")
         return output
