@@ -3,8 +3,10 @@
 import sys
 from collections.abc import Mapping
 from math import lcm
+from typing import Literal
 
 import vllm
+from vllm.logger import logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
@@ -26,6 +28,24 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+
+# vllm PR #43447 added prefix-cache local KV retention (sliding-window
+# checkpoint tails). The retention constants and SlidingWindowManager class
+# live in upstream single_type_kv_cache_manager. Fall back to no-op symbols on
+# older vllm without PR #43447 so this patch keeps working.
+try:
+    from vllm.v1.core.single_type_kv_cache_manager import (
+        AUTO_RETENTION_BASE,
+        AUTO_RETENTION_INTERVAL,
+        SlidingWindowManager,
+    )
+
+    _HAS_LOCAL_KV_RETENTION = True
+except ImportError:  # pragma: no cover - older vllm without PR #43447
+    AUTO_RETENTION_BASE = 1024
+    AUTO_RETENTION_INTERVAL = 32768
+    SlidingWindowManager = None  # type: ignore[assignment,misc]
+    _HAS_LOCAL_KV_RETENTION = False
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -74,6 +94,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_num_batched_tokens: int | None = None,
+        # vllm PR #43447: optional prefix-cache local KV retention. The
+        # scheduler passes ``CacheConfig.prefix_cache_retention_interval``
+        # through ``get_kv_cache_coordinator`` -> here.
+        local_kv_retention_interval: int | Literal["auto"] | None = None,
     ):
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
@@ -127,6 +151,41 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             ), "block_size must be divisible by hash_block_size"
         self.verify_and_split_kv_cache_groups()
 
+        # vllm PR #43447: store the retention interval and mirror upstream's
+        # one-time info log. The inherited ``HybridKVCacheCoordinator.cache_blocks``
+        # consults ``self.local_kv_retention_interval`` + ``self.eagle_lookup_group_ids``
+        # (set by ``verify_and_split_kv_cache_groups`` below) to route sliding-window
+        # groups through ``cache_blocks_at_boundaries``.
+        self.local_kv_retention_interval = local_kv_retention_interval
+        if self.local_kv_retention_interval is not None and _HAS_LOCAL_KV_RETENTION:
+            has_sliding_window_group = any(
+                isinstance(manager, SlidingWindowManager) for manager in self.single_type_managers
+            )
+            if has_sliding_window_group:
+                if self.local_kv_retention_interval == "auto":
+                    logger.info(
+                        "Using prefix-cache local KV retention strategy: retain "
+                        "sliding-window checkpoint tails at powers of 2 from %d to "
+                        "%d tokens, then every %d tokens, plus the latest replayable "
+                        "prompt boundary.",
+                        AUTO_RETENTION_BASE,
+                        AUTO_RETENTION_INTERVAL,
+                        AUTO_RETENTION_INTERVAL,
+                    )
+                elif self.local_kv_retention_interval == 0:
+                    logger.info(
+                        "Using prefix-cache local KV retention strategy: retain only "
+                        "the latest replayable prompt boundary."
+                    )
+                else:
+                    logger.info(
+                        "Using prefix-cache local KV retention strategy: retain "
+                        "sliding-window checkpoint tails at the configured "
+                        "%d-token interval after prefix-cache alignment, plus "
+                        "the latest replayable prompt boundary.",
+                        self.local_kv_retention_interval,
+                    )
+
         self.use_eagle = use_eagle
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
@@ -176,6 +235,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             i
             for i, (_, group_ids, _) in enumerate(self.attention_groups)
             if any(gid in self.eagle_group_ids for gid in group_ids)
+        }
+        # vllm PR #43447: per-group ids of EAGLE/MTP groups, consumed by the
+        # inherited ``cache_blocks`` to decide whether a sliding-window manager
+        # needs to retain one extra local block past the replay boundary.
+        self.eagle_lookup_group_ids: set[int] = {
+            gid
+            for i, (_, group_ids, _) in enumerate(self.attention_groups)
+            if i in self.eagle_attn_group_indices
+            for gid in group_ids
         }
 
         # The LCM of the block sizes of all attention types.
@@ -309,6 +377,11 @@ def get_kv_cache_coordinator(
     hash_block_size: int,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
+    # vllm PR #43447: KVCacheManager passes this through from
+    # ``CacheConfig.prefix_cache_retention_interval``. Default keeps the
+    # pre-PR behavior, and the kwarg keeps us compatible with older vllm
+    # versions that don't forward it.
+    local_kv_retention_interval: int | Literal["auto"] | None = None,
 ) -> KVCacheCoordinator:
     if _is_deepseek_v4_kv_cache_config(kv_cache_config):
         return AscendHybridKVCacheCoordinator(
@@ -354,6 +427,7 @@ def get_kv_cache_coordinator(
         eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
         max_num_batched_tokens=max_num_batched_tokens,
+        local_kv_retention_interval=local_kv_retention_interval,
     )
 
 
