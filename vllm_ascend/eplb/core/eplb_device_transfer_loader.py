@@ -56,9 +56,12 @@ class D2DExpertWeightLoader:
         self.comm_op_list = []
         for send_info in expert_send_info:
             dst_rank, global_expert_id_to_send = send_info
-            # Plan now carries the local expert ID directly (not a slot index).
-            # expert_param_per_layer is indexed by local expert ID.
-            local_expert_id = global_expert_id_to_send
+            # Convert global expert ID to local slot index using the current
+            # (pre-update) expert map.  expert_param_per_layer is indexed by
+            # local slot index, not global expert ID.
+            local_expert_id = int(
+                self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send]
+            )
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
                 # Explicitly cast FRACTAL_NZ → ND before sending. On Ascend,
                 # .contiguous() on a FRACTAL_NZ slice may not fully convert to
@@ -76,7 +79,9 @@ class D2DExpertWeightLoader:
                 self.comm_op_list.append(
                     dist.P2POp(dist.irecv, buffer_tensor, self.comm_group.ranks[recv_rank], group=self.comm_group.device_group)
                 )
-            local_expert_to_replace = global_expert_id_to_recv  # direct expert ID
+            # Convert global expert ID to local slot index using the updated
+            # (post-update) expert map.
+            local_expert_to_replace = int(self.updated_expert_map[global_expert_id_to_recv])
             self.recv_expert_list.append((local_expert_to_replace, buffer_tensor_id))
 
         self.state = ExpertWeightUpdateState.READY
