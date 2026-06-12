@@ -24,6 +24,7 @@ import torch
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+from tests.e2e.utils import fork_new_process_for_each_test
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
@@ -31,10 +32,11 @@ MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4])
+@fork_new_process_for_each_test
+@patch.dict(os.environ, {"VLLM_ENABLE_V1_MULTIPROCESSING": "0"})
 @patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "0"})
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
 def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
-    del os.environ["VLLM_WORKER_MULTIPROC_METHOD"]
     capture_called = multiprocessing.Value("i", 0)  # int, 0 or 1
     capture_mem_before = multiprocessing.Value("q", -1)  # long long (64-bit)
     capture_mem_after = multiprocessing.Value("q", -1)  # long long
@@ -63,18 +65,19 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
         ]
         sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
         if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
-            vllm_model = VllmRunner(
+            with VllmRunner(
                 model,
                 max_model_len=1024,
                 quantization="ascend",
                 compilation_config={"cudagraph_mode": "PIECEWISE"},
-            )
+            ) as vllm_model:
+                _ = vllm_model.generate(prompts, sampling_params)
         else:
-            vllm_model = VllmRunner(
+            with VllmRunner(
                 model,
                 compilation_config={"cudagraph_mode": "PIECEWISE"},
-            )
-        _ = vllm_model.generate(prompts, sampling_params)
+            ) as vllm_model:
+                _ = vllm_model.generate(prompts, sampling_params)
 
     assert capture_called.value == 1, "capture_model was not called during test"
     assert capture_mem_before.value != -1, "capture_mem_before not set"
@@ -100,4 +103,3 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
         f"Used: {mem_used_by_capture / (1024**3):.2f} GiB, "
         f"Expected: < {max_capture_mem_gib:.2f} GiB"
     )
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
