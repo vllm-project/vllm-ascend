@@ -27,16 +27,25 @@ import torch
 import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.layernorm_guard import layernorm_fn
-from vllm.model_executor.layers.mamba.linear_attn import (
-    clear_linear_attention_cache_for_new_sequences,
-    linear_attention_decode,
-    linear_attention_prefill_and_mix,
-)
 from vllm.model_executor.models.bailing_moe_linear import BailingMoELinearAttention
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 from vllm_ascend.ops.triton.mamba.lightning_attn import AscendLightningAttentionKernel
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.21.0"):
+    from vllm.model_executor.layers.mamba.linear_attn import (  # type: ignore[import-not-found]
+        clear_linear_attention_cache_for_new_sequences,
+        linear_attention_decode,
+        linear_attention_prefill_and_mix,
+    )
+else:
+    from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (  # type: ignore[import-not-found]
+        clear_linear_attention_cache_for_new_sequences,
+        linear_attention_decode,
+        linear_attention_prefill_and_mix,
+    )
 
 
 class AscendBailingMoELinearAttention(BailingMoELinearAttention):

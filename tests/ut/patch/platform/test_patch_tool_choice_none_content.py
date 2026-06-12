@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 from openai.types.chat.chat_completion import ChatCompletion as OpenAIChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -23,6 +24,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
 
 from vllm_ascend.patch.platform import patch_tool_choice_none_content  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
 
 
 class _DummyDelegatingParser(DelegatingParser):
@@ -50,6 +52,9 @@ class _DummyDelegatingParser(DelegatingParser):
         return None
 
 
+@pytest.mark.skipif(
+    not vllm_version_is("0.21.0"), reason="OpenAIServing._parse_tool_calls_from_content exists only in v0.21.0"
+)
 def test_parse_tool_calls_from_content_allows_named_tool_choice_with_none_content():
     request = ChatCompletionRequest.model_validate(
         {

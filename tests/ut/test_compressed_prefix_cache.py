@@ -22,6 +22,7 @@ from vllm.v1.request import Request
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
+from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.cpu_test
 
@@ -60,12 +61,21 @@ def _make_compress_manager(
         enable_caching=True,
         hash_block_size=block_size,
     )
-    manager = CompressAttentionManager(
-        spec,
-        block_pool=block_pool,
-        enable_caching=True,
-        kv_cache_group_id=0,
-    )
+    if vllm_version_is("0.21.0"):
+        manager = CompressAttentionManager(
+            spec,
+            block_pool=block_pool,
+            enable_caching=True,
+            kv_cache_group_id=0,
+        )
+    else:
+        manager = CompressAttentionManager(
+            spec,
+            block_pool=block_pool,
+            enable_caching=True,
+            kv_cache_group_id=0,
+            scheduler_block_size=block_size,
+        )
     return spec, block_pool, manager
 
 
