@@ -45,9 +45,7 @@ cmake --install tools/ai_qos/build
 
 ​### 1) Auto mode
 
-​```bash
-python tools/ai_qos.py
-```
+`python tools/ai_qos.py`
 
 ​AI QoS auto mode automatically classifies the priorities of different types of traffic and generates QoS tags. It also prints the UB switch configuration. You can copy the outputs and log in to the UB switch to configure the QoS configurations of UB switch. This configuration will overwrite the current QoS configuration on the UB switch. If there is any existing QoS configuration, please back it up in advance.
 
