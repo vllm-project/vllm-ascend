@@ -165,25 +165,28 @@ jobs:
           set -x
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
-
+           "Environment variables initialized"
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
+          echo "start installing requirements at $(date -u +'%Y-%m-%d %H:%M:%S')"
           pip install uc-manager
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
           # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
           # (does not append to) the env var and would drop the ascend repo.
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if uv pip install -e . --no-build-isolation; then
+          echo "start installing vllm-ascend at $(date -u +'%Y-%m-%d %H:%M:%S')"
+          if uv pip install -e . --no-build-isolation ;then
             echo "vllm-ascend installed successfully"
           else
+            echo "start clean build for vllm-ascend at $(date -u +'%Y-%m-%d %H:%M:%S')"
             echo "Failed to install vllm-ascend with incremental build, falling back to clean build"
             rm -rf csrc/build
             rm -rf csrc/third_party
             uv pip install -e . --no-build-isolation
           fi
+          echo "vllm-ascend installation completed at $(date -u +'%Y-%m-%d %H:%M:%S')"
           
-
       - name: Save vllm-ascend csrc build cache
         if: success() && steps.restore-csrc-build-cache.outputs.cache-hit != 'true'
         uses: runs-on/cache/save@v5
