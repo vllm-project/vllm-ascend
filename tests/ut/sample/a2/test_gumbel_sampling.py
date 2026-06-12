@@ -10,7 +10,6 @@
 import pytest
 import torch
 
-from tests.ut.conftest import npu_test
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
 
 DEVICE = "npu"
@@ -32,7 +31,6 @@ def _ref_apply_temperature(
     return out
 
 
-@npu_test(num_npus=1, npu_type="a2")
 class TestGumbelSampling:
     @pytest.mark.parametrize(
         "num_tokens,vocab_size",
