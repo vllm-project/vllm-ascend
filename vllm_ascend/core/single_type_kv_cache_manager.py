@@ -23,6 +23,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class CompressAttentionManager(FullAttentionManager):
     def __init__(self, kv_cache_spec: MLAAttentionSpec, block_pool: BlockPool, **kwargs) -> None:
