@@ -2,6 +2,9 @@
 set -euo pipefail
 
 enable_coverage=false
+if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
+  enable_coverage=true
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
