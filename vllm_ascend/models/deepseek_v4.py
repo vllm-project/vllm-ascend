@@ -765,7 +765,8 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
         self.kv_norm = RMSNorm(self.head_dim, self.norm_eps)
-        self.wo_a = ColumnParallelLinear(
+        wo_a_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
+        self.wo_a = wo_a_cls(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * config.o_lora_rank,
             bias=False,
