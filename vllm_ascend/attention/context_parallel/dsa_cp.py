@@ -990,7 +990,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
         # o_proj_input: [N/TP, num_heads, head_dim] → [N/TP, n_group, heads_per_group * head_dim]
         o_proj_input = o_proj_input.view(num_tokens, self.n_group, -1)
         if olora_tp_enable():
-            # TODO: olora tp is not ready yet; `_get_row_parallel_op` does not currently include the required adaptation.
+            # TODO: olora tp is not ready yet; `_get_row_parallel_op` does not
+            # currently include the required adaptation.
             o_proj_tmp = self.wo_a(o_proj_input)
         else:
             # wo_a = self.wo_a.weight.view(self.n_groups, self.o_lora_rank, -1)
