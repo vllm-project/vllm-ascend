@@ -14,11 +14,6 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (
-    CapturedAttentionState,
-    DecodeEagleCudaGraphManager,
-    PrefillEagleCudaGraphManager,
-)
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -27,8 +22,26 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+if vllm_version_is("0.21.0"):
+    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (  # type: ignore[import-not-found]
+        CapturedAttentionState,
+        DecodeEagleCudaGraphManager,
+        PrefillEagleCudaGraphManager,
+    )
+else:
+    from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
+        AttentionStatePair as CapturedAttentionState,
+    )
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
+        DecodeSpeculatorCudaGraphManager as DecodeEagleCudaGraphManager,
+    )
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
+        PrefillSpeculatorCudaGraphManager as PrefillEagleCudaGraphManager,
+    )
 
 
 class PrefillEagleAclGraphManager(PrefillEagleCudaGraphManager):

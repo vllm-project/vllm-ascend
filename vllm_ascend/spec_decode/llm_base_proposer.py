@@ -16,7 +16,6 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
     init_model_parallel_group,
-    patch_tensor_parallel_group,
 )
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
@@ -52,7 +51,30 @@ from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+
+if vllm_version_is("0.21.0"):
+    from vllm.distributed.parallel_state import patch_tensor_parallel_group  # type: ignore[import-not-found]
+else:
+    import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
+
+    @contextmanager
+    def patch_tensor_parallel_group(tp_group):
+        """Temporarily swap the global TP group for draft-model spec decode.
+
+        Backports vllm 0.21's ``patch_tensor_parallel_group`` which was removed
+        on vLLM main. Used so the draft model can run with a TP degree that
+        differs from the target model.
+        """
+        old_tp_group = _ps.get_tp_group()
+        _ps._TP_STATE_PATCHED = True
+        _ps._TP = tp_group
+        try:
+            yield
+        finally:
+            _ps._TP_STATE_PATCHED = False
+            _ps._TP = old_tp_group
+
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4

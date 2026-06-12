@@ -35,8 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -62,6 +60,10 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     collect_storage_merged_register_regions,
     get_transfer_timeout_value,
     validate_register_region_count,
+)
+from vllm_ascend.distributed.utils import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
 )
 from vllm_ascend.utils import enable_custom_op
 

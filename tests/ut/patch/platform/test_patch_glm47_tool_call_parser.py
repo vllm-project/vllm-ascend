@@ -5,13 +5,25 @@ from unittest.mock import MagicMock
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.parser.abstract_parser import _WrappedParser
 from vllm.reasoning.deepseek_v3_reasoning_parser import (
     DeepSeekV3ReasoningWithThinkingParser,
 )
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
 from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.21.0"):
+    from vllm.parser.abstract_parser import _WrappedParser  # type: ignore[import-not-found]
+else:
+    # vLLM main removed the ``_WrappedParser`` helper; the base ``Parser``
+    # already instantiates from ``reasoning_parser_cls`` / ``tool_parser_cls``
+    # class attributes, so a thin ``DelegatingParser`` subclass is equivalent.
+    from vllm.parser.abstract_parser import DelegatingParser  # type: ignore[import-not-found]
+
+    class _WrappedParser(DelegatingParser):  # type: ignore[no-redef]
+        pass
+
 
 MOCK_TOKENIZER = MagicMock()
 MOCK_TOKENIZER.get_vocab.return_value = {
@@ -49,6 +61,14 @@ def _request():
 
 def _collect_tool_args(tool_calls):
     return "".join(tc.function.arguments for tc in tool_calls if tc.function.arguments)
+
+
+def _parse_delta(parser, *args, finished=False, **kwargs):
+    # vLLM main added a required keyword-only ``finished`` arg to
+    # ``parse_delta``; v0.21.0 has no such parameter.
+    if vllm_version_is("0.21.0"):
+        return parser.parse_delta(*args, **kwargs)
+    return parser.parse_delta(*args, finished=finished, **kwargs)
 
 
 def test_glm47_streaming_inline_zero_arg_tool_call_waits_until_complete():
@@ -92,16 +112,20 @@ def test_glm45_reasoning_glm47_streaming_inline_zero_arg_tool_call():
     _WrappedParser.tool_parser_cls = Glm47MoeModelToolParser
     parser = _WrappedParser(MOCK_TOKENIZER, request.tools)
 
-    first = parser.parse_delta(
+    first = _parse_delta(
+        parser,
         "Need current time.",
         [2001, 2002],
         request,
         prompt_token_ids=[],
+        finished=False,
     )
-    second = parser.parse_delta(
+    second = _parse_delta(
+        parser,
         "</think><tool_call>get_current_time</tool_call>",
         [154842, 154843, 455, 11075, 3009, 154844],
         request,
+        finished=True,
     )
 
     assert first is not None

@@ -153,6 +153,14 @@ class NPUPlatform(Platform):
     def is_sleep_mode_available(self) -> bool:
         return True
 
+    def is_cumem_allocator_available(self) -> bool:
+        # vLLM main gates sleep mode on the platform reporting a
+        # usable cumem allocator. NPU provides its own ``CaMemAllocator``
+        # (vllm_ascend.device_allocator.camem), so report availability here.
+        # ModelConfig validation runs before custom-op init, so avoid importing
+        # the extension and just declare support.
+        return True
+
     @property
     def pass_key(self) -> str:
         """
