@@ -45,6 +45,7 @@ on:
 
 env:
   QUAY_REPO: quay.io/ascend/vllm-ascend
+  QUAY_TEMP_REPO: quay.io/atlas-ci/vllm-atlas-temp
   CACHE_REPO: ghcr.io/vllm-project/vllm-ascend
 
 jobs:
@@ -173,7 +174,8 @@ jobs:
         context: .
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
         # only trigger when tag, branch/main push
-        outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
+        push: ${{ inputs.should_push }}
+        outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
@@ -183,6 +185,21 @@ jobs:
         # When a new image is built and pushed, the cache will also be updated in the registry, so that next build can benefit from it.
         cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}
         cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', env.CACHE_REPO, steps.cache-tag.outputs.value) || '' }}
+
+
+    - name: Tag digest to prevent GC
+      if: ${{ inputs.should_push }}
+      run: |
+        SUFFIX=""
+        if [ -n "${{ inputs.suffix }}" ]; then
+          SUFFIX="-${{ inputs.suffix }}"
+        fi
+        TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
+        echo "Creating temp tag: ${{ env.QUAY_TEMP_REPO }}:$TAG"
+        docker buildx imagetools create \
+          -t "${{ env.QUAY_TEMP_REPO }}:$TAG" \
+          "${{ env.QUAY_TEMP_REPO }}@${{ steps.build.outputs.digest }}"
+
 
     - name: Export digest
       run: |
@@ -286,7 +303,7 @@ jobs:
 
       - name: Merge and push multi-arch image
         env:
-          IMAGE: ${{ env.QUAY_REPO }}
+          IMAGE: ${{ env.QUAY_TEMP_REPO }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
