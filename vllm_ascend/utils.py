@@ -1317,8 +1317,15 @@ def refresh_block_size(vllm_config):
         cache_config.block_size = 128
 
     if model_config.hf_config.model_type == "deepseek_v4":
-        # TODO(qcs): generalize the block_size
-        cache_config.block_size = 128
+        if cache_config.block_size is None:
+            cache_config.block_size = 32
+        elif cache_config.block_size not in [32, 64, 128]:
+            logger.warning(
+                "For deepseek_v4 model, block size should be 32, 64 or 128. "
+                "Setting block size to 32 for better performance."
+            )
+            cache_config.block_size = 32
+        return
 
     if not scheduler_config or not model_config:
         return

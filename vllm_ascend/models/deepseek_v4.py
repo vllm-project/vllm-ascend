@@ -226,6 +226,14 @@ class DeepseekV2MLP(nn.Module):
         return x
 
 
+def _dsv4_block_sizes():
+    # Lazy import to avoid the circular import chain (layer -> dsa_v1 ->
+    # attention_v1 -> device_op) hit during vLLM subprocess model inspection.
+    from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+
+    return DSV4_BLOCK_SIZES
+
+
 class DeepseekV4MoE(nn.Module):
     def __init__(
         self,
@@ -520,7 +528,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=8,
+                block_size=_dsv4_block_sizes()[cache_config.block_size][0][2],  # type: ignore[union-attr]
             )
         elif compress_ratio == 128:
             self.state_cache = CompressorStateCache(
@@ -528,7 +536,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=32,
+                block_size=_dsv4_block_sizes()[cache_config.block_size][0][3],  # type: ignore[union-attr]
             )
         else:
             raise ValueError(
