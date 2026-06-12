@@ -37,7 +37,10 @@ from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, upd
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import (
+    DecodeEagleAclGraphManager,
+    PrefillEagleAclGraphManager,
+)
 
 
 class AscendEagleSpeculator(EagleSpeculator):
@@ -75,7 +78,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         self.input_batch: InputBatch | None = None
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        with graph_manager_wrapper(self):
+        with graph_managers_wrapper(self):
             super().init_cudagraph_manager(cudagraph_mode)
 
     def propose(
@@ -158,6 +161,65 @@ class AscendEagleSpeculator(EagleSpeculator):
                 attn_backends[layer_name] = attn_backend
 
         self.attn_backends = attn_backends
+
+        # Pre-allocate per-step slot-mapping buffers for the all-steps decode
+        # graph.  Each buffer mirrors one row (group 0) of block_tables.slot_mappings
+        # and is written just before replay in _prefill_draft_slot_mappings.
+        cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and self.num_speculative_steps > 1
+        ):
+            from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+
+            num_kv_groups = block_tables.slot_mappings.shape[0]
+            if num_kv_groups != 1:
+                raise NotImplementedError(
+                    f"DecodeEagleAclGraphManager combined decode graph only supports "
+                    f"single-KV-group models, got {num_kv_groups} KV groups"
+                )
+            max_tokens = block_tables.slot_mappings.shape[1]
+            self.draft_slot_mappings_buffers: list[torch.Tensor] = [
+                torch.full(
+                    (max_tokens,),
+                    PAD_SLOT_ID,
+                    dtype=block_tables.slot_mappings.dtype,
+                    device=block_tables.slot_mappings.device,
+                )
+                for _ in range(self.num_speculative_steps - 1)
+            ]
+        else:
+            self.draft_slot_mappings_buffers = []
+
+    def multi_step_decode(
+        self,
+        num_reqs: int,
+        skip_attn: bool,
+        batch_desc,
+        num_tokens_across_dp: torch.Tensor | None,
+    ) -> None:
+        """Override to replay all N-1 decode steps in a single graph call.
+
+        In FULL graph mode the base class loops N-1 times, each time replaying
+        a single-step graph.  Here we call run_fullgraph once on the
+        DecodeEagleAclGraphManager which replays all steps in one shot.
+
+        For non-FULL modes (eager / piecewise) fall through to the base class,
+        which calls self.generate_draft() per step — our Ascend override of
+        generate_draft handles those paths correctly.
+        NOTE: we must NOT delegate FULL mode to super(): the parent loops N-1
+        times and calls run_fullgraph each time, but our combined graph already
+        runs all N-1 steps in one replay, so delegating would execute (N-1)^2
+        draft steps.
+        """
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # Store the actual (unpadded) num_reqs so _prefill_draft_slot_mappings
+            # can use it to avoid computing slot mappings from stale padded positions.
+            self._current_decode_num_reqs = num_reqs
+            assert self.decode_cudagraph_manager is not None
+            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+        else:
+            super().multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp)
 
     def generate_draft(
         self,
@@ -374,15 +436,21 @@ def torch_gather_wrapper():
 
 
 @contextmanager
-def graph_manager_wrapper(speculator):
-    """Context manager to override graph manager."""
-    original_graph_manager = PrefillEagleCudaGraphManager
+def graph_managers_wrapper(speculator):
+    """Replace vllm's prefill/decode graph managers with Ascend implementations."""
+    original_prefill = vllm_speculator.PrefillEagleCudaGraphManager
+    original_decode = vllm_speculator.DecodeEagleCudaGraphManager
 
-    def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+    def prefill_factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
         return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
+    def decode_factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+        return DecodeEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
+
     try:
-        vllm_speculator.PrefillEagleCudaGraphManager = factory
+        vllm_speculator.PrefillEagleCudaGraphManager = prefill_factory
+        vllm_speculator.DecodeEagleCudaGraphManager = decode_factory
         yield
     finally:
-        vllm_speculator.PrefillEagleCudaGraphManager = original_graph_manager
+        vllm_speculator.PrefillEagleCudaGraphManager = original_prefill
+        vllm_speculator.DecodeEagleCudaGraphManager = original_decode
