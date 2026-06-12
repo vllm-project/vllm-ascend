@@ -182,8 +182,16 @@ pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from wheelnext index.
 uv pip install --system \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant https://mirrors.huaweicloud.com/ascend/repos/pypi   \
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
+--index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
 vllm-ascend==|pip_vllm_ascend_version|
+
+```
+
+```{note}
+If you encounter errors during `uv pip install` (e.g., corrupted cache or stale package data), try clearing the uv cache first and then re-run the install command:
+
+    uv cache clean
 
 ```
 
@@ -231,6 +239,11 @@ If you are building in a CPU-only environment where `npu-smi` is unavailable, yo
 - Atlas A3: `export SOC_VERSION=ascend910_9391`
 - Atlas 300I: `export SOC_VERSION=ascend310p1`
 - Atlas A5: `export SOC_VERSION=<value starting with "ascend950">`
+```
+
+```{note}
+To enable the batch invariance feature, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
+For usage guidance on the batch invariance feature, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>
 ```
 
 ## Set up using Docker

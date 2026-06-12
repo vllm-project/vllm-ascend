@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
 import sys
+from collections.abc import Mapping
 from math import lcm
 
 import vllm
@@ -24,12 +25,31 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
-from vllm_ascend import envs
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
+
+
+def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    if getattr(kv_cache_spec, "model_version", None) == "deepseek_v4":
+        return True
+
+    nested_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
+    if nested_specs is None:
+        return False
+
+    if isinstance(nested_specs, Mapping):
+        nested_specs = nested_specs.values()
+    elif not isinstance(nested_specs, (list, tuple, set)):
+        return False
+
+    return any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in nested_specs)
+
+
+def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
+    return any(_is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -116,7 +136,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if self.dcp_world_size * self.pcp_world_size > 1:
             block_size *= self.dcp_world_size * self.pcp_world_size
         if hasattr(kv_cache_spec, "compress_ratio"):
-            compress_ratio = kv_cache_spec.compress_ratio if kv_cache_spec.compress_ratio >= 1 else 1
+            compress_ratio = kv_cache_spec.compress_ratio or 1
+            compress_ratio = compress_ratio if compress_ratio >= 1 else 1
             block_size *= compress_ratio
         return block_size
 
@@ -190,10 +211,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
 
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
-            effective_block_size = self._get_effective_block_size(kv_cache_spec)
-            if kv_cache_spec.block_size == self.hash_block_size:
+            target_block_size = kv_cache_spec.block_size
+            if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
+                target_block_size *= self.dcp_world_size * self.pcp_world_size
+            if target_block_size == self.hash_block_size:
                 return block_hashes
-            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, effective_block_size)
+            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, target_block_size)
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
@@ -287,7 +310,7 @@ def get_kv_cache_coordinator(
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
-    if envs.VLLM_ASCEND_APPLY_DSV4_PATCH:
+    if _is_deepseek_v4_kv_cache_config(kv_cache_config):
         return AscendHybridKVCacheCoordinator(
             kv_cache_config,
             max_model_len,
