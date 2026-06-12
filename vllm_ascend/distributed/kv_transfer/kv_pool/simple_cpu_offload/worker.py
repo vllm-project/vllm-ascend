@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for Ascend SimpleCPUOffloadConnector."""
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.config import VllmConfig
@@ -25,10 +25,12 @@ class SimpleCPUOffloadWorker:
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
+        verify_offload_transfers: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.cpu_capacity_bytes = cpu_capacity_bytes
+        self.verify_offload_transfers = verify_offload_transfers
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -45,6 +47,10 @@ class SimpleCPUOffloadWorker:
         self._pending_load_event_indices: set[int] = set()
         self._submitted_load_event_indices: set[int] = set()
         self._completed_store_events: dict[int, int] = {}
+        self._stored_block_stats: dict[
+            tuple[int, str], tuple[float, float]
+        ] = {}
+        self._load_stat_checks: dict[int, tuple[list[int], list[int]]] = {}
         self._load_stream_waited = False
 
     def register_kv_caches(
@@ -62,7 +68,6 @@ class SimpleCPUOffloadWorker:
         self.device = any_tensor.device
 
         assert self.kv_cache_config is not None
-        num_blocks = self.kv_cache_config.num_blocks
 
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         register_cache_ptrs = []
@@ -162,6 +167,13 @@ class SimpleCPUOffloadWorker:
         """Synchronize all in-flight transfer events."""
         for event_idx, event in self._load_events:
             event.synchronize()
+            stat_check = self._load_stat_checks.pop(event_idx, None)
+            if stat_check is not None:
+                self._check_restored_block_stats(
+                    stat_check[0],
+                    stat_check[1],
+                    event_idx,
+                )
             self._load_hwm = event_idx
         self._load_events.clear()
         self._submitted_load_event_indices.clear()
@@ -175,6 +187,13 @@ class SimpleCPUOffloadWorker:
             event_idx, event = events[0]
             if not event.query():
                 break
+            stat_check = self._load_stat_checks.pop(event_idx, None)
+            if stat_check is not None:
+                self._check_restored_block_stats(
+                    stat_check[0],
+                    stat_check[1],
+                    event_idx,
+                )
             hwm = event_idx
             events.pop(0)
 
@@ -213,6 +232,12 @@ class SimpleCPUOffloadWorker:
 
         if is_store:
             stream.wait_stream(torch.npu.current_stream())
+            if self.verify_offload_transfers:
+                self._record_preempted_block_stats(
+                    src_block_ids,
+                    dst_block_ids,
+                    event_idx,
+                )
 
         with torch.npu.stream(stream):
             for src_block_id, dst_block_id in zip(src_block_ids, dst_block_ids):
@@ -247,6 +272,87 @@ class SimpleCPUOffloadWorker:
 
         assert not is_store
         self._load_events.append((event_idx, event))
+        if self.verify_offload_transfers:
+            self._load_stat_checks[event_idx] = (
+                list(src_block_ids),
+                list(dst_block_ids),
+            )
+
+    @staticmethod
+    def _block_stats(block: torch.Tensor) -> tuple[float, float]:
+        value = block.detach().float()
+        return value.mean().item(), value.var(unbiased=False).item()
+
+    def _record_preempted_block_stats(
+        self,
+        gpu_block_ids: list[int],
+        cpu_block_ids: list[int],
+        event_idx: int,
+    ) -> None:
+        assert self.gpu_kv_caches is not None
+
+        for gpu_block_id, cpu_block_id in zip(gpu_block_ids, cpu_block_ids):
+            for name, gpu_tensor in self.gpu_kv_caches.items():
+                self._stored_block_stats[(cpu_block_id, name)] = (
+                    self._block_stats(gpu_tensor[gpu_block_id])
+                )
+
+        logger.warning(
+            "Recorded preempted KV block statistics: event=%d, "
+            "block_pairs=%d, tensors=%d",
+            event_idx,
+            len(gpu_block_ids),
+            len(self.gpu_kv_caches),
+        )
+
+    def _check_restored_block_stats(
+        self,
+        cpu_block_ids: list[int],
+        gpu_block_ids: list[int],
+        event_idx: int,
+    ) -> None:
+        assert self.gpu_kv_caches is not None
+
+        for cpu_block_id, gpu_block_id in zip(cpu_block_ids, gpu_block_ids):
+            for name, gpu_tensor in self.gpu_kv_caches.items():
+                expected = self._stored_block_stats.get((cpu_block_id, name))
+                if expected is None:
+                    raise RuntimeError(
+                        "Missing preemption statistics for restored KV block: "
+                        f"event={event_idx}, tensor={name}, "
+                        f"cpu_block={cpu_block_id}, gpu_block={gpu_block_id}"
+                    )
+                actual = self._block_stats(gpu_tensor[gpu_block_id])
+                mean_matches = torch.isclose(
+                    torch.tensor(actual[0]),
+                    torch.tensor(expected[0]),
+                    rtol=1e-4,
+                    atol=1e-5,
+                    equal_nan=True,
+                ).item()
+                variance_matches = torch.isclose(
+                    torch.tensor(actual[1]),
+                    torch.tensor(expected[1]),
+                    rtol=1e-4,
+                    atol=1e-5,
+                    equal_nan=True,
+                ).item()
+                if not mean_matches or not variance_matches:
+                    raise RuntimeError(
+                        "Restored KV block statistics mismatch: "
+                        f"event={event_idx}, tensor={name}, "
+                        f"cpu_block={cpu_block_id}, gpu_block={gpu_block_id}, "
+                        f"expected_mean={expected[0]}, actual_mean={actual[0]}, "
+                        f"expected_var={expected[1]}, actual_var={actual[1]}"
+                    )
+
+        logger.warning(
+            "Restored KV block statistics matched: event=%d, "
+            "block_pairs=%d, tensors=%d",
+            event_idx,
+            len(cpu_block_ids),
+            len(self.gpu_kv_caches),
+        )
 
     def get_finished(
         self,
