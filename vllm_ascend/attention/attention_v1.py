@@ -1597,6 +1597,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             # MTP multi-token decode: reshape to proper BNSD
             query_bnsd = query[:num_tokens].reshape(batch_size, max_q_len, self.num_heads, self.head_size).transpose(1, 2).contiguous()
             actual_seq_lengths_q = [max_q_len] * batch_size
+            pre_tokens = self.sliding_window or SWA_INT_MAX
+            next_tokens = 0 if self.sliding_window else SWA_INT_MAX
             attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                 query_bnsd,
                 key,
@@ -1617,6 +1619,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 value_antiquant_mode=0,
                 inner_precise=1,
                 sparse_mode=3,
+                pre_tokens=pre_tokens,
+                next_tokens=next_tokens,
             )
             attn_output = attn_output.transpose(1, 2).contiguous().view(num_tokens, self.num_heads, self.head_size)
         else:
@@ -1673,6 +1677,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 # MTP multi-token decode: reshape to proper BNSD
                 query_bnsd = query[:num_decode_tokens].reshape(num_decodes, max_q_len, self.num_heads, self.head_size).transpose(1, 2).contiguous()
                 actual_seq_lengths_q = [max_q_len] * num_decodes
+                pre_tokens = self.sliding_window or SWA_INT_MAX
+                next_tokens = 0 if self.sliding_window else SWA_INT_MAX
                 attn_out, _ = torch_npu.npu_fused_infer_attention_score(
                     query_bnsd,
                     kv_k,
@@ -1693,6 +1699,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     value_antiquant_mode=0,
                     inner_precise=1,
                     sparse_mode=3,
+                    pre_tokens=pre_tokens,
+                    next_tokens=next_tokens,
                 )
                 attn_out = attn_out.transpose(1, 2).contiguous().view(num_decode_tokens, self.num_heads, self.head_size)
             else:
