@@ -20,7 +20,6 @@ fi
 test_results=()
 failed_logs=()
 test_index=0
-overall_status=0
 pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
 
 mkdir -p "${pytest_log_dir}"
@@ -76,9 +75,8 @@ run_pytest_target() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${overall_status}" -eq 0 ]; then
-      overall_status="${status}"
-    fi
+    print_summary
+    exit "${status}"
   fi
 }
 
@@ -101,9 +99,8 @@ run_pytest_batch() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${overall_status}" -eq 0 ]; then
-      overall_status="${status}"
-    fi
+    print_summary
+    exit "${status}"
   fi
 }
 
@@ -132,4 +129,3 @@ else
 fi
 
 print_summary
-exit "${overall_status}"
