@@ -16,7 +16,7 @@ def precompute_rope_cos_sin_kernel(
     batch_size_per_vec: tl.constexpr,
     ROPE_DIM: tl.constexpr,
     num_vectorcore: tl.constexpr,
-    N: tl.constexpr,
+    N,
 ):
     row_pid = tl.program_id(0)
     input_batch_offset = row_pid * batch_size_per_vec
