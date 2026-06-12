@@ -70,6 +70,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
+    split_if_not_byte_contiguous,
     string_to_int64_hash,
     zmq_ctx,
 )
@@ -565,6 +566,52 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(call_args[3], [2 * 1024])
         mock_get_meta.assert_not_called()
 
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_kv_cache_uses_block_stride_for_block_offsets(self, mock_get_meta):
+        req = dict(self.test_req)
+        req["local_block_ids"] = [[1, 2]]
+        req["remote_block_ids"] = [[3, 4]]
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
+            self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1]]}
+            self.thread.block_len_per_addr = [[1024]]
+            self.thread.block_stride_per_addr = [[2048]]
+            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[4096]]
+
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        call_args, _ = self.engine.batch_transfer_sync_read.call_args
+        self.assertEqual(call_args[1], [0x1000 + 1 * 2048, 0x1000 + 2 * 2048])
+        self.assertEqual(call_args[2], [0x3000 + 3 * 4096, 0x3000 + 4 * 4096])
+        self.assertEqual(call_args[3], [1024, 1024])
+        mock_get_meta.assert_not_called()
+
+    def test_append_mamba_transfer_meta_uses_block_stride_for_block_offsets(self):
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
+
+        self.thread._append_mamba_transfer_meta(
+            src_list,
+            dst_list,
+            length_list,
+            group_spec={"kv_cache_spec_type": "MambaSpec"},
+            src_layer_base_addr=[0x1000, 0x2000],
+            dst_layer_base_addr=[0x3000, 0x4000],
+            block_len=[100, 200],
+            block_stride=[128, 256],
+            remote_block_stride=[160, 512],
+            remote_block_id=3,
+            local_block_id=2,
+            tp_num_need_pulls=1,
+            remote_tp_offset=0,
+        )
+
+        self.assertEqual(src_list, [0x1000 + 2 * 128, 0x2000 + 2 * 256])
+        self.assertEqual(dst_list, [0x3000 + 3 * 160, 0x4000 + 3 * 512])
+        self.assertEqual(length_list, [100, 200])
+
     def test_transfer_kv_cache_failure(self):
         self.engine.batch_transfer_sync_read.return_value = -1
         self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
@@ -619,6 +666,7 @@ class TestMetadataHandling(unittest.TestCase):
             mock_send.assert_called_once_with(mock_socket, self.thread.encoder.encode((GET_META_MSG, "")), "host1:5555")
             mock_recv.assert_called_once_with(mock_socket, self.thread.remote_poller, "host1:5555")
             self.assertEqual(self.thread.kv_caches_base_addr["remote_engine"][5555], [[0x3000], [0x4000]])
+            self.assertEqual(self.thread.remote_block_stride_per_addr["remote_engine"][5555], [[1024]])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_send")
     @patch(
@@ -920,6 +968,36 @@ class TestHelperFunctions(unittest.TestCase):
         src_groups, dst_groups = group_concurrent_contiguous(src, dst)
         self.assertEqual(src_groups, [])
         self.assertEqual(dst_groups, [])
+
+    def test_group_concurrent_contiguous_uses_stride_for_memory_contiguity(self):
+        src: list[int] = [1, 2]
+        dst: list[int] = [10, 11]
+
+        src_groups, dst_groups = group_concurrent_contiguous(
+            src,
+            dst,
+            src_block_stride=4096,
+            dst_block_stride=2048,
+            block_len=1024,
+        )
+
+        self.assertEqual(src_groups, [[1], [2]])
+        self.assertEqual(dst_groups, [[10], [11]])
+
+    def test_split_if_not_byte_contiguous_fast_path(self):
+        src_groups = [[1, 2]]
+        dst_groups = [[10, 11]]
+
+        src_result, dst_result = split_if_not_byte_contiguous(
+            src_groups,
+            dst_groups,
+            src_block_stride=1024,
+            dst_block_stride=1024,
+            block_len=1024,
+        )
+
+        self.assertIs(src_result, src_groups)
+        self.assertIs(dst_result, dst_groups)
 
     def test_string_to_int64_hash(self):
         hash1 = string_to_int64_hash("test_string")

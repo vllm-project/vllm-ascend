@@ -449,6 +449,7 @@ class KVCacheRecvingThread(threading.Thread):
             self.group_compress_ratios[group_id] = compress_ratio
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
         self.remote_block_size_scale: dict[str, dict[int, list[list[int]]]] = SizedDict()
+        self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
@@ -661,6 +662,7 @@ class KVCacheRecvingThread(threading.Thread):
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
         remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         remote_block_size_scale = self.remote_block_size_scale[remote_engine_id][remote_handshake_port]
+        remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
         session_id = f"{remote_host}:{remote_transfer_port}"
 
         req_start_time = time.perf_counter()
@@ -739,6 +741,8 @@ class KVCacheRecvingThread(threading.Thread):
                         src_layer_base_addr=local_kv_caches_base_addrs[layer_idx],
                         dst_layer_base_addr=remote_kv_caches_base_addrs[layer_idx],
                         block_len=self.block_len_per_addr[layer_idx],
+                        block_stride=self.block_stride_per_addr[layer_idx],
+                        remote_block_stride=remote_block_stride_per_addr[layer_idx],
                         remote_block_id=grouped_remote_block_ids[0][0],
                         local_block_id=grouped_local_block_ids[0][0],
                         tp_num_need_pulls=tp_num_need_pulls,
@@ -769,10 +773,18 @@ class KVCacheRecvingThread(threading.Thread):
                     dst_layer_base_addr = remote_kv_caches_base_addrs[layer_idx][cache_idx]
                     block_len = self.block_len_per_addr[layer_idx][cache_idx]
                     block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
+                    remote_block_stride = remote_block_stride_per_addr[layer_idx][cache_idx]
                     inner_block_len = block_len // tp_num_need_pulls
-                    for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
+                    transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
+                        grouped_remote_block_ids,
+                        grouped_local_block_ids,
+                        src_block_stride=remote_block_stride,
+                        dst_block_stride=block_stride,
+                        block_len=inner_block_len,
+                    )
+                    for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
                         src = src_layer_base_addr + local_block_id[0] * block_stride + inner_offset * inner_block_len
-                        dst = dst_layer_base_addr + remote_block_id[0] * block_stride
+                        dst = dst_layer_base_addr + remote_block_id[0] * remote_block_stride
                         length = inner_block_len * len(local_block_id)
                         src_list.append(src)
                         dst_list.append(dst)
@@ -915,6 +927,8 @@ class KVCacheRecvingThread(threading.Thread):
         src_layer_base_addr: list[int],
         dst_layer_base_addr: list[int],
         block_len: list[int],
+        block_stride: list[int],
+        remote_block_stride: list[int],
         remote_block_id: int,
         local_block_id: int,
         tp_num_need_pulls: int,
@@ -927,6 +941,8 @@ class KVCacheRecvingThread(threading.Thread):
         remote_conv_addr, remote_ssm_addr = dst_layer_base_addr[:2]
         local_conv_addr, local_ssm_addr = src_layer_base_addr[:2]
         local_conv_len, local_ssm_len = block_len[:2]
+        local_conv_stride, local_ssm_stride = block_stride[:2]
+        remote_conv_stride, remote_ssm_stride = remote_block_stride[:2]
 
         tp_ratio = tp_num_need_pulls
         remote_conv_len = local_conv_len // tp_ratio
@@ -935,14 +951,14 @@ class KVCacheRecvingThread(threading.Thread):
         if tp_ratio == 1:
             src_list.extend(
                 [
-                    local_conv_addr + local_block_id * local_conv_len,
-                    local_ssm_addr + local_block_id * local_ssm_len,
+                    local_conv_addr + local_block_id * local_conv_stride,
+                    local_ssm_addr + local_block_id * local_ssm_stride,
                 ]
             )
             dst_list.extend(
                 [
-                    remote_conv_addr + remote_block_id * remote_conv_len,
-                    remote_ssm_addr + remote_block_id * remote_ssm_len,
+                    remote_conv_addr + remote_block_id * remote_conv_stride,
+                    remote_ssm_addr + remote_block_id * remote_ssm_stride,
                 ]
             )
             length_list.extend([remote_conv_len, remote_ssm_len])
@@ -977,14 +993,16 @@ class KVCacheRecvingThread(threading.Thread):
                 local_addr_offset = (
                     (i * remote_conv_width + remote_conv_offset) * tp_ratio + remote_tp_offset * remote_conv_size
                 ) * conv_dtype_size
-                src_list.append(local_conv_addr + local_block_id * local_conv_len + local_addr_offset)
-                dst_list.append(remote_conv_addr + remote_block_id * remote_conv_len + remote_addr_offset)
+                src_list.append(local_conv_addr + local_block_id * local_conv_stride + local_addr_offset)
+                dst_list.append(remote_conv_addr + remote_block_id * remote_conv_stride + remote_addr_offset)
                 length_list.append(remote_conv_size * conv_dtype_size)
 
         src_list.append(
-            local_ssm_addr + local_block_id * local_ssm_len + remote_tp_offset * local_ssm_len // tp_num_need_pulls
+            local_ssm_addr
+            + local_block_id * local_ssm_stride
+            + remote_tp_offset * local_ssm_len // tp_num_need_pulls
         )
-        dst_list.append(remote_ssm_addr + remote_block_id * remote_ssm_len)
+        dst_list.append(remote_ssm_addr + remote_block_id * remote_ssm_stride)
         length_list.append(remote_ssm_len)
 
     def _get_group_kv_caches(self, group_idx: int, layer_indices: list[int] | None = None) -> dict[str, Any]:
@@ -1180,6 +1198,7 @@ class KVCacheRecvingThread(threading.Thread):
             self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
             self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
+            self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -2712,16 +2731,22 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignor
 
 
 def group_concurrent_contiguous(
-    src: list[int], dst: list[int]
-) -> tuple[list[npt.NDArray[np.int64]], list[npt.NDArray[np.int64]]]:
-    """Vectorised NumPy implementation."""
+    src: list[int],
+    dst: list[int],
+    src_block_stride: int = 1,
+    dst_block_stride: int = 1,
+    block_len: int = 1,
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Group block ids that are contiguous in both id space and memory."""
     src_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
     dst_indices: npt.NDArray[np.int64] = np.array(dst, dtype=np.int64)
 
     if src_indices.size == 0:
         return [], []
 
-    brk = np.where((np.diff(src_indices) != 1) | (np.diff(dst_indices) != 1))[0] + 1
+    src_byte_contiguous = np.diff(src_indices) * src_block_stride == block_len
+    dst_byte_contiguous = np.diff(dst_indices) * dst_block_stride == block_len
+    brk = np.where(~(src_byte_contiguous & dst_byte_contiguous))[0] + 1
     src_groups = np.split(src_indices, brk)
     dst_groups = np.split(dst_indices, brk)
 
@@ -2729,6 +2754,27 @@ def group_concurrent_contiguous(
     dst_groups = [g.tolist() for g in dst_groups]
 
     return src_groups, dst_groups
+
+
+def split_if_not_byte_contiguous(
+    src_groups: list[list[int]],
+    dst_groups: list[list[int]],
+    src_block_stride: int,
+    dst_block_stride: int,
+    block_len: int,
+) -> tuple[list[list[int]], list[list[int]]]:
+    if src_block_stride == block_len and dst_block_stride == block_len:
+        return src_groups, dst_groups
+
+    src = [bid for group in src_groups for bid in group]
+    dst = [bid for group in dst_groups for bid in group]
+    return group_concurrent_contiguous(
+        src,
+        dst,
+        src_block_stride=src_block_stride,
+        dst_block_stride=dst_block_stride,
+        block_len=block_len,
+    )
 
 
 def string_to_int64_hash(input_str):
