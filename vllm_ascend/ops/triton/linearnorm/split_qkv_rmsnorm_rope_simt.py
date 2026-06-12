@@ -13,10 +13,10 @@ def precompute_rope_cos_sin_kernel(
     cos_sin_cache_gm_ptr,
     out_cos_sin_gm_ptr,
     batch_size,
+    N,
     batch_size_per_vec: tl.constexpr,
     ROPE_DIM: tl.constexpr,
     num_vectorcore: tl.constexpr,
-    N: tl.constexpr,
 ):
     row_pid = tl.program_id(0)
     input_batch_offset = row_pid * batch_size_per_vec
@@ -317,10 +317,10 @@ def split_qkv_rmsnorm_rope_simt_impl(
         cos_sin_cache,
         cos_sin_precomputed,
         batch_size,
+        N,
         batch_size_per_vec_cos_sin,
         rope_dim,
         num_vectorcore,
-        N,
         force_simt_only=True,
     )
 
