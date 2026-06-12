@@ -1591,7 +1591,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         key = self._nz_5d_view(self.key_cache, block_size)
         value = self._nz_5d_view(self.value_cache, block_size)
 
-        num_tokens = query.shape[0]
+        num_tokens = int(attn_metadata.actual_seq_lengths_q[-1])
         max_q_len = num_tokens // batch_size
         if max_q_len > 1:
             # MTP multi-token decode: reshape to proper BNSD
