@@ -1676,6 +1676,17 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             for i in range(1, num_decodes):
                 per_req_q.append(int(actual_seq_qlen[i]) - int(actual_seq_qlen[i - 1]))
             max_q = max(per_req_q)
+
+            # NPU FIA rejects BNSD/BSND + NZ 5D + paged attention when
+            # per-request query tokens S > 16 (prompt_flash_attention_tiling.cpp:5381).
+            # If any "decode" request exceeds this, it was misclassified; merge into
+            # the prefill path which uses TND layout (no NZ 5D constraint).
+            if max_q > 16:
+                attn_metadata.num_prefills += num_decodes
+                num_decode_tokens = 0
+                num_decodes = 0
+
+        if num_decode_tokens > 0:
             n_tokens = sum(per_req_q)
 
             q_lens_t = torch.tensor(per_req_q, dtype=torch.int64, device=query.device)
