@@ -160,7 +160,6 @@ jobs:
       - name: Install vllm-ascend
         env:
           SOC_VERSION: ${{ matrix.soc_version }}
-          MAX_JOBS: "16"
         run: |
           set -x
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
