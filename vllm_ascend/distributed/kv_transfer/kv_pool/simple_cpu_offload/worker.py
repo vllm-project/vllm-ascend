@@ -50,7 +50,6 @@ class SimpleCPUOffloadWorker:
         self._stored_block_stats: dict[
             tuple[int, str], tuple[float, float]
         ] = {}
-        self._load_stat_checks: dict[int, tuple[list[int], list[int]]] = {}
         self._load_stream_waited = False
 
     def register_kv_caches(
@@ -151,6 +150,7 @@ class SimpleCPUOffloadWorker:
             metadata.preempt_load_gpu_blocks,
             metadata.preempt_load_event,
             is_store=False,
+            sync=True,
         )
 
     def wait_for_layer_load(self) -> None:
@@ -167,13 +167,6 @@ class SimpleCPUOffloadWorker:
         """Synchronize all in-flight transfer events."""
         for event_idx, event in self._load_events:
             event.synchronize()
-            stat_check = self._load_stat_checks.pop(event_idx, None)
-            if stat_check is not None:
-                self._check_restored_block_stats(
-                    stat_check[0],
-                    stat_check[1],
-                    event_idx,
-                )
             self._load_hwm = event_idx
         self._load_events.clear()
         self._submitted_load_event_indices.clear()
@@ -187,13 +180,6 @@ class SimpleCPUOffloadWorker:
             event_idx, event = events[0]
             if not event.query():
                 break
-            stat_check = self._load_stat_checks.pop(event_idx, None)
-            if stat_check is not None:
-                self._check_restored_block_stats(
-                    stat_check[0],
-                    stat_check[1],
-                    event_idx,
-                )
             hwm = event_idx
             events.pop(0)
 
@@ -265,18 +251,17 @@ class SimpleCPUOffloadWorker:
             if is_store:
                 self._completed_store_events[event_idx] = 1
             else:
+                if self.verify_offload_transfers:
+                    self._check_restored_block_stats(
+                        src_block_ids,
+                        dst_block_ids,
+                        event_idx,
+                    )
                 self._load_hwm = max(self._load_hwm, event_idx)
-                self._pending_load_event_indices.discard(event_idx)
-                self._submitted_load_event_indices.discard(event_idx)
             return
 
         assert not is_store
         self._load_events.append((event_idx, event))
-        if self.verify_offload_transfers:
-            self._load_stat_checks[event_idx] = (
-                list(src_block_ids),
-                list(dst_block_ids),
-            )
 
     @staticmethod
     def _block_stats(block: torch.Tensor) -> tuple[float, float]:
