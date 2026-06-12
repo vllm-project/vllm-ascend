@@ -56,8 +56,8 @@ class PreemptedRequestState:
 class SimpleCPUOffloadScheduler:
     """Preserve preempted requests' KV blocks in CPU memory.
 
-    Full blocks with hashes share CPU blocks through BlockPool's cache map.
-    Partial blocks without hashes remain private to the preempted request.
+    When offload prefix caching is enabled, full hashed blocks share CPU
+    blocks. Otherwise every offloaded block is private to its request.
     """
 
     def __init__(
@@ -65,9 +65,11 @@ class SimpleCPUOffloadScheduler:
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
+        enable_offload_prefix_caching: bool = True,
     ):
         assert kv_cache_config is not None
         self.vllm_config = vllm_config
+        self.enable_offload_prefix_caching = enable_offload_prefix_caching
         self.cpu_kv_cache_config = self._derive_cpu_config(
             kv_cache_config, cpu_capacity_bytes
         )
@@ -79,9 +81,10 @@ class SimpleCPUOffloadScheduler:
 
         logger.info(
             "SimpleCPUOffloadScheduler: allocating %d CPU blocks "
-            "(%.2f GB) for recompute offload",
+            "(%.2f GB) for recompute offload, prefix caching=%s",
             self.num_cpu_blocks,
             cpu_capacity_bytes / (1024**3),
+            self.enable_offload_prefix_caching,
         )
 
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
@@ -94,7 +97,7 @@ class SimpleCPUOffloadScheduler:
                 vllm_config.scheduler_config.max_num_batched_tokens
             ),
             use_eagle=False,
-            enable_caching=True,
+            enable_caching=self.enable_offload_prefix_caching,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
@@ -204,6 +207,7 @@ class SimpleCPUOffloadScheduler:
 
         kv_cache_groups = self.cpu_kv_cache_config.kv_cache_groups
         group_gpu_blocks: list[list[KVCacheBlock]] = []
+        group_gpu_hashes: list[list[BlockHashWithGroupId | None]] = []
         missing_hashes: set[BlockHashWithGroupId] = set()
         num_unhashed = 0
 
@@ -218,8 +222,28 @@ class SimpleCPUOffloadScheduler:
                 for block_id in group_gpu_ids[:num_blocks]
             ]
             group_gpu_blocks.append(gpu_blocks)
-            for gpu_block in gpu_blocks:
-                block_hash = gpu_block.block_hash
+            effective_hashes: list[BlockHashWithGroupId | None] = []
+            for block_idx, block_id in enumerate(group_gpu_ids):
+                gpu_block = self._gpu_block_pool.blocks[block_id]
+                block_is_computed = (
+                    (block_idx + 1) * group_block_size <= num_computed_tokens
+                )
+                if not block_is_computed and gpu_block.block_hash is not None:
+                    # allocate_slots() may assign a hash using tokens planned
+                    # for this scheduling step. If the request is then
+                    # preempted before forward, that block does not contain the
+                    # hashed KV and must not remain in the GPU prefix cache.
+                    self._gpu_block_pool._maybe_evict_cached_block(gpu_block)
+                if block_idx >= num_blocks:
+                    continue
+
+                block_hash = (
+                    gpu_block.block_hash
+                    if block_is_computed
+                    and self.enable_offload_prefix_caching
+                    else None
+                )
+                effective_hashes.append(block_hash)
                 if block_hash is None:
                     num_unhashed += 1
                 elif (
@@ -230,6 +254,7 @@ class SimpleCPUOffloadScheduler:
                     and block_hash not in self._pending_hash_blocks
                 ):
                     missing_hashes.add(block_hash)
+            group_gpu_hashes.append(effective_hashes)
 
         num_needed = num_unhashed + len(missing_hashes)
         if not any(group_gpu_blocks):
@@ -250,10 +275,11 @@ class SimpleCPUOffloadScheduler:
         store_cpu_block_ids: list[int] = []
         waiting_for_store = False
 
-        for gpu_blocks in group_gpu_blocks:
+        for gpu_blocks, effective_hashes in zip(
+            group_gpu_blocks, group_gpu_hashes
+        ):
             group_cpu_ids: list[int] = []
-            for gpu_block in gpu_blocks:
-                block_hash = gpu_block.block_hash
+            for gpu_block, block_hash in zip(gpu_blocks, effective_hashes):
                 cpu_block = None
 
                 if block_hash is not None:

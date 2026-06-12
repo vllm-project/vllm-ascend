@@ -57,6 +57,14 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         cpu_capacity_bytes = int(
             extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES)
         )
+        enable_offload_prefix_caching = extra_config.get(
+            "enable_offload_prefix_caching", True
+        )
+        if not isinstance(enable_offload_prefix_caching, bool):
+            raise ValueError(
+                "enable_offload_prefix_caching must be a boolean, got "
+                f"{enable_offload_prefix_caching!r}"
+            )
         world_size = vllm_config.parallel_config.world_size
         cpu_capacity_per_rank = cpu_capacity_bytes // world_size
         if "cpu_bytes_to_use_per_rank" in extra_config:
@@ -75,10 +83,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
         logger.info(
             "SimpleCPUOffloadConnector: role=%s, per_rank=%.2f GB, "
-            "world_size=%d",
+            "world_size=%d, offload_prefix_caching=%s",
             role.name,
             cpu_capacity_per_rank / (1024**3),
             world_size,
+            enable_offload_prefix_caching,
         )
 
         if role == KVConnectorRole.SCHEDULER:
@@ -86,6 +95,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config,
                 kv_cache_config,
                 cpu_capacity_per_rank,
+                enable_offload_prefix_caching,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
