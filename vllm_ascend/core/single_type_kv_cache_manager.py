@@ -5,7 +5,11 @@ from collections.abc import Sequence
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (
+    BlockHashList,
+    BlockHashListWithBlockSize,
+    KVCacheBlock,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SingleTypeKVCacheManager,
@@ -19,8 +23,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
-
-from vllm_ascend.utils import vllm_version_is
 
 
 class CompressAttentionManager(FullAttentionManager):
@@ -172,8 +174,6 @@ class CompressAttentionManager(FullAttentionManager):
 
         if num_cached_blocks >= num_full_blocks:
             return
-        if vllm_version_is("0.21.0"):
-            return super().cache_blocks(request, num_tokens)
 
         self.block_pool.cache_full_blocks(
             request=request,
@@ -204,11 +204,13 @@ class CompressAttentionManager(FullAttentionManager):
         #     "CompressAttentionManager can only be used for compressor attention groups"
         # )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple([] for _ in range(len(kv_cache_group_ids)))
-        block_size = kv_cache_spec.block_size * kv_cache_spec.compress_ratio
+        block_size = kv_cache_spec.block_size
         if dcp_world_size * pcp_world_size > 1:
             block_size *= dcp_world_size * pcp_world_size
-        max_num_blocks = max_length // block_size
-        for block_hash in itertools.islice(block_hashes, max_num_blocks):
+        logical_block_size = block_size * kv_cache_spec.compress_ratio
+        logical_block_hashes = BlockHashListWithBlockSize(block_hashes, block_size, logical_block_size)
+        max_num_blocks = max_length // logical_block_size
+        for block_hash in itertools.islice(logical_block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
@@ -222,11 +224,9 @@ class CompressAttentionManager(FullAttentionManager):
             for computed in computed_blocks:
                 computed.pop()
 
-        # NOTE: Div the compress ratio when finding the longest cache hit token length.
-        alignment_tokens = cdiv(alignment_tokens, kv_cache_spec.compress_ratio)
         while (
-            block_size != alignment_tokens  # Faster for common case.
-            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+            logical_block_size != alignment_tokens  # Faster for common case.
+            and len(computed_blocks[0]) * logical_block_size % alignment_tokens != 0
         ):
             for computed in computed_blocks:
                 computed.pop()
