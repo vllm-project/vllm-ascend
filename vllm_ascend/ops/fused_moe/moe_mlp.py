@@ -352,6 +352,7 @@ def unquant_apply_mlp(
     group_list_type: int = 1,
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
+    swiglu_limit: int = 0,
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
@@ -371,8 +372,12 @@ def unquant_apply_mlp(
 
     if act_name == "swigluoai":
         num_experts, _, hidden_size = w1.shape
-        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
+        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size), limit=swiglu_limit)
     else:
+        if swiglu_limit > 0:
+            gate, up = gate_up_out.chunk(2, dim=-1)
+            gate.clamp_(max=swiglu_limit)
+            up.clamp_(min=-swiglu_limit, max=swiglu_limit)
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     if topk_scales is not None:
@@ -428,6 +433,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             group_list_type=group_list_type,
             topk_scales=topk_scales,
             need_trans=need_trans,
+            swiglu_limit=swiglu_limit,
         )
 
     assert w1_scale is not None and w2_scale is not None

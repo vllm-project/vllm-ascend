@@ -68,6 +68,7 @@ _vllm_mock_modules = [
     "vllm.distributed.parallel_state",
     "vllm.envs",
     "vllm.forward_context",
+    "vllm.logger",
     "vllm.model_executor",
     "vllm.model_executor.layers",
     "vllm.model_executor.layers.linear",

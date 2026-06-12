@@ -865,13 +865,15 @@ def rejection_random_sample_pytorch(
     global_token_indices = cu_start[:, None] + pos_indices
     global_token_indices = global_token_indices.clamp(0, draft_token_ids.shape[0] - 1)
     draft_tokens = draft_token_ids[global_token_indices]  # [batch_size, max_draft_len]
+    placeholder_mask = draft_tokens == PLACEHOLDER_TOKEN_ID
+    safe_draft_tokens = draft_tokens.masked_fill(placeholder_mask, 0)
 
     if IS_NGRAM:
         ones_cpu = torch.ones(1, pin_memory=True, dtype=torch.float32)
         draft_token_probs = ones_cpu.to(device, non_blocking=True).expand_as(draft_tokens)
     else:
         flat_indices = global_token_indices.flatten()
-        flat_draft_tokens = draft_tokens.flatten()
+        flat_draft_tokens = safe_draft_tokens.flatten()
         flat_draft_probs = draft_probs[flat_indices, flat_draft_tokens]
         draft_token_probs = flat_draft_probs.view(batch_size, max_draft_len)
 
@@ -896,7 +898,7 @@ def rejection_random_sample_pytorch(
         target_token_probs = target_token_probs_flat.view(batch_size, max_draft_len)
     else:
         flat_indices = global_token_indices.flatten()
-        flat_draft_tokens = draft_tokens.flatten()
+        flat_draft_tokens = safe_draft_tokens.flatten()
         flat_target_probs = target_probs[flat_indices, flat_draft_tokens]
         target_token_probs = flat_target_probs.view(batch_size, max_draft_len)
 
@@ -909,6 +911,7 @@ def rejection_random_sample_pytorch(
     acceptance_condition = (draft_token_probs > zero_threshold) & (
         target_token_probs / draft_token_probs >= uniform_token_probs
     )
+    acceptance_condition = acceptance_condition & (~placeholder_mask)
 
     first_rejection = (~acceptance_condition) & valid_mask
 
@@ -1073,8 +1076,9 @@ def sample_recovered_tokens_pytorch(
             prob = target_probs.clone()
             for i in range(num_tokens):
                 draft_id = draft_token_ids[i]
-                mask = target_indices[i] == draft_id
-                prob[i, mask] = 0
+                if draft_id != PLACEHOLDER_TOKEN_ID:
+                    mask = target_indices[i] == draft_id
+                    prob[i, mask] = 0
         else:
             # Gather draft probs at candidate indices
             flat_indices = target_indices.flatten()
@@ -1098,7 +1102,8 @@ def sample_recovered_tokens_pytorch(
             token_indices = torch.arange(num_tokens, device=device)
 
             modified_target_probs = target_probs.clone()
-            modified_target_probs[token_indices, draft_token_ids] = 0
+            valid_draft_mask = draft_token_ids != PLACEHOLDER_TOKEN_ID
+            modified_target_probs[token_indices[valid_draft_mask], draft_token_ids[valid_draft_mask]] = 0
             prob = modified_target_probs
 
         else:
@@ -1158,13 +1163,15 @@ def rejection_random_sample_block_verify_pytorch(
     global_token_indices = cu_start[:, None] + pos_indices
     global_token_indices = global_token_indices.clamp(0, draft_token_ids.shape[0] - 1)
     draft_tokens = draft_token_ids[global_token_indices]
+    placeholder_mask = draft_tokens == PLACEHOLDER_TOKEN_ID
+    safe_draft_tokens = draft_tokens.masked_fill(placeholder_mask, 0)
 
     if IS_NGRAM:
         ones_cpu = torch.ones(1, pin_memory=True, dtype=torch.float32)
         draft_token_probs = ones_cpu.to(device, non_blocking=True).expand_as(draft_tokens)
     else:
         flat_indices = global_token_indices.flatten()
-        flat_draft_tokens = draft_tokens.flatten()
+        flat_draft_tokens = safe_draft_tokens.flatten()
         flat_draft_probs = draft_probs[flat_indices, flat_draft_tokens]
         draft_token_probs = flat_draft_probs.view(batch_size, max_spec_len)
 
@@ -1189,7 +1196,7 @@ def rejection_random_sample_block_verify_pytorch(
         target_token_probs = target_token_probs_flat.view(batch_size, max_spec_len)
     else:
         flat_indices = global_token_indices.flatten()
-        flat_draft_tokens = draft_tokens.flatten()
+        flat_draft_tokens = safe_draft_tokens.flatten()
         flat_target_probs = target_probs[flat_indices, flat_draft_tokens]
         target_token_probs = flat_target_probs.view(batch_size, max_spec_len)
 
@@ -1201,7 +1208,7 @@ def rejection_random_sample_block_verify_pytorch(
     pi = torch.cumprod(pi, dim=-1)
     uniform_token_probs = torch.cumprod(uniform_token_probs, dim=-1)
     legal_mask = (draft_token_probs > 0) & (pi >= uniform_token_probs)
-    legal_mask = legal_mask & valid_mask
+    legal_mask = legal_mask & valid_mask & (~placeholder_mask)
 
     last_accept_pos = torch.where(
         legal_mask.any(dim=-1, keepdim=True),
@@ -1264,7 +1271,14 @@ def sample_recovered_tokens_blockwise_pytorch(
     if IS_NGRAM:
         draft_token_scalar_probs = torch.ones(num_tokens, device=device, dtype=torch.float32)
     else:
-        draft_token_scalar_probs = draft_probs[token_indices, draft_token_ids]
+        valid_draft_mask = draft_token_ids != PLACEHOLDER_TOKEN_ID
+        safe_draft_token_ids = draft_token_ids.masked_fill(~valid_draft_mask, 0)
+        draft_token_scalar_probs = draft_probs[token_indices, safe_draft_token_ids]
+        draft_token_scalar_probs = torch.where(
+            valid_draft_mask,
+            draft_token_scalar_probs,
+            torch.zeros_like(draft_token_scalar_probs),
+        )
 
     # Get target probability for each draft token
     if enable_reduce_sampling:
@@ -1279,7 +1293,14 @@ def sample_recovered_tokens_blockwise_pytorch(
             torch.tensor(0.0, device=device),
         ).sum(dim=1)  # [num_tokens]
     else:
-        target_token_scalar_probs = target_probs[token_indices, draft_token_ids]
+        valid_draft_mask = draft_token_ids != PLACEHOLDER_TOKEN_ID
+        safe_draft_token_ids = draft_token_ids.masked_fill(~valid_draft_mask, 0)
+        target_token_scalar_probs = target_probs[token_indices, safe_draft_token_ids]
+        target_token_scalar_probs = torch.where(
+            valid_draft_mask,
+            target_token_scalar_probs,
+            torch.zeros_like(target_token_scalar_probs),
+        )
 
     per_token_ratio = torch.where(
         draft_token_scalar_probs > 0,
@@ -1304,8 +1325,9 @@ def sample_recovered_tokens_blockwise_pytorch(
             prob = target_probs.clone()
             for i in range(num_tokens):
                 draft_id = draft_token_ids[i]
-                mask = target_indices[i] == draft_id
-                prob[i, mask] = 0
+                if draft_id != PLACEHOLDER_TOKEN_ID:
+                    mask = target_indices[i] == draft_id
+                    prob[i, mask] = 0
             residual = torch.clamp(p_i_expanded * prob, min=0.0)
         else:
             # Gather draft probs at candidate indices (same as sample_recovered_tokens_pytorch)
@@ -1325,7 +1347,8 @@ def sample_recovered_tokens_blockwise_pytorch(
         # normal mode
         if IS_NGRAM:
             modified_target = target_probs.clone()
-            modified_target[token_indices, draft_token_ids] = 0.0
+            valid_draft_mask = draft_token_ids != PLACEHOLDER_TOKEN_ID
+            modified_target[token_indices[valid_draft_mask], draft_token_ids[valid_draft_mask]] = 0.0
             residual = torch.clamp(p_i_expanded * modified_target, min=0.0)
         else:
             residual = torch.clamp(p_i_expanded * target_probs - draft_probs, min=0.0)
