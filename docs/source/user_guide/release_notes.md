@@ -113,7 +113,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 - **Python**: Python 3.12 is now officially supported and the default for all Docker images. Python 3.10 and 3.11 remain supported. [#9558](https://github.com/vllm-project/vllm-ascend/pull/9558)
 - **Upstream vLLM**: Upgraded from v0.20.2 to v0.21.0. [#9835](https://github.com/vllm-project/vllm-ascend/pull/9835)
 - **xlite**: Upgraded from `0.1.0rc9.dev210` to `0.1.0rc10.dev210`.
-- **CANN**: Remains at 9.0.0 (unchanged from v0.20.2rc1).
+- **CANN**: Remains at 9.0.0 (unchanged from v0.20.2rc1). **Note**: `FULL_AND_PIECEWISE` requires HDK 25.5.1+ / CANN 8.5.0+ for the stream-budget fix; older stacks are still limited by the legacy stream budget and may fall back to `PIECEWISE`.
 - **PyTorch / torch_npu**: 2.10.0 (unchanged from v0.20.2rc1).
 - **triton-ascend**: 3.2.1 (unchanged from v0.20.2rc1).
 - **Mooncake**: Upgraded from v0.3.8.post1 to v0.3.9. [#10339](https://github.com/vllm-project/vllm-ascend/pull/10339)
@@ -133,6 +133,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 
 ### Known Issues
 
+- **FULL_AND_PIECEWISE on older HDK/CANN**: HDK < 25.5.1 / CANN < 8.5.0 stacks still have the old stream-budget limitation, which may cause graph capture failures or fallback to `PIECEWISE` mode. Upgrade to HDK 25.5.1+ / CANN 8.5.0+ is recommended for full `FULL_AND_PIECEWISE` support.
 - GLM5/GLM5.1 W4A8 deployments have known issues in some advanced configurations. CANN 9.0 with MC2 can return inaccurate output, FlashComm can fail during model startup, and MTP weight loading can fail in 1P1D A3 deployments. [#9395](https://github.com/vllm-project/vllm-ascend/issues/9395) [#9658](https://github.com/vllm-project/vllm-ascend/issues/9658) [#9655](https://github.com/vllm-project/vllm-ascend/issues/9655)
 - GLM-5.1 deployments can hit `MoeDistributeDispatchV2`/NPU graph failures when Expert Parallel is used together with FULL graph mode. The reported workaround is to disable Expert Parallel for FULL graph mode, or use PIECEWISE/eager mode. [#9503](https://github.com/vllm-project/vllm-ascend/issues/9503)
 - 310P does not currently support `runner_type='pooling'`; starting pooling models on 310P raises `NotImplementedError`. [#9593](https://github.com/vllm-project/vllm-ascend/issues/9593)
