@@ -12,6 +12,7 @@
 #define DISPATCH_FFN_COMBINE_W4A8_KERNEL_HPP
 
 #include "kernel_operator.h"
+#include "dispatch_ffn_combine_w4_a8_base.h"
 
 #include "catlass/catlass.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
@@ -217,6 +218,7 @@ public:
     template <>
     CATLASS_DEVICE void operator()<AscendC::AIC>(Params const &params)
     {
+        MoeTracing(TRACE_POINT("dispatch-gmm1 aic", "B"));
 #ifdef SYNC_MODE
         AscendC::SyncAll<false>();
 #endif
@@ -225,16 +227,22 @@ public:
         AscendC::SyncAll<false>();
         AscendC::SyncAll<false>();
 #endif
+        MoeTracing(TRACE_POINT("dispatch-gmm1 aic", "E"));
+
+        MoeTracing(TRACE_POINT("dispatch-gmm2 aic", "B"));
         GMM2(params);
 #ifdef SYNC_MODE
         AscendC::SyncAll<false>();
 #endif
+        MoeTracing(TRACE_POINT("dispatch-gmm2 aic", "E"));
     }
 
     template <>
     CATLASS_DEVICE void operator()<AscendC::AIV>(Params const &params)
     {
+        MoeTracing(TRACE_POINT("dispatch-combine aiv", "B"));
         DispatchAndCombine(params);
+        MoeTracing(TRACE_POINT("dispatch-combine aiv", "E"));
     }
 
 private:
@@ -335,6 +343,7 @@ private:
         if (params.ptrXActiveMask == nullptr) {
             return;
         }
+        MoeTracing(TRACE_POINT("dispatch-phase aiv apply-mask", "B"));
         int32_t m = params.problemShape.m();
         int32_t topK = params.topK;
         int32_t expertNum = params.expertPerRank * params.EP;
@@ -372,6 +381,7 @@ private:
         AscendC::DataCopyPad(expertIdxGm[startIdx], tmpExpertIdx[0], {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0, 0});
 
         AscendC::SyncAll<true>();
+        MoeTracing(TRACE_POINT("dispatch-phase aiv apply-mask", "E"));
     }
 
     CATLASS_DEVICE void FetchAndPreprocessInt8ToInt4(uint64_t gmOffsetA, AscendC::GlobalTensor<float> dstScale,
@@ -509,6 +519,7 @@ private:
     void GetCumsumForMMAIV(AscendC::GlobalTensor<int32_t> &tokenPerExpert, AscendC::GlobalTensor<int32_t> &result,
                            uint32_t expertPerRank, uint32_t rankId, uint32_t EP)
     {
+        MoeTracing(TRACE_POINT("dispatch-phase aiv cumsum", "B"));
         int32_t expertPerRankAligned = (expertPerRank + 8 - 1) / 8 * 8;
         AscendC::LocalTensor<int32_t> tmpBuffer1 = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         AscendC::LocalTensor<int32_t> tmpResult =
@@ -533,11 +544,13 @@ private:
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
 
         AscendC::DataCopyPad(result, tmpBuffer1, {U16(EP), U16((expertPerRank) * sizeof(int32_t)), 0, 0});
+        MoeTracing(TRACE_POINT("dispatch-phase aiv cumsum", "E"));
     }
 
     CATLASS_DEVICE
     void GMM1(Params const &params)
     {
+        MoeTracing(TRACE_POINT("dispatch-gmm1 aic wait-cumsum", "B"));
         icache_preload(8);
         BlockScheduler blockScheduler;
         BlockMmad blockMmad(resource);
@@ -555,11 +568,15 @@ private:
         uint16_t syncgmmIdx = 0;
         AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx /
                                         CROSS_CORE_FLAG_MAX_SET_COUNT);  // Wait for AIV to finish cumsum for matmul
+        MoeTracing(TRACE_POINT("dispatch-gmm1 aic wait-cumsum", "E"));
 
+        MoeTracing(TRACE_POINT("dispatch-gmm1 aic init-scheduler", "B"));
         syncgmmIdx++;
         AscendC::GlobalTensor<ElementB> gmB1;
+        MoeTracing(TRACE_POINT("dispatch-gmm1 aic init-scheduler", "E"));
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
+            MoeTracing(TRACE_POINT("dispatch-gmm1 aic expert-matmul", "B"), 0, groupIdx);
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
 
             if (preCurrentmSum >= params.maxOutputSize) {
@@ -591,8 +608,10 @@ private:
 
             for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
                 for (; syncGroupIdx <= groupIdx; syncGroupIdx++) {
+                    MoeTracing(TRACE_POINT("dispatch-gmm1 aic group-wait", "B"), 0, groupIdx);
                     AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx / CROSS_CORE_FLAG_MAX_SET_COUNT);
                     syncgmmIdx++;
+                    MoeTracing(TRACE_POINT("dispatch-gmm1 aic group-wait", "E"), 0, groupIdx);
                 }
                 // Compute block location
                 GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
@@ -622,11 +641,13 @@ private:
 
             if (IsSyncTask(groupIdx, params.expertPerRank))
             {
+                MoeTracing(TRACE_POINT("dispatch-gmm1 aic sync-barrier", "B"), 0, groupIdx);
                 syncLoopIdx++;
                 if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
                     blockMmad.SynchronizeBlock();
                 }
                 blockMmad.Finalize(syncLoopIdx, SYNCFLAGC2V);
+                MoeTracing(TRACE_POINT("dispatch-gmm1 aic sync-barrier", "E"), 0, groupIdx);
             }
 
             preCurrentmSum += currentM / 2;
@@ -636,20 +657,25 @@ private:
             }
             gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
+            MoeTracing(TRACE_POINT("dispatch-gmm1 aic expert-matmul", "E"), 0, groupIdx);
         }
 
+        MoeTracing(TRACE_POINT("dispatch-gmm1 aic tail-sync", "B"));
         for (; syncGroupIdx < params.expertPerRank; syncGroupIdx++) {
             AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx / CROSS_CORE_FLAG_MAX_SET_COUNT);
             syncgmmIdx++;
         }
+        MoeTracing(TRACE_POINT("dispatch-gmm1 aic tail-sync", "E"));
     }
 
     CATLASS_DEVICE
     void GMM2(Params const &params)
     {
+        MoeTracing(TRACE_POINT("dispatch-gmm2 aic init-scheduler", "B"));
         icache_preload(8);
         BlockScheduler blockScheduler;
         BlockMmad blockMmad(resource);
+        MoeTracing(TRACE_POINT("dispatch-gmm2 aic init-scheduler", "E"));
 
         uint32_t n2 = params.problemShape.k();
         uint32_t k2 = params.problemShape.n() / 2;
@@ -666,6 +692,7 @@ private:
         int32_t syncLoopIdx = -1;
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
+            MoeTracing(TRACE_POINT("dispatch-gmm2 aic expert-matmul", "B"), 0, groupIdx);
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
             if (preCurrentmSum >= params.maxOutputSize) {
                 currentM = 0;
@@ -698,7 +725,9 @@ private:
             // Determine the starting loopIdx of the current core under the current groupIdx
             uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
             if(groupIdx == 0 || IsSyncTask(groupIdx - 1, params.expertPerRank)) {
+                MoeTracing(TRACE_POINT("dispatch-gmm2 aic wait-swiglu", "B"), 0, groupIdx);
                 AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGV2C);
+                MoeTracing(TRACE_POINT("dispatch-gmm2 aic wait-swiglu", "E"), 0, groupIdx);
             }
             for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
                 if (loopIdx + coreNum >= coreLoops) {
@@ -735,11 +764,14 @@ private:
             gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
 
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
+            MoeTracing(TRACE_POINT("dispatch-gmm2 aic expert-matmul", "E"), 0, groupIdx);
         }
+        MoeTracing(TRACE_POINT("dispatch-gmm2 aic finalize", "B"));
         if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
             blockMmad.SynchronizeBlock();
             blockMmad.Finalize(params.expertPerRank - 1, 0);
         }
+        MoeTracing(TRACE_POINT("dispatch-gmm2 aic finalize", "E"));
     }
 
     CATLASS_DEVICE
@@ -774,6 +806,7 @@ private:
     void CrossRankSyncAndlocalTokenPerExpertAllGatherAndGetSumPreRankV2(Params const &params,
                                                                         int64_t localTokenPerExpertOffset)
     {
+        MoeTracing(TRACE_POINT("dispatch-phase aiv allgather", "B"));
         uint32_t numPerCore = paddedExpertNumAligned;
         AscendC::LocalTensor<int32_t> tmpBuffer = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         AscendC::LocalTensor<int32_t> prevSumBuf = tmpBuffer[numPerCore];
@@ -849,6 +882,7 @@ private:
         }
 
         AscendC::SyncAll<true>();
+        MoeTracing(TRACE_POINT("dispatch-phase aiv allgather", "E"));
     }
 
     CATLASS_DEVICE
@@ -933,6 +967,7 @@ private:
 
         ApplyXActiveMask(params);
 
+        MoeTracing(TRACE_POINT("dispatch-phase aiv init-routing", "B"));
         //---initRouting------
         moe_init_routing_quant_v2<ElementD2>(
             reinterpret_cast<GM_ADDR>(params.ptrA), params.expertIdx, params.moeInitRoutingQuantV2Scale,
@@ -940,6 +975,7 @@ private:
             localTokenPerExpert, params.expertTokensBeforeCapacity, shmem() + peermemInfo.offsetPeerPerTokenScale,
             params.ptrWorkspace + expandedRowIdxOffset, &params.moeInitRoutingQuantV2TilingData,
             params.initRoutingQuantTilingKey);
+        MoeTracing(TRACE_POINT("dispatch-phase aiv init-routing", "E"));
         
         AscendC::SyncAll<true>();
 
@@ -973,6 +1009,7 @@ private:
         uint32_t dequantSumTemp = 0;
         icache_preload(8);
         for (int32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
+            MoeTracing(TRACE_POINT("dispatch-phase aiv fetch-preprocess", "B"), 0, groupIdx);
             // The ith core reads data from the ith rank's peermem
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
             for (int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
@@ -1017,6 +1054,7 @@ private:
                 nSyncSwiglu++;
                 dequantSum[nSyncSwiglu] = dequantSumTemp;
             }
+            MoeTracing(TRACE_POINT("dispatch-phase aiv fetch-preprocess", "E"), 0, groupIdx);
         }
 #ifdef SYNC_MODE
         AscendC::SyncAll<false>();
@@ -1043,6 +1081,7 @@ private:
 #endif
         for(int32_t syncIdx = 0; syncIdx < nSyncSwiglu; syncIdx++)
         {
+            MoeTracing(TRACE_POINT("dispatch-phase aiv swiglu-epilogue", "B"), 0, syncIdx);
             AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);
             AscendC::SyncAll<true>();
             uint32_t curRowNum = dequantSum[syncIdx+1] - dequantSum[syncIdx];
@@ -1064,6 +1103,7 @@ private:
             AscendC::SyncAll<true>();
             // Synchronization signal: SwiGLU notifies GMM2
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C);
+            MoeTracing(TRACE_POINT("dispatch-phase aiv swiglu-epilogue", "E"), 0, syncIdx);
         }
         blockEpilogue1.Finalize();
 #ifdef SYNC_MODE
@@ -1071,7 +1111,9 @@ private:
         AscendC::SyncAll<false>();
 #endif
 
+        MoeTracing(TRACE_POINT("combine-phase aiv epilogue2", "B"));
         CombineV2(params, blockEpilogue2);
+        MoeTracing(TRACE_POINT("combine-phase aiv epilogue2", "E"));
         AscendC::SyncAll<true>();
         ResetTokenPerExpert(params.EP * paddedExpertNumAligned);
         shmem.InitStatusTargetSum();

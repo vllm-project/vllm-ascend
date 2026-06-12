@@ -273,8 +273,83 @@ log_selected_ops
 
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
+
+  # TRACE_PREPROCESSOR_HOOK_START
+  # -----------------------------------------------------------------
+  # Run trace_preprocessor.py on op_kernel source directories BEFORE
+  # compilation to replace TRACE_POINT("label","B/E") with unique
+  # integer point_ids.  Sources are backed up to .preproc_bak first,
+  # then restored after build (no git dependency).
+  # Set TRACE_DISABLE=1 to skip this step.
+  # -----------------------------------------------------------------
+  _TRACE_PREPROCESSOR="${ROOT_DIR}/csrc/scripts/trace/trace_preprocessor.py"
+  _TRACE_PROCESSED_DIRS=()
+  if [[ -z "${TRACE_DISABLE:-}" ]] && [[ -f "${_TRACE_PREPROCESSOR}" ]]; then
+      _TRACE_PYTHON=""
+      for _py in python3 python; do
+          if command -v "${_py}" &>/dev/null; then
+              _TRACE_PYTHON="${_py}"
+              break
+          fi
+      done
+      if [[ -z "${_TRACE_PYTHON}" ]]; then
+          log "trace_preprocessor: WARNING — no python found, skip preprocessing (kernel will write point_id=0)"
+      else
+          _TRACE_BUILD_OUT="${ROOT_DIR}/csrc/trace_preprocess_out"
+          mkdir -p "${_TRACE_BUILD_OUT}"
+          for _op_kernel_dir in \
+              "${ROOT_DIR}/csrc/mc2/dispatch_ffn_combine/op_kernel" \
+              "${ROOT_DIR}/csrc/mc2/dispatch_ffn_combine_w4_a8/op_kernel"; do
+              if [[ -d "${_op_kernel_dir}" ]]; then
+                  _op_name=$(basename "$(dirname "${_op_kernel_dir}")")
+                  _out_subdir="${_TRACE_BUILD_OUT}/${_op_name}"
+                  mkdir -p "${_out_subdir}"
+                  _bak_dir="${_op_kernel_dir}.preproc_bak"
+                  log "trace_preprocessor: backing up ${_op_kernel_dir} -> ${_bak_dir}"
+                  rm -rf "${_bak_dir}"
+                  cp -r "${_op_kernel_dir}" "${_bak_dir}"
+                  log "trace_preprocessor: processing ${_op_kernel_dir} -> ${_out_subdir}"
+                  if ${_TRACE_PYTHON} "${_TRACE_PREPROCESSOR}" \
+                      "${_op_kernel_dir}" "${_out_subdir}" --modify; then
+                      log "trace_preprocessor: OK, point_map.json -> ${_out_subdir}/point_map.json"
+                      # Verify: count remaining TRACE_POINT calls (should be 0 after --modify).
+                      # Use TRACE_POINT\s*\(\s*" to match calls like TRACE_POINT("label","B")
+                      # but NOT the macro definition #define TRACE_POINT(label, event) 0
+                      # grep returns 1 on no-match; must tolerate with set -o pipefail
+                      _remaining=$(grep -r 'TRACE_POINT\s*(\s*"' "${_op_kernel_dir}" -l 2>/dev/null | wc -l) || _remaining=0
+                      if [[ "${_remaining}" -gt 0 ]]; then
+                          log "trace_preprocessor: ERROR — ${_remaining} files still contain TRACE_POINT after --modify!"
+                          log "trace_preprocessor: restoring backup and skipping this dir"
+                          rm -rf "${_op_kernel_dir}"
+                          mv "${_bak_dir}" "${_op_kernel_dir}"
+                      else
+                          log "trace_preprocessor: verified — 0 TRACE_POINT strings remaining in ${_op_kernel_dir}"
+                          _TRACE_PROCESSED_DIRS+=("${_op_kernel_dir}")
+                      fi
+                  else
+                      log "trace_preprocessor: WARNING — preprocessing failed, restoring backup"
+                      rm -rf "${_op_kernel_dir}"
+                      mv "${_bak_dir}" "${_op_kernel_dir}"
+                  fi
+              fi
+          done
+      fi
+  fi
+  # TRACE_PREPROCESSOR_HOOK_END
+
   bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
   log "build.sh finished"
+
+  # TRACE_PREPROCESSOR_HOOK_CLEANUP
+  # Restore op_kernel sources from .preproc_bak (no git dependency)
+  for _op_kernel_dir in "${_TRACE_PROCESSED_DIRS[@]}"; do
+      _bak_dir="${_op_kernel_dir}.preproc_bak"
+      if [[ -d "${_bak_dir}" ]]; then
+          log "trace_preprocessor cleanup: restoring ${_op_kernel_dir} from backup"
+          rm -rf "${_op_kernel_dir}"
+          mv "${_bak_dir}" "${_op_kernel_dir}"
+      fi
+  done
 
   custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
   log "custom_ops_install_dir=${custom_ops_install_dir}"

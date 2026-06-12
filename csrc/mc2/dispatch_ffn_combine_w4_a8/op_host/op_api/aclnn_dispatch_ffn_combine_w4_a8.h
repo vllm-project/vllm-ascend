@@ -27,6 +27,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnDispatchFFNCombineW4A8Ge
                                                                                         const aclTensor* probs, const aclTensor* xActiveMask,
                                                                                         const char* group, int64_t maxOutputSize, double swigluLimit,
                                                                                         const aclTensor* out, const aclTensor* expertTokenNums,
+                                                                                        const aclTensor* profilingDataOptional,
                                                                                         uint64_t* workspaceSize, aclOpExecutor** executor);
 
 

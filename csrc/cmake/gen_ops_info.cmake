@@ -27,6 +27,9 @@ function(kernel_src_copy)
       add_custom_target(${OP_NAME}_src_copy
         COMMAND ${CMAKE_COMMAND} -E make_directory ${KNCPY_DST_DIR}/${OP_NAME}
         COMMAND bash -c "find ${SRC_DIR} -mindepth 1 -maxdepth 1 -exec cp -r {} ${KNCPY_DST_DIR}/${OP_NAME} \\;"
+        # TRACE_PREPROCESSOR_HOOK_START
+        COMMAND bash -c "if [ -f ${CMAKE_SOURCE_DIR}/scripts/trace/trace_preprocessor.py ]; then ${ASCEND_PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/trace/trace_preprocessor.py ${KNCPY_DST_DIR}/${OP_NAME} ${KNCPY_DST_DIR}/${OP_NAME} --modify; else echo WARNING: trace_preprocessor.py missing, skip TRACE_POINT preprocessing; fi"
+        # TRACE_PREPROCESSOR_HOOK_END
         VERBATIM
       )
       add_dependencies(${KNCPY_TARGET} ${OP_NAME}_src_copy)

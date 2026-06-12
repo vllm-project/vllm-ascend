@@ -21,6 +21,7 @@ using namespace AscendC;
 #include "kernel_operator.h"
 
 #include "utils/moe_distribute_base.h"
+#include "dispatch_ffn_combine_w4_a8_base.h"
 
 #include "dispatch_ffn_combine_w4_a8_tiling.h"
 

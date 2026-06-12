@@ -236,8 +236,11 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     at::Tensor& out,
     at::Tensor& expert_token_nums,
     const c10::optional<at::Tensor> &x_active_mask,
+    const c10::optional<at::Tensor> &profiling_data,
     double swiglu_limit
 ) {
+    (void)x_active_mask;
+    (void)profiling_data;
     return {out, expert_token_nums};
 }
 

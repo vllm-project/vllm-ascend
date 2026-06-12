@@ -41,6 +41,7 @@ extern aclnnStatus aclnnInnerDispatchFFNCombineW4A8GetWorkspaceSize(const aclTen
                                                          const char* group, int64_t maxOutputSize,
                                                          bool transB, bool weightNz, double swigluLimit,
                                                          const aclTensor* out, const aclTensor* expertTokenNums,
+                                                         const aclTensor* profilingDataOptional,
                                                          uint64_t* workspaceSize, aclOpExecutor** executor);
 extern aclnnStatus aclnnInnerDispatchFFNCombineW4A8(void *workspace, uint64_t workspaceSize,
                                             aclOpExecutor *executor, aclrtStream stream);
@@ -54,6 +55,7 @@ aclnnStatus aclnnDispatchFFNCombineW4A8GetWorkspaceSize(const aclTensor* x, cons
                                                     const aclTensor* probs, const aclTensor* xActiveMask,
                                                     const char* group, int64_t maxOutputSize, double swigluLimit,
                                                     const aclTensor* out, const aclTensor* expertTokenNums,
+                                                    const aclTensor* profilingDataOptional,
                                                     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     bool transB = false;
@@ -64,7 +66,8 @@ aclnnStatus aclnnDispatchFFNCombineW4A8GetWorkspaceSize(const aclTensor* x, cons
                                                                     probs, xActiveMask,
                                                                     group, maxOutputSize, 
                                                                     transB, weightNz, swigluLimit,
-                                                                    out, expertTokenNums, workspaceSize, executor);
+                                                                    out, expertTokenNums, profilingDataOptional,
+                                                                    workspaceSize, executor);
     return ret;
 }
 

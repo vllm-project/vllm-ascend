@@ -26,6 +26,8 @@ add_ops_compile_options(
         -Werror
         -DHCCL_COMM
         -DCATLASS_ARCH=2201
+        -mllvm -cce-aicore-stack-size=0x9000
+        -mllvm -cce-aicore-function-stack-size=0x9000
         ${_DISPATCH_FFN_INC_OPTS}
 )
 

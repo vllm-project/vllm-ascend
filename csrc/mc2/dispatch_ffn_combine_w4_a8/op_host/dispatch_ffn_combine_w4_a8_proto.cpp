@@ -17,17 +17,24 @@
 
 using namespace ge;
 namespace ops {
-const size_t ATTR_GROUP = 0;
-const size_t ATTR_RANK_SIZE = 1;
-const size_t SUPPORT_DIM_SIZE = 2;
+constexpr uint32_t OUTPUT_PROFILING_DATA = 2;
+constexpr uint32_t MAX_INFER_GETBLOCKNUM_UB = 128;
+constexpr uint32_t MIX_AIC_1_2_SLOTS_PER_GROUP = 3;
+constexpr uint32_t MAX_PROFILING_CORE_SLOTS = MAX_INFER_GETBLOCKNUM_UB * MIX_AIC_1_2_SLOTS_PER_GROUP;
+constexpr uint32_t PROF_SIZE_PER_CORE_INFER = 2048;
 
 static ge::graphStatus InferShapeDispatchFFNCombineW4A8(gert::InferShapeContext* context) {
-  (void) context;
+  gert::Shape *profilingShape = context->GetOutputShape(OUTPUT_PROFILING_DATA);
+  if (profilingShape == nullptr) {
+    return ge::GRAPH_SUCCESS;
+  }
+  profilingShape->SetDimNum(1);
+  profilingShape->SetDim(0, MAX_PROFILING_CORE_SLOTS * PROF_SIZE_PER_CORE_INFER);
   return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus InferDataTypeDispatchFFNCombineW4A8(gert::InferDataTypeContext* context) {
-  (void) context;
+  context->SetOutputDataType(OUTPUT_PROFILING_DATA, ge::DT_INT64);
   return ge::GRAPH_SUCCESS;
 }
 

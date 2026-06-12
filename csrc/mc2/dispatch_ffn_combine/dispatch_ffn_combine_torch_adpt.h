@@ -32,6 +32,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     at::Tensor& out,
     at::Tensor& expert_token_nums,
     const c10::optional<at::Tensor>& x_active_mask,
+    const c10::optional<at::Tensor>& profiling_data,
     double swiglu_limit
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
@@ -68,7 +69,8 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  max_output_size,
                  swiglu_limit,
                  out,
-                 expert_token_nums);
+                 expert_token_nums,
+                 profiling_data);
     } else {
         EXEC_NPU_CMD(aclnnDispatchFFNCombineBF16,
                  x,
