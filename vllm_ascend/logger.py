@@ -198,4 +198,48 @@ def _patch_vllm_formatter() -> None:
     vllm_logger.addHandler = _patched_add_handler  # type: ignore[method-assign,assignment]
 
 
-_patch_vllm_formatter()
+def _should_configure_logging() -> bool:
+    """Determine if logging should be configured in the current process.
+    
+    Returns False for child processes (EngineCore) to avoid initialization failures.
+    """
+    import os
+    
+    # Skip configuration in child processes
+    if hasattr(os, 'getppid'):
+        try:
+            current_pid = os.getpid()
+            parent_pid = os.getppid()
+            
+            # In normal scenarios, the main process has ppid == 1 only in containers
+            # For child processes spawned by multiprocessing, ppid will be the parent's pid
+            # We skip configuration if we detect we're not in the main process
+            if parent_pid != 1 and current_pid != 1:
+                # Check if this is likely a child process by looking at process name
+                try:
+                    if hasattr(os, 'readlink'):
+                        # Linux: /proc/{pid}/comm
+                        proc_name = os.readlink(f'/proc/{current_pid}/comm')
+                        if 'worker' in proc_name.lower() or 'engine' in proc_name.lower():
+                            return False
+                    elif os.name == 'nt':
+                        # Windows: use wmic to get process name
+                        import subprocess
+                        result = subprocess.run(
+                            ['wmic', 'process', 'where', f'processid={current_pid}', 'get', 'name'],
+                            capture_output=True, text=True
+                        )
+                        if result.returncode == 0:
+                            proc_name = result.stdout.strip()
+                            if 'worker' in proc_name.lower() or 'engine' in proc_name.lower():
+                                return False
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    return True
+
+
+if _should_configure_logging():
+    _patch_vllm_formatter()
