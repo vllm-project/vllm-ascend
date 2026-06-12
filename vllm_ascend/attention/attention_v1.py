@@ -1421,6 +1421,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 return self._forward_c8_decode(query, attn_metadata, output, layer)
             elif attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
                 return self._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
+            elif attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
+                # MTP spec decode uses the same BNSD paged C8 path as regular decode
+                return self._forward_c8_decode(query, attn_metadata, output, layer)
             else:
                 return self._forward_c8_fused_infer_attention(
                     query,
