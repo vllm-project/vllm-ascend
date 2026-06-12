@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.21.0rc1 - 2026.06.04
+## v0.21.0rc1 - 2026.06.13
 
 We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the first release candidate for the v0.21.0 release line, building on v0.20.2rc1. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
 
@@ -36,6 +36,10 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 - Added Mooncake SSD offload with embedded client for large-scale KV cache storage. [#9731](https://github.com/vllm-project/vllm-ascend/pull/9731)
 - Re-added code start compilation caching for npugraph_ex (previously reverted), improving warmup time. [#9914](https://github.com/vllm-project/vllm-ascend/pull/9914)
 - Added ACL graph memory estimation before KV cache allocation to prevent OOM during graph capture. [#9865](https://github.com/vllm-project/vllm-ascend/pull/9865)
+- Added DeepSeek-V4 compressor block size [32,64,128] support to improve automatic prefix cache hit rate. [#10354](https://github.com/vllm-project/vllm-ascend/pull/10354)
+- Added batch_invariant_ops setup for reinforcement learning scenarios. [#10034](https://github.com/vllm-project/vllm-ascend/pull/10034)
+- Adapted load balance proxy example to shared scheduler workers. [#9645](https://github.com/vllm-project/vllm-ascend/pull/9645)
+- [310P] Added Qwen3.5 MTP and graph mode support. [#10309](https://github.com/vllm-project/vllm-ascend/pull/10309)
 
 ### Hardware and Operator Support
 
@@ -96,6 +100,13 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 - Fixed 310P Qwen3-Embedding and Qwen3-VL-Embedding run failures. [#9854](https://github.com/vllm-project/vllm-ascend/pull/9854)
 - Removed legacy capture-size pruning in `update_aclgraph_sizes`. [#9962](https://github.com/vllm-project/vllm-ascend/pull/9962)
 - Fixed `fused_gdn_gating` unavailability on Ascend A5 for Qwen3.5. [#10083](https://github.com/vllm-project/vllm-ascend/pull/10083)
+- Fixed DSA v1 W8A8 dynamic conflict in attention. [#9476](https://github.com/vllm-project/vllm-ascend/pull/9476)
+- Fixed DeepSeek-V4 compressed prefix lookup in prefix cache. [#10297](https://github.com/vllm-project/vllm-ascend/pull/10297)
+- Fixed GLM streaming tool call name preservation. [#10361](https://github.com/vllm-project/vllm-ascend/pull/10361)
+- Fixed GLM5.1-W8A8 MTP load weight error with vLLM v0.21.0. [#10317](https://github.com/vllm-project/vllm-ascend/pull/10317)
+- Moved DeepSeek V4 cache hooks into model, removing legacy patch environment variables. [#10327](https://github.com/vllm-project/vllm-ascend/pull/10327) [#10333](https://github.com/vllm-project/vllm-ascend/pull/10333)
+- Fixed FP32 MM encoder attention support. [#10200](https://github.com/vllm-project/vllm-ascend/pull/10200)
+- Aligned vllm-ascend with upstream vLLM unit test expectations. [#10146](https://github.com/vllm-project/vllm-ascend/pull/10146)
 
 ### Dependencies
 
@@ -105,7 +116,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 - **CANN**: Remains at 9.0.0 (unchanged from v0.20.2rc1).
 - **PyTorch / torch_npu**: 2.10.0 (unchanged from v0.20.2rc1).
 - **triton-ascend**: 3.2.1 (unchanged from v0.20.2rc1).
-- **Mooncake**: v0.3.8.post1 (unchanged from v0.20.2rc1).
+- **Mooncake**: Upgraded from v0.3.8.post1 to v0.3.9. [#10339](https://github.com/vllm-project/vllm-ascend/pull/10339)
 
 ### Breaking Changes and Migration Notes
 
