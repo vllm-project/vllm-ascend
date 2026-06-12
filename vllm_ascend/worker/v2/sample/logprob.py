@@ -17,16 +17,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from typing import TYPE_CHECKING
-
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 
 
 @triton.jit
@@ -88,47 +83,6 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
     return logprobs
 
 
-@triton.jit
-def _fill_logprob_token_ids_kernel(
-    out_token_ids_ptr,
-    out_token_ids_stride,
-    out_valid_mask_ptr,
-    out_valid_mask_stride,
-    sampled_token_ids_ptr,
-    topk_indices_ptr,
-    topk_indices_stride,
-    expanded_idx_mapping_ptr,
-    num_per_req_token_ids_ptr,
-    per_req_token_ids_ptr,
-    per_req_token_ids_stride,
-    NUM_TOPK: tl.constexpr,
-    PADDED_COLS: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-
-    sampled = tl.load(sampled_token_ids_ptr + batch_idx)
-    tl.store(out_token_ids_ptr + batch_idx * out_token_ids_stride, sampled)
-    tl.store(out_valid_mask_ptr + batch_idx * out_valid_mask_stride, 1)
-
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + batch_idx)
-    num_custom = tl.load(num_per_req_token_ids_ptr + req_state_idx)
-
-    col = tl.arange(0, PADDED_COLS)
-    tid_base = out_token_ids_ptr + batch_idx * out_token_ids_stride + 1
-    mask_base = out_valid_mask_ptr + batch_idx * out_valid_mask_stride + 1
-
-    if num_custom > 0:
-        src = per_req_token_ids_ptr + req_state_idx * per_req_token_ids_stride
-        valid = col < num_custom
-    else:
-        src = topk_indices_ptr + batch_idx * topk_indices_stride
-        valid = col < NUM_TOPK
-
-    tokens = tl.load(src + col, mask=valid, other=0).to(tl.int64)
-    tl.store(tid_base + col, tokens, mask=valid)
-    tl.store(mask_base + col, tl.full([PADDED_COLS], 1, tl.int1), mask=valid)
-
-
 @triton.jit(do_not_specialize=["batch_size", "rows_per_core"])
 def _ranks_kernel(
     output_ptr,
@@ -166,50 +120,18 @@ def compute_topk_logprobs(
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
     cu_num_logits: list[int] | None = None,
-    logprob_token_ids_state: "LogprobTokenIdsState | None" = None,
-    expanded_idx_mapping: torch.Tensor | None = None,
-    max_per_req_token_ids: int = 0,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
+    logprob_token_ids = sampled_token_ids.unsqueeze(-1)
+    if num_logprobs > 0:
+        topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
+        logprob_token_ids = torch.cat((sampled_token_ids.unsqueeze(-1), topk_indices), dim=1)
 
-    if max_per_req_token_ids == 0:
-        logprob_token_ids = sampled_token_ids.unsqueeze(-1)
-        if num_logprobs > 0:
-            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
-            logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
-        logprobs = compute_token_logprobs(logits, logprob_token_ids)
-    else:
-        assert logprob_token_ids_state is not None
-        assert expanded_idx_mapping is not None
-
-        if num_logprobs > 0:
-            topk_token_ids = torch.topk(logits, num_logprobs, dim=-1).indices
-            topk_token_ids = topk_token_ids.to(torch.int32)
-        else:
-            topk_token_ids = logprob_token_ids_state.token_ids.gpu
-
-        num_cols = max(num_logprobs, max_per_req_token_ids)
-        logprob_token_ids = sampled_token_ids.new_zeros((batch_size, 1 + num_cols))
-        valid_mask = torch.zeros_like(logprob_token_ids, dtype=torch.bool)
-        _fill_logprob_token_ids_kernel[(batch_size,)](
-            logprob_token_ids,
-            logprob_token_ids.stride(0),
-            valid_mask,
-            valid_mask.stride(0),
-            sampled_token_ids,
-            topk_token_ids,
-            topk_token_ids.stride(0),
-            expanded_idx_mapping,
-            logprob_token_ids_state.num_token_ids.gpu,
-            logprob_token_ids_state.token_ids.gpu,
-            logprob_token_ids_state.token_ids.gpu.stride(0),
-            NUM_TOPK=num_logprobs,
-            PADDED_COLS=triton.next_power_of_2(num_cols),
-            multibuffer=False,
-        )
-        logprobs = compute_token_logprobs(logits, logprob_token_ids)
-        logprobs = logprobs.masked_fill(~valid_mask, float("-inf"))
+    # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
+    # logprobs tensor. Instead, we only compute and return the logprobs of
+    # the topk + 1 tokens.
+    logprobs = compute_token_logprobs(logits, logprob_token_ids)
     token_ranks = torch.empty(
         batch_size,
         dtype=torch.int64,
