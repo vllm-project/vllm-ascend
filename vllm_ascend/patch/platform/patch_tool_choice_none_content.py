@@ -122,10 +122,8 @@ def _patched_delegating_parse_tool_calls(
     enable_auto_tools: bool,
 ):
     if content is None and _is_forced_tool_choice(request):
-        _set_no_forced_tool_call(request, True)
         return [], None
 
-    _set_no_forced_tool_call(request, False)
     return _original_delegating_parse_tool_calls(
         self,
         request,
