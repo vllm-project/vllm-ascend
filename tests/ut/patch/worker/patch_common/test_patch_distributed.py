@@ -390,14 +390,20 @@ def test_destroy_releases_all_acquired_keys_in_reverse_order(module_env):
 
     cpu_group = group.cpu_group
     shared_device_group = group.device_group
+    communicator = group.device_communicator
     acquired_keys = list(group._acquired_hccl_keys)
+
+    destroy_order = []
+    communicator.destroy.side_effect = lambda: destroy_order.append("communicator")
+    module_env.destroy_process_group.side_effect = lambda group: destroy_order.append(group)
 
     group.destroy()
     group.destroy()
 
     assert len(acquired_keys) == 2
     assert release_mock.call_args_list == [call(acquired_keys[1]), call(acquired_keys[0])]
-    assert module_env.destroy_process_group.call_args_list == [call(cpu_group), call(shared_device_group)]
+    assert module_env.destroy_process_group.call_args_list == [call(shared_device_group), call(cpu_group)]
+    assert destroy_order == ["communicator", shared_device_group, cpu_group]
     assert group.device_communicator is None
     assert group.mq_broadcaster is None
     assert not hasattr(group, "cpu_group")
@@ -492,8 +498,8 @@ def test_shared_hccl_group_is_destroyed_only_after_last_coordinator(module_env):
 
     assert module_env.destroy_process_group.call_args_list == [
         call(cpu_group_first),
-        call(cpu_group_second),
         call(shared_device_group),
+        call(cpu_group_second),
     ]
 
 
@@ -554,8 +560,8 @@ def test_destroy_cleans_up_fail_closed_hccl_device_group(module_env):
     group.destroy()
 
     assert module_env.destroy_process_group.call_args_list == [
-        call(cpu_group),
         call(device_group),
+        call(cpu_group),
     ]
     assert group._acquired_hccl_keys == []
     assert not hasattr(group, "cpu_group")
@@ -608,8 +614,8 @@ def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
     group.destroy()
 
     assert module_env.destroy_process_group.call_args_list == [
-        call(cpu_group),
         call(device_group),
+        call(cpu_group),
     ]
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")

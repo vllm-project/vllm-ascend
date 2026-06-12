@@ -189,6 +189,12 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
     def _release_hccl_resources(self) -> bool:
         destroyed = False
+        device_communicator = getattr(self, "device_communicator", None)
+        if device_communicator is not None:
+            device_communicator.destroy()
+            self.device_communicator = None
+            destroyed = True
+
         if hasattr(self, "_acquired_hccl_keys"):
             for hccl_key in reversed(self._acquired_hccl_keys):
                 _HCCL_PG_REGISTRY.release(hccl_key)
@@ -201,19 +207,11 @@ class GroupCoordinatorPatch(GroupCoordinator):
             self._unshared_hccl_groups = []
             destroyed = True
 
-        device_communicator = getattr(self, "device_communicator", None)
-        if device_communicator is not None:
-            device_communicator.destroy()
-            self.device_communicator = None
-            destroyed = True
         return destroyed
 
     def destroy(self):
-        cpu_group = getattr(self, "cpu_group", None)
-        if cpu_group is not None:
-            torch.distributed.destroy_process_group(cpu_group)
-        if hasattr(self, "cpu_group"):
-            del self.cpu_group
+        if getattr(self, "mq_broadcaster", None) is not None:
+            self.mq_broadcaster = None
 
         self._release_hccl_resources()
 
@@ -223,8 +221,11 @@ class GroupCoordinatorPatch(GroupCoordinator):
         if hasattr(self, "device_group"):
             del self.device_group
 
-        if getattr(self, "mq_broadcaster", None) is not None:
-            self.mq_broadcaster = None
+        cpu_group = getattr(self, "cpu_group", None)
+        if cpu_group is not None:
+            torch.distributed.destroy_process_group(cpu_group)
+        if hasattr(self, "cpu_group"):
+            del self.cpu_group
 
     def destroy_hccl(self) -> bool:
         """Release the HCCL process group."""
