@@ -114,6 +114,8 @@ jobs:
       cann_image: ${{ steps.export.outputs.cann_image }}
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
+      single_node: ${{ steps.set-matrix.outputs.single_node }}
+      multi_node: ${{ steps.set-matrix.outputs.multi_node }}
     steps:
       - id: export
         run: |
@@ -124,6 +126,33 @@ jobs:
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        uses: actions/checkout@v4 
+        with:
+          ref: ${{ inputs.vllm_ascend_branch }}
+
+      - name: Checkout PR code
+        if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.vllm_ascend_ref }}
+          sparse-checkout: .github/workflows/configs/
+          path: ./pr
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Read A2 test matrix config
+        id: set-matrix
+        env:
+          MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/nightly_config.yaml' || '.github/workflows/configs/nightly_config.yaml' }}
+          MATRIX_OUTPUTS: '{"single_node":"a2.single_node.test_config","multi_node":"a2.multi_node.test_config"}'
+        run: |
+          python3 -m pip install pyyaml -q
+          python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
   build-image:
     name: Build nightly-a2 image
@@ -144,7 +173,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, generate-a2-matrix]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -153,7 +182,7 @@ jobs:
       fail-fast: false
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.generate-a2-matrix.outputs.single_node) }}
+        test_config: ${{ fromJson(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
@@ -177,7 +206,7 @@ jobs:
 
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger, build-image, generate-a2-matrix, single-node-tests, single-node-accuracy-tests]
+    needs: [setup-vars, parse-trigger, build-image, single-node-tests, single-node-accuracy-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -187,7 +216,7 @@ jobs:
       max-parallel: 5
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.generate-a2-matrix.outputs.multi_node) }}
+        test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a2
@@ -227,6 +256,9 @@ jobs:
       nightly_matrix: ${{ steps.set-matrix.outputs.nightly_matrix }}
       pr_only_matrix: ${{ steps.set-matrix.outputs.pr_only_matrix }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
       - name: Checkout PR code
         if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
         uses: actions/checkout@v6
@@ -234,15 +266,20 @@ jobs:
           ref: ${{ inputs.vllm_ascend_ref }}
           sparse-checkout: .github/workflows/configs/
           path: ./pr
-      - name: Checkout repository
-        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Read accuracy group config
         id: set-matrix
         env:
           MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/nightly_config.yaml' || '.github/workflows/configs/nightly_config.yaml' }}
           MATRIX_OUTPUTS: '{"nightly_matrix":"a2.accuracy.nightly","pr_only_matrix":"a2.accuracy.pr_only"}'
-        run: python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
+        run: |
+          python3 -m pip install pyyaml -q
+          python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
   single-node-accuracy-tests:
     needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]

@@ -112,6 +112,10 @@ jobs:
     outputs:
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
+      multi_node: ${{ steps.set-matrix.outputs.multi_node }}
+      double_node: ${{ steps.set-matrix.outputs.double_node }}
+      single_node: ${{ steps.set-matrix.outputs.single_node }}
+      multi_card: ${{ steps.set-matrix.outputs.multi_card }}
     steps:
       - id: export
         run: |
@@ -121,6 +125,33 @@ jobs:
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.vllm_ascend_branch }}
+
+      - name: Checkout PR code
+        if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.vllm_ascend_ref }}
+          sparse-checkout: .github/workflows/configs/
+          path: ./pr
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Read A3 test matrix config
+        id: set-matrix
+        env:
+          MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/nightly_config.yaml' || '.github/workflows/configs/nightly_config.yaml' }}
+          MATRIX_OUTPUTS: '{"multi_node":"a3.multi_node.test_config","double_node":"a3.double_node.test_config","single_node":"a3.single_node.test_config","multi_card":"a3.multi_card.test_config"}'
+        run: |
+          python3 -m pip install pyyaml -q
+          python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
   build-image:
     name: Build nightly-a3 image
@@ -141,7 +172,7 @@ jobs:
 
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger, build-image, generate-a3-matrix]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -151,7 +182,7 @@ jobs:
       max-parallel: 1
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.generate-a3-matrix.outputs.multi_node) }}
+        test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -179,7 +210,7 @@ jobs:
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, parse-trigger, build-image, generate-a3-matrix, multi-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -189,7 +220,7 @@ jobs:
       max-parallel: 3
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.generate-a3-matrix.outputs.double_node) }}
+        test_config: ${{ fromJson(needs.setup-vars.outputs.double_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -217,7 +248,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, generate-a3-matrix, double-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -227,7 +258,7 @@ jobs:
       max-parallel: 7
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.generate-a3-matrix.outputs.single_node) }}
+        test_config: ${{ fromJson(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
@@ -246,7 +277,7 @@ jobs:
 
   multi-card-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, generate-a3-matrix, single-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, single-node-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -255,7 +286,7 @@ jobs:
       fail-fast: false
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.generate-a3-matrix.outputs.multi_card) }}
+        test_config: ${{ fromJson(needs.setup-vars.outputs.multi_card) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
