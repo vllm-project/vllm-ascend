@@ -51,6 +51,7 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
+#include "attention/fused_gdn_gating_v310/fused_gdn_gating_v310_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2152,6 +2153,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                   Tensor? num_accepted_tokens, "
         "                                   float scale_value=1.0) -> (Tensor output)");
     ops.impl("npu_recurrent_gated_delta_rule_310", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule_310);
+
+    ops.def(
+            "npu_fused_gdn_gating_310(Tensor a, "
+            "                         Tensor b, "
+            "                         Tensor A_log, "
+            "                         Tensor dt_bias, "
+            "                         float beta=1.0, "
+            "                         float threshold=20.0) -> (Tensor g, Tensor beta_output)");
+            
+        ops.impl("npu_fused_gdn_gating_310", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating_310);
+        
 }
 #else
 // Pybind on other platform
