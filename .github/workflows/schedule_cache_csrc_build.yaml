@@ -9,21 +9,15 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# WITHOUT WARRANTIES OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
 
-
 name: 'Cache csrc Build Directory'
+
 on:
-  push:
-    branches:
-      - main
-  schedule:
-    # UTC+8: 2am every day
-    - cron: '0 18 * * *'
   workflow_dispatch:
 
 defaults:
@@ -58,16 +52,22 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Generate build matrix from Dockerfiles
         id: generate
         run: |
-          pip install pyyaml
+          python -m pip install pyyaml
+
           if [[ "${{ github.event_name }}" == "push" ]]; then
-            matrix=$(python3 .github/workflows/scripts/generate_cache_matrix.py --branch-filter "${GITHUB_REF_NAME}")
+            matrix=$(python .github/workflows/scripts/generate_cache_matrix.py --branch-filter "${GITHUB_REF_NAME}")
           else
-            matrix=$(python3 .github/workflows/scripts/generate_cache_matrix.py)
+            matrix=$(python .github/workflows/scripts/generate_cache_matrix.py)
           fi
-          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------------
   # Job 2: build csrc cache for all branches × dockerfiles × archs
@@ -82,6 +82,7 @@ jobs:
 
     container:
       image: ${{ matrix.image }}
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v6
@@ -119,13 +120,13 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: matrix.os_type == 'openeuler'
         run: |
-          yum install -y gcc gcc-c++ cmake numactl-devel clang ninja-build
+          yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch
           pip install uv
 
-      - name: Get current cache hour
+      - name: Get current cache time
         id: get_cache_time
         run: |
-          cache_time=$(date -u +'%Y%m%d%H')
+          cache_time=$(date -u +'%Y%m%d%H%M%S')
           echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
 
       - name: Restore vllm-ascend csrc build cache
@@ -134,6 +135,7 @@ jobs:
         with:
           path: |
             csrc/build
+            csrc/third_party
           key: vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ steps.get_cache_time.outputs.cache_time }}
           restore-keys: |
             vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-
@@ -143,27 +145,32 @@ jobs:
           SOC_VERSION: ${{ matrix.soc_version }}
           MAX_JOBS: "16"
         run: |
+          set -x
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
+
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
-
-          if [ "${{ matrix.os_type }}" = "openeuler" ]; then
-            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
-          fi
-
           pip install uc-manager
           # NOTE: indexes (ascend repo for triton-ascend + pytorch cpu whl) come from
           # UV_EXTRA_INDEX_URL. Do not pass --extra-index-url on the CLI here: it overrides
           # (does not append to) the env var and would drop the ascend repo.
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          uv pip install -e .
-
+          if uv pip install -e . --no-build-isolation; then
+            echo "vllm-ascend installed successfully"
+          else
+            echo "Failed to install vllm-ascend with incremental build, falling back to clean build"
+            rm -rf csrc/build
+            rm -rf csrc/third_party
+            uv pip install -e . --no-build-isolation
+          fi
+          
       - name: Save vllm-ascend csrc build cache
         if: success() && steps.restore-csrc-build-cache.outputs.cache-hit != 'true'
         uses: runs-on/cache/save@v5
         with:
           path: |
             csrc/build
+            csrc/third_party
           key: vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ steps.get_cache_time.outputs.cache_time }}
