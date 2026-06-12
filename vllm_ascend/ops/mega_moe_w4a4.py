@@ -55,14 +55,16 @@ _TIK_DIR = os.environ.get("ASCEND_TIKCFW", f"{_CANN_HOME}/aarch64-linux/tikcpp/t
 # fused so no external Hadamard op is needed.
 _BUILD_DEFINES = [
     f"-DMEGA_HADAMARD_N={HADAMARD_BLOCK_SIZE}",
-    "-DMEGA_CUBE_HADAMARD",  # in-kernel block-diag Hadamard (Stage 0) -> self-contained
-    "-DMEGA_HADAMARD_KERNEL_SKIP",  # Stage-1 quant scale uses 1/sqrtN=1 (rotation done in Stage 0)
+    "-DMEGA_CUBE_HADAMARD",  # in-kernel block-diag Hadamard (Stage 1) -> self-contained
+    "-DMEGA_HADAMARD_KERNEL_SKIP",  # quant-stage scale uses 1/sqrtN=1 (rotation done by the Hadamard stage)
     "-DMEGA_OVERLAP",
     "-DMEGA_OVERLAP_SAFESYNC",  # cube/vector overlap schedule
-    "-DMEGA_S5_SCATTER",  # atomic-add unpermute/combine in Stage 5
-    "-DMEGA_S1_FAST",  # multi-row batched Stage 1 quant
+    # NOTE: the Sn build-flag digits are the kernel's internal stage index and do
+    # NOT track the doc's 1-based numbering; they are named by function below.
+    "-DMEGA_S5_SCATTER",  # atomic-add unpermute/combine (the combine stage)
+    "-DMEGA_S1_FAST",  # multi-row batched quant stage
     "-DMEGA_S3_DBUF",
-    "-DMEGA_S5_FP16",  # double-buffered Stage 3 / fp16 Stage 5
+    "-DMEGA_S5_FP16",  # double-buffered SwiGLU / fp16 combine
     "-DMEGA_S3_ROWPART",
     "-DMEGA_S5_ROWPART",  # skew-immune row partition
     "-DMEGA_SCALE_FOLD",  # fold the int4 *7 constant into the per-row divisor
@@ -141,7 +143,7 @@ def get_mega_moe_kernel():
 # Host-side orchestration for the fused kernel: weight repack (FRACTAL_NZ int4),
 # scale packing (uint64 for the cube FIXPIPE dequant), per-shape workspaces, the
 # routing permutation, and the launch. The kernel is the production hybrid build
-# (AscendC int4 cube + PTO vector, in-kernel Stage-0 Hadamard, fp16 cube dequant
+# (AscendC int4 cube + PTO vector, in-kernel Stage-1 Hadamard, fp16 cube dequant
 # folded into FIXPIPE for the gate_up/down matmuls), so the gate_up/down scratch
 # buffers are fp16 and both weight scales are uint64-packed.
 # ============================================================================
@@ -182,9 +184,9 @@ def routing_prep(topk_ids: torch.Tensor, num_experts: int):
     Returns ``(group_list, expanded_row_idx, sort_idx)``:
       * ``group_list`` [E] int64 — cumulative per-expert token counts.
       * ``expanded_row_idx`` [M] int32 — vendor convention; for original flat
-        index ``i`` it is the expanded slot token ``i`` landed at (Stage 5).
+        index ``i`` it is the expanded slot token ``i`` landed at (combine stage).
       * ``sort_idx`` [M] int32 — inverse: expanded slot -> original flat index
-        (Stage 1 reads ``x[sort_idx[m] // top_k]``).
+        (the quant stage reads ``x[sort_idx[m] // top_k]``).
 
     Done on fp32 so both argsorts stay on AICore (int sort falls back to AICpu).
     """
@@ -303,7 +305,7 @@ _B1_CACHE: dict = {}
 
 
 def _get_b1(device: torch.device, H: int) -> "ctypes.c_void_p":
-    """Stage-0 Hadamard weight: normalized 64x64 Walsh-Hadamard replicated H/64
+    """Stage-1 Hadamard weight: normalized 64x64 Walsh-Hadamard replicated H/64
     times, ``[H, 64]`` fp16. Generated at load (it's a fixed matrix, not stored
     in the checkpoint). The Sylvester matrix is symmetric, so it equals its own
     DN-transposed block."""
@@ -409,7 +411,7 @@ def mega_moe_forward(
     M_total = expanded_row_idx.shape[0]
 
     y, ws = _get_workspaces(device, M_total, T_orig, H, i_dim)
-    y[:T_orig].zero_()  # Stage 5 atomic-adds into pre-zeroed y
+    y[:T_orig].zero_()  # the combine stage atomic-adds into pre-zeroed y
 
     func = get_mega_moe_kernel()
     tgu_p, tdn_p = _get_tilings(device, H, i_dim, n_gu)

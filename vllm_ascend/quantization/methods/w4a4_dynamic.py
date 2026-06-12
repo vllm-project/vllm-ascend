@@ -17,7 +17,7 @@
 The routed experts are INT4 (per-output-channel symmetric), activations are
 INT4 dynamic per-token, and a block-diagonal Hadamard rotation -- baked into the
 ``gate_up`` weights offline at quantization time -- is applied online to the
-activations inside the kernel (Stage 0), so the two cancel. The whole expert
+activations inside the kernel (Stage 1), so the two cancel. The whole expert
 path (Hadamard -> quant+scatter -> gate_up -> SwiGLU+requant -> down ->
 combine) runs in a single launch; see ``vllm_ascend.ops.mega_moe_w4a4``.
 
@@ -64,7 +64,7 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW4A8DynamicFusedMoEMethod):
         freed -- only the mega kernel runs.
 
         The offline block-diagonal Hadamard is already baked into ``gate_up``;
-        the kernel's Stage-0 online Hadamard cancels it, so nothing is rotated
+        the kernel's Stage-1 online Hadamard cancels it, so nothing is rotated
         here.
         """
         # Loaded layout: w13_weight [E, 2I, H] int8, scale [E, 2I, 1];
