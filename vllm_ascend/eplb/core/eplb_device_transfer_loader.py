@@ -16,7 +16,6 @@
 #
 from enum import Enum
 
-import torch
 import torch.distributed as dist
 from vllm.logger import logger
 from vllm.v1.utils import record_function_or_nullcontext
@@ -56,12 +55,7 @@ class D2DExpertWeightLoader:
         self.comm_op_list = []
         for send_info in expert_send_info:
             dst_rank, global_expert_id_to_send = send_info
-            # Convert global expert ID to local slot index using the current
-            # (pre-update) expert map.  expert_param_per_layer is indexed by
-            # local slot index, not global expert ID.
-            local_expert_id = int(
-                self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send]
-            )
+            local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
                 self.comm_op_list.append(
                     dist.P2POp(dist.isend, src_tensor, self.comm_group.ranks[dst_rank], group=self.comm_group.device_group)
@@ -75,7 +69,7 @@ class D2DExpertWeightLoader:
                 )
             # Convert global expert ID to local slot index using the updated
             # (post-update) expert map.
-            local_expert_to_replace = int(self.updated_expert_map[global_expert_id_to_recv])
+            local_expert_to_replace = self.updated_expert_map[global_expert_id_to_recv].item()
             self.recv_expert_list.append((local_expert_to_replace, buffer_tensor_id))
 
         self.state = ExpertWeightUpdateState.READY
@@ -121,6 +115,9 @@ class D2DExpertWeightLoader:
             local_expert_to_replace, buffer_tensor_id = recv_expert_info
             self.eplb_adaptor.do_update_expert_weight(self.layer_id, local_expert_to_replace, buffer_tensor_id)
 
+        if self.layer_id == self.eplb_adaptor.num_moe_layers - 1:
+            logger.info("[EPLB] finished update expert weight.")
+            
         self.recv_expert_list = []
         self.updated_expert_map = None
         self.layer_id = -1
