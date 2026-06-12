@@ -270,7 +270,7 @@ class CompressAttentionManager(FullAttentionManager):
         self,
         request: Request,
         num_tokens: int,
-        retention_interval: int | None = None,
+        alignment_tokens: int | None = None,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -279,11 +279,8 @@ class CompressAttentionManager(FullAttentionManager):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
-            retention_interval: The sparse SWA-checkpoint retention knob
-                forwarded by the coordinator (vLLM PR #43447). Compressed MLA
-                groups do not honor retention, so this argument is accepted only
-                to keep a uniform ``cache_blocks`` signature across managers and
-                is otherwise ignored.
+            alignment_tokens: The cache-hit alignment used by upstream vLLM
+                main. v0.21.0 does not expose this argument in the base class.
         """
         compressed_tokens = num_tokens // self.compress_ratio
         # 0.20.2-style short-key convention: the key of the i-th compressed
