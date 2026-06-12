@@ -19,6 +19,10 @@ on:
         description: 'Quay username for pushing images'
         required: false
         type: string
+      quay_temp_username:
+        description: 'Quay username for pushing temp tag digests'
+        required: false
+        type: string
       workflow_dispatch_tag:
         description: 'The tag to use for workflow dispatch'
         required: false
@@ -41,6 +45,9 @@ on:
     secrets:
         QUAY_PASSWORD:
             description: 'Quay password for pushing images'
+            required: false
+        QUAY_TEMP_PASSWORD:
+            description: 'Quay password for pushing temp tag digests'
             required: false
 
 env:
@@ -186,7 +193,8 @@ jobs:
         cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}
         cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', env.CACHE_REPO, steps.cache-tag.outputs.value) || '' }}
 
-
+    # Quay.io automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
+    # Add temporary tags to digests to prevent them from being removed.
     - name: Tag digest to prevent GC
       if: ${{ inputs.should_push }}
       run: |
