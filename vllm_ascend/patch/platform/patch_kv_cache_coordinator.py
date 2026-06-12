@@ -52,7 +52,7 @@ def _validate_prefix_cache_retention_interval(
     alignment_tokens: int,
     kv_cache_config: KVCacheConfig,
 ) -> None:
-    """Validate VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL (vLLM PR #43447 (3)).
+    """Validate VLLM_PREFIX_CACHE_RETENTION_INTERVAL (vLLM PR #43447 (3)).
 
     No-op when unset. When set, the model must have at least one sliding-window
     KV cache group (otherwise retention has no effect), and the value must be a
@@ -62,13 +62,13 @@ def _validate_prefix_cache_retention_interval(
         return
     if not any(isinstance(g.kv_cache_spec, _SLIDING_WINDOW_SPECS) for g in kv_cache_config.kv_cache_groups):
         raise ValueError(
-            "VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL is set but this "
+            "VLLM_PREFIX_CACHE_RETENTION_INTERVAL is set but this "
             "model has no sliding-window KV cache group, so retention has no "
             "effect."
         )
     if retention_interval < 0 or retention_interval % alignment_tokens != 0:
         raise ValueError(
-            f"VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL ({retention_interval}) "
+            f"VLLM_PREFIX_CACHE_RETENTION_INTERVAL ({retention_interval}) "
             f"must be non-negative and a multiple of the cache-hit alignment "
             f"({alignment_tokens})."
         )
@@ -181,7 +181,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         # Prefix-cache SWA retention (vLLM PR #43447). None (env unset) keeps the
         # dense cache-all behavior byte-for-byte.
-        self.retention_interval = envs.VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL
+        self.retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
         _validate_prefix_cache_retention_interval(self.retention_interval, self.lcm_block_size, kv_cache_config)
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
