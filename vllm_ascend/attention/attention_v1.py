@@ -1586,80 +1586,51 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
         layer: AttentionLayer,
     ) -> torch.Tensor:
-        """C8 decode via FIA V1 BSH with native paged INT8 KV (NZ 5D).
+        """C8 decode: dequant paged INT8 KV to dense FP16, then FIA V1 TND.
 
-        NPU PFA tiling rejects NZ 5D key/value for BNSD/BSND/BNSD_BSND
-        when S > 16 (prompt_flash_attention_tiling.cpp:5381).  BSH layout
-        is not checked by that path, so we keep NZ 5D KV and let FIA
-        handle INT8→FP16 internally via antiquant scales.
+        NZ 5D format is rejected by NPU tiling when KV seq len > 16 with
+        BNSD + page attention (prompt_flash_attention_tiling.cpp:5381).
+        Dequant first, then use TND layout with dense KV to avoid this.
         """
-        _, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
-        assert block_size % 32 == 0, (
-            f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
-        )
         batch_size = len(attn_metadata.seq_lens_list)
+        kv_lens = attn_metadata.seq_lens_list
 
-        key = self._nz_5d_view(self.key_cache, block_size)
-        value = self._nz_5d_view(self.value_cache, block_size)
+        # Dequant paged INT8 KV to dense FP16
+        dense_k, dense_v = self._dequant_paged_kv_to_dense(
+            self.key_cache, self.value_cache,  # type: ignore[arg-type]
+            attn_metadata.block_tables,
+            kv_lens,
+            query.dtype,
+            layer,
+        )
 
-        # Compute per-request query lengths from TND cumulative format,
-        # then pad to uniform max_q layout for BSH reshape (B, S, H).
-        actual_seq_q = attn_metadata.actual_seq_lengths_q
-        per_req_q = [int(actual_seq_q[0])]
+        # Compute cumulative KV seq lengths for TND format
+        kv_total = sum(kv_lens)
+        actual_seq_kv = [int(kv_lens[0])]
         for i in range(1, batch_size):
-            per_req_q.append(int(actual_seq_q[i]) - int(actual_seq_q[i - 1]))
-        max_q = max(per_req_q)
-        n_tokens = sum(per_req_q)
+            actual_seq_kv.append(actual_seq_kv[-1] + int(kv_lens[i]))
 
-        q_lens_t = torch.tensor(per_req_q, dtype=torch.int64, device=query.device)
-        src_pos = torch.arange(n_tokens, dtype=torch.int64, device=query.device)
-        req_ids = torch.repeat_interleave(
-            torch.arange(batch_size, dtype=torch.int64, device=query.device), q_lens_t
-        )
-        cumsum = torch.cumsum(q_lens_t, dim=0)
-        offsets = src_pos - torch.repeat_interleave(cumsum - q_lens_t, q_lens_t)
-        dst_pos = req_ids * max_q + offsets
-
-        H = self.num_heads * self.head_size
-        padded = torch.zeros(
-            batch_size * max_q, H, dtype=query.dtype, device=query.device,
-        )
-        padded[dst_pos] = query[:n_tokens].view(n_tokens, H)
-        query_bsh = padded.reshape(batch_size, max_q, H)
-
-        # Perchannel antiquant scale for BSH layout: shape (H,) or (1, 1, H).
-        k_aq = layer._c8_k_aq_scale_nz_bnsd.view(1, self.num_kv_heads * self.head_size)
-        v_aq = layer._c8_v_aq_scale_nz_bnsd.view(1, self.num_kv_heads * self.head_size)
-
+        num_tokens = int(attn_metadata.actual_seq_lengths_q[-1])
         pre_tokens = self.sliding_window or SWA_INT_MAX
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-            query_bsh,
-            key,
-            value,
-            key_antiquant_scale=k_aq,
-            value_antiquant_scale=v_aq,
-            block_table=attn_metadata.block_tables,
-            actual_seq_lengths=per_req_q,
-            actual_seq_lengths_kv=attn_metadata.seq_lens_list,
+            query=query[:num_tokens],
+            key=dense_k[:kv_total],
+            value=dense_v[:kv_total],
             atten_mask=attn_metadata.attn_mask,
+            block_table=None,
+            input_layout="TND",
+            actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+            actual_seq_lengths_kv=actual_seq_kv,
             num_heads=self.num_heads,
             num_key_value_heads=self.num_kv_heads,
-            input_layout="BSH",
             scale=self.scale,
-            block_size=block_size,
-            antiquant_mode=0,
-            key_antiquant_mode=0,
-            value_antiquant_mode=0,
-            inner_precise=1,
             sparse_mode=3,
             pre_tokens=pre_tokens,
             next_tokens=next_tokens,
         )
-        # Unpad output: extract valid tokens per request
-        flat_out = attn_output.reshape(-1, H)
-        valid_out = flat_out[dst_pos].view(n_tokens, self.num_heads, self.head_size)
-        output[:n_tokens] = valid_out
+        output[:num_tokens] = attn_output.view(num_tokens, self.num_heads, self.head_size)
         return output
 
     def _forward_c8_chunked_prefill(
@@ -1671,13 +1642,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
         layer: AttentionLayer,
     ) -> torch.Tensor:
-        """C8 ChunkedPrefill: decode via FIA V1 BSH with native paged INT8
-        KV (NZ 5D), prefill via FIA V1 TND with float KV (new) or
-        gather+dequant (continuing).
-
-        BSH layout avoids the BNSD/BSND/BNSD_BSND dimension check at
-        prompt_flash_attention_tiling.cpp:5381 that rejects NZ 5D KV
-        when S > 16.
+        """C8 ChunkedPrefill: decode via dequant+TND (NZ 5D is rejected by
+        NPU tiling when BNSD+page attention and KV seq len > 16),
+        prefill via FIA V1 TND with float KV (new) or gather+dequant (continuing).
         """
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_decodes = attn_metadata.num_decodes
@@ -1685,73 +1652,48 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         num_tokens = int(actual_seq_qlen[-1])  # type: ignore[index]
 
         if num_decode_tokens > 0:
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
-            assert block_size % 32 == 0, (
-                f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
+            decode_kv_lens = attn_metadata.seq_lens_list[:num_decodes]
+
+            # Dequant paged INT8 KV to dense FP16 for decode requests
+            dense_k, dense_v = self._dequant_paged_kv_to_dense(
+                self.key_cache, self.value_cache,  # type: ignore[arg-type]
+                attn_metadata.block_tables[:num_decodes],
+                decode_kv_lens,
+                query.dtype,
+                layer,
             )
 
-            # NZ 5D KV (BSH layout avoids the BNSD/BSND/BNSD_BSND
-            # dimension check at prompt_flash_attention_tiling.cpp:5381).
-            kv_k = self._nz_5d_view(self.key_cache, block_size)
-            kv_v = self._nz_5d_view(self.value_cache, block_size)
+            # Cumulative KV seq lengths for TND format
+            kv_total = sum(decode_kv_lens)
+            actual_seq_kv = [int(decode_kv_lens[0])]
+            for i in range(1, num_decodes):
+                actual_seq_kv.append(actual_seq_kv[-1] + int(decode_kv_lens[i]))
 
-            # Compute per-request decode query lengths from TND cumulative,
-            # then pad to uniform max_q layout for BSH reshape (B, S, H).
+            # Per-request query lengths from TND cumulative
             per_req_q = [int(actual_seq_qlen[0])]
             for i in range(1, num_decodes):
                 per_req_q.append(int(actual_seq_qlen[i]) - int(actual_seq_qlen[i - 1]))
-            max_q = max(per_req_q)
             n_decode_q = sum(per_req_q)
-
-            q_lens_t = torch.tensor(per_req_q, dtype=torch.int64, device=query.device)
-            src_pos = torch.arange(n_decode_q, dtype=torch.int64, device=query.device)
-            req_ids = torch.repeat_interleave(
-                torch.arange(num_decodes, dtype=torch.int64, device=query.device), q_lens_t
-            )
-            cumsum = torch.cumsum(q_lens_t, dim=0)
-            offsets = src_pos - torch.repeat_interleave(cumsum - q_lens_t, q_lens_t)
-            dst_pos = req_ids * max_q + offsets
-
-            H = self.num_heads * self.head_size
-            padded = torch.zeros(
-                num_decodes * max_q, H, dtype=query.dtype, device=query.device,
-            )
-            padded[dst_pos] = query[:n_decode_q].view(n_decode_q, H)
-            query_bsh = padded.reshape(num_decodes, max_q, H)
-
-            # Perchannel antiquant scale for BSH layout: shape (H,) or (1, 1, H).
-            k_aq = layer._c8_k_aq_scale_nz_bnsd.view(1, self.num_kv_heads * self.head_size)
-            v_aq = layer._c8_v_aq_scale_nz_bnsd.view(1, self.num_kv_heads * self.head_size)
 
             pre_tokens = self.sliding_window or SWA_INT_MAX
             next_tokens = 0 if self.sliding_window else SWA_INT_MAX
             attn_out, _ = torch_npu.npu_fused_infer_attention_score(
-                query_bsh,
-                kv_k,
-                kv_v,
-                key_antiquant_scale=k_aq,
-                value_antiquant_scale=v_aq,
-                block_table=attn_metadata.block_tables[:num_decodes],
-                actual_seq_lengths=per_req_q,
-                actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
+                query=query[:n_decode_q],
+                key=dense_k[:kv_total],
+                value=dense_v[:kv_total],
                 atten_mask=attn_metadata.attn_mask,
+                block_table=None,
+                input_layout="TND",
+                actual_seq_lengths=[int(actual_seq_qlen[i]) for i in range(num_decodes)],
+                actual_seq_lengths_kv=actual_seq_kv,
                 num_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
-                input_layout="BSH",
                 scale=self.scale,
-                block_size=block_size,
-                antiquant_mode=0,
-                key_antiquant_mode=0,
-                value_antiquant_mode=0,
-                inner_precise=1,
                 sparse_mode=3,
                 pre_tokens=pre_tokens,
                 next_tokens=next_tokens,
             )
-            # Unpad output: extract valid tokens per request
-            flat_out = attn_out.reshape(-1, H)
-            valid_out = flat_out[dst_pos].view(n_decode_q, self.num_heads, self.head_size)
-            output[:n_decode_q] = valid_out
+            output[:n_decode_q] = attn_out.view(n_decode_q, self.num_heads, self.head_size)
 
         if attn_metadata.num_prefills > 0:
             prefill_q = query[num_decode_tokens:num_tokens]
