@@ -165,7 +165,7 @@ jobs:
           set -x
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
-           "Environment variables initialized"
+          echo "Environment variables initialized"
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
           echo "start installing requirements at $(date -u +'%Y-%m-%d %H:%M:%S')"
