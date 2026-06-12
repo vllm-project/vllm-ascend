@@ -170,6 +170,36 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         self.use_eagle = use_eagle
 
+        # Expose the cache-hit alignment + EAGLE flag on each manager so the SWA
+        # retention mask (vLLM PR #43447) can compute reachable blocks. One-time,
+        # zero hot-path cost. ``lcm_block_size`` is the logical/compressed hit
+        # alignment computed in verify_and_split_kv_cache_groups().
+        for i, manager in enumerate(self.single_type_managers):
+            manager.use_eagle = i in self.eagle_group_ids
+            manager.scheduler_block_size = self.lcm_block_size
+
+        # Prefix-cache SWA retention (vLLM PR #43447). None (env unset) keeps the
+        # dense cache-all behavior byte-for-byte.
+        self.retention_interval = envs.VLLM_ASCEND_PREFIX_CACHE_RETENTION_INTERVAL
+        _validate_prefix_cache_retention_interval(self.retention_interval, self.lcm_block_size, kv_cache_config)
+
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        """Cache blocks for the request, forwarding the SWA retention knob.
+
+        SWA managers accept ``retention_interval``; other managers (compress /
+        full-attention) accept it only to keep a uniform signature and ignore it.
+        We dispatch on ``isinstance(..., SlidingWindowManager)`` rather than
+        signature reflection to avoid per-request overhead.
+        """
+        for manager in self.single_type_managers:
+            if isinstance(manager, SlidingWindowManager):
+                manager.cache_blocks(
+                    request,
+                    num_computed_tokens,
+                    retention_interval=self.retention_interval,
+                )
+            else:
+                manager.cache_blocks(request, num_computed_tokens)
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
