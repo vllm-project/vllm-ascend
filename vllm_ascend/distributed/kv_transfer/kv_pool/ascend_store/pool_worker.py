@@ -190,8 +190,17 @@ class KVPoolWorker:
                 )
             )
 
+        kv_cache_groups = (
+            list(self.kv_cache_config.kv_cache_groups) if self.kv_cache_config is not None and self.use_hybrid else None
+        )
         self.token_database = ChunkedTokenDatabase(
-            self.metadata, self.grouped_block_size, partitions, self.use_hybrid, self.hash_block_size
+            self.metadata,
+            self.grouped_block_size,
+            partitions,
+            self.use_hybrid,
+            self.hash_block_size,
+            kv_cache_groups=kv_cache_groups,
+            alignment_tokens=self.cache_transfer_granularity,
         )
 
         backend = backend_map.get(self.backend.lower())
@@ -511,6 +520,11 @@ class KVPoolWorker:
                     for group_id in load_group_ids:
                         block_ids = request.block_ids_by_group[group_id]
                         group_block_size = self.grouped_block_size[group_id]
+                        load_mask = self.token_database.load_mask(
+                            request.block_hashes,
+                            token_len,
+                            group_id,
+                        )
                         mask_num = request.load_spec.vllm_cached_tokens // group_block_size * group_block_size
                         skip_null = (
                             group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
@@ -523,6 +537,8 @@ class KVPoolWorker:
                             kv_cache_group_id=group_id,
                             skip_null_blocks=skip_null,
                         ):
+                            if not self.token_database.mask_allows_chunk(load_mask, group_id, start):
+                                continue
                             addr, size, block_id = self.token_database.prepare_value(
                                 start,
                                 end,
