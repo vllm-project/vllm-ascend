@@ -237,6 +237,37 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
+# ** 10b. File: platform/patch_prefix_cache_core.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_manager.KVCacheManager.__init__`
+#      (forward `scheduler_block_size`)
+#   2. `vllm.v1.core.sched.scheduler.Scheduler.__init__`
+#      (pass `scheduler_block_size=self.block_size`)
+#   3. `vllm.v1.core.block_pool.BlockPool._maybe_evict_cached_block`
+#      (clean up DSv4 partial-prefix cache entries on eviction)
+#   4. `vllm.v1.core.sched.scheduler.Scheduler.schedule`
+#      (forward per-request KV copy block ids to the scheduler output)
+#    Why:
+#       The DeepSeek V4 partial compressed prefix-cache coordinator patch needs
+#       the scheduler's cache-hit granularity (`scheduler_block_size`) to align
+#       short-prefix hits, needs partial-prefix cache entries reclaimed when the
+#       backing block is evicted, and needs the per-request KV copy block ids it
+#       records to reach `SchedulerOutput.new_block_ids_to_copy`. Older supported
+#       vLLM versions do not thread `scheduler_block_size` natively and have no
+#       hook for the partial-cache cleanup / copy-block forwarding.
+#    How:
+#       Monkey-patch the four hooks above. Each patch is guarded by
+#       capability/source checks so it is skipped once the underlying vLLM
+#       already provides the upstream behavior (e.g. once `scheduler_block_size`
+#       is threaded natively).
+#    Related PR (if no, explain why):
+#       DSv4 partial compressed prefix-cache hits (vLLM-Ascend feature). No
+#       single upstream PR; tracks the DSv4 coordinator patch.
+#    Future Plan:
+#       Remove this patch once the supported vLLM version threads
+#       `scheduler_block_size` natively and exposes hooks for partial-prefix
+#       cache cleanup and KV copy-block forwarding.
+#
 # ** 10. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
