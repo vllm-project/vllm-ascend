@@ -79,6 +79,10 @@ GET_KV_CACHE_CHECKSUM_MSG = b"get_kv_cache_checksum_msg"
 DFX_CHECKSUM_RECV_TIMEOUT = 60.0
 
 
+def select_kv_caches_by_layer_names(kv_caches: dict[str, Any], layer_names: list[str]) -> dict[str, Any]:
+    return {layer_name: kv_caches[layer_name] for layer_name in layer_names if layer_name in kv_caches}
+
+
 class RemotePortInfo(TypedDict):
     num: int
     host: str
@@ -294,9 +298,15 @@ class KVCacheSendingThread(threading.Thread):
                     sock.send_multipart((identity, b"", encoded_data))
                 elif msg[0] == GET_KV_CACHE_CHECKSUM_MSG:
                     checksum_request = msg[1]
+                    layer_names = checksum_request.get("layer_names", [])
+                    kv_caches = (
+                        select_kv_caches_by_layer_names(self.kv_caches, layer_names)
+                        if layer_names
+                        else self.kv_caches
+                    )
                     try:
                         checksum = compute_kv_cache_checksum(
-                            kv_caches=self.kv_caches,
+                            kv_caches=kv_caches,
                             block_groups=checksum_request["block_groups"],
                             tp_num_need_pulls=checksum_request.get("tp_num_need_pulls", 1),
                             inner_offset=checksum_request.get("inner_offset", 0),
@@ -359,6 +369,7 @@ class KVCacheRecvingThread(threading.Thread):
         has_mamba,
         hma_group_size,
         _is_mamba_group,
+        group_layer_names: list[list[str]],
         ready_event: threading.Event,
         vllm_config: VllmConfig,
         kv_caches: dict[str, Any],
@@ -381,6 +392,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.hma_group_size = hma_group_size
         self.mamba_ssm_size = mamba_ssm_size
         self._is_mamba_group = _is_mamba_group
+        self.group_layer_names = group_layer_names
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
@@ -558,13 +570,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
-        checksum_enabled = (
-            is_mooncake_transfer_dfx_enabled()
-            and self.hma_group_size == 1
-            and not self._is_mamba_group[0]
-        )
-        checksum_source_block_groups: list[list[int]] = []
-        checksum_target_block_groups: list[list[int]] = []
+        checksum_groups: list[dict[str, Any]] = []
         for i in range(self.hma_group_size):
             if not self._is_mamba_group[i]:
                 grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
@@ -574,9 +580,19 @@ class KVCacheRecvingThread(threading.Thread):
                 transfer_block_idx = len(remote_block_ids[i]) - self.num_speculative_tokens - 1
                 grouped_remote_block_ids = [[remote_block_ids[i][transfer_block_idx]]]
                 grouped_local_block_ids = [[local_block_ids[i][0]]]
-            if checksum_enabled:
-                checksum_source_block_groups = grouped_remote_block_ids
-                checksum_target_block_groups = grouped_local_block_ids
+            if is_mooncake_transfer_dfx_enabled():
+                layer_names = self.group_layer_names[i] if i < len(self.group_layer_names) else []
+                selected_kv_caches = select_kv_caches_by_layer_names(self.kv_caches, layer_names)
+                if selected_kv_caches and grouped_remote_block_ids and grouped_local_block_ids:
+                    checksum_groups.append(
+                        {
+                            "group_idx": i,
+                            "group_is_mamba": self._is_mamba_group[i],
+                            "layer_names": layer_names,
+                            "source_block_groups": grouped_remote_block_ids,
+                            "target_block_groups": grouped_local_block_ids,
+                        }
+                    )
 
             for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
                 zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)
@@ -590,19 +606,17 @@ class KVCacheRecvingThread(threading.Thread):
                     dst_list.append(dst)
                     length_list.append(length)
 
-        source_checksum = None
-        if checksum_enabled:
-            source_checksum = self._get_remote_kv_cache_checksum(
+        for checksum_group in checksum_groups:
+            checksum_group["source_checksum"] = self._get_remote_kv_cache_checksum(
                 remote_host,
                 remote_handshake_port,
                 {
                     "request_id": req_meta["request_id"],
                     "remote_request_id": remote_request_id,
-                    "block_groups": checksum_source_block_groups,
+                    "block_groups": checksum_group["source_block_groups"],
+                    "layer_names": checksum_group["layer_names"],
                     "tp_num_need_pulls": 1,
                     "inner_offset": 0,
-                    "cache_start": 0,
-                    "cache_end": None,
                 },
             )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
@@ -610,16 +624,18 @@ class KVCacheRecvingThread(threading.Thread):
             logger.error("Mooncake transfer failed for request %s", req_meta["remote_request_id"])
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
-        if checksum_enabled:
+        for checksum_group in checksum_groups:
             try:
+                group_kv_caches = select_kv_caches_by_layer_names(self.kv_caches, checksum_group["layer_names"])
                 target_checksum = compute_kv_cache_checksum(
-                    kv_caches=self.kv_caches,
-                    block_groups=checksum_target_block_groups,
+                    kv_caches=group_kv_caches,
+                    block_groups=checksum_group["target_block_groups"],
                 )
             except Exception as err:
                 logger.exception(
-                    "Failed to compute Mooncake target KV checksum for request %s: %s",
+                    "Failed to compute Mooncake target KV checksum for request %s group %s: %s",
                     remote_request_id,
+                    checksum_group["group_idx"],
                     err,
                 )
                 target_checksum = {"error": str(err)}
@@ -627,12 +643,17 @@ class KVCacheRecvingThread(threading.Thread):
                 request_id=req_meta["request_id"],
                 remote_request_id=remote_request_id,
                 role="kv_consumer",
-                source_checksum=source_checksum,
+                source_checksum=checksum_group["source_checksum"],
                 target_checksum=target_checksum,
                 extra={
                     "path": "_transfer_kv_cache_all_groups",
                     "session_id": session_id,
                     "num_local_blocks": num_local_blocks,
+                    "group_idx": checksum_group["group_idx"],
+                    "group_is_mamba": checksum_group["group_is_mamba"],
+                    "layer_names": checksum_group["layer_names"],
+                    "source_block_groups": checksum_group["source_block_groups"],
+                    "target_block_groups": checksum_group["target_block_groups"],
                 },
             )
 
@@ -1440,6 +1461,7 @@ class MooncakeConnectorWorker:
             layer: group.kv_cache_spec for group in kv_cache_config.kv_cache_groups for layer in group.layer_names
         }
         self.hma_group_size = len(kv_cache_config.kv_cache_groups)
+        self.group_layer_names = [list(group.layer_names) for group in kv_cache_config.kv_cache_groups]
 
         # Mamba metadata
         self._is_mamba_group = [isinstance(group.kv_cache_spec, MambaSpec) for group in kv_cache_config.kv_cache_groups]
@@ -1642,6 +1664,7 @@ class MooncakeConnectorWorker:
                 self._has_mamba,
                 self.hma_group_size,
                 self._is_mamba_group,
+                self.group_layer_names,
                 ready_event,
                 self.vllm_config,
                 self.kv_caches,
