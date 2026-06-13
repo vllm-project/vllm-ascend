@@ -15,6 +15,7 @@ from vllm.v1.core.sched.output import NewRequestData
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
+_CACHE_MISSING = object()
 
 
 # Parameters related to the key
@@ -148,27 +149,40 @@ def _unwrap_spec(kv_cache_spec: Any) -> Any:
 def _get_manager_class_for_spec(spec: Any) -> Any | None:
     compress_ratio = getattr(spec, "compress_ratio", None)
     if compress_ratio is not None and compress_ratio > 1:
+        compress_manager = getattr(_get_manager_class_for_spec, "_compress_manager", _CACHE_MISSING)
+        if compress_manager is _CACHE_MISSING:
+            try:
+                from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
+            except ImportError:
+                compress_manager = None
+            else:
+                compress_manager = CompressAttentionManager
+            _get_manager_class_for_spec._compress_manager = compress_manager
+        if compress_manager is not None:
+            return compress_manager
+
+    registry = getattr(_get_manager_class_for_spec, "_registry", _CACHE_MISSING)
+    if registry is _CACHE_MISSING:
         try:
-            from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
-
-            return CompressAttentionManager
+            registry_module = importlib.import_module("vllm.v1.kv_cache_spec_registry")
+            registry = getattr(registry_module, "KVCacheSpecRegistry", None)
         except ImportError:
-            pass
-
-    try:
-        registry_module = importlib.import_module("vllm.v1.kv_cache_spec_registry")
-        registry = getattr(registry_module, "KVCacheSpecRegistry", None)
-    except ImportError:
-        registry = None
+            registry = None
+        _get_manager_class_for_spec._registry = registry
     if registry is not None:
         manager_cls = registry.get_manager_class(spec)
         if manager_cls is not None:
             return manager_cls
 
-    try:
-        manager_module = importlib.import_module("vllm.v1.core.single_type_kv_cache_manager")
-        spec_manager_map = getattr(manager_module, "spec_manager_map", {})
-    except ImportError:
+    spec_manager_map = getattr(_get_manager_class_for_spec, "_spec_manager_map", _CACHE_MISSING)
+    if spec_manager_map is _CACHE_MISSING:
+        try:
+            manager_module = importlib.import_module("vllm.v1.core.single_type_kv_cache_manager")
+            spec_manager_map = getattr(manager_module, "spec_manager_map", {})
+        except ImportError:
+            spec_manager_map = None
+        _get_manager_class_for_spec._spec_manager_map = spec_manager_map
+    if not spec_manager_map:
         return None
     manager_cls = spec_manager_map.get(type(spec))
     if manager_cls is not None:
