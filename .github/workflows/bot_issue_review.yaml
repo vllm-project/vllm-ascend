@@ -1,0 +1,69 @@
+name: "Issue Review Bot"
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    if: |
+      startsWith(github.event.issue.title, '[Bug]:') ||
+      startsWith(github.event.issue.title, '[Installation]:') ||
+      startsWith(github.event.issue.title, '[Usage]:') ||
+      startsWith(github.event.issue.title, '[Doc]:') ||
+      startsWith(github.event.issue.title, '[Misc]:')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install requests pyyaml
+
+      # Step 1: Extract issue type from title → issue_type.txt
+      - name: Extract input
+        id: extract
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: python .github/workflows/scripts/robot/extract_input.py --output issue_type.txt
+
+      # Step 2: Load the matching issue template → template.txt
+      - name: Prepare template
+        id: template
+        if: success()
+        run: python .github/workflows/scripts/robot/prepare_template.py --input issue_type.txt --output template.txt
+
+      # Step 3: Load the system prompt → system_prompt.txt
+      - name: Prepare system prompt
+        id: sysprompt
+        if: success()
+        run: python .github/workflows/scripts/robot/prepare_system_prompt.py --output system_prompt.txt
+
+      # Step 4: Call LLM with assembled prompt → review_output.md
+      - name: Call LLM
+        id: llm
+        if: success()
+        env:
+          VLLM_BASE_URL: ${{ secrets.VLLM_BASE_URL }}
+          VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python .github/workflows/scripts/robot/call_llm.py \
+            --system-prompt system_prompt.txt \
+            --template template.txt \
+            --output review_output.md
+
+      # Step 5: Post the review as a comment
+      - name: Post handler
+        id: post
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: python .github/workflows/scripts/robot/handle_review.py --input review_output.md
