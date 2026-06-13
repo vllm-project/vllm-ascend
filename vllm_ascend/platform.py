@@ -368,7 +368,8 @@ class NPUPlatform(Platform):
             return
 
         # MLA draft models do not use the GQA/MQA DCP head-sharding rule.
-        has_draft_mla_config = getattr(draft_model_config.hf_text_config, "kv_lora_rank", None) is not None
+        hf_text_config = getattr(draft_model_config, "hf_text_config", None)
+        has_draft_mla_config = getattr(hf_text_config, "kv_lora_rank", None) is not None
         if draft_model_config.use_mla or has_draft_mla_config:
             return
 
