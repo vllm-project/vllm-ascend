@@ -109,6 +109,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # Whether to enable Mooncake KV transfer DFX diagnostics.
+    # 0: disabled by default; 1: enabled. Not sensitive.
+    "VLLM_ASCEND_MOONCAKE_TRANSFER_DFX": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOONCAKE_TRANSFER_DFX", "0"))
+    ),
 }
 
 # end-env-vars-definition
