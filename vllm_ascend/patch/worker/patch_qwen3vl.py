@@ -9,7 +9,7 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding, select_cos_sin_cache
 
 
 def tensor_parallel_wrap(func):
@@ -35,11 +35,7 @@ def tensor_parallel_wrap(func):
 def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_states: torch.Tensor):
     qkv, _ = self.qkv_proj(hidden_states)
     if isinstance(self.rotary_emb, AscendMRotaryEmbedding):
-        cos_sin = self.rotary_emb.cos_sin_cache[positions]
-        if cos_sin.device != qkv.device:
-            cos_sin = cos_sin.to(qkv.device)
-        if cos_sin.dtype != qkv.dtype:
-            cos_sin = cos_sin.to(qkv.dtype)
+        cos_sin = select_cos_sin_cache(self.rotary_emb, positions, qkv)
         q, k, v, _ = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
             qkv=qkv,
             q_weight=self.q_norm.weight,

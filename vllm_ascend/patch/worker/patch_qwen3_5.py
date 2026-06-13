@@ -23,17 +23,14 @@ from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ops.rotary_embedding import select_cos_sin_cache
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
         qkv, _ = self.qkv_proj(hidden_states)
         if "qwen3_5" in self.config.model_type:
-            cos_sin = self.rotary_emb.cos_sin_cache[positions]
-            if cos_sin.device != qkv.device:
-                cos_sin = cos_sin.to(qkv.device)
-            if cos_sin.dtype != qkv.dtype:
-                cos_sin = cos_sin.to(qkv.dtype)
+            cos_sin = select_cos_sin_cache(self.rotary_emb, positions, qkv)
 
             q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
                 qkv=qkv,

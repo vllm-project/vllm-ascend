@@ -23,6 +23,7 @@ from vllm_ascend.device.mxfp_compat import (
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
+from vllm_ascend.ops.rotary_embedding import select_cos_sin_from_cache
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
@@ -208,9 +209,12 @@ class BaseDeviceAdaptor:
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz]
 
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
+        cos, sin = select_cos_sin_from_cache(
+            atten_obj.rotary_emb,
+            attn_metadata.decode.input_positions[:bsz],
+            hidden_states,
+            layout="TD",
+        )
 
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         dequant_scale_q_nope = None
@@ -572,12 +576,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
         bsz = attn_metadata.num_decode_tokens
-        hidden_states = hidden_states[:bsz].unsqueeze(1)
+        hidden_states = hidden_states[:bsz]
+        cos, sin = select_cos_sin_from_cache(
+            atten_obj.rotary_emb,
+            attn_metadata.decode.input_positions[:bsz],
+            hidden_states,
+            layout="T11D",
+        )
+        cos = cos.view(cos.shape[0], 1, cos.shape[-1])
+        sin = sin.view(sin.shape[0], 1, sin.shape[-1])
+        hidden_states = hidden_states.unsqueeze(1)
         hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
         dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0] * hidden_states.shape[1], -1)
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = torch_npu.npu_mla_prolog_v3(
             token_x=hidden_states,

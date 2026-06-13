@@ -48,7 +48,7 @@ from vllm_ascend.ops.layer_shard_linear import (
     reach_layer_for_shard_weight_series,
     register_all_layers_to_shard_weight_series,
 )
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import select_cos_sin_from_cache
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -146,8 +146,6 @@ class AscendMLAPrefillMetadata:
     max_query_len: int
     max_seq_lens: int
     chunked_context: ChunkedContextMetadata | CPChunkedContextMetadata | None = None
-    sin: torch.Tensor = None
-    cos: torch.Tensor = None
     pcp_metadata: AscendPCPMetadata | None = None
     actual_seq_lengths_q: list[int] | None = None
 
@@ -165,8 +163,6 @@ class AscendMLADecodeMetadata:
     seq_lens_list: list[int]
     actual_seq_lengths_q: list[int] | None = None
     attn_mask: torch.Tensor | None = None
-    sin: torch.Tensor = None
-    cos: torch.Tensor = None
     cp_seq_len: torch.Tensor = None
 
 
@@ -558,7 +554,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         prefill_query_start_loc = query_start_loc[reqs_start:] - query_start_loc[reqs_start]
 
         prefill_input_positions = input_positions[tokens_start:]
-        cos, sin = get_cos_and_sin_mla(prefill_input_positions)
         prefill_query_lens = self.query_lens[reqs_start:].to(torch.int32)
         actual_seq_lengths_q = torch.cumsum(prefill_query_lens, dim=0).tolist()
         return AscendMLAPrefillMetadata(
@@ -572,8 +567,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             max_seq_lens=max_seq_lens,
             query_start_loc=prefill_query_start_loc,
             chunked_context=chunked_context_metadata,
-            sin=sin,
-            cos=cos,
             actual_seq_lengths_q=actual_seq_lengths_q,
         )
 
@@ -644,7 +637,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
                 )
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
             block_table=self.block_table,
@@ -653,8 +645,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             max_seq_lens=max_seq_lens,
             attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             actual_seq_lengths_q=actual_seq_lengths_q,
-            sin=sin[: self.num_decode_tokens, ...],
-            cos=cos[: self.num_decode_tokens, ...],
             cp_seq_len=cp_seq_len,
         )
         return decode_metadata
@@ -1552,6 +1542,13 @@ class AscendMLAImpl(MLAAttentionImpl):
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
         return decode_q_nope, decode_q_pe
 
+    def _select_mla_cos_sin(
+        self,
+        positions: torch.Tensor,
+        ref_tensor: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return select_cos_sin_from_cache(self.rotary_emb, positions, ref_tensor, layout="T11D")
+
     def mla_preprocess_prefill(self, q_c, kv_no_split, kv_cache, attn_metadata):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -1560,8 +1557,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
         prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
-        cos = attn_metadata.prefill.cos
-        sin = attn_metadata.prefill.sin
+        cos, sin = self._select_mla_cos_sin(attn_metadata.prefill.input_positions, prefill_q_pe)
         prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
         prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(prefill_kv_no_split, cos, sin, kv_cache, prefill_slots)
@@ -1577,9 +1573,8 @@ class AscendMLAImpl(MLAAttentionImpl):
     def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
         num_decode_tokens = attn_metadata.num_decode_tokens
         decode_q_c = q_c[:num_decode_tokens]
-        cos = attn_metadata.decode.cos
-        sin = attn_metadata.decode.sin
         decode_ql_nope, decode_q_pe = self._q_proj_and_k_up_proj(decode_q_c)
+        cos, sin = self._select_mla_cos_sin(attn_metadata.decode.input_positions[:num_decode_tokens], decode_q_pe)
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         dequant_scale_q_nope = None
         if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:

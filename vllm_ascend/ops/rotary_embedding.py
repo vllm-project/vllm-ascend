@@ -32,122 +32,65 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import has_rope, is_vl_model
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
     from vllm_ascend.ops.triton.rope import rope_forward_triton
 
-# Currently, rope ops used on npu requires detached cos && sin as inputs.
-# However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
-# So we have to preprocess cos_sin_cache int cos && sin. In the future,
-# we shall implement a new rope ops which accept cos_sin_cache as inputs.
-# NOTE(Angazenn): MLA && SFA models uses attn_metadata to pass cos && sin
-# to rope in AscendMLA(SFA)Impl. However, since rope is isolated from
-# AscendAttentionBackendImpl for GQA models, we cannot pass cos && sin by
-# attn_metadata. This causes that rope in GQA models must pass cos && sin
-# by different approaches.
-_cos_mla: torch.Tensor = None
-_sin_mla: torch.Tensor = None
-_cos_cache: torch.Tensor = None
-_sin_cache: torch.Tensor = None
-_cos_sin_cache: torch.Tensor = None
-_cos: torch.Tensor = None
-_sin: torch.Tensor = None
-_cos_slice: torch.Tensor = None
-_sin_slice: torch.Tensor = None
+def get_rope_cache(rotary_emb, ref_tensor: torch.Tensor) -> torch.Tensor:
+    """Return rotary_emb.cos_sin_cache matched to ref_tensor dtype/device."""
+    if hasattr(rotary_emb, "_match_cos_sin_cache_dtype"):
+        return rotary_emb._match_cos_sin_cache_dtype(ref_tensor)
+
+    cos_sin_cache = rotary_emb.cos_sin_cache
+    if cos_sin_cache.device == ref_tensor.device and cos_sin_cache.dtype == ref_tensor.dtype:
+        return cos_sin_cache
+
+    cos_sin_cache = cos_sin_cache.to(ref_tensor.device, dtype=ref_tensor.dtype)
+    if not torch.compiler.is_compiling():
+        rotary_emb.cos_sin_cache = cos_sin_cache
+    return cos_sin_cache
 
 
-def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):
-    global _cos_mla
-    global _sin_mla
-    global _cos
-    global _sin
-
-    if _cos_mla is not None or _sin_mla is not None or _cos is not None or _sin is not None:
-        return
-
-    model_config = vllm_config.model_config
-    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-
-    if model_config.use_mla:
-        rope_dim = model_config.hf_text_config.qk_rope_head_dim
-        _cos_mla = torch.ones(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
-        _sin_mla = torch.zeros(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
-    elif not is_vl_model(vllm_config) and has_rope(vllm_config):
-        rope_dim = model_config.get_head_size()
-        # For models using partial rope like Qwen3-Next.
-        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
-            rope_dim = int(rope_dim * model_config.hf_text_config.partial_rotary_factor)
-        elif hasattr(model_config.hf_text_config, "rotary_dim"):
-            rope_dim = int(model_config.hf_text_config.rotary_dim)
-        _cos = torch.ones(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
-        _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
+def select_cos_sin_cache(rotary_emb, positions: torch.Tensor, ref_tensor: torch.Tensor) -> torch.Tensor:
+    """Select cos_sin_cache rows with upstream-style positions ownership."""
+    return get_rope_cache(rotary_emb, ref_tensor)[positions]
 
 
-def get_cos_and_sin_mla(positions, use_cache=False):
-    global _cos_cache
-    global _sin_cache
-    cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
-    sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
-    if not use_cache:
-        return cos, sin
-    global _cos_mla
-    global _sin_mla
-    num_tokens = positions.size(0)
-    _cos_mla[:num_tokens, ...] = cos
-    _sin_mla[:num_tokens, ...] = sin
-    return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
+def _expand_rope_dim(cos: torch.Tensor, sin: torch.Tensor, *, is_neox_style: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    if is_neox_style:
+        return torch.cat((cos, cos), dim=-1), torch.cat((sin, sin), dim=-1)
+    return cos.repeat_interleave(2, dim=-1), sin.repeat_interleave(2, dim=-1)
 
 
-def _record_cos_sin_cache(cos_sin_cache):
-    global _cos_sin_cache
-    if _cos_sin_cache is not None:
-        return
-    _cos_sin_cache = cos_sin_cache
+def select_cos_sin_from_cache(
+    rotary_emb,
+    positions: torch.Tensor,
+    ref_tensor: torch.Tensor,
+    *,
+    layout: str = "T11D",
+    expand_rope_dim: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resolve cos/sin from rotary_emb for legacy NPU ops.
 
+    layout values:
+    - "TD": [num_tokens, rotary_dim]
+    - "T11D": [num_tokens, 1, 1, rotary_dim]
+    - "1T1D": [1, num_tokens, 1, rotary_dim]
+    """
+    cos_sin = select_cos_sin_cache(rotary_emb, positions, ref_tensor)
+    cos, sin = cos_sin.chunk(2, dim=-1)
+    if expand_rope_dim:
+        cos, sin = _expand_rope_dim(cos, sin, is_neox_style=getattr(rotary_emb, "is_neox_style", True))
 
-def _record_cos_and_sin_cache(cos_cache, sin_cache):
-    global _cos_cache
-    global _sin_cache
-    _cos_cache = cos_cache
-    _sin_cache = sin_cache
-
-
-def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
-    global _cos_cache
-    global _sin_cache
-    if _cos_cache is not None or _sin_cache is not None:
-        return
-    hidden_dim = cos_sin_cache.shape[-1] // 2
-    cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
-    _cos_cache = cos_cache.squeeze(1)
-    _sin_cache = sin_cache.squeeze(1)
-
-
-def update_cos_sin(positions):
-    global _cos
-    global _sin
-    global _cos_slice
-    global _sin_slice
-
-    if _cos_sin_cache is None or _cos is None or _sin is None:
-        return
-
-    num_tokens = positions.size(0)
-    _cos[:, :num_tokens] = (
-        _cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[0]
-    )
-    _sin[:, :num_tokens] = (
-        _cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[1]
-    )
-    _cos_slice = _cos[:, :num_tokens]
-    _sin_slice = _sin[:, :num_tokens]
-
-
-def get_cos_and_sin_slice():
-    return _cos_slice, _sin_slice
+    if layout == "TD":
+        return cos.contiguous().view(positions.shape[-1], -1), sin.contiguous().view(positions.shape[-1], -1)
+    if layout == "T11D":
+        return cos.contiguous().view(positions.shape[-1], 1, 1, -1), sin.contiguous().view(positions.shape[-1], 1, 1, -1)
+    if layout == "1T1D":
+        return cos.contiguous().view(1, positions.shape[-1], 1, -1), sin.contiguous().view(1, positions.shape[-1], 1, -1)
+    raise ValueError(f"Unsupported RoPE cache layout: {layout}")
 
 
 def rope_forward_oot(
@@ -227,8 +170,6 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype, init_cache)
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
-        _record_cos_sin_cache(self.cos_sin_cache)
-        _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
 
     def forward_oot(
         self,
@@ -282,7 +223,6 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         )
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
-        _record_cos_sin_cache(self.cos_sin_cache)
 
     def forward_oot(
         self,
@@ -446,8 +386,6 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         self.register_buffer("cos_sin_cache", cache, persistent=False)
         self.register_buffer("cos_cached", cos_cached, persistent=False)
         self.register_buffer("sin_cached", sin_cached, persistent=False)
-        _record_cos_sin_cache(cache)
-        _record_cos_and_sin_cache(cos_cached, sin_cached)
 
     def forward(
         self, positions: torch.Tensor, query: torch.Tensor, key: torch.Tensor, offsets: torch.Tensor | None = None
@@ -483,11 +421,10 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         assert positions.ndim == 2
         assert key is not None
 
-        self._match_cos_sin_cache_dtype(query)
         self.cos = None
         self.sin = None
         if self.cos is None and self.sin is None:
-            cos_sin = self.cos_sin_cache[positions]  # type: ignore
+            cos_sin = select_cos_sin_cache(self, positions, query)
             cos, sin = cos_sin.chunk(2, dim=-1)
             self.cos = cos.contiguous()
             self.sin = sin.contiguous()
