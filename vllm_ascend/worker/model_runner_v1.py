@@ -3777,7 +3777,7 @@ class NPUModelRunner(GPUModelRunner):
         if capturer is None:
             # v0.21.0: capturer not passed by caller, get from global
             capturer = get_global_experts_capturer()
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.fused_moe import FusedMoE
         for module in self.compilation_config.static_forward_context.values():
             if isinstance(module, FusedMoE):
                 module._ascend_routed_experts_capturer = capturer
