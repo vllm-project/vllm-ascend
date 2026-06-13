@@ -241,6 +241,14 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(hit_call["max_length"], 32)
         self.assertEqual(hit_call["alignment_tokens"], 64)
 
+    def test_mask_allows_chunk_uses_group_block_size(self):
+        db = ChunkedTokenDatabase([self.meta], block_size=[8], partitions=None)
+
+        self.assertTrue(db.mask_allows_chunk(None, start=128, kv_cache_group_id=0))
+        self.assertFalse(db.mask_allows_chunk([False, True], start=0, kv_cache_group_id=0))
+        self.assertTrue(db.mask_allows_chunk([False, True], start=8, kv_cache_group_id=0))
+        self.assertFalse(db.mask_allows_chunk([False, True], start=16, kv_cache_group_id=0))
+
     def test_get_block_hashes_rehashes_grouped_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
         self.assertEqual(
