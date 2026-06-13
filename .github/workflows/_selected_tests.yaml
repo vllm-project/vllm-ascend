@@ -189,7 +189,7 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          uv pip install -e . --no-build-isolation
+          uv pip install -v -e .
 
       - name: Install vllm-project/vllm-ascend no device
         if: ${{ matrix.group.npu_type == 'cpu' }}
@@ -199,7 +199,7 @@ jobs:
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          uv pip install -v -e .
 
       - name: Uninstall Triton for 310P tests
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
