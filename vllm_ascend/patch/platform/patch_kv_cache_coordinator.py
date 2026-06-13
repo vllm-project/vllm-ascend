@@ -373,7 +373,12 @@ def get_kv_cache_coordinator(
         )
         if not vllm_version_is("0.21.0"):
             orig_kwargs["scheduler_block_size"] = scheduler_block_size
-        return _orig_get_kv_cache_coordinator(**orig_kwargs)
+        try:
+            return _orig_get_kv_cache_coordinator(**orig_kwargs)
+        except TypeError:
+            if "scheduler_block_size" in orig_kwargs:
+                del orig_kwargs["scheduler_block_size"]
+            return _orig_get_kv_cache_coordinator(**orig_kwargs)
     return AscendHybridKVCacheCoordinator(
         kv_cache_config,
         max_model_len,

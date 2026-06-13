@@ -129,7 +129,7 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
-from vllm_ascend.eplb.utils import model_register
+
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -546,7 +546,10 @@ class NPUModelRunner(GPUModelRunner):
         )
         # for cleancode , actually the three attrs is defined in gpu_model_runner
         self.execute_model_state: ExecuteModelState | None = None
-        # None in the first PP rank. The rest are set after load_model.
+        # None in the first PP rank. The rest are set after load_model
+        # (in _dummy_run or warmup). Do NOT overwrite to None unconditionally;
+        # the warmup code calls make_empty_intermediate_tensors which includes
+        # _pp_aux via the monkey-patched version.
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
@@ -2258,7 +2261,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
-            if self.use_aux_hidden_state_outputs:
+            if self.use_aux_hidden_state_outputs and get_pp_group().is_last_rank:
                 hidden_states, aux_hidden_states = hidden_states
             if self.pcp_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
@@ -2278,6 +2281,8 @@ class NPUModelRunner(GPUModelRunner):
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
                     self._finalize_dump_data()
+                    if self.dynamic_eplb:
+                        self.eplb_updator.forward_end()
                     return hidden_states
                 if self.is_pooling_model:
                     # Return the pooling output.
@@ -2531,7 +2536,13 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_async_scheduling:
             pp = get_pp_group()
             if pp.world_size > 1 and pp.is_last_rank:
-                self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
+                # With spec decoding sampled_token_ids has shape
+                # [num_reqs, num_spec_tokens + 1]; the receiver
+                # expects [num_reqs, 1] — broadcast only column 0.
+                ids = sampler_output.sampled_token_ids
+                if ids.shape[-1] != 1:
+                    ids = ids[:, :1].contiguous()
+                self._pp_broadcast_prev_sampled_token_ids(ids)
 
         if not self.use_async_scheduling:
             return model_runner_output
@@ -3512,6 +3523,13 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors = IntermediateTensors(
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                 )
+                # _pp_aux buffer is pre-allocated with a static batch dim,
+                # but the forward expects a dynamic batch dim.  Mark it
+                # here (outside the compiled graph) so Dynamo treats both
+                # consistently.
+                aux_buf = intermediate_tensors.tensors.get("_pp_aux")
+                if aux_buf is not None:
+                    torch._dynamo.mark_dynamic(aux_buf, 0)
 
             need_dummy_logits = not is_profile and lmhead_tp_enable()
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
@@ -3544,7 +3562,7 @@ class NPUModelRunner(GPUModelRunner):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
-            if self.use_aux_hidden_state_outputs:
+            if self.use_aux_hidden_state_outputs and get_pp_group().is_last_rank:
                 hidden_states, _ = outputs
             else:
                 hidden_states = outputs
@@ -3563,8 +3581,7 @@ class NPUModelRunner(GPUModelRunner):
                     is_profile=is_profile,
                 )
             if is_profile and self.dynamic_eplb:
-                target = self.model.language_model if hasattr(self.model, "language_model") else self.model
-                target.clear_all_moe_loads()
+                self.eplb_updator.adaptor.clear_all_moe_loads()
             if self.dynamic_eplb:
                 self.eplb_updator.forward_end()
             self._finalize_dump_data(dump=False)
@@ -3633,6 +3650,26 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            # Set aux_hidden_state_layers on ALL PP ranks.
+            # _set_up_drafter only sets use_aux_hidden_state_outputs on the last
+            # PP rank, but non-last ranks also need it to produce _pp_aux.
+            should_set_aux = self.use_aux_hidden_state_outputs or (
+                self.vllm_config.speculative_config
+                and self.vllm_config.speculative_config.method == "eagle3"
+            )
+            if should_set_aux:
+                self.use_aux_hidden_state_outputs = True
+                from vllm.model_executor.models.interfaces import supports_eagle3
+                if not supports_eagle3(self.model):
+                    raise RuntimeError(
+                        "Model does not support EAGLE3 interface but "
+                        "aux_hidden_state_outputs was requested"
+                    )
+                aux_layers = self._get_eagle3_aux_layers_from_config()
+                if not aux_layers:
+                    aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                self.model.set_aux_hidden_state_layers(aux_layers)
+
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name
@@ -3640,25 +3677,12 @@ class NPUModelRunner(GPUModelRunner):
                 if "sink" in name:
                     self._has_sinks = True
                     break
-            if self.dynamic_eplb:
-                model_register(self.model)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
                     patch_load_weights(self.vllm_config)
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
-                if self.use_aux_hidden_state_outputs:
-                    from vllm.model_executor.models.interfaces import supports_eagle3
-                    if not supports_eagle3(self.model):
-                        raise RuntimeError(
-                            "Model does not support EAGLE3 interface but "
-                            "aux_hidden_state_outputs was requested"
-                        )
-                    aux_layers = self._get_eagle3_aux_layers_from_config()
-                    if not aux_layers:
-                        aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
-                    self.model.set_aux_hidden_state_layers(aux_layers)
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
@@ -3729,10 +3753,13 @@ class NPUModelRunner(GPUModelRunner):
         if self.speculative_config and (
             self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
         ):
-            assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
-            block_size = (self.kernel_block_sizes[0] if isinstance(
-            self.kernel_block_sizes, list) else self.kernel_block_sizes)
-            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            # The drafter is only initialized on the last PP rank.
+            # On non-last ranks (PP > 1) it is absent — skip setup.
+            if hasattr(self, "drafter") and self.drafter is not None:
+                assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
+                block_size = (self.kernel_block_sizes[0] if isinstance(
+                self.kernel_block_sizes, list) else self.kernel_block_sizes)
+                self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group() and not is_profiling:
             get_kv_transfer_group().register_kv_caches(kv_caches)
@@ -3750,7 +3777,7 @@ class NPUModelRunner(GPUModelRunner):
         if capturer is None:
             # v0.21.0: capturer not passed by caller, get from global
             capturer = get_global_experts_capturer()
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.fused_moe import FusedMoE
         for module in self.compilation_config.static_forward_context.values():
             if isinstance(module, FusedMoE):
                 module._ascend_routed_experts_capturer = capturer
@@ -4771,29 +4798,51 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_groups: list[KVCacheGroupSpec],
         is_profiling: bool = False,
     ) -> None:
-        with update_pass_config(self):
-            super()._check_and_update_cudagraph_mode(
-                attention_backends,
-                kv_cache_groups,
-                is_profiling=is_profiling,
-            )
+        # The upstream super()._check_and_update_cudagraph_mode asserts
+        # isinstance(self.drafter, EagleProposer | ...) unconditionally,
+        # but the drafter is only created on the last PP rank.  Inject a
+        # temporary stub on non-last ranks so the assertion passes.
+        _saved_drafter = getattr(self, "drafter", None)
+        _need_restore = False
+        if _saved_drafter is None and self.speculative_config:
+            from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+
+            class _DrafterStub(AscendEagleProposer):
+                def __init__(s):
+                    pass
+                def initialize_cudagraph_keys(s, *a, **k):
+                    pass
+                def initialize_attn_backend(s, *a, **k):
+                    pass
+
+            self.drafter = _DrafterStub()
+            _need_restore = True
+
+        try:
+            with update_pass_config(self):
+                super()._check_and_update_cudagraph_mode(
+                    attention_backends,
+                    kv_cache_groups,
+                    is_profiling=is_profiling,
+                )
 
 
-        capture_descs = self.cudagraph_dispatcher.get_capture_descs()
-        capture_sizes = sorted({
-            desc.num_tokens
-            for _, descs in capture_descs
-            for desc in descs
-        })
+            capture_descs = self.cudagraph_dispatcher.get_capture_descs()
+            capture_sizes = sorted({
+                desc.num_tokens
+                for _, descs in capture_descs
+                for desc in descs
+            })
 
-        # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
-        # we set the graph params right before initializing the keys.
-        # Profiling still runs real graph warmup/capture paths, so the NPU-side
-        # graph params must exist there as well.
-        if self.use_aclgraph:
-            set_graph_params(capture_sizes)
-            if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+            # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
+            # we set the graph params right before initializing the keys.
+            if self.use_aclgraph:
+                set_graph_params(capture_sizes)
+                if self.speculative_config:
+                    set_draft_graph_params(capture_sizes)
+        finally:
+            if _need_restore:
+                self.drafter = _saved_drafter
 
     def profile_cudagraph_memory(self) -> int:
         parent_module_name = _get_gpu_model_runner_module_name(self)
