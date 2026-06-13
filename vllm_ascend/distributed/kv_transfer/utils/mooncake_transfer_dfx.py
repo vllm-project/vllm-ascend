@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import Any
 
+import torch
 from vllm.logger import logger
 
 from vllm_ascend import envs as ascend_envs
@@ -96,6 +97,10 @@ def _block_nbytes(cache: Any) -> int:
     return int(cache[0].numel() * cache.element_size())
 
 
+def _tensor_to_raw_bytes(tensor: Any) -> bytes:
+    return tensor.detach().contiguous().cpu().view(torch.uint8).numpy().tobytes()
+
+
 def compute_kv_cache_checksum(
     *,
     kv_caches: Mapping[str, Any],
@@ -123,7 +128,7 @@ def compute_kv_cache_checksum(
         byte_end = byte_start + inner_block_len
         for block_group in normalized_groups:
             for block_id in block_group:
-                block_bytes = cache[block_id].detach().contiguous().cpu().numpy().tobytes()
+                block_bytes = _tensor_to_raw_bytes(cache[block_id])
                 segment = block_bytes[byte_start:byte_end]
                 digest.update(segment)
                 total_bytes += len(segment)
