@@ -59,11 +59,11 @@ ARG SOC_VERSION="ascend910_9391"
 ARG COMPILE_CUSTOM_KERNELS=1
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
-    OMP_NUM_THREADS=1 \
-    VLLM_BATCH_INVARIANT=1
+    OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
 
 RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
+    export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
