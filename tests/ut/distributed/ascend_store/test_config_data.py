@@ -18,9 +18,10 @@
 import hashlib
 import unittest
 from dataclasses import dataclass
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import config_data as config_data_mod
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
@@ -31,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     PoolKey,
     ReqMeta,
     RequestTracker,
+    _get_manager_class_for_spec,
     get_block_hashes,
 )
 
@@ -323,6 +325,47 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(len(new_keys), 2)
         self.assertIn("@pp_rank:0", new_keys[0])
         self.assertIn("@pp_rank:1", new_keys[1])
+
+
+class TestManagerClassResolution(unittest.TestCase):
+    def tearDown(self):
+        self._clear_resolver_cache()
+
+    @staticmethod
+    def _clear_resolver_cache():
+        for attr in ("_registry", "_spec_manager_map"):
+            if hasattr(_get_manager_class_for_spec, attr):
+                delattr(_get_manager_class_for_spec, attr)
+
+    def test_manager_resolution_caches_imported_modules(self):
+        class FakeManager:
+            pass
+
+        class FakeSpec:
+            pass
+
+        self._clear_resolver_cache()
+        spec = FakeSpec()
+        registry_module = MagicMock()
+        registry_module.KVCacheSpecRegistry.get_manager_class.return_value = None
+        manager_module = MagicMock()
+        manager_module.spec_manager_map = {FakeSpec: FakeManager}
+        import_names: list[str] = []
+
+        def fake_import_module(name: str):
+            import_names.append(name)
+            if name == "vllm.v1.kv_cache_spec_registry":
+                return registry_module
+            if name == "vllm.v1.core.single_type_kv_cache_manager":
+                return manager_module
+            raise ImportError(name)
+
+        with patch.object(config_data_mod.importlib, "import_module", side_effect=fake_import_module):
+            self.assertIs(_get_manager_class_for_spec(spec), FakeManager)
+            self.assertIs(_get_manager_class_for_spec(spec), FakeManager)
+
+        self.assertEqual(import_names.count("vllm.v1.kv_cache_spec_registry"), 1)
+        self.assertEqual(import_names.count("vllm.v1.core.single_type_kv_cache_manager"), 1)
 
 
 class TestLoadSpec(unittest.TestCase):
