@@ -507,13 +507,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         block_tables = attn_metadata[key].block_tables
                         attn_state = attn_metadata[key].attn_state
 
-                    # Determine atten_mask and sparse_mode based on attn_state
-                    if attn_state == AscendAttentionState.DecodeOnly:
-                        update_attn_mask = None
-                        update_sparse_mode = 0
-                    else:
-                        update_attn_mask = attn_mask
-                        update_sparse_mode = 3
+                    is_decode = attn_state == AscendAttentionState.DecodeOnly
+                    update_attn_mask, update_sparse_mode = (None, 0) if is_decode else (attn_mask, 3)
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
@@ -551,8 +546,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ) -> torch.Tensor:
         is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-        atten_mask = None if is_decode else attn_metadata.attn_mask
-        sparse_mode = 0 if is_decode else 3
+        atten_mask, sparse_mode = (None, 0) if is_decode else (attn_metadata.attn_mask, 3)
 
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
@@ -836,11 +830,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
         else:
             is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            atten_mask, sparse_mode = (None, 0) if is_decode else (attn_metadata.attn_mask, 3)
             attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                 query=query,
                 key=key,
                 value=value,
-                atten_mask=None if is_decode else attn_metadata.attn_mask,
+                atten_mask=atten_mask,
                 block_table=block_table,
                 input_layout="TND",
                 block_size=block_size,
@@ -849,7 +844,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale=self.scale,
-                sparse_mode=0 if is_decode else 3,
+                sparse_mode=sparse_mode,
             )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
