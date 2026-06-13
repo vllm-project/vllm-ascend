@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import logging
 from contextlib import contextmanager
 
 import numpy as np
@@ -183,13 +184,14 @@ class NPUModelRunner(GPUModelRunner):
         assert num_tokens > 0
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
-        logger.debug(
-            "prepare_inputs: num_tokens=%d, num_tokens_padded=%d, num_reqs=%d, cg_mode=%s",
-            num_tokens,
-            num_tokens_after_padding,
-            num_reqs,
-            batch_desc.cg_mode,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "prepare_inputs: num_tokens=%d, num_tokens_padded=%d, num_reqs=%d, cg_mode=%s",
+                num_tokens,
+                num_tokens_after_padding,
+                num_reqs,
+                batch_desc.cg_mode,
+            )
 
         # Decode first, then prefill.
         # batch_idx -> req_id
@@ -442,7 +444,8 @@ class NPUModelRunner(GPUModelRunner):
         req_ids: list[str],
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        logger.debug("_update_seq_lens_cpu: %d requests", len(req_ids))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("_update_seq_lens_cpu: %d requests", len(req_ids))
         # wait for num_computed_tokens copy to cpu stream to finish.
         self.num_computed_tokens_event.synchronize()
         for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
