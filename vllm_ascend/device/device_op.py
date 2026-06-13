@@ -117,7 +117,7 @@ class BaseDeviceAdaptor:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
         if dynamic_scale is None:
-            return torch_npu.npu_dynamic_quant(hidden_states)
+            return torch_npu.npu_dynamic_quant(hidden_states, dst_type=act_quant_type)
 
         return hidden_states, dynamic_scale
 
@@ -896,16 +896,28 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         mxfp_quant_dtype: QuantType | None = None,
     ):
         if not use_mxfp_quant:
-            return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                x=x,
-                weight=weight,
-                group_list=group_list,
-                weight_scale=weight_scale,
-                x_scale=x_scale,
-                bias=bias,
-                swiglu_limit=swiglu_limit,
-                use_mxfp_quant=False,
-            )
+            if act_quant_type == torch.float8_e4m3fn:
+                out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                    x=x,
+                    weight=[weight],
+                    weight_scale=[weight_scale],
+                    x_scale=x_scale,
+                    group_list=group_list,
+                    quant_dtype=torch.float8_e4m3fn,
+                    dequant_dtype=torch.float32,
+                )
+                return out, out_scale, None
+            else:
+                return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                    x=x,
+                    weight=weight,
+                    group_list=group_list,
+                    weight_scale=weight_scale,
+                    x_scale=x_scale,
+                    bias=bias,
+                    swiglu_limit=swiglu_limit,
+                    use_mxfp_quant=False,
+                )
 
         # W4A8 mxfp
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
@@ -1009,6 +1021,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         mxfp_quant_dtype: QuantType | None = None,
     ) -> torch.Tensor:
         if not use_mxfp_quant:
+            if act_quant_type == torch.float8_e4m3fn:
+                fallback_output_dtype = torch.bfloat16
             return BaseDeviceAdaptor.npu_grouped_matmul_gmm2(
                 hidden_states=hidden_states,
                 weight=weight,
