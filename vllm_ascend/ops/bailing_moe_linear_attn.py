@@ -34,18 +34,22 @@ from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 from vllm_ascend.ops.triton.mamba.lightning_attn import AscendLightningAttentionKernel
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.mamba.linear_attn import (  # type: ignore[import-not-found]
-        clear_linear_attention_cache_for_new_sequences,
-        linear_attention_decode,
-        linear_attention_prefill_and_mix,
-    )
-else:
-    from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (  # type: ignore[import-not-found]
-        clear_linear_attention_cache_for_new_sequences,
-        linear_attention_decode,
-        linear_attention_prefill_and_mix,
-    )
+def _import_linear_attn_fns():
+    paths = []
+    if vllm_version_is("0.21.0"):
+        paths.append("vllm.model_executor.layers.mamba.linear_attn")
+    paths.append("vllm.model_executor.layers.mamba.linear.minimax_linear_attn")
+    for path in paths:
+        try:
+            mod = __import__(path, fromlist=[
+                "clear_linear_attention_cache_for_new_sequences",
+                "linear_attention_decode",
+                "linear_attention_prefill_and_mix",
+            ])
+            return (mod.clear_linear_attention_cache_for_new_sequences, mod.linear_attention_decode, mod.linear_attention_prefill_and_mix)
+        except (ImportError, ModuleNotFoundError):
+            continue
+    raise ImportError("Cannot import linear attention functions.")
 
 
 class AscendBailingMoELinearAttention(BailingMoELinearAttention):
@@ -59,6 +63,7 @@ class AscendBailingMoELinearAttention(BailingMoELinearAttention):
     """
 
     def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
+        _, _, linear_attention_prefill_and_mix = _import_linear_attn_fns()
         return linear_attention_prefill_and_mix(
             q=q,
             k=k,
@@ -75,6 +80,7 @@ class AscendBailingMoELinearAttention(BailingMoELinearAttention):
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
         """Handle decode (single token per sequence)."""
+        _, linear_attention_decode, _ = _import_linear_attn_fns()
         hidden = linear_attention_decode(
             q,
             k,
@@ -153,6 +159,7 @@ class AscendBailingMoELinearAttention(BailingMoELinearAttention):
         if attn_metadata is not None:
             kv_cache = self.kv_cache[0]
             state_indices_tensor = attn_metadata.state_indices_tensor
+            clear_linear_attention_cache_for_new_sequences, _, _ = _import_linear_attn_fns()
             clear_linear_attention_cache_for_new_sequences(kv_cache, state_indices_tensor, attn_metadata)
 
         # Compute attention
