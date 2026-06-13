@@ -59,6 +59,10 @@ class ACLGraphEntry:
     # for aclgraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
+    # When a device error occurs in graph mode, the device-side memory
+    # manager may free the addresses used by captured graphs. After
+    # recovery, the graph must be recaptured to reallocate memory.
+    need_reset: bool = False
 
 
 class ACLGraphWrapper:
@@ -92,6 +96,16 @@ class ACLGraphWrapper:
     def clear_all_graphs(cls) -> None:
         for instance in list(cls._all_instances):
             instance.clear_graphs()
+    
+    @classmethod
+    def label_reset_all_graphs(cls, reset_graph_pool: bool = False) -> Callable:
+        if reset_graph_pool:
+            current_platform._global_graph_pool = torch.npu.graph_pool_handle()
+        for instance in list(cls._all_instances):
+            if reset_graph_pool:
+                instance.graph_pool = current_platform.get_global_graph_pool()
+            for entry in instance.concrete_aclgraph_entries.values():
+                entry.need_reset = True
 
     def __init__(
         self,
@@ -169,7 +183,7 @@ class ACLGraphWrapper:
 
         entry = self.concrete_aclgraph_entries[batch_descriptor]
 
-        if entry.aclgraph is None:
+        if entry.aclgraph is None or entry.need_reset:
             if self.aclgraph_options.debug_log_enable:
                 # Since we capture aclgraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
@@ -181,7 +195,13 @@ class ACLGraphWrapper:
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
-            aclgraph = torch.npu.NPUGraph()
+
+            if entry.aclgraph is None:
+                aclgraph = torch.npu.NPUGraph()
+            else:
+                entry.need_reset = False
+                entry.aclgraph.reset()
+                aclgraph = entry.aclgraph
 
             with ExitStack() as stack:
                 if self.aclgraph_options.gc_disable:

@@ -281,6 +281,9 @@ class AscendConfig:
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
 
+        recovery_config = additional_config.get("recovery_config", {})
+        self.recovery_config = RecoveryConfig(recovery_config, ascend_envs.VLLM_ASCEND_ENABLE_RECOVERY)
+
     @staticmethod
     def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
         if config_key in additional_config:
@@ -704,6 +707,30 @@ class RejectionSamplerConfig:
             )
         if self.posterior_alpha < 0:
             raise ValueError(f"rejection_sampler_config.posterior_alpha must be >= 0, got {self.posterior_alpha}")
+
+
+class RecoveryConfig:
+    CPU_PROCESS_GROUP_TIMEOUT_MIN = 25
+    CPU_PROCESS_GROUP_TIMEOUT_MAX = 60
+    CPU_PROCESS_GROUP_TIMEOUT_DEFAULT = 30
+
+    def __init__(self, user_config: dict | None, env_enable: bool):
+        if user_config is None:
+            user_config = {}
+        self.enable = user_config.get("enable", False) or env_enable
+        self.cpu_process_group_timeout = user_config.get(
+            "cpu_process_group_timeout", self.CPU_PROCESS_GROUP_TIMEOUT_DEFAULT
+        )
+        if self.enable:
+            self._validate()
+
+    def _validate(self):
+        if not self.CPU_PROCESS_GROUP_TIMEOUT_MIN <= self.cpu_process_group_timeout <= self.CPU_PROCESS_GROUP_TIMEOUT_MAX:
+            raise ValueError(
+                f"recovery_config.cpu_process_group_timeout must be between "
+                f"{self.CPU_PROCESS_GROUP_TIMEOUT_MIN}s and {self.CPU_PROCESS_GROUP_TIMEOUT_MAX}s, "
+                f"got {self.cpu_process_group_timeout}s"
+            )
 
 
 class EplbConfig:

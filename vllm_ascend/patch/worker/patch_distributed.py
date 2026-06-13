@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from functools import wraps
 from typing import Any, cast
 
@@ -24,6 +25,7 @@ import vllm
 from torch.distributed import Backend
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgRegistry, make_hccl_pg_key
 from vllm_ascend.utils import create_hccl_pg_options
@@ -126,6 +128,11 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.use_custom_op_call = True
         self.use_cpu_custom_send_recv = False
 
+        # Get CPU group timeout from RecoveryConfig only for DP and PP groups
+        ascend_config = get_ascend_config()
+        if group_name in ("dp", "pp") and ascend_config.recovery_config.enable:
+            self._cpu_group_timeout = ascend_config.recovery_config.cpu_process_group_timeout
+
         reuse_domain = _resolve_reuse_domain(group_name)
 
         try:
@@ -144,7 +151,13 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
                 # a group with `gloo` backend, to allow direct coordination between
                 # processes through the CPU.
-                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                # Only apply custom timeout for DP and PP groups with recovery enabled
+                if hasattr(self, "_cpu_group_timeout"):
+                    cpu_group = torch.distributed.new_group(
+                        ranks, backend="gloo", timeout=timedelta(seconds=self._cpu_group_timeout)
+                    )
+                else:
+                    cpu_group = torch.distributed.new_group(ranks, backend="gloo")
                 if self.rank in ranks:
                     self.ranks = ranks
                     self.world_size = len(ranks)
@@ -217,7 +230,12 @@ class GroupCoordinatorPatch(GroupCoordinator):
             self.cpu_group = None
 
         for ranks in self._group_ranks:
-            new_cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            if hasattr(self, "_cpu_group_timeout"):
+                new_cpu_group = torch.distributed.new_group(
+                    ranks, backend="gloo", timeout=timedelta(seconds=self._cpu_group_timeout)
+                )
+            else:
+                new_cpu_group = torch.distributed.new_group(ranks, backend="gloo")
             if self.rank in ranks:
                 self.cpu_group = new_cpu_group
 
@@ -225,7 +243,9 @@ class GroupCoordinatorPatch(GroupCoordinator):
             self.device_communicator.cpu_group = self.cpu_group
 
         logger.info(
-            "Reinit cpu_group for %s (ranks=%s)", self.unique_name, self.ranks
+            "Reinit cpu_group for %s (ranks=%s)",
+            self.unique_name,
+            self.ranks,
         )
 
     def all_to_all(

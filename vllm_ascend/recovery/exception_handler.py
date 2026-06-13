@@ -27,67 +27,72 @@ class NetworkExceptionHandler(ExceptionHandler):
 
     def generate_plan(self, exception: ExceptionInfo, vllm_config: VllmConfig) -> RecoveryPlan:
         """
-        网络链路故障(比如灵衢l1-l2链路故障)底层可自愈，无需额外的恢复手段，恢复计划中应包含：
-        1. npu故障恢复阶段: stop_device -> restart_device -> reinit_process_group
+        Network link failure recovery plan:
+        1. device_recovery_step: recovery_begin -> stop_device -> restart_device -> reinit_process_group
+        2. clean_engine_cache_step: label_dirty_requests -> clean_batch_queue -> recompute_dirty_requests
+        3. clean_worker_cache_step: worker_clean_dirty_requests_cache
+        4. re_capture_graph: worker_rebuild_cpu_group -> worker_recapture_graph
         """
         config = dict[str, Any]()
-        recovery_begin = RecoveryAction(
-            name="recovery_begin"
-        )
-        stop_device = RecoveryAction(
-            name="stop_device"
-        )
-        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        rebuild_all_resources = cudagraph_mode == CUDAGraphMode.FULL
-        
-        restart_device = RecoveryAction(
-            name="restart_device",
-        )
-        config["rebuild_all_resources"] = rebuild_all_resources
-        reinit_process_group = RecoveryAction(
-            name="reinit_process_group",
-        )
-        config["group"]=None
-        config["rebuild_link"]=False
-        npu_recover_step = RecoveryStep(
-            name="npu_recover",
+
+        # Step 1: Device recovery
+        config["rebuild_all_resources"] = False
+        config["group"] = None
+        config["rebuild_link"] = False
+
+        device_recovery_step = RecoveryStep(
+            name="device_recovery",
             target="worker",
-            #actions=[recovery_begin, stop_device, restart_device, reinit_process_group],
-            actions=[recovery_begin, stop_device],
+            actions=[
+                RecoveryAction(name="recovery_begin"),
+                RecoveryAction(name="stop_device"),
+                RecoveryAction(name="restart_device"),
+                RecoveryAction(name="reinit_process_group"),
+            ],
             timeout_s=60
         )
 
-        """
-        npu侧的状态清理完毕后,需要清理host侧的缓存信息:
-        2. abort出错batch及后续batch的缓存信息
-        """
-        clean_action = RecoveryAction(
-            name="clear_requests"
-        )
-        
-        clean_step = RecoveryStep(
-            name="clear_requests",
+        # Step 2: Clean engine cache
+        clean_engine_cache_step = RecoveryStep(
+            name="clean_engine_cache",
             target="engine_core",
-            actions=[clean_action],
-            timeout_s=5
-        )
-        """
-        封装为最终的recovery plan并返回,包含恢复网络链路故障的全部动作
-        """
-        clean_action_worker = RecoveryAction(
-            name="clean_cache"
-        )
-        clean_step_worker = RecoveryStep(
-            name="clean_cache_worker",
-            target="worker",
-            actions=[clean_action_worker],
+            actions=[
+                RecoveryAction(name="label_dirty_requests"),
+                RecoveryAction(name="clean_batch_queue"),
+                RecoveryAction(name="recompute_dirty_requests"),
+            ],
             timeout_s=60
         )
 
+        # Step 3: Clean worker cache
+        clean_worker_cache_step = RecoveryStep(
+            name="clean_worker_cache",
+            target="worker",
+            actions=[
+                RecoveryAction(name="worker_clean_dirty_requests_cache"),
+            ],
+            timeout_s=60
+        )
+
+        # Step 4: Re-capture graph
+        re_capture_graph_step = RecoveryStep(
+            name="re_capture_graph",
+            target="worker",
+            actions=[
+                RecoveryAction(name="worker_rebuild_cpu_group"),
+                RecoveryAction(name="worker_recapture_graph"),
+            ],
+            timeout_s=60
+        )
 
         network_recover_plan = RecoveryPlan(
             name="network_recover_plan",
-            steps=[npu_recover_step, clean_step, clean_step_worker],
+            steps=[
+                device_recovery_step,
+                clean_engine_cache_step,
+                clean_worker_cache_step,
+                re_capture_graph_step,
+            ],
             cfg=config,
             timeout_s=300
         )
