@@ -188,7 +188,7 @@ jobs:
           git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }}
+            --changed-files vllm_ascend/ops/__init__.py
 
       - name: Set no-tests output when source paths unchanged
         id: noop

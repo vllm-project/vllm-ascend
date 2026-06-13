@@ -163,6 +163,16 @@ jobs:
           restore-keys: |
             vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-
 
+      - name: Debug cache restore result
+        if: ${{ steps.check_npu.outputs.has_npu == 'true' }}
+        run: |
+          echo "cache-hit: ${{ steps.restore-csrc-build-cache.outputs.cache-hit }}"
+          echo "cache-matched-key: ${{ steps.restore-csrc-build-cache.outputs.cache-matched-key }}"
+          echo "restore-keys prefix: vllm-ascend-build-ninja-v1-${{ steps.get_csrc_build_cache_base_branch.outputs.base_branch }}-${{ runner.os }}-${{ steps.get_csrc_build_cache_arch.outputs.cache_arch }}-${{ env.CSRC_BUILD_CACHE_IMAGE }}-"
+          echo "csrc/build exists: $([ -d csrc/build ] && echo YES || echo NO)"
+          echo "csrc/build content count: $(find csrc/build -maxdepth 1 2>/dev/null | wc -l)"
+          echo "csrc/third_party exists: $([ -d csrc/third_party ] && echo YES || echo NO)"
+
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
