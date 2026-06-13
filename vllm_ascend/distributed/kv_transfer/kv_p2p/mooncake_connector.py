@@ -439,6 +439,8 @@ class KVCacheRecvingThread(threading.Thread):
         tp_num_need_pulls: int,
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         all_task_done: bool = False,
+        num_external_tokens: int = 0,
+        num_prompt_blocks: int = 0,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -455,6 +457,8 @@ class KVCacheRecvingThread(threading.Thread):
             "tp_num_need_pulls": tp_num_need_pulls,
             "remote_port_send_num": remote_port_send_num,
             "all_task_done": all_task_done,
+            "num_external_tokens": num_external_tokens,
+            "num_prompt_blocks": num_prompt_blocks,
         }
         logger.debug(f"Adding request {request_id} to the queue.Trans info:{trans_info}")
         self.request_queue.put(trans_info)
@@ -660,10 +664,25 @@ class KVCacheRecvingThread(threading.Thread):
         if num_local_blocks == 0:
             return
 
+        original_remote_block_ids = list(remote_block_ids)
+        num_prompt_blocks = req_meta.get("num_prompt_blocks", 0)
+        num_external_tokens = req_meta.get("num_external_tokens", 0)
+        num_external_blocks = math.ceil(num_external_tokens / self.block_size) if num_external_tokens > 0 else 0
+        is_mtp_partial_prompt = (
+            self.vllm_config.speculative_config is not None
+            and num_prompt_blocks > 0
+            and num_local_blocks < num_prompt_blocks
+            and num_external_blocks >= num_prompt_blocks
+        )
         num_remote_blocks = len(remote_block_ids)
         assert num_local_blocks <= num_remote_blocks
         if num_local_blocks < num_remote_blocks:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
+        checksum_remote_block_ids = (
+            original_remote_block_ids[:num_local_blocks]
+            if is_mtp_partial_prompt
+            else remote_block_ids
+        )
 
         # Check if we have the remote metadata cached.
         if (
@@ -676,10 +695,12 @@ class KVCacheRecvingThread(threading.Thread):
             grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
                 remote_block_ids, local_block_ids
             )
+            checksum_source_block_groups, _ = group_concurrent_contiguous(checksum_remote_block_ids, local_block_ids)
         else:
             remote_block_ids = list(map(lambda x: [x], remote_block_ids))
             local_block_ids = list(map(lambda x: [x], local_block_ids))
             grouped_remote_block_ids, grouped_local_block_ids = remote_block_ids, local_block_ids
+            checksum_source_block_groups = list(map(lambda x: [x], checksum_remote_block_ids))
         num_transfer_groups = len(grouped_remote_block_ids)
         # tp_num_need_pulls: number of KV caches each Decode node needs to pull from each PP stage
         # Due to GQA, different KV heads are distributed across different ranks, so there are offsets
@@ -727,7 +748,7 @@ class KVCacheRecvingThread(threading.Thread):
             {
                 "request_id": req_meta["request_id"],
                 "remote_request_id": remote_request_id,
-                "block_groups": grouped_remote_block_ids,
+                "block_groups": checksum_source_block_groups,
                 "tp_num_need_pulls": 1,
                 "inner_offset": 0,
                 "cache_start": 0,
@@ -763,6 +784,16 @@ class KVCacheRecvingThread(threading.Thread):
                 "num_blocks": num_blocks,
                 "tp_num_need_pulls": tp_num_need_pulls,
                 "inner_offset": inner_offset,
+                "num_prompt_blocks": num_prompt_blocks,
+                "num_external_tokens": num_external_tokens,
+                "num_external_blocks": num_external_blocks,
+                "actual_remote_block_groups": grouped_remote_block_ids,
+                "checksum_source_block_groups": checksum_source_block_groups,
+                "checksum_source_block_policy": (
+                    "mtp_partial_prompt_prefix"
+                    if is_mtp_partial_prompt
+                    else "transfer_remote_blocks"
+                ),
             },
         )
 
@@ -1901,6 +1932,8 @@ class MooncakeConnectorWorker:
                     offset=0,
                     tp_num_need_pulls=tp_num_need_pulls,
                     all_task_done=True,
+                    num_external_tokens=meta.num_external_tokens,
+                    num_prompt_blocks=meta.num_prompt_blocks,
                 )
             elif meta.remote_pcp_size * meta.remote_dcp_size > 1:
                 assert len(meta.local_block_ids) == 1, "Context Parallel does not support multi-groups now."
@@ -1934,6 +1967,8 @@ class MooncakeConnectorWorker:
                             all_task_done=(
                                 pcp_dcp_rank == len(remote_handshake_port_list) - 1 and i == tp_num_need_pulls - 1
                             ),
+                            num_external_tokens=meta.num_external_tokens,
+                            num_prompt_blocks=meta.num_prompt_blocks,
                         )
             else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
                 chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
@@ -1958,6 +1993,8 @@ class MooncakeConnectorWorker:
                         offset=i,
                         tp_num_need_pulls=tp_num_need_pulls,
                         all_task_done=(i == tp_num_need_pulls * self._prefill_pp_size - 1),
+                        num_external_tokens=meta.num_external_tokens,
+                        num_prompt_blocks=meta.num_prompt_blocks,
                     )
 
         for req_id in metadata.reqs_in_batch:
