@@ -118,7 +118,9 @@ jobs:
       - name: Get csrc build cache base branch
         id: get_csrc_build_cache_base_branch
         run: |
-          base_branch="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-unknown-branch}}"
+          # Use github context expression (inherited via workflow_call) instead of
+          # GITHUB_BASE_REF env var which is not set for workflow_call events.
+          base_branch="${{ github.base_ref || github.ref_name }}"
           base_branch=$(printf "%s" "$base_branch" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')
           if [ -z "$base_branch" ]; then
             base_branch="unknown-branch"
