@@ -10,7 +10,6 @@ test_cases:
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--enforce-eager"
-      - "True"
       - "--no-enable-prefix-caching"
       - "--tensor-parallel-size"
       - "2"

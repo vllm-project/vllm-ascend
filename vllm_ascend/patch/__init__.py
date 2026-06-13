@@ -200,6 +200,24 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM47 inline zero-argument streaming parser fix.
 #
+# ** 7c. File: platform/patch_anthropic_system_message.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.anthropic.protocol.AnthropicMessage`
+#      `vllm.entrypoints.anthropic.serving.AnthropicServingMessages`
+#    Why:
+#       Recent Claude Code clients can send `role: system` entries inside the
+#       Anthropic Messages API `messages` array. The pinned vLLM rejects those
+#       requests before inference starts.
+#    How：
+#       Monkey-patch Anthropic message role validation to accept `system`, merge
+#       inline system messages with the top-level system prompt, and skip inline
+#       system entries when converting the remaining chat history.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/44000
+#       https://github.com/vllm-project/vllm/pull/44283
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #44283.
+#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
@@ -310,7 +328,7 @@
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionRequest`
 #      `vllm.tokenizers.deepseek_v4`
 #    Why:
-#       Supported vLLM v0.20.2 predates newer DeepSeek V4 reasoning-effort
+#       Supported vLLM v0.21.0 predates newer DeepSeek V4 reasoning-effort
 #       handling: `minimal`, `xhigh`, and `max` are rejected at request
 #       validation time, reasoning effort does not automatically enable
 #       thinking, and `reasoning_effort="none"` does not force chat mode in
@@ -320,7 +338,7 @@
 #       backport the newer `build_chat_params` enable_thinking behavior, and
 #       monkey-patch the DeepSeek V4 tokenizer reasoning-effort mapping.
 #    Related PR (if no, explain why):
-#       Upstream vLLM main behavior after v0.20.2.
+#       Upstream vLLM main behavior after v0.21.0.
 #    Future Plan:
 #       Remove this patch once vllm-ascend upgrades to a vLLM version with the
 #       same DeepSeek V4 thinking behavior.
@@ -329,7 +347,7 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tool_parsers.minimax_m2_tool_parser.MinimaxM2ToolParser`
 #    Why:
-#       vLLM 0.20.2 only emits MiniMax-M2 tool-call arguments after a complete
+#       vLLM 0.21.0 only emits MiniMax-M2 tool-call arguments after a complete
 #       `<invoke>...</invoke>` block, so long arguments are buffered instead of
 #       streamed incrementally.
 #    How:
@@ -412,9 +430,7 @@
 #    How：
 #       Import `triton` from vllm.triton_utils (which handles both
 #       real Triton and TritonPlaceholder) and inject `next_power_of_2`
-#       onto the module. For vLLM versions that have
-#       `vllm.utils.math_utils.next_power_of_2`, reuse that implementation;
-#       for v0.20.2 (which lacks it), skip the patch.
+#       onto the module, reusing `vllm.utils.math_utils.next_power_of_2`.
 #    Related PR (if no, explain why):
 #       No, torch_npu Triton compatibility issue.
 #    Future Plan:
@@ -724,65 +740,16 @@
 #       Rotary quant is a unique feature of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-# ** 19b. File: worker/patch_deepseek_mtp_pp.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.__init__`
-#      `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.forward`
-#      `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.compute_logits`
-#      `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.load_weights`
-#      `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.embed_input_ids`
+#   4. `vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM.load_weights`
 #    Why:
-#       DeepSeekMTP (used as the MTP draft model for GLM5.1 with model_type=glm_moe_dsa)
-#       does not support pipeline parallelism. When PP>1, all ranks attempt to load
-#       the full MTP model, wasting memory and potentially causing errors.
+#       After vllm PR #41706, GlmMoeDsaForCausalLM.load_weights uses `AutoWeightsLoader` which
+#       does not skip `rot.weight`, and will cause ValueError while loading weights.
 #    How：
-#       On non-last PP ranks, replace the MTP model with a minimal stub
-#       (PPMissingLayer) and skip weight loading. Full MTP model is only
-#       created on the last PP stage. Set supports_pp=True.
+#       Use the `skip_prefixes` parameter to skip certain weight tensors.
 #    Related PR (if no, explain why):
-#       No, MTP+PP is a vllm-ascend feature combination.
+#       https://github.com/vllm-project/vllm/pull/41706
 #    Future Plan:
-#       Remove this patch when upstream DeepSeekMTP supports PP natively.
-#
-#   2. `vllm_ascend.spec_decode.eagle_proposer.AscendEagleProposer.load_model`
-#    Why:
-#       On non-last PP ranks the proposer should skip attention-layer discovery
-#       and kernel setup for the MTP draft model since only a stub exists.
-#    How：
-#       When method=="mtp" and PP>1 and not last rank, only create the stub model,
-#       skip all attention-layer discovery.
-#    Related PR (if no, explain why):
-#       No, same as above.
-#    Future Plan:
-#       Remove this patch when upstream DeepSeekMTP supports PP natively.
-#
-#   3. `vllm_ascend.spec_decode.eagle_proposer.AscendEagleProposer._maybe_share_embeddings`
-#    Why:
-#       With PP>1 the original code skips embedding sharing entirely, but on the
-#       last PP rank the target model has real embed_tokens that can be shared.
-#       Skipping sharing causes MTP to load its own embedding copy (extra memory,
-#       potential precision issues).
-#    How：
-#       On the last PP rank with PP>1, share the target model's embed_tokens
-#       with the MTP draft model. On non-last ranks, skip sharing (the MTP model
-#       is a stub).
-#    Related PR (if no, explain why):
-#       No, PP+spec-decode embedding sharing is vllm-ascend specific.
-#    Future Plan:
-#       Remove this patch when upstream supports PP+MTP embedding sharing.
-#
-#   4. `vllm_ascend.spec_decode.eagle_proposer.AscendEagleProposer._maybe_share_lm_head`
-#    Why:
-#       With PP>1, on non-last PP ranks the target model's lm_head is PPMissingLayer,
-#       causing torch.equal() comparison with MTP shared_head to fail.
-#    How：
-#       Skip LM head sharing on non-last PP ranks. Use original logic on last
-#       PP rank or when PP=1.
-#    Related PR (if no, explain why):
-#       No, same as above.
-#    Future Plan:
-#       Remove this patch when upstream supports PP+MTP LM head sharing.
-#
+#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
 # ** 20. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`

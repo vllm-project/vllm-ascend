@@ -86,7 +86,7 @@ Below are the maintained branches:
 
 | Branch           | Status       | Note                                 |
 |------------------|--------------|--------------------------------------|
-| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.20.2 tag |
+| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.21.0 tag |
 | v0.7.1-dev       | Unmaintained | Outdated, no longer maintained. |
 | v0.7.3-dev       | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |
 | v0.9.1-dev       | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |
