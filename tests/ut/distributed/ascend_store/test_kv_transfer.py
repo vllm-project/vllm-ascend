@@ -216,7 +216,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             put_step=1,
             kv_role="kv_producer",
             ready_event=threading.Event(),
-            group_uses_align_state=[False],
         )
         req = ReqMeta(
             req_id="r1",
@@ -390,8 +389,6 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
             tp_rank=0,
             dcp_size=1,
             ready_event=threading.Event(),
-            invalid_block_ids=set(),
-            invalid_block_ids_lock=threading.Lock(),
         )
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
         req = ReqMeta(

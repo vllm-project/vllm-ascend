@@ -454,6 +454,17 @@ class ChunkedTokenDatabase:
         )
         return [block is not cached_block_pool.null_block for block in hit_blocks[0]]
 
+    def mask_allows_chunk(
+        self,
+        mask: list[bool] | None,
+        start: int,
+        kv_cache_group_id: int,
+    ) -> bool:
+        if mask is None:
+            return True
+        chunk_idx = start // self.get_block_size(kv_cache_group_id)
+        return chunk_idx < len(mask) and mask[chunk_idx]
+
     def _get_group_buffers(
         self, kv_cache_group_id: int, cache_role: str = "kv"
     ) -> tuple[list[int], list[int], list[int] | None]:

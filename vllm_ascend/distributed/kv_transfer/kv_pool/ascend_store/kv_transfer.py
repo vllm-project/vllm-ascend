@@ -206,6 +206,9 @@ class KVTransferThread(threading.Thread):
             return self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
     def _chunk_mask_allows(self, mask: list[bool] | None, start: int, kv_cache_group_id: int) -> bool:
+        mask_allows_chunk = getattr(self.token_database, "mask_allows_chunk", None)
+        if mask_allows_chunk is not None:
+            return mask_allows_chunk(mask, start, kv_cache_group_id)
         if mask is None:
             return True
         chunk_idx = start // self._get_block_size(kv_cache_group_id)
