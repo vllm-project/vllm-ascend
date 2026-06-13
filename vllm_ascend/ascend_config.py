@@ -627,7 +627,6 @@ class EplbConfig:
         "expert_map_record_path": None,
         "num_redundant_experts": 0,
         "eplb_policy_type": 1,
-        "eplb_pp_stage": -1,
     }
 
     def __init__(self, user_config: dict | None = None):

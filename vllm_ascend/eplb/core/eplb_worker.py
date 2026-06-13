@@ -20,7 +20,6 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
-from vllm.distributed import get_ep_group
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
@@ -34,7 +33,7 @@ class EplbWorker:
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
-        self.rank_id = get_ep_group().rank_in_group
+        self.rank_id = dist.get_rank()
         self.multi_stage = policy_type == 3
 
     def do_update(self):
@@ -161,42 +160,35 @@ class EplbWorker:
                     updated_expert_maps_this_layer,
                     layer_id,
                 )
-                continue
 
-            # NOTE: expert_maps tensors are in LOCAL/SLOT format:
-            #   tensor[rank, slot] = local_expert_id
-            # So torch.where gives (rank, SLOT) pairs — the second index
-            # is a SLOT INDEX, not a global expert ID.
-            # We must look up the actual local_expert_id from the new map.
-
-            # Find (rank, slot) where slot becomes newly occupied
-            dst_rank_indices, slots_to_fill = torch.where(
+            # Parse expert_ids each rank needs to receive from other ranks
+            dst_rank_indices, experts_to_recv = torch.where(
                 (current_expert_maps_this_layer == -1) & (updated_expert_maps_this_layer != -1)
+            )
+
+            # Parse expert_ids each rank needs to send to other ranks
+            src_rank_indices, experts_to_send = torch.where(
+                (current_expert_maps_this_layer != -1) & (updated_expert_maps_this_layer == -1)
             )
 
             for idx in range(len(dst_rank_indices)):
                 dst_rank_id = dst_rank_indices[idx].item()
-                slot_id = slots_to_fill[idx].item()
-                # Look up the actual local expert ID that fills this slot
-                expert_id = updated_expert_maps_this_layer[dst_rank_id, slot_id].item()
+                expert_id = experts_to_recv[idx].item()
                 if dst_rank_id not in expert_recv_info_this_layer:
                     expert_recv_info_this_layer[dst_rank_id] = []
 
-                # Find source: prefer ranks freeing this expert (current has it,
-                # updated doesn't), fall back to any rank that currently holds it.
-                freeing_mask = (current_expert_maps_this_layer == expert_id) & (updated_expert_maps_this_layer == -1)
-                if freeing_mask.any():
-                    candidate_src_ranks, _ = torch.where(freeing_mask)
+                if not torch.isin(torch.tensor(expert_id), experts_to_send).any():
+                    # if expert_id are not sent out from any npu, it will be copied from one npu holding this expert
+                    candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:, expert_id] != -1)[0]
                 else:
-                    candidate_src_ranks, _ = torch.where(current_expert_maps_this_layer == expert_id)
+                    candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
 
                 # TODO: improve selection criterion of NPU sending expert_id,
                 # considering intra-node or inter-node...
-                src_rank_id = candidate_src_ranks[0].item()
+                src_rank_id = candidate_src_rank_indices[0].item()
                 if src_rank_id not in expert_send_info_this_layer:
                     expert_send_info_this_layer[src_rank_id] = []
 
-                # Use expert_id (local expert ID) in the plan, not slot index
                 expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
                 expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
 

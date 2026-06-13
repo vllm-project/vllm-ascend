@@ -200,13 +200,6 @@ def _patch_speculative_minimax_whitelist() -> None:
                 if callable(verify_vocab):
                     verify_vocab()
                 return self
-            if "pipeline parallelism" in msg and "not supported" in msg:
-                # PP check for eagle3 draft model — the draft model runs only
-                # on the last PP rank and does not need native PP support.
-                verify_vocab = getattr(self, "verify_equal_vocab_size_if_draft_model", None)
-                if callable(verify_vocab):
-                    verify_vocab()
-                return self
             raise
 
     _patched_verify_args._vllm_ascend_minimax_eagle3_patched = True  # type: ignore[attr-defined]

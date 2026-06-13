@@ -905,6 +905,8 @@ class RecomputeScheduler(Scheduler):
             routed_experts = None
             finish_reason = None
             if stopped:
+                routed_experts = self._get_routed_experts(request)
+
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()

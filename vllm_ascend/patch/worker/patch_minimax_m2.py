@@ -228,12 +228,6 @@ def _patched_minimax_m2_forward(
     if not aux_layers:
         return _original_minimax_m2_forward(self, input_ids, positions, intermediate_tensors, inputs_embeds)
 
-    # Use a Python list as a sparse slot array (outside Dynamo's FX graph).
-    # Each aux layer has a fixed slot index.  Missing slots stay None.
-    aux_layers_list = list(aux_layers)
-    aux_slot = {layer: i for i, layer in enumerate(aux_layers_list)}
-    aux_slots: list[torch.Tensor | None] = [None] * len(aux_layers_list)
-
     if get_pp_group().is_first_rank:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
@@ -244,84 +238,26 @@ def _patched_minimax_m2_forward(
         assert intermediate_tensors is not None
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
-        # Incoming aux buffer has shape [batch, num_aux, hidden].
-        # The model runner has already marked its batch dim as dynamic.
-        incoming = intermediate_tensors.tensors.get("_pp_aux")
-        if incoming is not None:
-            for i in range(incoming.shape[1]):
-                if aux_slots[i] is None:
-                    aux_slots[i] = incoming[:, i, :].contiguous()
 
+    aux_hidden_states: list[torch.Tensor] = []
     for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
         layer_idx = self.start_layer + idx
-        slot = aux_slot.get(layer_idx)
-        if slot is not None:
-            aux_slots[slot] = (
-                hidden_states + residual if residual is not None else hidden_states
-            )
+        if layer_idx in aux_layers:
+            aux_hidden_states.append(hidden_states + residual if residual is not None else hidden_states)
         hidden_states, residual = layer(positions, hidden_states, residual)
 
-    # Filter None slots and return.
-    aux_list = [t for t in aux_slots if t is not None]
-
     if not get_pp_group().is_last_rank:
-        # Zero-fill empty slots and stack as [batch, num_aux, hidden]
-        # for PP transport.  The batch dim comes from hidden_states so
-        # it stays dynamic and matches the receiver's expectation.
-        for i in range(len(aux_slots)):
-            if aux_slots[i] is None:
-                aux_slots[i] = torch.zeros(
-                    hidden_states.shape[0], hidden_states.shape[1],
-                    dtype=hidden_states.dtype, device=hidden_states.device,
-                )
-        return IntermediateTensors({
-            "hidden_states": hidden_states,
-            "residual": residual,
-            "_pp_aux": torch.stack(aux_slots, dim=1),
-        })
+        return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
 
     hidden_states, _ = self.norm(hidden_states, residual)
-    if aux_list:
-        return hidden_states, aux_list
+    if aux_hidden_states:
+        return hidden_states, aux_hidden_states
     return hidden_states
 
 
 if not getattr(_original_minimax_m2_forward, "_vllm_ascend_minimax_eagle3_patched", False):
     MiniMaxM2Model.forward = _patched_minimax_m2_forward  # type: ignore[assignment]
     MiniMaxM2Model.forward._vllm_ascend_minimax_eagle3_patched = True  # type: ignore[attr-defined]
-
-    # make_empty_intermediate_tensors is set as an INSTANCE attribute in
-    # MiniMaxM2Model.__init__.  Wrap __init__ to add the aux_hidden_states
-    # buffer after construction, so PP send/recv can transport aux states.
-    _original_model_init = MiniMaxM2Model.__init__
-
-    def _patched_model_init(
-        self: "MiniMaxM2Model",
-        *,
-        vllm_config,
-        prefix: str = "",
-    ) -> None:
-        _original_model_init(self, vllm_config=vllm_config, prefix=prefix)
-        _original_make_empty = self.make_empty_intermediate_tensors
-
-        def _make_empty_with_aux(
-            batch_size: int,
-            dtype: torch.dtype,
-            device: torch.device,
-            _orig=_original_make_empty,
-        ) -> IntermediateTensors:
-            result = _orig(batch_size, dtype, device)
-            aux_layers = getattr(self, "aux_hidden_state_layers", None)
-            num_aux = len(aux_layers) if aux_layers else 3
-            result.tensors["_pp_aux"] = torch.zeros(
-                (batch_size, num_aux, self.config.hidden_size),
-                dtype=dtype, device=device,
-            )
-            return result
-
-        self.make_empty_intermediate_tensors = _make_empty_with_aux
-
-    MiniMaxM2Model.__init__ = _patched_model_init  # type: ignore[assignment]
 
 
 def _set_aux_hidden_state_layers(self: "MiniMaxM2ForCausalLM", layers: tuple[int, ...]) -> None:

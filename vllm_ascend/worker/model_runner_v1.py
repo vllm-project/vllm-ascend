@@ -121,7 +121,7 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
-
+from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -514,10 +514,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         # for cleancode , actually the three attrs is defined in gpu_model_runner
         self.execute_model_state: ExecuteModelState | None = None
-        # None in the first PP rank. The rest are set after load_model
-        # (in _dummy_run or warmup). Do NOT overwrite to None unconditionally;
-        # the warmup code calls make_empty_intermediate_tensors which includes
-        # _pp_aux via the monkey-patched version.
+        # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
@@ -2076,8 +2073,6 @@ class NPUModelRunner(GPUModelRunner):
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
                     self._finalize_dump_data()
-                    if self.dynamic_eplb:
-                        self.eplb_updator.forward_end()
                     return hidden_states
                 if self.is_pooling_model:
                     # Return the pooling output.
@@ -3321,13 +3316,6 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors = IntermediateTensors(
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                 )
-                # _pp_aux buffer is pre-allocated with a static batch dim,
-                # but the forward expects a dynamic batch dim.  Mark it
-                # here (outside the compiled graph) so Dynamo treats both
-                # consistently.
-                aux_buf = intermediate_tensors.tensors.get("_pp_aux")
-                if aux_buf is not None:
-                    torch._dynamo.mark_dynamic(aux_buf, 0)
 
             need_dummy_logits = not is_profile and lmhead_tp_enable()
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
@@ -3379,7 +3367,8 @@ class NPUModelRunner(GPUModelRunner):
                     is_profile=is_profile,
                 )
             if is_profile and self.dynamic_eplb:
-                self.eplb_updator.adaptor.clear_all_moe_loads()
+                target = self.model.language_model if hasattr(self.model, "language_model") else self.model
+                target.clear_all_moe_loads()
             if self.dynamic_eplb:
                 self.eplb_updator.forward_end()
             self._finalize_dump_data(dump=False)
@@ -3448,26 +3437,6 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
-            # Set aux_hidden_state_layers on ALL PP ranks.
-            # _set_up_drafter only sets use_aux_hidden_state_outputs on the last
-            # PP rank, but non-last ranks also need it to produce _pp_aux.
-            should_set_aux = self.use_aux_hidden_state_outputs or (
-                self.vllm_config.speculative_config
-                and self.vllm_config.speculative_config.method == "eagle3"
-            )
-            if should_set_aux:
-                self.use_aux_hidden_state_outputs = True
-                from vllm.model_executor.models.interfaces import supports_eagle3
-                if not supports_eagle3(self.model):
-                    raise RuntimeError(
-                        "Model does not support EAGLE3 interface but "
-                        "aux_hidden_state_outputs was requested"
-                    )
-                aux_layers = self._get_eagle3_aux_layers_from_config()
-                if not aux_layers:
-                    aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
-                self.model.set_aux_hidden_state_layers(aux_layers)
-
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name
@@ -3475,12 +3444,25 @@ class NPUModelRunner(GPUModelRunner):
                 if "sink" in name:
                     self._has_sinks = True
                     break
+            if self.dynamic_eplb:
+                model_register(self.model)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
                     patch_load_weights(self.vllm_config)
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
+                if self.use_aux_hidden_state_outputs:
+                    from vllm.model_executor.models.interfaces import supports_eagle3
+                    if not supports_eagle3(self.model):
+                        raise RuntimeError(
+                            "Model does not support EAGLE3 interface but "
+                            "aux_hidden_state_outputs was requested"
+                        )
+                    aux_layers = self._get_eagle3_aux_layers_from_config()
+                    if not aux_layers:
+                        aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                    self.model.set_aux_hidden_state_layers(aux_layers)
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
