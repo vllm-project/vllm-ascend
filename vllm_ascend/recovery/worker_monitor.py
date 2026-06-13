@@ -16,11 +16,10 @@ from vllm_ascend.recovery.utils import get_engine_recovery_bind_address
 
 class WorkerMonitor:
     """
-    故障处理线程
-    搞3个zmq socket
-    1. 接收worker的错误信息
-    2. 接收EngineCore下发的RecoveryPlan
-    3. 向EngineCore发送故障信息和执行结果
+    Fault handling thread with 3 zmq sockets:
+    1. Receive error info from worker
+    2. Receive RecoveryPlan from EngineCore
+    3. Send fault info and execution results to EngineCore
     """
     def __init__(self, vllm_config:VllmConfig, worker, ctx:zmq.Context) -> None:
         self.vllm_config = vllm_config
