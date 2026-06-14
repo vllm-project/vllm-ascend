@@ -89,7 +89,8 @@ public:
         __gm__ uint8_t *seqUsed,
         __gm__ uint8_t *startPos,
         __gm__ uint8_t *cmpKvOut,
-        __gm__ uint8_t *workspace);
+        __gm__ uint8_t *workspace,
+        __gm__ uint8_t *ropePositions = nullptr);
     __aicore__ inline void Process();
 
 private:
@@ -178,7 +179,8 @@ __aicore__ inline void CompressorKernelPerf<COMP>::Init(
         __gm__ uint8_t *seqUsed,
         __gm__ uint8_t *startPos,
         __gm__ uint8_t *cmpKvOut,
-        __gm__ uint8_t *workspace)
+        __gm__ uint8_t *workspace,
+        __gm__ uint8_t *ropePositions)
 {
     if ASCEND_IS_AIV {
         constInfo.aiCoreIdx = GetBlockIdx() / 2;
@@ -231,7 +233,7 @@ __aicore__ inline void CompressorKernelPerf<COMP>::Init(
     } else {
         blockVec_.InitParams(constInfo, tools_);
         blockVec_.Init(x, wKv, wGate, stateCache, ape, normWeight, ropeSin, ropeCos, stateBlockTable,
-                        cuSeqlens, seqUsed, startPos, cmpKvOut);
+                        cuSeqlens, seqUsed, startPos, cmpKvOut, ropePositions);
         blockVec_.InitBuffers(pipe_);
 #if __CCE_AICORE__ == 310
         blockVec_.InitVec1GlobalTensor(Vec1InputKvGm, Vec1InputScoreGm, vec1KvCacheGm, vec1ScoreCacheGm, vec1ResGm, vec2InputGm);

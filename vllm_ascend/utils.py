@@ -225,6 +225,12 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     return True
 
 
+def ensure_npu_internal_format_enabled() -> None:
+    npu_config = getattr(getattr(torch_npu, "npu", None), "config", None)
+    if npu_config is not None:
+        npu_config.allow_internal_format = True
+
+
 # NZ conversion policy:
 # - 310P: always convert supported weights to FRACTAL_NZ
 # - non-310P: follow VLLM_ASCEND_ENABLE_NZ
@@ -232,6 +238,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
+    ensure_npu_internal_format_enabled()
     return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 

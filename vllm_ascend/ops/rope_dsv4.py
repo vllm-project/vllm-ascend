@@ -1,24 +1,32 @@
 import math
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 import torch.nn as nn
-import torch_npu
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 
+from vllm_ascend.ops.rope_cache_ops import inplace_partial_rotary_mul_dsa_by_cache, rotary_mul_materialized
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 class RopeGlobalState:
     def __init__(self):
-        self.static_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-        self.runtime_buffer: dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]] = {}
+        self.static_cache: dict[str, torch.Tensor] = {}
+        self.runtime_buffer: dict[str, dict[str, torch.Tensor]] = {}
         self.layer_info: dict[str, tuple[str, list[str]]] = {}
         self.registry_summary: dict[str, set] = {}
 
 
 _ROPE_STATE = RopeGlobalState()
+
+
+def _dsa_rope_layer_key(layername: str, config_key: str, rope_groups: list[str] | None = None) -> str:
+    if rope_groups is None:
+        return f"{layername}::{config_key}"
+    groups_key = ",".join(sorted(rope_groups))
+    return f"{layername}::{config_key}::groups={groups_key}"
 
 
 class DSARopeDataProxy:
@@ -62,44 +70,170 @@ class DSARopeDataProxy:
             return layer_result
 
 
-def materialize_dsa_cos_sin(positions: torch.Tensor | dict[str, torch.Tensor], use_cache: bool = False):
-    """Materialize DSA cos/sin only where legacy DSA kernels still require tensors."""
+def _normalize_dsa_positions(positions: torch.Tensor | dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     if isinstance(positions, torch.Tensor):
-        pos_map = {"default": positions}
-    else:
-        pos_map = positions
+        return {"default": positions}
+    return positions
 
-    batch_result: dict[Any, Any] = {}
+
+def _to_dsa_cos_sin_cache(cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    """Normalize legacy DSA tuple storage into the standard cos_sin_cache tensor."""
+    if isinstance(cache, tuple):
+        cos_cache, sin_cache = cache
+        return torch.cat((cos_cache, sin_cache), dim=-1)
+    return cache
+
+
+def split_dsa_cos_sin_cache(cos_sin_cache: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split the standard DSA cos_sin_cache only for legacy materialized users."""
+    if isinstance(cos_sin_cache, tuple):
+        return cos_sin_cache
+    if cos_sin_cache.shape[-1] % 2 != 0:
+        raise ValueError(f"DSA cos_sin_cache last dim must be even, got {cos_sin_cache.shape[-1]}")
+    half_dim = cos_sin_cache.shape[-1] // 2
+    return cos_sin_cache.narrow(-1, 0, half_dim), cos_sin_cache.narrow(-1, half_dim, half_dim)
+
+
+def _materialize_dsa_group_cos_sin(
+    config_key: str,
+    group_name: str,
+    positions: torch.Tensor,
+    *,
+    use_cache: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if config_key not in _ROPE_STATE.static_cache:
+        return None
+
+    static_cache = _to_dsa_cos_sin_cache(_ROPE_STATE.static_cache[config_key])
+    curr_cache = static_cache[positions]
+
+    if use_cache:
+        group_buffer = _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
+
+        if group_buffer is None:
+            return None
+
+        num_tokens = positions.size(0)
+        group_buffer[:num_tokens].copy_(curr_cache)
+        return split_dsa_cos_sin_cache(group_buffer[:num_tokens])
+
+    return split_dsa_cos_sin_cache(curr_cache)
+
+
+@dataclass
+class DSARopeCacheView:
+    """Position-based DSA RoPE view for one layer/group."""
+
+    config_key: str
+    group_name: str
+    positions: torch.Tensor
+    use_cache: bool
+    rotary_dim: int
+    _legacy_materialized: tuple[torch.Tensor, torch.Tensor] | None = field(default=None, init=False, repr=False)
+
+    @property
+    def cos_sin_cache(self) -> torch.Tensor:
+        return _to_dsa_cos_sin_cache(_ROPE_STATE.static_cache[self.config_key])
+
+    def materialize(self, *, inverse: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return legacy materialized cos/sin for non by-cache DSA callers."""
+        if self._legacy_materialized is None:
+            materialized = _materialize_dsa_group_cos_sin(
+                self.config_key,
+                self.group_name,
+                self.positions,
+                use_cache=self.use_cache,
+            )
+            if materialized is None:
+                raise KeyError(
+                    f"DSA RoPE group {self.group_name} is not registered for config {self.config_key}."
+                )
+            self._legacy_materialized = materialized
+
+        cos, sin = self._legacy_materialized
+        if inverse:
+            sin = -sin
+        return cos, sin
+
+    def backend_cos_sin_cache(self) -> torch.Tensor:
+        return self.cos_sin_cache
+
+
+class DSARopeCacheProxy:
+    """Lazy layer lookup for DSA RoPE cache views."""
+
+    def __init__(self, view_map: dict[Any, dict[str, DSARopeCacheView]]):
+        self._views = view_map
+
+    def __getitem__(self, layer_name: str):
+        info = _ROPE_STATE.layer_info.get(layer_name)
+        if info is None:
+            raise KeyError(f"Layer {layer_name} not registered.")
+
+        config_key, required_groups = info
+        config_views = self._views.get(config_key, {})
+
+        layer_result = {}
+        for grp in required_groups:
+            if grp in config_views:
+                layer_result[grp] = config_views[grp]
+        if len(layer_result) == 1:
+            return list(layer_result.values())[0]
+
+        return layer_result
+
+
+def get_dsa_rope_cache_proxy(
+    positions: torch.Tensor | dict[str, torch.Tensor],
+    *,
+    use_cache: bool = False,
+) -> DSARopeCacheProxy:
+    pos_map = _normalize_dsa_positions(positions)
+    view_map: dict[Any, dict[str, DSARopeCacheView]] = {}
 
     for config_key, registered_groups in _ROPE_STATE.registry_summary.items():
         if config_key not in _ROPE_STATE.static_cache:
             continue
-        static_cos, static_sin = _ROPE_STATE.static_cache[config_key]
+        static_cache = _to_dsa_cos_sin_cache(_ROPE_STATE.static_cache[config_key])
+        static_cos, _ = split_dsa_cos_sin_cache(static_cache)
 
+        view_map[config_key] = {}
+        for group_name, pos_tensor in pos_map.items():
+            if group_name not in registered_groups:
+                continue
+            view_map[config_key][group_name] = DSARopeCacheView(
+                config_key=config_key,
+                group_name=group_name,
+                positions=pos_tensor,
+                use_cache=use_cache,
+                rotary_dim=int(static_cos.shape[-1]),
+            )
+
+    return DSARopeCacheProxy(view_map)
+
+
+def materialize_dsa_cos_sin(positions: torch.Tensor | dict[str, torch.Tensor], use_cache: bool = False):
+    """Materialize DSA cos/sin only where legacy DSA kernels still require tensors."""
+    pos_map = _normalize_dsa_positions(positions)
+
+    batch_result: dict[Any, Any] = {}
+
+    for config_key, registered_groups in _ROPE_STATE.registry_summary.items():
         batch_result[config_key] = {}
 
         for group_name, pos_tensor in pos_map.items():
             if group_name not in registered_groups:
                 continue
 
-            curr_cos = static_cos[pos_tensor]
-            curr_sin = static_sin[pos_tensor]
-
-            if use_cache:
-                group_buffers = _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
-
-                if group_buffers is None:
-                    continue
-
-                buf_cos, buf_sin = group_buffers
-                num_tokens = pos_tensor.size(0)
-
-                buf_cos[:num_tokens].copy_(curr_cos)
-                buf_sin[:num_tokens].copy_(curr_sin)
-
-                batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
-            else:
-                batch_result[config_key][group_name] = (curr_cos, curr_sin)
+            materialized = _materialize_dsa_group_cos_sin(
+                config_key,
+                group_name,
+                pos_tensor,
+                use_cache=use_cache,
+            )
+            if materialized is None:
+                continue
+            batch_result[config_key][group_name] = materialized
 
     return DSARopeDataProxy(batch_result, is_cos=True), DSARopeDataProxy(batch_result, is_cos=False)
 
@@ -130,7 +264,8 @@ class ComplexExpRotaryEmbedding(nn.Module):
             f"rotary_dim{rotary_dim}_max_position_embeddings{max_position_embeddings}_"
             f"base{base}_scaling_factor{scaling_factor}_beta_fast{beta_fast}_beta_slow{beta_slow}"
         )
-        _ROPE_STATE.layer_info[layername] = (config_key, rope_groups)
+        self.rope_cache_key = _dsa_rope_layer_key(layername, config_key, rope_groups)
+        _ROPE_STATE.layer_info[self.rope_cache_key] = (config_key, rope_groups)
 
         if config_key not in _ROPE_STATE.registry_summary:
             _ROPE_STATE.registry_summary[config_key] = set()
@@ -155,7 +290,10 @@ class ComplexExpRotaryEmbedding(nn.Module):
             cos = cos.to(current_platform.device_type)
             sin = sin.to(current_platform.device_type)
 
-            _ROPE_STATE.static_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
+            _ROPE_STATE.static_cache[config_key] = torch.cat(
+                (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1)),
+                dim=-1,
+            )
 
         if config_key not in _ROPE_STATE.runtime_buffer:
             _ROPE_STATE.runtime_buffer[config_key] = {}
@@ -164,9 +302,10 @@ class ComplexExpRotaryEmbedding(nn.Module):
         max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens
         for grp in rope_groups:
             if grp not in _ROPE_STATE.runtime_buffer[config_key]:
-                buf_cos = torch.ones(max_batch_size, 1, 1, rotary_dim, dtype=dtype, device=target_device)
-                buf_sin = torch.zeros(max_batch_size, 1, 1, rotary_dim, dtype=dtype, device=target_device)
-                _ROPE_STATE.runtime_buffer[config_key][grp] = (buf_cos, buf_sin)
+                buf_cos_sin = torch.empty(max_batch_size, 1, 1, rotary_dim * 2, dtype=dtype, device=target_device)
+                buf_cos_sin[..., :rotary_dim] = 1
+                buf_cos_sin[..., rotary_dim:] = 0
+                _ROPE_STATE.runtime_buffer[config_key][grp] = buf_cos_sin
 
     @staticmethod
     def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow):
@@ -223,6 +362,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        """Legacy helper for callers that still own materialized DSA cos/sin."""
         ori_shape = x.shape
         y = x
 
@@ -231,7 +371,33 @@ class ComplexExpRotaryEmbedding(nn.Module):
         if x.dim() == 3:
             x = x.unsqueeze(1)
 
-        x = torch_npu.npu_rotary_mul(x, cos, sin, rotary_mode="interleave")
+        x = rotary_mul_materialized(x, cos, sin, rotary_mode="interleave")
+
+        y.copy_(x.view(ori_shape))
+        return y
+
+    def forward_by_cache(
+        self,
+        x: torch.Tensor,
+        rope_cache: DSARopeCacheView,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor:
+        ori_shape = x.shape
+        y = x
+
+        if x.dim() == 2:
+            x = x.unsqueeze(-2)
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+
+        inplace_partial_rotary_mul_dsa_by_cache(
+            x,
+            rope_cache,
+            rotary_mode="interleave",
+            partial_slice=[0, x.shape[-1]],
+            inverse=inverse,
+        )
 
         y.copy_(x.view(ori_shape))
         return y

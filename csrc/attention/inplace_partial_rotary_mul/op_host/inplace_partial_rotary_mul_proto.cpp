@@ -59,6 +59,17 @@ REG_OP(InplacePartialRotaryMul)
     .ATTR(partial_slice, ListInt, {0, 0})
     .OP_END_FACTORY_REG(InplacePartialRotaryMul)
 
+REG_OP(InplacePartialRotaryMulDsaByCache)
+    .INPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT16, DT_BFLOAT16}))
+    .INPUT(positions, TensorType({DT_INT64, DT_INT64, DT_INT64, DT_INT64, DT_INT64}))
+    .INPUT(cos_sin_cache, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT, DT_FLOAT}))
+    .OUTPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT16, DT_BFLOAT16}))
+    .ATTR(mode, Int, 1)
+    .ATTR(partial_slice, ListInt, {0, 0})
+    .ATTR(rope_dim, Int, 0)
+    .ATTR(inverse, Bool, false)
+    .OP_END_FACTORY_REG(InplacePartialRotaryMulDsaByCache)
+
 } // namespace ge
 
 #endif

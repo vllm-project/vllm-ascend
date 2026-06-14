@@ -111,14 +111,18 @@ def test_mock_rotary_uses_layer_owned_rope_cache():
         device=torch.device("cpu"),
         dtype=torch.float32,
     )
+    rotary.cos_sin_cache = torch.arange(8 * 4, dtype=torch.float32).view(8, 4)
     ref_tensor = torch.empty(positions.shape[0], 1, 4, dtype=torch.float32)
 
     cos, sin = select_cos_sin_from_cache(rotary, positions, ref_tensor, layout="T11D")
+    expected_cos, expected_sin = rotary.cos_sin_cache.index_select(0, positions).chunk(2, dim=-1)
+    expected_cos = torch.cat((expected_cos, expected_cos), dim=-1).view(positions.shape[0], 1, 1, 4)
+    expected_sin = torch.cat((expected_sin, expected_sin), dim=-1).view(positions.shape[0], 1, 1, 4)
 
     assert cos.shape == (positions.shape[0], 1, 1, 4)
     assert sin.shape == (positions.shape[0], 1, 1, 4)
-    assert torch.equal(cos, torch.ones_like(cos))
-    assert torch.equal(sin, torch.zeros_like(sin))
+    assert torch.equal(cos, expected_cos)
+    assert torch.equal(sin, expected_sin)
 
 
 def create_mla_kv_cache(

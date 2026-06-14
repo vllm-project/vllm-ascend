@@ -17,6 +17,7 @@
 
 import math
 import os
+from typing import Optional
 
 import torch
 import torch_npu
@@ -34,27 +35,32 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.platform import NPUPlatform
 
 if HAS_TRITON:
-    from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+    from vllm_ascend.ops.triton.rope import (
+        mrope_forward_triton_by_cache,
+        rope_forward_triton,
+    )
 
-    from vllm_ascend.ops.triton.rope import rope_forward_triton
 
 def get_rope_cache(rotary_emb, ref_tensor: torch.Tensor) -> torch.Tensor:
-    """Return rotary_emb.cos_sin_cache matched to ref_tensor dtype/device."""
-    if hasattr(rotary_emb, "_match_cos_sin_cache_dtype"):
-        return rotary_emb._match_cos_sin_cache_dtype(ref_tensor)
+    """Return rotary_emb.cos_sin_cache matched to ref_tensor dtype/device.
 
+    Keep this helper side-effect free. Some upstream cache helpers update the
+    module buffer when dtype/device differ, which makes graph capture unstable
+    when adjacent calls disagree on the reference tensor dtype.
+    """
     cos_sin_cache = rotary_emb.cos_sin_cache
     if cos_sin_cache.device == ref_tensor.device and cos_sin_cache.dtype == ref_tensor.dtype:
         return cos_sin_cache
 
-    cos_sin_cache = cos_sin_cache.to(ref_tensor.device, dtype=ref_tensor.dtype)
-    if not torch.compiler.is_compiling():
-        rotary_emb.cos_sin_cache = cos_sin_cache
-    return cos_sin_cache
+    return cos_sin_cache.to(ref_tensor.device, dtype=ref_tensor.dtype)
 
 
 def select_cos_sin_cache(rotary_emb, positions: torch.Tensor, ref_tensor: torch.Tensor) -> torch.Tensor:
-    """Select cos_sin_cache rows with upstream-style positions ownership."""
+    """Legacy row materialization helper for callers that still own positions.
+
+    New NPU hot paths should pass positions plus the full cos_sin_cache to a
+    by-cache adapter/backend instead of slicing rows in Python.
+    """
     return get_rope_cache(rotary_emb, ref_tensor)[positions]
 
 
@@ -72,7 +78,10 @@ def select_cos_sin_from_cache(
     layout: str = "T11D",
     expand_rope_dim: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Resolve cos/sin from rotary_emb for legacy NPU ops.
+    """Resolve materialized cos/sin from rotary_emb for legacy NPU ops.
+
+    This is intentionally kept as a boundary helper only. Stage-9 by-cache
+    paths should pass positions plus cos_sin_cache through adapter APIs.
 
     layout values:
     - "TD": [num_tokens, rotary_dim]
@@ -96,16 +105,26 @@ def select_cos_sin_from_cache(
 def rope_forward_oot(
     positions: torch.Tensor,
     query: torch.Tensor,
-    key: torch.Tensor,
+    key: Optional[torch.Tensor],
     cos_sin_cache: torch.Tensor,
     head_size: int,
     rotary_dim: int,
     is_neox_style: bool,
     offsets: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    query_shape, key_shape = query.shape, key.shape
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
+    if key is None:
+        return RotaryEmbedding.forward_static(
+            positions,
+            query,
+            None,
+            head_size,
+            rotary_dim,
+            cos_sin_cache,
+            is_neox_style,
+        )
+    query_shape, key_shape = query.shape, key.shape
     if HAS_TRITON:
         num_tokens = query.shape[0]
         query, key = rope_forward_triton(
@@ -156,6 +175,27 @@ def rope_forward_oot(
     return query.view(query_shape), key.view(key_shape)
 
 
+def rope_forward_oot_op(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    is_neox_style: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    query, key = rope_forward_oot(
+        positions,
+        query,
+        key,
+        cos_sin_cache,
+        head_size,
+        rotary_dim,
+        is_neox_style,
+    )
+    return query, key
+
+
 class AscendRotaryEmbedding(RotaryEmbedding):
     def __init__(
         self,
@@ -175,19 +215,32 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
     ):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
+        if offsets is not None:
+            raise NotImplementedError("Batched rotary embedding with offsets is currently not supported on NPU.")
         is_draft_model = _EXTRA_CTX.is_draft_model
         flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
         if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
             positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
+        cos_sin_cache = get_rope_cache(self, query)
+        if key is None:
+            return rope_forward_oot(
+                positions,
+                query,
+                None,
+                cos_sin_cache,
+                self.head_size,
+                self.rotary_dim,
+                is_neox_style,
+            )
         return torch.ops.vllm.npu_rotary_embedding(
-            positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
+            positions, query, key, cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )
 
 
@@ -228,7 +281,7 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
     ):
@@ -390,6 +443,8 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
     def forward(
         self, positions: torch.Tensor, query: torch.Tensor, key: torch.Tensor, offsets: torch.Tensor | None = None
     ):
+        if offsets is not None:
+            raise NotImplementedError("Batched rotary embedding with offsets is currently not supported on NPU.")
         if len(key.shape) == 2:
             key = key[:, None, :]
         # Note: we implement the non neox_style method with shuffle the last dim and neox style
@@ -401,8 +456,9 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
             query = query.view(b, h_q, d // 2, 2).transpose(3, 2).reshape(b, h_q, d)
             b, h_k, d = key.shape
             key = key.view(b, h_k, d // 2, 2).transpose(3, 2).reshape(b, h_k, d)
+        cos_sin_cache = get_rope_cache(self, query)
         q_pe, k_pe = torch.ops.vllm.npu_rotary_embedding(
-            positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
+            positions, query, key, cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )
         return q_pe, k_pe
 
@@ -418,16 +474,11 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
     ):
+        if offsets is not None:
+            raise NotImplementedError("Batched MRoPE with offsets is currently not supported on NPU.")
         assert positions.ndim == 2
         assert key is not None
 
-        self.cos = None
-        self.sin = None
-        if self.cos is None and self.sin is None:
-            cos_sin = select_cos_sin_cache(self, positions, query)
-            cos, sin = cos_sin.chunk(2, dim=-1)
-            self.cos = cos.contiguous()
-            self.sin = sin.contiguous()
         query_shape = query.shape
         key_shape = key.shape
 
@@ -438,11 +489,11 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         if query_shape[0] > self._ASCEND_TRITON_GRID_LIMIT and os.environ.get("TRITON_ALL_BLOCKS_PARALLEL") != "1":
             os.environ["TRITON_ALL_BLOCKS_PARALLEL"] = "1"
 
-        q, k = triton_mrope(
+        q, k = mrope_forward_triton_by_cache(
             query,
             key,
-            self.cos,
-            self.sin,
+            get_rope_cache(self, query),
+            positions,
             self.mrope_section,
             self.head_size,
             self.rotary_dim,
@@ -456,33 +507,28 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
+        offsets: torch.Tensor | None = None,
     ):
+        if offsets is not None:
+            raise NotImplementedError("Batched MRoPE with offsets is currently not supported on NPU.")
         if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
             # todo: need cann update in 8.5.0
-            return self.forward_triton(positions, query, key)
+            return self.forward_triton(positions, query, key, offsets)
 
         if self.mrope_section != [16, 24, 24]:
-            return super().forward_oot(positions, query, key)
+            return super().forward_oot(positions, query, key, offsets)
 
         import torch_npu
 
         mrope_section = [0, 0, 0] if positions.ndim == 1 else self.mrope_section
 
-        if self.cos_sin_cache.device != query.device:  # type: ignore
-            self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
-                query.device
-            )  # type: ignore
-
-        if self.cos_sin_cache.dtype != query.dtype:  # type: ignore
-            self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
-                query.dtype
-            )  # type: ignore
+        cos_sin_cache = get_rope_cache(self, query)
 
         query, key = torch_npu.npu_mrope(
             positions.contiguous(),
             query.contiguous(),
             key.contiguous(),
-            self.cos_sin_cache.contiguous(),
+            cos_sin_cache.contiguous(),
             self.head_size,
             mrope_section=mrope_section,
             rotary_mode="half",
@@ -510,6 +556,8 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        from vllm_ascend.ops.rope_cache_ops import rotary_mul_materialized
+
         x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 
         head_dim = x.shape[-1]
@@ -520,7 +568,7 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         cos = cos.reshape(1, -1, 1, head_dim)
         sin = sin.reshape(1, -1, 1, head_dim)
 
-        output = torch_npu.npu_rotary_mul(x, cos, sin)
+        output = rotary_mul_materialized(x, cos, sin)
 
         output = self._post_process(output, origin_shape, origin_dtype)
 

@@ -78,6 +78,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        rope_layer_name: str | None = None,
     ) -> None:
         nn.Module.__init__(self)
         self.dim = dim
@@ -109,6 +110,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.indexer_rotary_emb = dsa_modules.indexer_rotary_emb
         self.skip_topk = dsa_modules.skip_topk
         self.prefix = prefix
+        self.rope_layer_name = rope_layer_name or f"{prefix}.attn"
 
         ascend_device_type = get_ascend_device_type()
         k_dtype = torch.fp8 if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
@@ -201,7 +203,12 @@ def dsa_forward(
     kv_cache = _build_kv_cache(self, forward_context)
 
     self.dsa_attn.impl.forward(
-        self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
+        self.rope_layer_name,
+        hidden_states,
+        kv_cache,
+        attn_metadata,
+        need_gather_q_kv,
+        output,
     )
     return
 

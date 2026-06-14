@@ -43,10 +43,19 @@ void CompressorTiling::ConvertRequiredParams(gert::TilingContext &context, Compr
     compressorContext.ape.shape = context.GetRequiredInputShape(APE_INPUT_INDEX);
     compressorContext.normWeight.desc = context.GetRequiredInputDesc(NORM_WEIGHT_INPUT_INDEX);
     compressorContext.normWeight.shape = context.GetRequiredInputShape(NORM_WEIGHT_INPUT_INDEX);
-    compressorContext.ropeSin.desc = context.GetRequiredInputDesc(ROPE_SIN_INPUT_INDEX);
-    compressorContext.ropeSin.shape = context.GetRequiredInputShape(ROPE_SIN_INPUT_INDEX);
-    compressorContext.ropeCos.desc = context.GetRequiredInputDesc(ROPE_COS_INPUT_INDEX);
-    compressorContext.ropeCos.shape = context.GetRequiredInputShape(ROPE_COS_INPUT_INDEX);
+    if (compressorContext.isDsaByCache) {
+        compressorContext.compressPositions.desc = context.GetRequiredInputDesc(COMPRESS_POSITIONS_INPUT_INDEX);
+        compressorContext.compressPositions.shape = context.GetRequiredInputShape(COMPRESS_POSITIONS_INPUT_INDEX);
+        compressorContext.ropeCos.desc = context.GetRequiredInputDesc(BY_CACHE_COS_SIN_CACHE_INPUT_INDEX);
+        compressorContext.ropeCos.shape = context.GetRequiredInputShape(BY_CACHE_COS_SIN_CACHE_INPUT_INDEX);
+        compressorContext.ropeSin.desc = compressorContext.ropeCos.desc;
+        compressorContext.ropeSin.shape = compressorContext.ropeCos.shape;
+    } else {
+        compressorContext.ropeSin.desc = context.GetRequiredInputDesc(ROPE_SIN_INPUT_INDEX);
+        compressorContext.ropeSin.shape = context.GetRequiredInputShape(ROPE_SIN_INPUT_INDEX);
+        compressorContext.ropeCos.desc = context.GetRequiredInputDesc(ROPE_COS_INPUT_INDEX);
+        compressorContext.ropeCos.shape = context.GetRequiredInputShape(ROPE_COS_INPUT_INDEX);
+    }
 
     compressorContext.cmpKv.desc = context.GetOutputDesc(CMP_KV_OUTPUT_INDEX);
     compressorContext.cmpKv.shape = context.GetOutputShape(CMP_KV_OUTPUT_INDEX);
@@ -62,14 +71,22 @@ void CompressorTiling::ConvertRequiredParams(gert::TilingContext &context, Compr
 
 void CompressorTiling::ConvertOptionalParams(gert::TilingContext &context, CompressorContext &compressorContext)
 {
-    compressorContext.stateBlockTable.desc = context.GetOptionalInputDesc(STATE_BLOCK_TABLE_INPUT_INDEX);
-    compressorContext.stateBlockTable.shape = context.GetOptionalInputShape(STATE_BLOCK_TABLE_INPUT_INDEX);
-    compressorContext.cuSeqlens.desc = context.GetOptionalInputDesc(CU_SEQ_LEN_INPUT_INDEX);
-    compressorContext.cuSeqlens.shape = context.GetOptionalInputShape(CU_SEQ_LEN_INPUT_INDEX);
-    compressorContext.seqUsed.desc = context.GetOptionalInputDesc(SEQ_USED_INPUT_INDEX);
-    compressorContext.seqUsed.shape = context.GetOptionalInputShape(SEQ_USED_INPUT_INDEX);
-    compressorContext.startPos.desc = context.GetOptionalInputDesc(START_POS_INPUT_INDEX);
-    compressorContext.startPos.shape = context.GetOptionalInputShape(START_POS_INPUT_INDEX);
+    const uint32_t stateBlockTableIndex =
+        compressorContext.isDsaByCache ? BY_CACHE_STATE_BLOCK_TABLE_INPUT_INDEX : STATE_BLOCK_TABLE_INPUT_INDEX;
+    const uint32_t cuSeqlensIndex =
+        compressorContext.isDsaByCache ? BY_CACHE_CU_SEQ_LEN_INPUT_INDEX : CU_SEQ_LEN_INPUT_INDEX;
+    const uint32_t seqUsedIndex =
+        compressorContext.isDsaByCache ? BY_CACHE_SEQ_USED_INPUT_INDEX : SEQ_USED_INPUT_INDEX;
+    const uint32_t startPosIndex =
+        compressorContext.isDsaByCache ? BY_CACHE_START_POS_INPUT_INDEX : START_POS_INPUT_INDEX;
+    compressorContext.stateBlockTable.desc = context.GetOptionalInputDesc(stateBlockTableIndex);
+    compressorContext.stateBlockTable.shape = context.GetOptionalInputShape(stateBlockTableIndex);
+    compressorContext.cuSeqlens.desc = context.GetOptionalInputDesc(cuSeqlensIndex);
+    compressorContext.cuSeqlens.shape = context.GetOptionalInputShape(cuSeqlensIndex);
+    compressorContext.seqUsed.desc = context.GetOptionalInputDesc(seqUsedIndex);
+    compressorContext.seqUsed.shape = context.GetOptionalInputShape(seqUsedIndex);
+    compressorContext.startPos.desc = context.GetOptionalInputDesc(startPosIndex);
+    compressorContext.startPos.shape = context.GetOptionalInputShape(startPosIndex);
 }
 
 ge::graphStatus CompressorTiling::ConvertContext(gert::TilingContext &context, CompressorContext &compressorContext)
@@ -83,6 +100,8 @@ ge::graphStatus CompressorTiling::ConvertContext(gert::TilingContext &context, C
 
     compressorContext.opName = context.GetNodeName();
     compressorContext.opType = context.GetNodeType();
+    compressorContext.isDsaByCache = compressorContext.opType != nullptr &&
+                                     std::string(compressorContext.opType) == "CompressorDsaByCache";
     compressorContext.platformInfo = context.GetPlatformInfo();
     ConvertRequiredParams(context, compressorContext);
     ConvertOptionalParams(context, compressorContext);
@@ -259,6 +278,7 @@ ge::graphStatus CompressorTiling::CheckEmptyTensor() const
             context_->stateCache.shape->GetStorageShape().GetShapeSize() == 0 ||
             context_->ape.shape->GetStorageShape().GetShapeSize() == 0 ||
             context_->normWeight.shape->GetStorageShape().GetShapeSize() == 0 ||
+            (context_->isDsaByCache && context_->compressPositions.shape->GetStorageShape().GetShapeSize() == 0) ||
             context_->ropeSin.shape->GetStorageShape().GetShapeSize() == 0 ||
             context_->ropeCos.shape->GetStorageShape().GetShapeSize() == 0 ||
             context_->stateBlockTable.shape->GetStorageShape().GetShapeSize() == 0) {
@@ -382,6 +402,7 @@ ge::graphStatus CompressorTiling::CheckSinglePara() const
         ge::GRAPH_SUCCESS != CheckSingleParaStateCache() ||
         ge::GRAPH_SUCCESS != CheckSingleParaApe() ||
         ge::GRAPH_SUCCESS != CheckSingleParaNormWeight() ||
+        ge::GRAPH_SUCCESS != CheckSingleParaCompressPositions() ||
         ge::GRAPH_SUCCESS != CheckSingleParaRopeSin() ||
         ge::GRAPH_SUCCESS != CheckSingleParaRopeCos() ||
         ge::GRAPH_SUCCESS != CheckSingleParaStateBlockTable() ||
@@ -589,11 +610,30 @@ ge::graphStatus CompressorTiling::CheckSingleParaNormWeight() const
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus CompressorTiling::CheckSingleParaCompressPositions() const
+{
+    if (!context_->isDsaByCache) {
+        return ge::GRAPH_SUCCESS;
+    }
+    if (ge::GRAPH_SUCCESS != CheckDtypeSupport(context_->compressPositions.desc, COMPRESS_POSITIONS_NAME) ||
+        ge::GRAPH_SUCCESS != CheckDimNumSupport(context_->compressPositions.shape, COMPRESS_POSITIONS_NAME)) {
+        return ge::GRAPH_FAILED;
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus CompressorTiling::CheckSingleParaRopeSin() const
 {
+    if (context_->isDsaByCache) {
+        return ge::GRAPH_SUCCESS;
+    }
     if (ge::GRAPH_SUCCESS != CheckDtypeSupport(context_->ropeSin.desc, ROPE_SIN_NAME) ||
-        ge::GRAPH_SUCCESS != CheckDimNumSupport(context_->ropeSin.shape, ROPE_SIN_NAME) ||
-        ge::GRAPH_SUCCESS != CheckDimNumInLayoutSupport(LayoutTypeToStr(context_->layout), context_->ropeSin.shape, ROPE_SIN_NAME)) {
+        ge::GRAPH_SUCCESS != CheckDimNumSupport(context_->ropeSin.shape, ROPE_SIN_NAME)) {
+        return ge::GRAPH_FAILED;
+    }
+    if (!context_->isDsaByCache &&
+        ge::GRAPH_SUCCESS != CheckDimNumInLayoutSupport(LayoutTypeToStr(context_->layout), context_->ropeSin.shape,
+                                                        ROPE_SIN_NAME)) {
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -601,9 +641,14 @@ ge::graphStatus CompressorTiling::CheckSingleParaRopeSin() const
 
 ge::graphStatus CompressorTiling::CheckSingleParaRopeCos() const
 {
-    if (ge::GRAPH_SUCCESS != CheckDtypeSupport(context_->ropeCos.desc, ROPE_COS_NAME) ||
-        ge::GRAPH_SUCCESS != CheckDimNumSupport(context_->ropeCos.shape, ROPE_COS_NAME) ||
-        ge::GRAPH_SUCCESS != CheckDimNumInLayoutSupport(LayoutTypeToStr(context_->layout), context_->ropeCos.shape, ROPE_COS_NAME)) {
+    const std::string &ropeName = context_->isDsaByCache ? COS_SIN_CACHE_NAME : ROPE_COS_NAME;
+    if (ge::GRAPH_SUCCESS != CheckDtypeSupport(context_->ropeCos.desc, ropeName) ||
+        ge::GRAPH_SUCCESS != CheckDimNumSupport(context_->ropeCos.shape, ropeName)) {
+        return ge::GRAPH_FAILED;
+    }
+    if (!context_->isDsaByCache &&
+        ge::GRAPH_SUCCESS != CheckDimNumInLayoutSupport(LayoutTypeToStr(context_->layout), context_->ropeCos.shape,
+                                                        ROPE_COS_NAME)) {
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -746,6 +791,12 @@ ge::graphStatus CompressorTiling::CheckRequiredInOutExistence() const
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(context_->normWeight.desc == nullptr, OP_LOGE(context_->opName, "tensor normWeight is nullptr"),
                 return ge::GRAPH_FAILED);
+    if (context_->isDsaByCache) {
+        OP_CHECK_IF(context_->compressPositions.shape == nullptr,
+                    OP_LOGE(context_->opName, "tensor compressPositions is nullptr"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(context_->compressPositions.desc == nullptr,
+                    OP_LOGE(context_->opName, "tensor compressPositions is nullptr"), return ge::GRAPH_FAILED);
+    }
     OP_CHECK_IF(context_->ropeSin.shape == nullptr, OP_LOGE(context_->opName, "tensor ropeSin is nullptr"),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(context_->ropeSin.desc == nullptr, OP_LOGE(context_->opName, "tensor ropeSin is nullptr"),
@@ -863,6 +914,16 @@ ge::graphStatus CompressorTiling::CheckShapeConsistency() const
 
 ge::graphStatus CompressorTiling::CheckShapeConsistencyRope() const
 {
+    if (context_->isDsaByCache) {
+        const auto cosSinShape = context_->ropeCos.shape->GetStorageShape();
+        const uint32_t cosSinLastDim = cosSinShape.GetDimNum() - 1;
+        const uint32_t expectedLastDim = baseParams_->ropeHeadDim * 2;
+        OP_CHECK_IF(cosSinShape.GetDim(cosSinLastDim) != expectedLastDim,
+                    OP_LOGE(context_->opName, "cos_sin_cache last dim should be 2*ropeHeadDim: %u, but got %ld",
+                            expectedLastDim, cosSinShape.GetDim(cosSinLastDim)),
+                    return ge::GRAPH_FAILED);
+        return ge::GRAPH_SUCCESS;
+    }
     auto cmpT = std::min(baseParams_->tokenSize, baseParams_->tokenSize / baseParams_->cmpRatio + baseParams_->batchSize);
     if (context_->layout == LayoutType::LAYOUT_BSH) {
         if (ge::GRAPH_SUCCESS != LogErrorShapeConsistency("ropeSin", context_->ropeSin.shape, COMPRESSOR_DIM_INDEX_0, "batchSize", baseParams_->batchSize) ||
@@ -911,6 +972,11 @@ ge::graphStatus CompressorTiling::CheckDtypeConsistencyRope() const
         OP_LOGE(context_->opName, "rope datatype should be same with x or DT_FLOAT, x is %s, but got %s",
                 DataTypeToSerialString(context_->dtype).c_str(), DataTypeToSerialString(sinDtype).c_str()),
         return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context_->isDsaByCache && sinDtype != context_->dtype,
+        OP_LOGE(context_->opName, "CompressorDsaByCache requires rope datatype to be same with x: %s, but got %s",
+                DataTypeToSerialString(context_->dtype).c_str(), DataTypeToSerialString(sinDtype).c_str()),
+        return ge::GRAPH_FAILED);
     bool supportFp32Rope = socVersion_ == platform_ascendc::SocVersion::ASCEND910B ||
                            socVersion_ == platform_ascendc::SocVersion::ASCEND910_93;
     OP_CHECK_IF(
@@ -935,14 +1001,16 @@ ge::graphStatus CompressorTiling::CheckDtypeConsistency() const
 ge::graphStatus CompressorTiling::CheckDimNumConsistency() const
 {
     auto xDimNum = context_->x.shape->GetStorageShape().GetDimNum();
-    OP_CHECK_IF(xDimNum != context_->ropeSin.shape->GetStorageShape().GetDimNum(),
-                OP_LOGE(context_->opName, "ropeSin dim num should be equal to x: %u, but got %u", xDimNum,
-                        context_->ropeSin.shape->GetStorageShape().GetDimNum()),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(xDimNum != context_->ropeCos.shape->GetStorageShape().GetDimNum(),
-                OP_LOGE(context_->opName, "ropeCos dim num should be equal to x: %u, but got %u", xDimNum,
-                        context_->ropeCos.shape->GetStorageShape().GetDimNum()),
-                return ge::GRAPH_FAILED);
+    if (!context_->isDsaByCache) {
+        OP_CHECK_IF(xDimNum != context_->ropeSin.shape->GetStorageShape().GetDimNum(),
+                    OP_LOGE(context_->opName, "ropeSin dim num should be equal to x: %u, but got %u", xDimNum,
+                            context_->ropeSin.shape->GetStorageShape().GetDimNum()),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(xDimNum != context_->ropeCos.shape->GetStorageShape().GetDimNum(),
+                    OP_LOGE(context_->opName, "ropeCos dim num should be equal to x: %u, but got %u", xDimNum,
+                            context_->ropeCos.shape->GetStorageShape().GetDimNum()),
+                    return ge::GRAPH_FAILED);
+    }
     OP_CHECK_IF(xDimNum != context_->cmpKv.shape->GetStorageShape().GetDimNum(),
                 OP_LOGE(context_->opName, "cmpKv dim num should be equal to x: %u, but got %u", xDimNum,
                         context_->cmpKv.shape->GetStorageShape().GetDimNum()),
@@ -1014,6 +1082,11 @@ CMP_EXTERN_C ge::graphStatus TilingCompressor(gert::TilingContext *context)
     return ge::GRAPH_SUCCESS;
 }
 
+CMP_EXTERN_C ge::graphStatus TilingCompressorDsaByCache(gert::TilingContext *context)
+{
+    return TilingCompressor(context);
+}
+
 ge::graphStatus TilingPrepareForCompressor(gert::TilingParseContext *context)
 {
     (void)context;
@@ -1022,5 +1095,9 @@ ge::graphStatus TilingPrepareForCompressor(gert::TilingParseContext *context)
 
 IMPL_OP_OPTILING(Compressor)
     .Tiling(TilingCompressor)
+    .TilingParse<CompressorCompileInfo>(TilingPrepareForCompressor);
+
+IMPL_OP_OPTILING(CompressorDsaByCache)
+    .Tiling(TilingCompressorDsaByCache)
     .TilingParse<CompressorCompileInfo>(TilingPrepareForCompressor);
 } // namespace optiling

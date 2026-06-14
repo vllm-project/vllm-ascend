@@ -100,6 +100,72 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
 }
 
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess_by_cache(
+    const at::Tensor &hiddenState,
+    const at::Tensor &wdqkv,
+    const c10::optional<at::Tensor> &descale0,
+    const at::Tensor &gamma1,
+    const c10::optional<at::Tensor> &beta1,
+    const at::Tensor &wuq,
+    const c10::optional<at::Tensor> &descale1,
+    const at::Tensor &gamma2,
+    const at::Tensor &positions,
+    const at::Tensor &cos_sin_cache,
+    const at::Tensor &wuk,
+    const at::Tensor &kv_cache,
+    const at::Tensor &kv_cache_rope,
+    const at::Tensor &slotmapping,
+    const c10::optional<at::Tensor> &quant_scale0,
+    const c10::optional<at::Tensor> &quant_offset0,
+    const c10::optional<at::Tensor> &bias0,
+    const c10::optional<at::Tensor> &quant_scale1,
+    const c10::optional<at::Tensor> &quant_offset1,
+    const c10::optional<at::Tensor> &bias1,
+    const c10::optional<at::Tensor> &ctkv_scale,
+    const c10::optional<at::Tensor> &q_nope_scale,
+    c10::optional<c10::string_view> cache_mode,
+    c10::optional<c10::string_view> quant_mode,
+    c10::optional<bool> enable_inner_out,
+    bool is_neox_style,
+    at::Tensor &q_out0,
+    at::Tensor &kv_cache_out0,
+    at::Tensor &q_out1,
+    at::Tensor &kv_cache_out1,
+    at::Tensor &inner_out,
+    c10::optional<bool> enable_raw_q_out,
+    at::Tensor &raw_q_out
+    )
+{
+    (void)hiddenState;
+    (void)wdqkv;
+    (void)descale0;
+    (void)gamma1;
+    (void)beta1;
+    (void)wuq;
+    (void)descale1;
+    (void)gamma2;
+    (void)positions;
+    (void)cos_sin_cache;
+    (void)wuk;
+    (void)kv_cache;
+    (void)kv_cache_rope;
+    (void)slotmapping;
+    (void)quant_scale0;
+    (void)quant_offset0;
+    (void)bias0;
+    (void)quant_scale1;
+    (void)quant_offset1;
+    (void)bias1;
+    (void)ctkv_scale;
+    (void)q_nope_scale;
+    (void)cache_mode;
+    (void)quant_mode;
+    (void)enable_inner_out;
+    (void)is_neox_style;
+    (void)enable_raw_q_out;
+    return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out, raw_q_out};
+}
+
 void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
                                     c10::optional<c10::string_view> format_mode,
                                     c10::optional<c10::string_view> quant_mode)
@@ -797,6 +863,57 @@ compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wg
     return output;
 }
 
+std::tuple<at::Tensor>
+compressor_by_cache_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate, at::Tensor &state_cache,
+                         const at::Tensor &ape, const at::Tensor &norm_weight, const at::Tensor &compress_positions,
+                         const at::Tensor &cos_sin_cache, const c10::optional<at::Tensor> &state_block_table,
+                         const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
+                         const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio,
+                         int64_t coff, double norm_eps, int64_t rotary_mode, int64_t cache_mode, bool is_neox_style)
+{
+    (void)wkv;
+    (void)wgate;
+    (void)state_cache;
+    (void)ape;
+    (void)cos_sin_cache;
+    (void)state_block_table;
+    (void)cu_seqlens;
+    (void)seqused;
+    (void)start_pos;
+    (void)rope_head_dim;
+    (void)norm_eps;
+    (void)rotary_mode;
+    (void)cache_mode;
+    (void)is_neox_style;
+    return construct_compressor_output_tensor(x, norm_weight, compress_positions, cmp_ratio, coff);
+}
+
+std::tuple<at::Tensor>
+compressor_dsa_by_cache_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate,
+                             at::Tensor &state_cache, const at::Tensor &ape, const at::Tensor &norm_weight,
+                             const at::Tensor &compress_positions, const at::Tensor &cos_sin_cache,
+                             const c10::optional<at::Tensor> &state_block_table,
+                             const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
+                             const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim,
+                             int64_t cmp_ratio, int64_t coff, double norm_eps, int64_t rotary_mode,
+                             int64_t cache_mode)
+{
+    (void)wkv;
+    (void)wgate;
+    (void)state_cache;
+    (void)ape;
+    (void)cos_sin_cache;
+    (void)state_block_table;
+    (void)cu_seqlens;
+    (void)seqused;
+    (void)start_pos;
+    (void)rope_head_dim;
+    (void)norm_eps;
+    (void)rotary_mode;
+    (void)cache_mode;
+    return construct_compressor_output_tensor(x, norm_weight, compress_positions, cmp_ratio, coff);
+}
+
 std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tensor(const at::Tensor& query, const at::Tensor& key,
                                                            int64_t sparse_count, std::string query_layout_str,
                                                            std::string key_layout_str, bool return_value)
@@ -1117,6 +1234,48 @@ void inplace_partial_rotary_mul_meta(
     at::IntArrayRef partial_slice)
 {
     auto origin_dim_num = x.dim();
+    return;
+}
+
+void inplace_partial_rotary_mul_by_cache_meta(
+    at::Tensor &x,
+    const at::Tensor &positions,
+    const at::Tensor &cos_sin_cache,
+    c10::string_view rotary_mode,
+    at::IntArrayRef partial_slice,
+    int64_t rope_dim,
+    bool is_neox_style,
+    int64_t rope_dim_offset,
+    bool inverse)
+{
+    (void)x;
+    (void)positions;
+    (void)cos_sin_cache;
+    (void)rotary_mode;
+    (void)partial_slice;
+    (void)rope_dim;
+    (void)is_neox_style;
+    (void)rope_dim_offset;
+    (void)inverse;
+    return;
+}
+
+void inplace_partial_rotary_mul_dsa_by_cache_meta(
+    at::Tensor &x,
+    const at::Tensor &positions,
+    const at::Tensor &cos_sin_cache,
+    c10::string_view rotary_mode,
+    at::IntArrayRef partial_slice,
+    int64_t rope_dim,
+    bool inverse)
+{
+    (void)x;
+    (void)positions;
+    (void)cos_sin_cache;
+    (void)rotary_mode;
+    (void)partial_slice;
+    (void)rope_dim;
+    (void)inverse;
     return;
 }
 
@@ -1574,6 +1733,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
+    ops.impl("mla_preprocess_by_cache", &vllm_ascend::meta::mla_preprocess_by_cache);
     // batch_matmul_transpose
     ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
 #endif
@@ -1617,6 +1777,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
+    ops.impl("compressor_by_cache", &vllm_ascend::meta::compressor_by_cache_meta);
+    ops.impl("compressor_dsa_by_cache", &vllm_ascend::meta::compressor_dsa_by_cache_meta);
     ops.impl("npu_quant_lightning_indexer", &vllm_ascend::meta::npu_quant_lightning_indexer_meta);
     ops.impl("npu_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
@@ -1627,6 +1789,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_hc_pre_inv_rms", &vllm_ascend::meta::npu_hc_pre_inv_rms_meta);
     ops.impl("npu_hc_pre_sinkhorn", &vllm_ascend::meta::npu_hc_pre_sinkhorn_meta);
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
+    ops.impl("inplace_partial_rotary_mul_by_cache", &vllm_ascend::meta::inplace_partial_rotary_mul_by_cache_meta);
+    ops.impl("inplace_partial_rotary_mul_dsa_by_cache",
+             &vllm_ascend::meta::inplace_partial_rotary_mul_dsa_by_cache_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
     ops.impl("indexer_compress_epilog", &vllm_ascend::meta::indexer_compress_epilog_meta);
     ops.impl("kv_compress_epilog", &vllm_ascend::meta::kv_compress_epilog_meta);

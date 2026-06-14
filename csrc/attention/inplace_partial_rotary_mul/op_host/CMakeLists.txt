@@ -54,9 +54,21 @@
 
 add_op_to_compiled_list()
 
+get_filename_component(_INPLACE_PARTIAL_ROTARY_MUL_DIR ${CMAKE_CURRENT_SOURCE_DIR} DIRECTORY)
+set(inplace_partial_rotary_mul_dsa_by_cache_dir
+    ${_INPLACE_PARTIAL_ROTARY_MUL_DIR}
+    CACHE INTERNAL "Source directory for InplacePartialRotaryMulDsaByCache opFile"
+)
+set(COMPILED_OPS
+    ${COMPILED_OPS}
+    inplace_partial_rotary_mul_dsa_by_cache
+    CACHE STRING "Compiled Ops" FORCE
+)
+
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnn PRIVATE
         inplace_partial_rotary_mul_def.cpp
+        inplace_partial_rotary_mul_dsa_by_cache_def.cpp
     )
 endif()
 
@@ -69,7 +81,19 @@ add_ops_compile_options(
                 --op_relocatable_kernel_binary=true
 )
 
+add_ops_compile_options(
+        OP_NAME InplacePartialRotaryMulDsaByCache
+        OPTIONS --cce-auto-sync=on
+                -Wno-deprecated-declarations
+                -Werror
+                -mllvm -cce-aicore-hoist-movemask=false
+                --op_relocatable_kernel_binary=true
+)
+
 
 if (NOT BUILD_OPS_RTY_KERNEL)
-    add_modules_sources(OPTYPE inplace_partial_rotary_mul ACLNNTYPE aclnn)
+    add_modules_sources(
+        OPTYPE inplace_partial_rotary_mul inplace_partial_rotary_mul_dsa_by_cache
+        ACLNNTYPE aclnn aclnn
+    )
 endif()

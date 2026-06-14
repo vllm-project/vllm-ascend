@@ -9,9 +9,26 @@
 # -----------------------------------------------------------------------------------------------------------
 add_op_to_compiled_list()
 
+get_filename_component(_COMPRESSOR_DIR ${CMAKE_CURRENT_SOURCE_DIR} DIRECTORY)
+set(compressor_dsa_by_cache_dir
+    ${_COMPRESSOR_DIR}/compressor_dsa_by_cache
+    CACHE INTERNAL "Source directory for CompressorDsaByCache opFile"
+)
+set(COMPILED_OPS
+    ${COMPILED_OPS}
+    compressor_dsa_by_cache
+    CACHE STRING "Compiled Ops" FORCE
+)
+set(COMPILED_OP_DIRS
+    ${COMPILED_OP_DIRS}
+    ${compressor_dsa_by_cache_dir}
+    CACHE STRING "Compiled Ops Dirs" FORCE
+)
+
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnn PRIVATE
         compressor_def.cpp
+        compressor_dsa_by_cache_def.cpp
     )
 endif()
 
@@ -24,6 +41,18 @@ add_ops_compile_options(
                 --op_relocatable_kernel_binary=true
 )
 
+add_ops_compile_options(
+        OP_NAME CompressorDsaByCache
+                OPTIONS --cce-auto-sync=off
+                -Wno-deprecated-declarations
+                -Werror
+                -mllvm -cce-aicore-hoist-movemask=false
+                --op_relocatable_kernel_binary=true
+)
+
 if (NOT BUILD_OPS_RTY_KERNEL)
-    add_modules_sources(OPTYPE compressor ACLNNTYPE aclnn)
+    add_modules_sources(
+        OPTYPE compressor compressor_dsa_by_cache
+        ACLNNTYPE aclnn aclnn
+    )
 endif()

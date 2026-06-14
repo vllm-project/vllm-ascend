@@ -62,6 +62,7 @@
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <vector>
 
 namespace vllm_ascend {
 
@@ -117,6 +118,74 @@ void enqueue_device_print(std::unique_ptr<DevicePrintPayload> payload,
     TORCH_CHECK(ret == ACL_SUCCESS, "aclrtLaunchHostFunc failed, error code: ", ret);
 }
 
+}
+
+bool is_aclnn_api_available(const char *api_name)
+{
+    std::string workspace_api = std::string(api_name) + "GetWorkspaceSize";
+    return GetOpApiFuncAddr(api_name) != nullptr &&
+           GetOpApiFuncAddr(workspace_api.c_str()) != nullptr;
+}
+
+bool aclnn_api_available(c10::string_view api_name)
+{
+    std::string api_name_str(api_name.data(), api_name.size());
+    return is_aclnn_api_available(api_name_str.c_str());
+}
+
+bool resolve_rotary_mode(c10::string_view rotary_mode, int64_t &mode)
+{
+    static const std::unordered_map<std::string, int64_t> mode_map = {
+        {"half", 0},
+        {"interleave", 1},
+        {"quarter", 2},
+        {"interleave-half", 3}
+    };
+    auto it = mode_map.find(std::string(rotary_mode));
+    if (it == mode_map.end()) {
+        return false;
+    }
+    mode = it->second;
+    return true;
+}
+
+void validate_positions_for_cache(const at::Tensor &positions,
+                                  const char *op_name)
+{
+    TORCH_CHECK(positions.defined(), op_name, " expects defined positions");
+    TORCH_CHECK(positions.dim() == 1, op_name, " expects 1-D positions, got dim ", positions.dim());
+    TORCH_CHECK(positions.scalar_type() == at::kLong || positions.scalar_type() == at::kInt,
+                op_name, " expects int32/int64 positions, got ", positions.scalar_type());
+}
+
+void validate_dsa_positions_for_cache(const at::Tensor &positions,
+                                      const char *op_name)
+{
+    validate_positions_for_cache(positions, op_name);
+    TORCH_CHECK(positions.scalar_type() == at::kLong,
+                op_name, " expects int64 positions for the DSA by-cache kernel, got ",
+                positions.scalar_type());
+}
+
+void validate_cos_sin_cache(const at::Tensor &cos_sin_cache, const char *op_name)
+{
+    TORCH_CHECK(cos_sin_cache.defined(), op_name, " expects defined cos_sin_cache");
+    TORCH_CHECK(cos_sin_cache.dim() == 2,
+                op_name, " expects cos_sin_cache with shape [max_position, rotary_dim], got dim ",
+                cos_sin_cache.dim());
+    TORCH_CHECK(cos_sin_cache.size(-1) % 2 == 0,
+                op_name, " expects even cos_sin_cache last dim, got ", cos_sin_cache.size(-1));
+}
+
+void validate_dsa_cos_sin_cache(const at::Tensor &cos_sin_cache,
+                                const char *op_name)
+{
+    TORCH_CHECK(cos_sin_cache.defined(), op_name, " expects defined cos_sin_cache");
+    TORCH_CHECK(cos_sin_cache.dim() >= 2,
+                op_name, " expects cos_sin_cache with shape [..., 2 * rotary_dim], got dim ",
+                cos_sin_cache.dim());
+    TORCH_CHECK(cos_sin_cache.size(-1) % 2 == 0,
+                op_name, " expects even cos_sin_cache last dim, got ", cos_sin_cache.size(-1));
 }
 
 void swap_blocks_batch(const torch::Tensor& src_ptrs,
@@ -1190,6 +1259,62 @@ std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, co
     return std::tuple<at::Tensor>(cmp_kv);
 }
 
+std::tuple<at::Tensor> compressor_by_cache(
+    const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate, at::Tensor &state_cache,
+    const at::Tensor &ape, const at::Tensor &norm_weight, const at::Tensor &compress_positions,
+    const at::Tensor &cos_sin_cache, const c10::optional<at::Tensor> &state_block_table,
+    const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
+    const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio, int64_t coff,
+    double norm_eps, int64_t rotary_mode, int64_t cache_mode, bool is_neox_style)
+{
+    validate_positions_for_cache(compress_positions, "compressor_by_cache");
+    validate_cos_sin_cache(cos_sin_cache, "compressor_by_cache");
+    if (is_aclnn_api_available("aclnnCompressorByCache")) {
+        std::tuple<at::Tensor> output =
+            construct_compressor_output_tensor(x, norm_weight, compress_positions, cmp_ratio, coff);
+        at::Tensor cmp_kv = std::get<0>(output);
+        int64_t state_cache_stride_dim0 = state_cache.stride(0);
+        EXEC_NPU_CMD(aclnnCompressorByCache, x, wkv, wgate, state_cache, ape, norm_weight,
+                     compress_positions, cos_sin_cache, state_block_table, cu_seqlens, seqused, start_pos,
+                     rope_head_dim, cmp_ratio, coff, norm_eps, rotary_mode, cache_mode, is_neox_style,
+                     state_cache_stride_dim0, cmp_kv);
+        return std::tuple<at::Tensor>(cmp_kv);
+    }
+
+    TORCH_CHECK(false,
+                "compressor_by_cache requires aclnnCompressorByCache. "
+                "The materialized sin/cos compatibility fallback has been disabled.");
+    return std::tuple<at::Tensor>(at::Tensor());
+}
+
+std::tuple<at::Tensor> compressor_dsa_by_cache(
+    const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate, at::Tensor &state_cache,
+    const at::Tensor &ape, const at::Tensor &norm_weight, const at::Tensor &compress_positions,
+    const at::Tensor &cos_sin_cache, const c10::optional<at::Tensor> &state_block_table,
+    const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
+    const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio, int64_t coff,
+    double norm_eps, int64_t rotary_mode, int64_t cache_mode)
+{
+    validate_dsa_positions_for_cache(compress_positions, "compressor_dsa_by_cache");
+    validate_dsa_cos_sin_cache(cos_sin_cache, "compressor_dsa_by_cache");
+    if (is_aclnn_api_available("aclnnCompressorDsaByCache")) {
+        std::tuple<at::Tensor> output =
+            construct_compressor_output_tensor(x, norm_weight, compress_positions, cmp_ratio, coff);
+        at::Tensor cmp_kv = std::get<0>(output);
+        int64_t state_cache_stride_dim0 = state_cache.stride(0);
+        EXEC_NPU_CMD(aclnnCompressorDsaByCache, x, wkv, wgate, state_cache, ape, norm_weight,
+                     compress_positions, cos_sin_cache, state_block_table, cu_seqlens, seqused, start_pos,
+                     rope_head_dim, cmp_ratio, coff, norm_eps, rotary_mode, cache_mode, state_cache_stride_dim0,
+                     cmp_kv);
+        return std::tuple<at::Tensor>(cmp_kv);
+    }
+
+    TORCH_CHECK(false,
+                "compressor_dsa_by_cache requires aclnnCompressorDsaByCache. "
+                "The materialized sin/cos compatibility fallback has been disabled.");
+    return std::tuple<at::Tensor>(at::Tensor());
+}
+
 std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tensor(const at::Tensor& query, const at::Tensor& key,
                                                            int64_t sparse_count, std::string query_layout_str,
                                                            std::string key_layout_str, bool return_value)
@@ -1734,21 +1859,66 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_sinkhorn_npu(
 void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const at::Tensor &r2, c10::string_view rotary_mode, at::IntArrayRef partial_slice)
 {
     constexpr int BSND_DIM_NUM = 4;
-    static const std::unordered_map<std::string, int> mode_map = {
-        {"half", 0},
-        {"interleave", 1},
-        {"quarter", 2},
-        {"interleave-half", 3}
-    };
-    std::string rotary_mode_str = std::string(rotary_mode);
-    auto it = mode_map.find(rotary_mode_str);
-    if (it == mode_map.end())
-    {
-        return;
-    }
+    int64_t mode = 0;
+    TORCH_CHECK(resolve_rotary_mode(rotary_mode, mode),
+                "inplace_partial_rotary_mul_by_cache unsupported rotary_mode: ", rotary_mode);
     auto origin_dim_num = x.dim();
     TORCH_CHECK(origin_dim_num == BSND_DIM_NUM, "Input tensor x's dim num should be 4, actual ", origin_dim_num, ".");
-    EXEC_NPU_CMD(aclnnInplacePartialRotaryMul, x, r1, r2, it->second, partial_slice);
+    EXEC_NPU_CMD(aclnnInplacePartialRotaryMul, x, r1, r2, mode, partial_slice);
+}
+
+void inplace_partial_rotary_mul_by_cache_npu(at::Tensor &x, const at::Tensor &positions,
+                                             const at::Tensor &cos_sin_cache,
+                                             c10::string_view rotary_mode,
+                                             at::IntArrayRef partial_slice,
+                                             int64_t rope_dim,
+                                             bool is_neox_style,
+                                             int64_t rope_dim_offset,
+                                             bool inverse)
+{
+    constexpr int BSND_DIM_NUM = 4;
+    int64_t mode = 0;
+    TORCH_CHECK(resolve_rotary_mode(rotary_mode, mode),
+                "inplace_partial_rotary_mul_by_cache unsupported rotary_mode: ", rotary_mode);
+    auto origin_dim_num = x.dim();
+    TORCH_CHECK(origin_dim_num == BSND_DIM_NUM, "Input tensor x's dim num should be 4, actual ", origin_dim_num, ".");
+    validate_positions_for_cache(positions, "inplace_partial_rotary_mul_by_cache");
+    validate_cos_sin_cache(cos_sin_cache, "inplace_partial_rotary_mul_by_cache");
+    if (is_aclnn_api_available("aclnnInplacePartialRotaryMulByCache")) {
+        EXEC_NPU_CMD(aclnnInplacePartialRotaryMulByCache, x, positions, cos_sin_cache, mode, partial_slice,
+                     rope_dim, is_neox_style, rope_dim_offset, inverse);
+        return;
+    }
+
+    TORCH_CHECK(false,
+                "inplace_partial_rotary_mul_by_cache requires aclnnInplacePartialRotaryMulByCache. "
+                "The materialized sin/cos compatibility fallback has been disabled.");
+}
+
+void inplace_partial_rotary_mul_dsa_by_cache_npu(at::Tensor &x, const at::Tensor &positions,
+                                                 const at::Tensor &cos_sin_cache,
+                                                 c10::string_view rotary_mode,
+                                                 at::IntArrayRef partial_slice,
+                                                 int64_t rope_dim,
+                                                 bool inverse)
+{
+    constexpr int BSND_DIM_NUM = 4;
+    int64_t mode = 0;
+    TORCH_CHECK(resolve_rotary_mode(rotary_mode, mode),
+                "inplace_partial_rotary_mul_dsa_by_cache unsupported rotary_mode: ", rotary_mode);
+    auto origin_dim_num = x.dim();
+    TORCH_CHECK(origin_dim_num == BSND_DIM_NUM, "Input tensor x's dim num should be 4, actual ", origin_dim_num, ".");
+    validate_dsa_positions_for_cache(positions, "inplace_partial_rotary_mul_dsa_by_cache");
+    validate_dsa_cos_sin_cache(cos_sin_cache, "inplace_partial_rotary_mul_dsa_by_cache");
+    if (is_aclnn_api_available("aclnnInplacePartialRotaryMulDsaByCache")) {
+        EXEC_NPU_CMD(aclnnInplacePartialRotaryMulDsaByCache, x, positions, cos_sin_cache, mode,
+                     partial_slice, rope_dim, inverse);
+        return;
+    }
+
+    TORCH_CHECK(false,
+                "inplace_partial_rotary_mul_dsa_by_cache requires aclnnInplacePartialRotaryMulDsaByCache. "
+                "The materialized sin/cos compatibility fallback has been disabled.");
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_npu(
@@ -2374,6 +2544,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("mla_preprocess", torch::kPrivateUse1, &vllm_ascend::mla_preprocess);
 
+    ops.def(
+        "mla_preprocess_by_cache(Tensor hiddenState, Tensor wdqkv,"
+        "                        Tensor? descale0, Tensor gamma1, Tensor? beta1, Tensor wuq, Tensor? descale1,"
+        "                        Tensor gamma2, Tensor positions, Tensor cos_sin_cache, Tensor wuk, Tensor kv_cache,"
+        "                        Tensor kv_cache_rope, Tensor slotmapping, Tensor? quant_scale0,"
+        "                        Tensor? quant_offset0, Tensor? bias0, Tensor? quant_scale1, Tensor? quant_offset1,"
+        "                        Tensor? bias1, Tensor? ctkv_scale, Tensor? q_nope_scale, str? cache_mode,"
+        "                        str? quant_mode, bool? enable_inner_out, bool is_neox_style,"
+        "                        Tensor! q_out0, Tensor! kv_cache_out0, Tensor! q_out1,"
+        "                        Tensor! kv_cache_out1, Tensor! inner_out, bool? enable_raw_q_out,"
+        "                        Tensor! raw_q_out) -> (Tensor q_out0, Tensor kv_cache_out0,"
+        "                                                   Tensor q_out1, Tensor kv_cache_out1, Tensor inner_out,"
+        "                                                   Tensor raw_q_out)"
+    );
+    ops.impl("mla_preprocess_by_cache", torch::kPrivateUse1, &vllm_ascend::mla_preprocess_by_cache);
+
     //batch_matmul ops refer to sgl-kernel-npu
     ops.def(
             "batch_matmul_transpose(Tensor tensor_a, Tensor tensor_b, Tensor tensor_c, str? format_mode=None, str? quant_mode=None) -> ()");
@@ -2395,6 +2581,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("device_print_tensor(Tensor tensor) -> ()");
     ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
+
+    ops.def("aclnn_api_available(str api_name) -> bool");
+    ops.impl("aclnn_api_available", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::aclnn_api_available);
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
@@ -2618,6 +2808,32 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("compressor", torch::kPrivateUse1, &vllm_ascend::compressor);
 
     ops.def(
+        "compressor_by_cache("
+            "Tensor x, Tensor wkv, Tensor wgate, "
+            "Tensor(a!) state_cache, Tensor ape, Tensor norm_weight, "
+            "Tensor compress_positions, Tensor cos_sin_cache, "
+            "Tensor? state_block_table, Tensor? cu_seqlens, "
+            "Tensor? seqused, Tensor? start_pos, "
+            "int rope_head_dim, int cmp_ratio, int coff, "
+            "float norm_eps, int rotary_mode, int cache_mode, bool is_neox_style=True"
+        ") -> Tensor"
+        );
+    ops.impl("compressor_by_cache", torch::kPrivateUse1, &vllm_ascend::compressor_by_cache);
+
+    ops.def(
+        "compressor_dsa_by_cache("
+            "Tensor x, Tensor wkv, Tensor wgate, "
+            "Tensor(a!) state_cache, Tensor ape, Tensor norm_weight, "
+            "Tensor compress_positions, Tensor cos_sin_cache, "
+            "Tensor? state_block_table, Tensor? cu_seqlens, "
+            "Tensor? seqused, Tensor? start_pos, "
+            "int rope_head_dim, int cmp_ratio, int coff, "
+            "float norm_eps, int rotary_mode, int cache_mode"
+        ") -> Tensor"
+        );
+    ops.impl("compressor_dsa_by_cache", torch::kPrivateUse1, &vllm_ascend::compressor_dsa_by_cache);
+
+    ops.def(
         "npu_quant_lightning_indexer("
             "Tensor query, Tensor key, Tensor weights, "
             "Tensor query_dequant_scale, Tensor key_dequant_scale, "
@@ -2766,6 +2982,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> ()"
     );
     ops.impl("inplace_partial_rotary_mul", torch::kPrivateUse1, &vllm_ascend::inplace_partial_rotary_mul_npu);
+
+    ops.def(
+        "inplace_partial_rotary_mul_by_cache("
+            "Tensor(a!) x, Tensor positions, Tensor cos_sin_cache, str rotary_mode, int[] partial_slice, "
+            "int rope_dim, bool is_neox_style, int rope_dim_offset=0, bool inverse=False"
+        ") -> ()"
+    );
+    ops.impl("inplace_partial_rotary_mul_by_cache", torch::kPrivateUse1,
+             &vllm_ascend::inplace_partial_rotary_mul_by_cache_npu);
+
+    ops.def(
+        "inplace_partial_rotary_mul_dsa_by_cache("
+            "Tensor(a!) x, Tensor positions, Tensor cos_sin_cache, str rotary_mode, "
+            "int[] partial_slice, int rope_dim, bool inverse=False"
+        ") -> ()"
+    );
+    ops.impl("inplace_partial_rotary_mul_dsa_by_cache", torch::kPrivateUse1,
+             &vllm_ascend::inplace_partial_rotary_mul_dsa_by_cache_npu);
 
     ops.def(
         "npu_rms_norm_dynamic_quant("

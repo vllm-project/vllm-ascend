@@ -11,6 +11,8 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
+from vllm_ascend.ops.rope_cache_ops import rotary_mul_by_cache
+from vllm_ascend.ops.rotary_embedding import get_rope_cache
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -408,8 +410,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         q_c: torch.Tensor,
         kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         attn_metadata: M,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
@@ -419,7 +420,11 @@ class AscendSFACPImpl(AscendSFAImpl):
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
         if HAS_TRITON:
             q_li = rope_forward_triton_siso(
-                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+                q_li,
+                cos_sin_cache=get_rope_cache(self.rotary_emb, q_li),
+                positions=positions,
+                rope_dim=self.qk_rope_head_dim,
+                is_neox_style=self.is_rope_neox_style,
             )
         else:
             q_li_pe, q_li_nope = torch.split(
@@ -427,7 +432,7 @@ class AscendSFACPImpl(AscendSFAImpl):
             )  # [b,s,64,64+64]
 
             q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
+            q_li_pe = rotary_mul_by_cache(q_li_pe, positions, self.rotary_emb, layout="T11D")
             q_li_pe = q_li_pe.squeeze(2)
             q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)  # [b*s,64,128]
 
@@ -542,21 +547,20 @@ class AscendSFACPImpl(AscendSFAImpl):
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
         attn_metadata: M,
     ):
         if self.pcp_size == 1:
-            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+            return super().exec_kv(kv_no_split, positions, kv_cache, slots, attn_metadata)
         kv_c, k_pe = kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())  # type: ignore[misc]
         assert len(kv_cache) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
         assert attn_metadata.sfa_cp_metadata is not None
         kv_c_normed = kv_c_normed.view([kv_c_normed.shape[0], self.num_kv_heads, -1])
         k_pe = k_pe.unsqueeze(1)
-        k_pe = self.rope_single(k_pe, cos, sin)
+        k_pe = self.rope_single(k_pe, positions)
         kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
         kv_c_k_pe = get_pcp_group().all_gather(kv_c_k_pe, 0)
         kv_c_k_pe = torch.index_select(kv_c_k_pe, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)

@@ -375,12 +375,22 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
     config_val = get_ascend_config().enable_mlapo
+    if not config_val:
+        return False
+
+    from vllm_ascend.ops.rope_cache_ops import (
+        has_mla_preprocess_by_cache_backend,
+        has_mla_prolog_v3_by_cache_kernel,
+    )
+
     if get_ascend_device_type() == AscendDeviceType.A5:
-        return bool(config_val)
+        return has_mla_prolog_v3_by_cache_kernel()
+    if not has_mla_preprocess_by_cache_backend():
+        return False
 
     is_decode_instance = (
         vllm_config.kv_transfer_config is not None
         and vllm_config.kv_transfer_config.is_kv_consumer
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
-    return bool(config_val and is_decode_instance)
+    return is_decode_instance

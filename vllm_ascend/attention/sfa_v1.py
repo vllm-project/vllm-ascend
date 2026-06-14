@@ -42,7 +42,14 @@ from vllm_ascend.ops.layer_shard_linear import (
     reach_layer_for_shard_weight_series,
     register_all_layers_to_shard_weight_series,
 )
-from vllm_ascend.ops.rotary_embedding import select_cos_sin_from_cache
+from vllm_ascend.ops.rope_cache_ops import (
+    has_mla_preprocess_by_cache_backend,
+    interleave_rope_by_cache,
+    kv_rmsnorm_rope_cache_by_cache,
+    mla_preprocess_by_cache,
+    rotary_mul_by_cache,
+)
+from vllm_ascend.ops.rotary_embedding import get_rope_cache
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import (
@@ -53,6 +60,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,
     enable_sp,
+    ensure_npu_internal_format_enabled,
     get_weight_prefetch_method,
     maybe_trans_nz,
 )
@@ -555,6 +563,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                 )
             if self.enable_dsa_cp:
                 reasons.append("Currently mlapo does not support SFA with CP,thus mlapo is disabled for these layers.")
+            if not has_mla_preprocess_by_cache_backend():
+                reasons.append(
+                    "MLAPO is disabled because no by-cache MLA preprocess "
+                    "backend is available."
+                )
             if reasons:
                 self.enable_mlapo = False
                 for msg in reasons:
@@ -580,6 +593,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
         assert self.kv_a_proj_with_mqa is None
         assert self.fused_qkv_a_proj is not None
+        ensure_npu_internal_format_enabled()
 
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
         q_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
@@ -675,21 +689,13 @@ class AscendSFAImpl(MLAAttentionImpl):
     def rope_single(
         self,
         x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
     ) -> torch.Tensor:
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
-        x = torch_npu.npu_interleave_rope(x, cos, sin)
+        x = interleave_rope_by_cache(x, positions, self.rotary_emb)
         return x.view(B, N, D)
-
-    def _select_sfa_cos_sin(
-        self,
-        positions: torch.Tensor,
-        ref_tensor: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return select_cos_sin_from_cache(self.rotary_emb, positions, ref_tensor, layout="T11D")
 
     def _init_o_proj_tp_full_params(self):
         """
@@ -775,8 +781,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
         attn_metadata: M,
@@ -789,11 +794,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         cache_mode = "PA"
 
         if self.enable_dsa_cp:
-            _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
+            _, _, k_pe, k_nope = kv_rmsnorm_rope_cache_by_cache(
                 kv_no_split,
                 self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-                cos,
-                sin,
+                positions,
+                self.rotary_emb,
                 slots.to(torch.int64),
                 kv_cache[1],
                 kv_cache[0],
@@ -803,11 +808,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             return k_pe, k_nope
         else:
-            torch_npu.npu_kv_rmsnorm_rope_cache(
+            kv_rmsnorm_rope_cache_by_cache(
                 kv_no_split,
                 self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-                cos,
-                sin,
+                positions,
+                self.rotary_emb,
                 slots.to(torch.int64),
                 kv_cache[1],
                 kv_cache[0],
@@ -855,8 +860,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
         slot_mapping: torch.Tensor,
         num_input_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -876,7 +880,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        torch.ops._C_ascend.mla_preprocess(
+        mla_preprocess_by_cache(
             hidden_states,
             self.wd_qkv,
             self.deq_scale_qkv,
@@ -885,8 +889,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.wu_q,
             self.qb_deq_scl,
             self.gamma2,
-            cos,
-            sin,
+            positions,
+            self.rotary_emb,
             self.W_UK_T,
             k_nope,
             k_pe,
@@ -913,8 +917,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def indexer_select_pre_process(
         self,
         x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
     ):
         kw, _ = self.wk_weights_proj(x)
         k_li = kw[:, : self.head_dim]
@@ -922,21 +925,20 @@ class AscendSFAImpl(MLAAttentionImpl):
         k_li = k_li.view(-1, 1, self.head_dim)
 
         if HAS_TRITON:
-            cos = cos.view(-1, self.qk_rope_head_dim)
-            sin = sin.view(-1, self.qk_rope_head_dim)
             k_li = rope_forward_triton_siso(
-                k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+                k_li,
+                cos_sin_cache=get_rope_cache(self.rotary_emb, k_li),
+                positions=positions,
+                rope_dim=self.qk_rope_head_dim,
+                is_neox_style=self.is_rope_neox_style,
             )
         else:
             k_li_pe, k_li_nope = torch.split(
                 k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
             )
 
-            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
-            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
-
             k_li_pe = k_li_pe.unsqueeze(2)
-            k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
+            k_li_pe = rotary_mul_by_cache(k_li_pe, positions, self.rotary_emb, layout="T11D")
             k_li_pe = k_li_pe.squeeze(2)
 
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
@@ -957,8 +959,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         q_c: torch.Tensor,
         kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         attn_metadata: M,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
@@ -968,7 +969,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
         if HAS_TRITON:
             q_li = rope_forward_triton_siso(
-                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+                q_li,
+                cos_sin_cache=get_rope_cache(self.rotary_emb, q_li),
+                positions=positions,
+                rope_dim=self.qk_rope_head_dim,
+                is_neox_style=self.is_rope_neox_style,
             )
         else:
             q_li_pe, q_li_nope = torch.split(
@@ -976,7 +981,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             )  # [b,s,64,64+64]
 
             q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
+            q_li_pe = rotary_mul_by_cache(q_li_pe, positions, self.rotary_emb, layout="T11D")
             q_li_pe = q_li_pe.squeeze(2)
             q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)  # [b*s,64,128]
 
@@ -1099,7 +1104,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
-        cos, sin = self._select_sfa_cos_sin(attn_metadata.input_positions, hidden_states)
+        positions = attn_metadata.input_positions
         slot_mapping = attn_metadata.slot_mapping
         slot_mapping_cp = None
         if self.enable_dsa_cp:
@@ -1132,12 +1137,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_with_mlapo(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
-                cos=cos,
-                sin=sin,
+                positions=positions,
                 slot_mapping=slot_mapping,
                 num_input_tokens=num_input_tokens,
             )
-            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, positions=positions)
             wait_for_kv_layer_from_connector(layer_name)
         # native
         else:
@@ -1158,15 +1162,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
 
-            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, positions=positions)
 
             wait_for_kv_layer_from_connector(layer_name)
 
             if self.enable_dsa_cp:
                 assert slot_mapping_cp is not None
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata)
+                k_pe, k_nope = self.exec_kv(kv_no_split, positions, kv_cache, slot_mapping_cp, attn_metadata)
             else:
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, attn_metadata)
+                k_pe, k_nope = self.exec_kv(kv_no_split, positions, kv_cache, slot_mapping, attn_metadata)
 
             if self.enable_dsa_cp:
                 assert k_pe is not None
@@ -1213,7 +1217,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     )
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
-            q_pe = self.rope_single(q_pe, cos, sin)
+            q_pe = self.rope_single(q_pe, positions)
 
             if self.enable_dsa_cp:
                 if kv_ag_handle is not None:
@@ -1274,8 +1278,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 q_c=q_c,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
-                cos=cos,
-                sin=sin,
+                positions=positions,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )

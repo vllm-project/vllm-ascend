@@ -13,10 +13,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from unittest import mock
+
 import torch
 
 from vllm_ascend._310p.ops.rotary_embedding import (
     AscendMRotaryEmbedding310,
+    AscendRotaryEmbedding310,
+    _select_apply_rotary_pos_emb_slices,
     _select_mrope_apply_rotary_slices,
 )
 
@@ -112,5 +116,58 @@ def test_select_mrope_apply_rotary_slices_supports_1d_positions():
     expected_cos = torch.cat((expected_cos, expected_cos), dim=-1).view(1, positions.shape[-1], 1, -1)
     expected_sin = torch.cat((expected_sin, expected_sin), dim=-1).view(1, positions.shape[-1], 1, -1)
 
+    assert torch.equal(cos, expected_cos)
+    assert torch.equal(sin, expected_sin)
+
+
+def _build_rotary_embedding(
+    *,
+    head_size: int = 96,
+    rotary_dim: int = 96,
+    cache_dim: int = 96,
+    is_neox_style: bool = True,
+) -> AscendRotaryEmbedding310:
+    emb = AscendRotaryEmbedding310.__new__(AscendRotaryEmbedding310)
+    emb.head_size = head_size
+    emb.rotary_dim = rotary_dim
+    emb.is_neox_style = is_neox_style
+    emb.cos_sin_cache = torch.randn(64, cache_dim, dtype=torch.float32)
+    return emb
+
+
+def test_310p_rotary_embedding_by_cache_path_does_not_select_legacy_slices():
+    emb = _build_rotary_embedding()
+    positions = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+    query = torch.randn(positions.numel(), emb.head_size)
+    key = torch.randn_like(query)
+
+    with (
+        mock.patch("vllm_ascend._310p.ops.rotary_embedding.select_cos_sin_cache") as select_cache,
+        mock.patch("vllm_ascend._310p.ops.rotary_embedding.torch_npu._npu_rotary_embedding") as npu_rotary,
+    ):
+        out_q, out_k = emb.forward_oot(positions, query, key)
+
+    select_cache.assert_not_called()
+    npu_rotary.assert_called_once()
+    assert torch.equal(out_q, query)
+    assert torch.equal(out_k, key)
+
+
+def test_310p_apply_rotary_slices_are_selected_only_for_legacy_apply_op():
+    emb = _build_rotary_embedding(head_size=128, rotary_dim=128, cache_dim=128)
+    positions = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+    query = torch.randn(positions.numel(), emb.head_size)
+    selected_cache = torch.randn(positions.numel(), 128)
+
+    with mock.patch(
+        "vllm_ascend._310p.ops.rotary_embedding.select_cos_sin_cache",
+        return_value=selected_cache,
+    ) as select_cache:
+        cos, sin = _select_apply_rotary_pos_emb_slices(emb, positions, query)
+
+    select_cache.assert_called_once_with(emb, positions, query)
+    expected_cos, expected_sin = selected_cache.chunk(2, dim=-1)
+    expected_cos = torch.cat((expected_cos, expected_cos), dim=-1).view(1, positions.shape[-1], 1, -1)
+    expected_sin = torch.cat((expected_sin, expected_sin), dim=-1).view(1, positions.shape[-1], 1, -1)
     assert torch.equal(cos, expected_cos)
     assert torch.equal(sin, expected_sin)

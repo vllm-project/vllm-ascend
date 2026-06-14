@@ -23,7 +23,7 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
 
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, select_cos_sin_cache, select_cos_sin_from_cache
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, get_rope_cache, select_cos_sin_cache
 
 
 def _apply_rotary_mrope_torch(
@@ -63,10 +63,14 @@ def _select_mrope_apply_rotary_slices(
     rotary_emb: MRotaryEmbedding,
     positions: torch.Tensor,
     ref_tensor: torch.Tensor,
+    cos_sin_cache: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Resolve MRoPE cos/sin for `npu_apply_rotary_pos_emb` inside the layer."""
     assert positions.ndim in (1, 2), "M-RoPE positions must be [num_tokens] or [3, num_tokens]."
-    cos_sin = select_cos_sin_cache(rotary_emb, positions, ref_tensor)
+    if cos_sin_cache is None:
+        cos_sin = select_cos_sin_cache(rotary_emb, positions, ref_tensor)
+    else:
+        cos_sin = cos_sin_cache[positions]
     cos, sin = cos_sin.chunk(2, dim=-1)
     if positions.ndim == 2:
         assert positions.shape[0] == 3, "MRoPE expects positions [3, num_tokens] (T/H/W)."
@@ -116,6 +120,31 @@ def _select_mrope_apply_rotary_slices(
     return cos_buffer[:, :num_tokens], sin_buffer[:, :num_tokens]
 
 
+def _select_apply_rotary_pos_emb_slices(
+    rotary_emb: AscendRotaryEmbedding,
+    positions: torch.Tensor,
+    ref_tensor: torch.Tensor,
+    cos_sin_cache: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resolve cos/sin only for the legacy 310P apply-rotary op path."""
+    if cos_sin_cache is None:
+        cos_sin = select_cos_sin_cache(rotary_emb, positions, ref_tensor)
+    else:
+        cos_sin = cos_sin_cache[positions]
+    cos, sin = cos_sin.chunk(2, dim=-1)
+    if rotary_emb.is_neox_style:
+        cos = torch.cat((cos, cos), dim=-1)
+        sin = torch.cat((sin, sin), dim=-1)
+    else:
+        cos = cos.repeat_interleave(2, dim=-1)
+        sin = sin.repeat_interleave(2, dim=-1)
+    num_tokens = positions.shape[-1]
+    return (
+        cos.contiguous().view(1, num_tokens, 1, -1),
+        sin.contiguous().view(1, num_tokens, 1, -1),
+    )
+
+
 def _rope_forward_oot(
     self,
     positions: torch.Tensor,
@@ -125,15 +154,12 @@ def _rope_forward_oot(
     offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     query_shape, key_shape = query.shape, key.shape
-    if self.cos_sin_cache.device != query.device:
-        self.cos_sin_cache = self.cos_sin_cache.to(query.device)
-    if self.cos_sin_cache.dtype != query.dtype:
-        self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
-    cos, sin = select_cos_sin_from_cache(self, positions, query, layout="1T1D")
+    cos_sin_cache = get_rope_cache(self, query)
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
     rotary_mode = "half" if is_neox_style else "interleave"
-    if self.head_size == 128 and self.cos_sin_cache.shape[-1] == 128:
+    if self.head_size == 128 and cos_sin_cache.shape[-1] == 128:
+        cos, sin = _select_apply_rotary_pos_emb_slices(self, positions, query, cos_sin_cache)
         query = query.contiguous().view(1, query.shape[0], -1, self.head_size)
         key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
         query, key = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin, rotary_mode=rotary_mode)
@@ -146,6 +172,7 @@ def _rope_forward_oot(
         k_rot = key[..., : self.rotary_dim]
         k_pass = key[..., self.rotary_dim :]
         if self.rotary_dim == 64:
+            cos, sin = _select_apply_rotary_pos_emb_slices(self, positions, query, cos_sin_cache)
             q_rot = q_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
             k_rot = k_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
             q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(q_rot, k_rot, cos, sin, rotary_mode=rotary_mode)
@@ -157,7 +184,7 @@ def _rope_forward_oot(
                 q_rot,
                 k_rot,
                 self.rotary_dim,
-                self.cos_sin_cache,
+                cos_sin_cache,
                 is_neox_style,
             )
         q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
@@ -172,7 +199,7 @@ def _rope_forward_oot(
             query,
             key,
             self.head_size,
-            self.cos_sin_cache,
+            cos_sin_cache,
             is_neox_style,
         )
     return query.view(query_shape), key.view(key_shape)
