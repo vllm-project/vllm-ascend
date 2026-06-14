@@ -40,6 +40,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: update-estimated-times-${{ github.ref }}
