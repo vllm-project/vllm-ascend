@@ -57,7 +57,7 @@ permissions:
 
 jobs:
   selected-tests:
-    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card-${{ matrix.group.partition && format(' (part {0})', matrix.group.partition) || '' }}
+    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
     strategy:
       fail-fast: false
       matrix:
