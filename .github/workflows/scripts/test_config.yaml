@@ -766,6 +766,12 @@ estimated_times:
   tests/ut/worker/a2/test_model_runner_v1_with_device.py: 600
   tests/ut/worker/a2/test_worker_multi_instance.py: 600
   tests/ut/worker/a2/test_worker_v1.py: 600
+
+# === Runner Mapping ===
+# Maps test paths to runner types using regex patterns.
+# Each entry has a ``default`` runner and an optional ``310p`` override
+# for files whose name contains ``_310p``.
+# Patterns are evaluated longest first (most specific wins).
 runner_mapping:
   tests/e2e/pull_request/one_card:
     default: a2_x1
