@@ -13,7 +13,6 @@ test_cases:
       - "8192"
       - --gpu-memory-utilization
       - "0.90"
-      - --enforce-eager
       - --port
       - "8000"
 
@@ -22,7 +21,6 @@ serve:
   dtype: auto
   max_model_len: 8192
   gpu_memory_utilization: 0.90
-  enforce_eager: true
   trust_remote_code: true
 
 tasks:
