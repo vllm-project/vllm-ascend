@@ -32,6 +32,16 @@ on:
         required: false
         default: ''
         description: 'The vllm-ascend ref to test.'
+      upload_timing:
+        type: boolean
+        required: false
+        default: false
+        description: 'Upload test_timing_data.json as artifact'
+      continue_on_error:
+        type: boolean
+        required: false
+        default: false
+        description: 'Continue running the job even if tests fail'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -47,7 +57,7 @@ permissions:
 
 jobs:
   selected-tests:
-    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
+    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card-${{ matrix.group.partition && format(' (part {0})', matrix.group.partition) || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -213,27 +223,49 @@ jobs:
 
       - name: Run selected tests with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
+        continue-on-error: ${{ inputs.continue_on_error }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          TIMING_FLAG=""
+          if [ "${{ inputs.upload_timing }}" = "true" ]; then
+            TIMING_FLAG="--timing"
+          fi
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "with-device" \
+            ${TIMING_FLAG} \
             ${{ matrix.group.tests }}
 
       - name: Run selected tests without device
         if: ${{ matrix.group.npu_type == 'cpu' }}
+        continue-on-error: ${{ inputs.continue_on_error }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
+          TIMING_FLAG=""
+          if [ "${{ inputs.upload_timing }}" = "true" ]; then
+            TIMING_FLAG="--timing"
+          fi
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "without-device" \
+            ${TIMING_FLAG} \
             ${{ matrix.group.tests }}
+
+      - name: Upload timing data
+        if: ${{ inputs.upload_timing }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: timing-data-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
+          path: ${{ runner.temp }}/selected-tests-*/test_timing_data.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload selected test logs
         if: always()
