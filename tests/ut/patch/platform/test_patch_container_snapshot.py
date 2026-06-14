@@ -121,3 +121,36 @@ def test_advertise_zmq_endpoint_returns_original_when_host_missing():
     snapshot_patch._patch_coordinator()
     endpoint = "inproc://snapshot-pipe"
     assert DPCoordinatorProc._advertise_zmq_endpoint(endpoint, "10.0.0.5") == endpoint
+
+
+def test_patch_mp_client_empty_client_addresses_uses_launch_capture():
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import vllm.v1.engine.core_client as core_client_mod
+
+    expected_output_address = "tcp://127.0.0.1:40000"
+
+    def fake_original_init(self, asyncio_mode, vllm_config, executor_class, log_stats, client_addresses=None):
+        if client_addresses:
+            return
+        import vllm.v1.engine.core_client as cm
+
+        with cm.launch_core_engines(None, None, None, None):
+            pass
+
+    @contextmanager
+    def fake_launch(*args, **kwargs):
+        yield MagicMock(), MagicMock(), SimpleNamespace(outputs=[expected_output_address]), None
+
+    core_client_mod.MPClient._container_snapshot_output_address_patched = False  # type: ignore[attr-defined]
+    core_client_mod.MPClient.__init__ = fake_original_init  # type: ignore[method-assign]
+
+    with patch("vllm.v1.engine.utils.launch_core_engines", fake_launch):
+        snapshot_patch._patch_mp_client()
+
+    client = core_client_mod.MPClient.__new__(core_client_mod.MPClient)
+    core_client_mod.MPClient.__init__(client, False, MagicMock(), MagicMock(), False, {})
+
+    assert client.output_address == expected_output_address

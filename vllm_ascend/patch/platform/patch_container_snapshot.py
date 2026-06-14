@@ -575,7 +575,7 @@ def _patch_mp_client() -> None:
 
         if hasattr(self, "output_address"):
             return
-        if client_addresses is not None:
+        if client_addresses:
             self.output_address = client_addresses["output_address"]  # type: ignore[attr-defined]
         elif _LaunchCapture.output_address is not None:
             self.output_address = _LaunchCapture.output_address  # type: ignore[attr-defined]
