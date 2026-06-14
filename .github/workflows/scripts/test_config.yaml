@@ -690,24 +690,24 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 600
   tests/e2e/pull_request/one_card/test_vlm.py: 596
   tests/e2e/pull_request/one_card/test_xlite.py: 138
-  tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 600
+  tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/aclgraph/test_full_graph_mode.py: 600
   tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py: 600
-  tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 600
+  tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 140
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 600
-  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 114
+  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 470
   tests/e2e/pull_request/two_card/test_data_parallel.py: 422
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 600
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 164
   tests/e2e/pull_request/two_card/test_external_launcher.py: 484
-  tests/e2e/pull_request/two_card/test_flashcomm_distributed.py: 600
+  tests/e2e/pull_request/two_card/test_flashcomm_distributed.py: 30
   tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 600
   tests/e2e/pull_request/two_card/test_moe_routing_replay.py: 600
-  tests/e2e/pull_request/two_card/test_offline_weight_load.py: 600
-  tests/e2e/pull_request/two_card/test_prefix_caching.py: 406
+  tests/e2e/pull_request/two_card/test_offline_weight_load.py: 640
+  tests/e2e/pull_request/two_card/test_prefix_caching.py: 430
   tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py: 600
   tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 600
-  tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 600
+  tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 360
   tests/e2e/pull_request/two_card/test_qwen3_performance.py: 201
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 600
   tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py: 44
@@ -749,7 +749,7 @@ estimated_times:
   tests/ut/ops/a2/test_gdn_chunk_meta.py: 600
   tests/ut/ops/a2/test_token_dispatcher.py: 600
   tests/ut/ops/a2/test_weight_prefetch.py: 600
-  tests/ut/ops/a3_2/test_activation.py: 600
+  tests/ut/ops/a3_2/test_activation.py: 20
   tests/ut/ops/a3_2/test_select_experts.py: 600
   tests/ut/quantization/methods/a2/test_w4a16.py: 600
   tests/ut/quantization/methods/a2/test_w4a4_flatquant.py: 600
@@ -798,3 +798,4 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
+
