@@ -184,7 +184,7 @@ jobs:
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
-            "without-device" \s
+            "without-device" \
             ${{ matrix.group.tests }}
 
       - name: Upload selected test logs
