@@ -21,11 +21,25 @@ on:
   schedule:
     - cron: '0 8 */3 * *'  # Every 3 days at 16:00 Beijing (UTC+8)
   workflow_dispatch:
+    inputs:
+      filter_npu_type:
+        description: 'Only run tests for this NPU type (e.g. a2, a3, 310p). Leave empty to run all.'
+        required: false
+        type: string
+        default: ''
+      filter_num_npus:
+        description: 'Only run tests with this NPU count (e.g. 1, 2, 4, 8). Leave empty to run all.'
+        required: false
+        type: string
+        default: ''
+      filter_partition:
+        description: 'Only run this partition (e.g. 1-3). Leave empty to run all.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: update-estimated-times-${{ github.ref }}
@@ -65,6 +79,24 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --run-all-modules \
             --changed-files vllm_ascend/__init__.py
+          # Re-read outputs and strip cpu-only groups (timing data from CPU UTs
+          # is batch-level and skipped by update_estimated_times.py anyway).
+          groups_json="$(grep '^test_groups=' "$GITHUB_OUTPUT" | cut -d= -f2-)"
+          filter=".npu_type != \"cpu\""
+          if [ -n "${{ inputs.filter_npu_type }}" ]; then
+            filter="${filter} and .npu_type == \"${{ inputs.filter_npu_type }}\""
+          fi
+          if [ -n "${{ inputs.filter_num_npus }}" ]; then
+            filter="${filter} and .num_npus == ${{ inputs.filter_num_npus }}"
+          fi
+          if [ -n "${{ inputs.filter_partition }}" ]; then
+            filter="${filter} and .partition == \"${{ inputs.filter_partition }}\""
+          fi
+          filtered="$(echo "$groups_json" | jq -c "[.[] | select(${filter})]")"
+          has_tests="false"
+          if [ "$(echo "$filtered" | jq 'length')" -gt 0 ]; then has_tests="true"; fi
+          sed -i "s|^test_groups=.*|test_groups=${filtered}|" "$GITHUB_OUTPUT"
+          sed -i "s|^has_tests=.*|has_tests=${has_tests}|" "$GITHUB_OUTPUT"
 
   run-tests-main:
     needs: select-tests

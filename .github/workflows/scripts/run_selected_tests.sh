@@ -83,7 +83,7 @@ run_pytest_target() {
   set -e
   if [ "${record_timing}" = true ]; then
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
-    local elapsed=$(echo "scale=1; ${elapsed_ns} / 1000000000" | bc)
+    local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
     timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
   fi
   echo "::endgroup::"
@@ -118,7 +118,7 @@ run_pytest_batch() {
   set -e
   if [ "${record_timing}" = true ]; then
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
-    local elapsed=$(echo "scale=1; ${elapsed_ns} / 1000000000" | bc)
+    local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
     timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
   fi
   echo "::endgroup::"
