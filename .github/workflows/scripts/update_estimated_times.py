@@ -120,6 +120,12 @@ def update_config(config_path: Path, timings: dict[str, list[int]]) -> int:
             if line and not line.startswith(" ") and not line.startswith("#") and not line.startswith("-"):
                 if ":" in line and line.split(":")[0].strip():
                     section_end = i
+                    # Backtrack through preceding blank/comment lines so they
+                    # are preserved in ``after`` rather than being dropped.
+                    while section_end > 0 and (
+                        lines[section_end - 1].strip() == "" or lines[section_end - 1].strip().startswith("#")
+                    ):
+                        section_end -= 1
                     break
 
     if et_start is None:
@@ -137,6 +143,9 @@ def update_config(config_path: Path, timings: dict[str, list[int]]) -> int:
 
     new_text = "\n".join(before) + "\n" + "\n".join(new_section_lines) + "\n"
     if after:
+        # Ensure a blank line separates estimated_times from the next section
+        if after[0].strip():
+            new_text += "\n"
         new_text += "\n".join(after) + "\n"
 
     config_path.write_text(new_text)
