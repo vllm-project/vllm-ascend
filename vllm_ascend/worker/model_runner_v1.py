@@ -3604,7 +3604,7 @@ class NPUModelRunner(GPUModelRunner):
         os.makedirs(model_dir, exist_ok=True)
         logger.info("[dump model] start dump model to %s", model_save_path)
         start = time.time()
-        import psutil
+        import psutil  # type: ignore[import-untyped]
         process = psutil.Process(os.getpid())
         logger.info("start dump_model() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
         torch.save(self.get_model().state_dict(), model_save_path)

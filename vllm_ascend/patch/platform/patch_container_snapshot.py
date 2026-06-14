@@ -209,7 +209,7 @@ def _patch_parallel_state() -> None:
             ps.destroy_distributed_environment()
             ps._reset_group_name_registry()
             if shutdown_ray:
-                import ray
+                import ray  # type: ignore[import-not-found]
 
                 ray.shutdown()
 
@@ -420,7 +420,7 @@ def _patch_engine_core_client() -> None:
             self.resources.stats_update_task = None
             self.stats_update_address = re.sub(
                 r"\d+\.\d+\.\d+\.\d+",
-                data_parallel_master_ip,
+                data_parallel_master_ip,  # type: ignore[arg-type]
                 self.stats_update_address,
             )
             self.first_req_sock_addr = core_client_mod.get_open_zmq_inproc_path()
@@ -610,7 +610,7 @@ def _patch_engine_core_init_threads() -> None:
 
     def _patched_init(self, *args, **kwargs):
         self.addresses = None  # type: ignore[attr-defined]
-        threading.Thread.start = _capturing_thread_start  # type: ignore[method-assign]
+        threading.Thread.start = _capturing_thread_start  # type: ignore[method-assign,assignment]
         try:
             original_init(self, *args, **kwargs)
         finally:
@@ -649,9 +649,11 @@ def _patch_engine_core_socket_threads() -> None:
         add_request_decoder = MsgpackDecoder(EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver)
         generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 
-        with ExitStack() as stack, zmq.Context() as ctx:
+        with ExitStack() as stack, zmq.Context() as ctx:  # type: ignore[attr-defined]
             input_sockets = [
-                stack.enter_context(make_zmq_socket(ctx, input_address, zmq.DEALER, identity=identity, bind=False))
+                stack.enter_context(
+                    make_zmq_socket(ctx, input_address, zmq.DEALER, identity=identity, bind=False)  # type: ignore[attr-defined]
+                )
                 for input_address in input_addresses
             ]
             if coord_input_address is None:
@@ -661,14 +663,14 @@ def _patch_engine_core_socket_threads() -> None:
                     make_zmq_socket(
                         ctx,
                         coord_input_address,
-                        zmq.XSUB,
+                        zmq.XSUB,  # type: ignore[attr-defined]
                         identity=identity,
                         bind=False,
                     )
                 )
                 coord_socket.send(b"\x01")
 
-            poller = zmq.Poller()
+            poller = zmq.Poller()  # type: ignore[attr-defined]
             ready_response = EngineCoreReadyResponse(
                 max_model_len=self.vllm_config.model_config.max_model_len,
                 num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
@@ -677,11 +679,11 @@ def _patch_engine_core_socket_threads() -> None:
             ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:
                 input_socket.send(ready_payload)
-                poller.register(input_socket, zmq.POLLIN)
+                poller.register(input_socket, zmq.POLLIN)  # type: ignore[attr-defined]
 
             if coord_socket is not None:
                 assert coord_socket.recv() == b"READY"
-                poller.register(coord_socket, zmq.POLLIN)
+                poller.register(coord_socket, zmq.POLLIN)  # type: ignore[attr-defined]
 
             ready_event.set()
             del ready_event
@@ -718,15 +720,15 @@ def _patch_engine_core_socket_threads() -> None:
     def process_output_sockets(self, output_paths: list[str], coord_output_path: str | None, engine_index: int):
         encoder = MsgpackEncoder()
         reuse_buffers: list[bytearray] = []
-        pending = deque[tuple[zmq.MessageTracker, Any, bytearray]]()
+        pending = deque[tuple[zmq.MessageTracker, Any, bytearray]]()  # type: ignore[name-defined]
 
-        with ExitStack() as stack, zmq.Context() as ctx:
+        with ExitStack() as stack, zmq.Context() as ctx:  # type: ignore[attr-defined]
             sockets = [
-                stack.enter_context(make_zmq_socket(ctx, output_path, zmq.PUSH, linger=4000))
+                stack.enter_context(make_zmq_socket(ctx, output_path, zmq.PUSH, linger=4000))  # type: ignore[attr-defined]
                 for output_path in output_paths
             ]
             coord_socket = (
-                stack.enter_context(make_zmq_socket(ctx, coord_output_path, zmq.PUSH, bind=False, linger=4000))
+                stack.enter_context(make_zmq_socket(ctx, coord_output_path, zmq.PUSH, bind=False, linger=4000))  # type: ignore[attr-defined]
                 if coord_output_path is not None
                 else None
             )
@@ -1026,13 +1028,14 @@ def _patch_coordinator() -> None:
 
     if not hasattr(coordinator_mod.DPCoordinatorProc, "_advertise_zmq_endpoint"):
 
-        @staticmethod
         def _advertise_zmq_endpoint(endpoint: str, advertise_host: str | None) -> str:
             if advertise_host is None or not endpoint.startswith("tcp://"):
                 return endpoint
             return re.sub(r"\d+\.\d+\.\d+\.\d+", advertise_host, endpoint)
 
-        coordinator_mod.DPCoordinatorProc._advertise_zmq_endpoint = _advertise_zmq_endpoint  # type: ignore[attr-defined]
+        coordinator_mod.DPCoordinatorProc._advertise_zmq_endpoint = staticmethod(  # type: ignore[attr-defined]
+            _advertise_zmq_endpoint
+        )
 
     original_process_input_socket = coordinator_mod.DPCoordinatorProc.process_input_socket
 

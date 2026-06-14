@@ -13,13 +13,13 @@ import pytest
 def npu_worker_cls():
     torch_npu = sys.modules.setdefault("torch_npu", types.ModuleType("torch_npu"))
     atb_ops = types.ModuleType("torch_npu.op_plugin.atb._atb_ops")
-    atb_ops._register_atb_extensions = MagicMock()
+    atb_ops._register_atb_extensions = MagicMock()  # type: ignore[attr-defined]
     op_plugin = types.ModuleType("torch_npu.op_plugin")
-    op_plugin.atb = types.SimpleNamespace(_atb_ops=atb_ops)
+    op_plugin.atb = types.SimpleNamespace(_atb_ops=atb_ops)  # type: ignore[attr-defined]
     profiler = types.ModuleType("torch_npu.profiler")
-    profiler.dynamic_profile = MagicMock()
+    profiler.dynamic_profile = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu.op_plugin"] = op_plugin
-    sys.modules["torch_npu.op_plugin.atb"] = op_plugin.atb
+    sys.modules["torch_npu.op_plugin.atb"] = op_plugin.atb  # type: ignore[assignment]
     sys.modules["torch_npu.op_plugin.atb._atb_ops"] = atb_ops
     sys.modules["torch_npu.profiler"] = profiler
     torch_npu.op_plugin = op_plugin  # type: ignore[attr-defined]
