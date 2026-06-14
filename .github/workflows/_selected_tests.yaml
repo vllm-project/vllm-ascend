@@ -245,19 +245,14 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
-          TIMING_FLAG=""
-          if [ "${{ inputs.upload_timing }}" = "true" ]; then
-            TIMING_FLAG="--timing"
-          fi
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "without-device" \
-            ${TIMING_FLAG} \
             ${{ matrix.group.tests }}
 
       - name: Upload timing data
-        if: ${{ inputs.upload_timing }}
+        if: ${{ inputs.upload_timing && matrix.group.npu_type != 'cpu' }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
