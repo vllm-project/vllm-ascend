@@ -20,7 +20,7 @@ done
 
 
 if [ "$#" -lt 4 ]; then
-  echo "Usage: $0 [--enable-coverage] <npu_type> <num_npus> <with-device|without-device> <test> [test ...]"
+  echo "Usage: $0 [--enable-coverage] <npu_type> <num_npus> <with-device|without-device> [--timing] <test> [test ...]"
   exit 1
 fi
 
@@ -28,6 +28,13 @@ npu_type="$1"
 num_npus="$2"
 mode="$3"
 shift 3
+
+record_timing=false
+if [ "$1" = "--timing" ]; then
+  record_timing=true
+  shift
+fi
+
 targets=("$@")
 
 if [ "${mode}" != "with-device" ] && [ "${mode}" != "without-device" ]; then
@@ -37,6 +44,7 @@ fi
 
 test_results=()
 failed_logs=()
+timing_entries=()
 test_index=0
 overall_status=0
 
@@ -102,19 +110,29 @@ run_pytest_target() {
     set +e
     python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
   else
-    set +e
-    pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
-  fi
+      local start_time=0
+      if [ "${record_timing}" = true ]; then
+        start_time=$(date +%s%N)
+      fi
+      set +e
+      pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+      fi
   local status=${PIPESTATUS[0]}
   set -e
+  if [ "${record_timing}" = true ]; then
+    local elapsed_ns=$(( $(date +%s%N) - start_time ))
+    local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
+    timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
+  fi
   echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
     test_results+=("${target}|PASSED|${log_file}")
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${overall_status}" -eq 0 ]; then
-      overall_status="${status}"
+    if [ "${record_timing}" != true ]; then
+      print_summary
+      exit "${status}"
     fi
   fi
 }
@@ -133,21 +151,49 @@ run_pytest_batch() {
     set +e
     python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   else
+    local start_time=0
+    if [ "${record_timing}" = true ]; then
+      start_time=$(date +%s%N)
+    fi
     set +e
     pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   fi
   local status=${PIPESTATUS[0]}
   set -e
+  if [ "${record_timing}" = true ]; then
+    local elapsed_ns=$(( $(date +%s%N) - start_time ))
+    local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
+    timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
+  fi
   echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
     test_results+=("${target}|PASSED|${log_file}")
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${overall_status}" -eq 0 ]; then
-      overall_status="${status}"
+    if [ "${record_timing}" != true ]; then
+      print_summary
+      exit "${status}"
     fi
   fi
+}
+
+print_timing_json() {
+  if [ "${#timing_entries[@]}" -eq 0 ]; then
+    return
+  fi
+  local json="["
+  local i=0
+  for entry in "${timing_entries[@]}"; do
+    if [ "${i}" -gt 0 ]; then
+      json+=","
+    fi
+    json+="${entry}"
+    i=$((i + 1))
+  done
+  json+="]"
+  echo "${json}" > "${pytest_log_dir}/test_timing_data.json"
+  echo -e "\033[1;34m=== Timing data written to ${pytest_log_dir}/test_timing_data.json ===\033[0m"
 }
 
 print_test_info
@@ -174,5 +220,6 @@ else
   done
 fi
 
+print_timing_json
 print_summary
 exit "${overall_status}"
