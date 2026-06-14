@@ -253,7 +253,7 @@ jobs:
         id: resolve-refs
         run: |
           echo "vllm_ascend_ref=${{ inputs.vllm_ascend_ref || 'main' }}" >> "$GITHUB_OUTPUT"
-          echo "vllm_version=${{ inputs.vllm_version || 'v0.20.2' }}" >> "$GITHUB_OUTPUT"
+          echo "vllm_version=${{ inputs.vllm_version || 'v0.21.0' }}" >> "$GITHUB_OUTPUT"
 
       - name: Select all tests
         id: full-scope
@@ -272,6 +272,7 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.select-full-tests.outputs.vllm_version }}
+          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
