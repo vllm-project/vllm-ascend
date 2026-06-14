@@ -168,11 +168,11 @@ jobs:
           ENABLE_COVERAGE: ${{ inputs.enable-coverage }}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
-            .github/workflows/scripts/run_selected_tests.sh \
-              "${{ matrix.group.npu_type }}" \
-              "${{ matrix.group.num_npus }}" \
-              "with-device" \
-              ${{ matrix.group.tests }}
+          .github/workflows/scripts/run_selected_tests.sh \
+            "${{ matrix.group.npu_type }}" \
+            "${{ matrix.group.num_npus }}" \
+            "with-device" \
+            ${{ matrix.group.tests }}
 
       - name: Run selected tests without device
         if: ${{ matrix.group.npu_type == 'cpu' }}
@@ -181,11 +181,11 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
           ENABLE_COVERAGE: ${{ inputs.enable-coverage }}
         run: |
-            .github/workflows/scripts/run_selected_tests.sh \
-              "${{ matrix.group.npu_type }}" \
-              "${{ matrix.group.num_npus }}" \
-              "without-device" \
-              ${{ matrix.group.tests }}
+          .github/workflows/scripts/run_selected_tests.sh \
+            "${{ matrix.group.npu_type }}" \
+            "${{ matrix.group.num_npus }}" \
+            "without-device" \s
+            ${{ matrix.group.tests }}
 
       - name: Upload selected test logs
         if: always()
