@@ -485,6 +485,9 @@ def get_kv_cache_coordinator(
             hash_block_size,
             metrics_collector,
         )
+        if not vllm_version_is("0.21.0"):
+            orig_kwargs["scheduler_block_size"] = scheduler_block_size
+        return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
     return AscendHybridKVCacheCoordinator(
         kv_cache_config,
