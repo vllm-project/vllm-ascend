@@ -1,5 +1,3 @@
-# CohereLabs/c4ai-command-r-v01
-
 ## Introduction
 
 CohereLabs/c4ai-command-r-v01 is an open-weights instruction model optimized for reasoning, summarization, and question answering. It supports multilingual generation and long-context processing, and is suitable for enterprise-style assistant and RAG scenarios. This tutorial describes how to deploy and validate the model on vLLM-Ascend with Atlas A2.
@@ -54,7 +52,6 @@ vllm serve "CohereLabs/c4ai-command-r-v01" \
   --tensor-parallel-size 4 \
   --max-model-len 8192 \
   --gpu-memory-utilization 0.90 \
-  --enforce-eager \
   --port 8000
 ```
 
@@ -83,16 +80,7 @@ Expected result:
 
 ## Accuracy Evaluation
 
-Run the LM-Eval correctness test with the model config:
-
-```bash
-python -m pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
-  --config tests/e2e/models/configs/c4ai-command-r-v01.yaml \
-  --tp-size 4 \
-  --report-dir ./benchmarks/accuracy
-```
-
-Reference values (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
+Reference accuracy values:
 
 | Task | Metric | Expected (yaml) |
 | --- | --- | --- |
