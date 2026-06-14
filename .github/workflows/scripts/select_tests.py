@@ -577,6 +577,7 @@ def _resolve_to_runners(
                 "npu_type": npu_type.value,
                 "runner": runner.label,
                 "tests": " ".join(sorted(tests)),
+                "partition": "1-1",
             }
             if runner.image_tag:
                 group["image_tag"] = runner.image_tag
