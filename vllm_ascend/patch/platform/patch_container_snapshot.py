@@ -140,7 +140,7 @@ def _patch_sleep_api_router() -> None:
     """
     from fastapi import HTTPException, Request, status
     from fastapi.responses import Response
-    from vllm.entrypoints.serve.sleep import api_router
+    from vllm.entrypoints.serve.sleep import api_router  # type: ignore[import-not-found]
 
     # This module uses `from __future__ import annotations`, so the
     # `raw_request: Request` annotations below are stored as strings. FastAPI
