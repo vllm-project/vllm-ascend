@@ -1,4 +1,5 @@
 import threading
+from contextlib import suppress
 
 
 class GlobalTE:
@@ -56,10 +57,8 @@ class GlobalTE:
             for closer in ("close", "shutdown", "deinitialize", "finalize", "stop"):
                 fn = getattr(old_engine, closer, None)
                 if callable(fn):
-                    try:
+                    with suppress(Exception):
                         fn()
-                    except Exception:
-                        pass
                     break
         # Drop the last reference; rely on GC/destructor to free native resources.
         del old_engine

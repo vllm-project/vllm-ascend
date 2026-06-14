@@ -24,7 +24,6 @@ import os
 import platform
 import time
 from ctypes import CDLL, c_int, c_void_p
-from datetime import datetime
 from types import NoneType
 
 import torch

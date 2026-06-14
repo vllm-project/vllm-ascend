@@ -323,12 +323,9 @@ def _patch_engine_core_client() -> None:
             identities = set(self.core_engines)
             sync_input_socket = core_client_mod.zmq.Socket.shadow(self.input_socket)
             while identities:
-                if not sync_input_socket.poll(
-                    timeout=core_client_mod.VLLM_ENGINE_READY_TIMEOUT_S * 1000
-                ):
+                if not sync_input_socket.poll(timeout=core_client_mod.VLLM_ENGINE_READY_TIMEOUT_S * 1000):
                     raise TimeoutError(
-                        "[snapshot] Timed out waiting for engines to send "
-                        "initial message on input socket."
+                        "[snapshot] Timed out waiting for engines to send initial message on input socket."
                     )
                 identity, _ = sync_input_socket.recv_multipart()
                 identities.remove(identity)
@@ -481,11 +478,7 @@ def _patch_engine_core_client() -> None:
                     try:
                         while True:
                             events = await poller.poll()
-                            if (
-                                not self.engines_running
-                                and len(events) == 2
-                                or (events[0][0] == first_req_rcv_socket)
-                            ):
+                            if not self.engines_running and len(events) == 2 or (events[0][0] == first_req_rcv_socket):
                                 buf = first_req_rcv_socket.recv(flags=core_client_mod.zmq.NOBLOCK).result()
                                 decoded = core_client_mod.msgspec.msgpack.decode(buf)
                                 if (
@@ -502,14 +495,11 @@ def _patch_engine_core_client() -> None:
                                         parallel_config.data_parallel_hybrid_lb
                                         or parallel_config.data_parallel_external_lb
                                     )
-                                    self.engine_ranks_managed = list(
-                                        range(dp_rank, dp_rank + dp_size)
-                                    )
+                                    self.engine_ranks_managed = list(range(dp_rank, dp_rank + dp_size))
                                     new_engine_count = decoded[1]
                                     if len(self.lb_engines) < new_engine_count:
                                         self.lb_engines = self.lb_engines + [
-                                            [0, 0]
-                                            for _ in range(new_engine_count - len(self.lb_engines))
+                                            [0, 0] for _ in range(new_engine_count - len(self.lb_engines))
                                         ]
                                     else:
                                         self.lb_engines = self.lb_engines[:new_engine_count]
@@ -522,9 +512,7 @@ def _patch_engine_core_client() -> None:
                                 assert decoded[0] == "FIRST_REQ"
                                 target_eng_index = decoded[1]
                                 self.engines_running = True
-                                msg = core_client_mod.msgspec.msgpack.encode(
-                                    (target_eng_index, self.current_wave)
-                                )
+                                msg = core_client_mod.msgspec.msgpack.encode((target_eng_index, self.current_wave))
                                 await socket.send(msg)
 
                             buf = None
@@ -544,13 +532,9 @@ def _patch_engine_core_client() -> None:
                                 count_slice = slice(ranks[0], ranks[-1] + 1)
                                 sliced_counts = counts[count_slice]
                                 self.lb_engines = sliced_counts
-                                logger.debug(
-                                    "Received counts: %s (%s)", sliced_counts, count_slice
-                                )
+                                logger.debug("Received counts: %s (%s)", sliced_counts, count_slice)
                     except asyncio.CancelledError:
-                        logger.info(
-                            "[snapshot] api server stats_update_task raise cancelled"
-                        )
+                        logger.info("[snapshot] api server stats_update_task raise cancelled")
                         raise
 
             resources.stats_update_task = asyncio.create_task(run_engine_stats_update_task())
@@ -644,11 +628,10 @@ def _patch_engine_core_socket_threads() -> None:
 
     import msgspec
     import zmq
-    import vllm.v1.engine.core as core_mod
+    from vllm.utils.network_utils import make_zmq_socket
     from vllm.v1.engine import EngineCoreReadyResponse, EngineCoreRequest, EngineCoreRequestType
     from vllm.v1.engine.core import EngineCoreProc
     from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-    from vllm.utils.network_utils import make_zmq_socket
 
     if not hasattr(EngineCoreProc, "ENGINE_CORE_THREAD_FINISH"):
         EngineCoreProc.ENGINE_CORE_THREAD_FINISH = b"ENGINE_CORE_THREAD_FINISH"  # type: ignore[attr-defined]
@@ -663,18 +646,12 @@ def _patch_engine_core_socket_threads() -> None:
         identity: bytes,
         ready_event: threading.Event,
     ):
-        add_request_decoder = MsgpackDecoder(
-            EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
-        )
+        add_request_decoder = MsgpackDecoder(EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver)
         generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [
-                stack.enter_context(
-                    make_zmq_socket(
-                        ctx, input_address, zmq.DEALER, identity=identity, bind=False
-                    )
-                )
+                stack.enter_context(make_zmq_socket(ctx, input_address, zmq.DEALER, identity=identity, bind=False))
                 for input_address in input_addresses
             ]
             if coord_input_address is None:
@@ -734,32 +711,22 @@ def _patch_engine_core_socket_threads() -> None:
                     self.input_queue.put_nowait((request_type, request))
 
                     if len(parts) == 2 and (b"resume" in bytes(parts[1].buffer)):
-                        logger.info(
-                            "[snapshot] engine core input thread received resume, stop input thread"
-                        )
+                        logger.info("[snapshot] engine core input thread received resume, stop input thread")
                         flag = False
                         break
 
-    def process_output_sockets(
-        self, output_paths: list[str], coord_output_path: str | None, engine_index: int
-    ):
+    def process_output_sockets(self, output_paths: list[str], coord_output_path: str | None, engine_index: int):
         encoder = MsgpackEncoder()
         reuse_buffers: list[bytearray] = []
         pending = deque[tuple[zmq.MessageTracker, Any, bytearray]]()
 
         with ExitStack() as stack, zmq.Context() as ctx:
             sockets = [
-                stack.enter_context(
-                    make_zmq_socket(ctx, output_path, zmq.PUSH, linger=4000)
-                )
+                stack.enter_context(make_zmq_socket(ctx, output_path, zmq.PUSH, linger=4000))
                 for output_path in output_paths
             ]
             coord_socket = (
-                stack.enter_context(
-                    make_zmq_socket(
-                        ctx, coord_output_path, zmq.PUSH, bind=False, linger=4000
-                    )
-                )
+                stack.enter_context(make_zmq_socket(ctx, coord_output_path, zmq.PUSH, bind=False, linger=4000))
                 if coord_output_path is not None
                 else None
             )
@@ -791,9 +758,7 @@ def _patch_engine_core_socket_threads() -> None:
 
                 buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
                 buffers = encoder.encode_into(outputs, buffer)
-                tracker = sockets[client_index].send_multipart(
-                    buffers, copy=False, track=True
-                )
+                tracker = sockets[client_index].send_multipart(buffers, copy=False, track=True)
                 if not tracker.done:
                     ref = outputs if len(buffers) > 1 else None
                     pending.appendleft((tracker, ref, buffer))
@@ -810,7 +775,7 @@ def _patch_engine_core() -> None:
     from vllm.utils import get_local_ip
 
     def _snap_log(title: str) -> str:
-        return f"[snapshot] [engine] " + "-" * 20 + title + "-" * 20
+        return "[snapshot] [engine] " + "-" * 20 + title + "-" * 20
 
     if not hasattr(core_mod.EngineCoreProc, "ENGINE_CORE_THREAD_FINISH"):
         core_mod.EngineCoreProc.ENGINE_CORE_THREAD_FINISH = b"ENGINE_CORE_THREAD_FINISH"  # type: ignore[attr-defined]
@@ -1030,7 +995,6 @@ def _patch_coordinator() -> None:
         return
 
     if not hasattr(coordinator_mod.DPCoordinator, "_container_snapshot_init_patched"):
-
         original_dp_init = coordinator_mod.DPCoordinator.__init__
 
         def _patched_dp_coordinator_init(self, parallel_config, enable_wave_coordination=True):
@@ -1080,15 +1044,9 @@ def _patch_coordinator() -> None:
         zmq_addr_pipe=None,
         advertise_host: str | None = None,
     ):
-        front_publish_address = re.sub(
-            r"\d+\.\d+\.\d+\.\d+", "0.0.0.0", front_publish_address
-        )
-        back_output_address = re.sub(
-            r"\d+\.\d+\.\d+\.\d+", "0.0.0.0", back_output_address
-        )
-        back_publish_address = re.sub(
-            r"\d+\.\d+\.\d+\.\d+", "0.0.0.0", back_publish_address
-        )
+        front_publish_address = re.sub(r"\d+\.\d+\.\d+\.\d+", "0.0.0.0", front_publish_address)
+        back_output_address = re.sub(r"\d+\.\d+\.\d+\.\d+", "0.0.0.0", back_output_address)
+        back_publish_address = re.sub(r"\d+\.\d+\.\d+\.\d+", "0.0.0.0", back_publish_address)
         logger.info(
             "[snapshot] coordinator bind on 0.0.0.0, advertise tcp as %s",
             advertise_host,
@@ -1111,10 +1069,7 @@ def _patch_coordinator() -> None:
             def send(self, endpoints):
                 if isinstance(endpoints, tuple) and len(endpoints) == 3:
                     endpoints = tuple(
-                        coordinator_mod.DPCoordinatorProc._advertise_zmq_endpoint(
-                            ep, self._host
-                        )
-                        for ep in endpoints
+                        coordinator_mod.DPCoordinatorProc._advertise_zmq_endpoint(ep, self._host) for ep in endpoints
                     )
                 return self._pipe.send(endpoints)
 
