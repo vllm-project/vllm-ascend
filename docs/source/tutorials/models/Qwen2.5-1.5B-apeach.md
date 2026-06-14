@@ -87,6 +87,7 @@ docker run --rm \
 
 ```bash
 vllm serve /root/.cache/jason9693/Qwen2.5-1.5B-apeach \
+    --served-model-name jason9693/Qwen2.5-1.5B-apeach \
     --trust-remote-code \
     --tensor-parallel-size 1 \
     --max-model-len 4096 \
@@ -135,7 +136,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```bash
 lm_eval \
   --model local-completions \
-  --model_args model=/root/.cache/jason9693/Qwen2.5-1.5B-apeach,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --model_args model=jason9693/Qwen2.5-1.5B-apeach,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
   --tasks gsm8k \
   --num_fewshot 5 \
   --apply_chat_template \
