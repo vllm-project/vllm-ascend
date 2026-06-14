@@ -1,0 +1,183 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Update estimated test times
+
+on:
+  schedule:
+    - cron: '0 8 */3 * *'  # Every 3 days at 16:00 Beijing (UTC+8)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-estimated-times-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select-tests:
+    runs-on: ubuntu-latest
+    outputs:
+      test_groups: ${{ steps.scope.outputs.test_groups }}
+      has_tests: ${{ steps.scope.outputs.has_tests }}
+      main_commit: ${{ steps.vllm.outputs.main_commit }}
+      release_tag: ${{ steps.vllm.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install regex pyyaml
+
+      - name: Read verified vLLM refs
+        id: vllm
+        run: |
+          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Select all tests
+        id: scope
+        run: |
+          python3 .github/workflows/scripts/select_tests.py \
+            --run-all-modules \
+            --changed-files vllm_ascend/__init__.py
+
+  run-tests-main:
+    needs: select-tests
+    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ needs.select-tests.outputs.main_commit }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+      upload_timing: true
+      continue_on_error: true
+
+  run-tests-release:
+    needs: select-tests
+    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ needs.select-tests.outputs.release_tag }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+      upload_timing: true
+      continue_on_error: true
+
+  update-estimated-times:
+    needs: [run-tests-main, run-tests-release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: timing-data-*
+          path: timing-artifacts/
+          merge-multiple: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Update estimated_times from timing data
+        run: |
+          python3 .github/workflows/scripts/update_estimated_times.py \
+            --timing-dir timing-artifacts/ \
+            --config .github/workflows/scripts/test_config.yaml
+
+      - name: Check for changes
+        id: check
+        run: |
+          if git diff --quiet .github/workflows/scripts/test_config.yaml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes to test_config.yaml."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "test_config.yaml has been updated:"
+            git diff .github/workflows/scripts/test_config.yaml
+          fi
+
+      - name: Commit and push
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          BRANCH="auto/update-estimated-times-${{ github.run_id }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add .github/workflows/scripts/test_config.yaml
+          git commit -s -m "[CI] Auto-update estimated test times in test_config.yaml"
+          git push origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Pushed branch: $BRANCH"
+
+      - name: Create pull request
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/github-script@v9
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: auto/update-estimated-times-${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            try {
+              const pr = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head: process.env.BRANCH,
+                base: 'main',
+                title: '[CI] Auto-update estimated test times in test_config.yaml',
+                body: '## Summary\n\n' +
+                  'This PR was auto-generated by the **Update estimated test times** ' +
+                  '[workflow](' + process.env.RUN_URL + ').\n\n' +
+                  'It updates the `estimated_times` values in ' +
+                  '`.github/workflows/scripts/test_config.yaml` based on actual elapsed ' +
+                  'times collected from CI workflow runs.\n\n' +
+                  '### Methodology\n\n' +
+                  '- Each test job uploads its elapsed time as a `timing-data-*` ' +
+                  'artifact upon completion.\n' +
+                  '- The workflow aggregates all collected timing artifacts across jobs.\n' +
+                  '- For each test, the **median** elapsed time is computed to reduce ' +
+                  'outlier impact.\n' +
+                  '- A **10% safety buffer** is applied and the result is rounded to the ' +
+                  'nearest 10 seconds.\n\n' +
+                  '### Review Checklist\n\n' +
+                  '- [ ] Verify that updated `estimated_time` values are within a ' +
+                  'reasonable range.\n' +
+                  '- [ ] Confirm no test entries are missing or unexpectedly removed.\n',
+              });
+              core.info('Created PR #' + pr.data.number);
+            } catch (error) {
+              if (error.message.includes('A pull request already exists')) {
+                core.warning('PR already exists');
+              } else { throw error; }
+            }
