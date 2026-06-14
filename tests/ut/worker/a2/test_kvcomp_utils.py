@@ -31,9 +31,6 @@ enable_custom_op()
 torch_npu.npu.config.allow_internal_format = True
 
 
-NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
-print(f"NPU_AVAILABLE={NPU_AVAILABLE}")
-
 # =============================================================================
 # test KVCompConfig
 # =============================================================================
@@ -81,7 +78,6 @@ def test_kvcomp_config_to_json_from_json_roundtrip():
 # # =============================================================================
 
 
-@pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
 def test_hash_encoder():
     """Test HashEncoder init with valid params (NPU only)."""
     encoder = HashEncoder(

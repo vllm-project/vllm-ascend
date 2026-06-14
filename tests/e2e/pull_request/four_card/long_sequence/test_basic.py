@@ -20,8 +20,6 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-import torch
 from PIL import Image
 from vllm import SamplingParams
 
@@ -118,10 +116,6 @@ def test_models_pcp_dcp_basic():
     },
 )
 @wait_until_npu_memory_free()
-@pytest.mark.skipif(
-    torch.npu.device_count() < 4,
-    reason="DeepSeek V4 DSA CP e2e test requires at least 4 NPUs.",
-)
 def test_deepseek_v4_w4a8_dsa_cp_basic_greedy():
     prompts = [
         "Hello, my name is",
@@ -394,10 +388,6 @@ def test_dcp_piece_wise():
     },
 )
 @wait_until_npu_memory_free()
-@pytest.mark.skipif(
-    torch.npu.device_count() < 4,
-    reason="Qwen3-VL-8B-Instruct multimodal test requires at least 4 NPUs.",
-)
 def test_qwen3_vl_8b_multimodal_single_and_multi_image():
     image = Image.open(QWEN_IMAGE_PATH).convert("RGB")
 
@@ -466,10 +456,6 @@ def test_qwen3_vl_8b_multimodal_single_and_multi_image():
     },
 )
 @wait_until_npu_memory_free()
-@pytest.mark.skipif(
-    torch.npu.device_count() < 4,
-    reason="Qwen3.5-4B multimodal test requires at least 4 NPUs.",
-)
 def test_qwen3_5_4b_multimodal_single_and_multi_image():
     image_1 = Image.open(QWEN_IMAGE_PATH).convert("RGB")
     image_2 = Image.open(QWEN_IMAGE_PATH).convert("RGB")

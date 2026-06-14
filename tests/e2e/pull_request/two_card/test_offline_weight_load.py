@@ -33,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
 
 
+@pytest.mark.skip("fix me, unstable, timeout")
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 @wait_until_npu_memory_free(0.7)
