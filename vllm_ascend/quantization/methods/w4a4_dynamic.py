@@ -88,17 +88,22 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW4A8DynamicFusedMoEMethod):
         # down:    [E, H,  I] -> [E, I, H]    (K=I, N=H)
         w13_kn = w13.transpose(1, 2).contiguous()
         w2_kn = w2.transpose(1, 2).contiguous()
-        # The mega kernel is compiled with fixed per-rank H/I (KERNEL_H_DIM/I_DIM).
-        # A different model shape or tensor-parallel size yields different per-rank
-        # dims, which the kernel would index with the wrong stride -> wrong results
-        # or out-of-bounds. Fail fast instead.
+        # The mega kernel is compiled with fixed per-rank H/I (KERNEL_H_DIM/I_DIM) and
+        # assumes the UNPACKED expert layout (gate_up N == 2*I, down N == H). A
+        # different model/TP size, or a packed ModelSlim layout (quant_description
+        # version 1.0.0 packs gate_up as [E,I,H] / down as [E,H/2,I]), would pass a
+        # K-only check yet leave the kernel indexing with the wrong N stride -> the
+        # up half uninitialized and the down matmul reading past the weight. Validate
+        # both K (shape[1]) and N (shape[2]) and fail fast.
         H_dim, I_dim = w13_kn.shape[1], w2_kn.shape[1]
-        if (H_dim, I_dim) != (_mega.KERNEL_H_DIM, _mega.KERNEL_I_DIM):
+        n_gu, n_dn = w13_kn.shape[2], w2_kn.shape[2]
+        if (H_dim, I_dim) != (_mega.KERNEL_H_DIM, _mega.KERNEL_I_DIM) or n_gu != 2 * I_dim or n_dn != H_dim:
             raise NotImplementedError(
-                "W4A4 mega kernel is compiled for per-rank "
-                f"H={_mega.KERNEL_H_DIM}, I={_mega.KERNEL_I_DIM} (Qwen3.x-MoE at TP=4); "
-                f"got H={H_dim}, I={I_dim}. Use the validated model/TP size or rebuild "
-                "the kernel for this shape."
+                "W4A4 mega kernel expects the unpacked per-rank layout gate_up "
+                f"[E, H, 2I] and down [E, I, H] with H={_mega.KERNEL_H_DIM}, "
+                f"I={_mega.KERNEL_I_DIM} (Qwen3.x-MoE at TP=4); got gate_up K={H_dim} "
+                f"N={n_gu} (want N={2 * I_dim}), down K={I_dim} N={n_dn} (want N={H_dim}). "
+                "A packed ModelSlim layout or a different model/TP size is not supported."
             )
         layer.w13_nz = _mega.pack_nz_int4(w13_kn)
         layer.w2_nz = _mega.pack_nz_int4(w2_kn)
