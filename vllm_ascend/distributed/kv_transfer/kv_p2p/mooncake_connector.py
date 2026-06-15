@@ -541,10 +541,11 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
-    def _mark_failed_recv_request(self, request_id: str, local_block_ids: list[int]) -> None:
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            self.invalid_block_ids.update(local_block_ids)
+            for group_ids in local_block_ids:
+                self.invalid_block_ids.update(group_ids)
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -778,10 +779,20 @@ class KVCacheRecvingThread(threading.Thread):
         )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
+            _sample_n = min(5, len(src_list))
             logger.error(
-                "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
+                "Mooncake transfer failed for request %s, ret=%s, session=%s, "
+                "src_list_len=%s, dst_list_len=%s, length_list_len=%s, "
+                "sample_src=%s, sample_dst=%s, sample_len=%s",
                 req_meta["remote_request_id"],
                 ret,
+                session_id,
+                len(src_list),
+                len(dst_list),
+                len(length_list),
+                src_list[:_sample_n],
+                dst_list[:_sample_n],
+                length_list[:_sample_n],
             )
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
@@ -1146,12 +1157,8 @@ class KVCacheRecvingThread(threading.Thread):
             assert engine_id != self.local_engine_id, (
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
             )
-            if agent_meta.kv_group2layeridx != self.kv_group2layeridx:
-                logger.warning(
-                    "Remote kv_group2layeridx is inconsistent with local. remote=%s, local=%s. ",
-                    agent_meta.kv_group2layeridx,
-                    self.kv_group2layeridx,
-                )
+            # In PD+PP mode, layer indices naturally differ between P and D nodes,
+            # so we skip kv_group2layeridx consistency check here.
             self.remote_kv_group2layeridx[engine_id][remote_handshake_port] = agent_meta.kv_group2layeridx
             self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
@@ -1386,6 +1393,7 @@ class MooncakeConnectorScheduler:
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
+        logger.warning("[ADDR] Scheduler init: local_ip=%s side_channel_host=%s", self.local_ip, self.side_channel_host)
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -1592,8 +1600,18 @@ class MooncakeConnectorWorker:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
+        logger.warning("[ADDR] Worker init: pp_rank=%s tp_rank=%s side_channel_host=%s pp_size=%s",
+                       self.pp_rank, self.tp_rank, self.side_channel_host, self.pp_size)
         self.pcp_size = get_pcp_group().world_size
-        self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        # Use global hidden layer count (not PP-sliced) for MTP index assignment,
+        # ensuring consistent MTP layer indices between P and D nodes in PD+PP mode.
+        try:
+            hf_text_config = vllm_config.model_config.hf_text_config
+            if hf_text_config is None:
+                raise AttributeError
+        except AttributeError:
+            hf_text_config = vllm_config.model_config.hf_config
+        self.total_layers = hf_text_config.num_hidden_layers
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
@@ -1626,7 +1644,10 @@ class MooncakeConnectorWorker:
         device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-        self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
+        self.engine = global_te.get_transfer_engine(
+            self.side_channel_host,
+            device_name=str(torch.npu.current_device()),
+        )
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
