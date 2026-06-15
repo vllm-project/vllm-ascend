@@ -65,7 +65,7 @@ actual_ut = {str(f) for f in Path("tests/ut").rglob("test_*.py")}
 uncovered_ut = sorted(actual_ut - resolved_ut)
 
 # ============================================================
-# 4. 源码覆盖
+# 4. source code coverage
 # ============================================================
 source_deps = {d.rstrip("/") for module in config for d in module.get("source_file_dependencies", [])}
 covered_source = set()
@@ -84,7 +84,7 @@ for f in Path("vllm_ascend").rglob("*.py"):
 uncovered_source = sorted({str(f) for f in Path("vllm_ascend").rglob("*.py") if str(f) not in covered_source})
 
 # ============================================================
-# 5. estimated_times 覆盖度
+# 5. estimated_times coverage
 # ============================================================
 _et = dict(meta.get("estimated_times", {}) or {})
 _rm = dict(meta.get("runner_mapping", {}) or {})
@@ -128,7 +128,7 @@ missing_et = sorted(need_et_files - existing_et_keys)
 cpu_ut_leaked = sorted(cpu_ut_files & existing_et_keys)
 
 # ============================================================
-# 6. runner_mapping 正确性
+# 6. Correctness of runner_mapping
 # ============================================================
 rm_errors: list[str] = []
 for pattern_str, runner_config in sorted(_rm.items()):
@@ -147,7 +147,7 @@ for pattern_str, runner_config in sorted(_rm.items()):
 rm_broken = len(rm_errors) > 0
 
 # ============================================================
-# 7. partition 合法性
+# 7. partition validity
 # ============================================================
 part_errors: list[str] = []
 # Collect actual runner keys used in routing
