@@ -18,12 +18,12 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The following model variants are available. It is recommended to download the model weight to a shared directory across multiple nodes (e.g., `/root/.cache/`).
+The following model variants are available. It is recommended to download the model weight to a shared directory accessible to all nodes.
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) |
-| Qwen3-30B-A3B-W8A8 | Atlas 800I A3 (64G, 1~4 cards) | [Download](https://modelscope.cn/models/vllm-ascend/Qwen3-30B-A3B-W8A8) |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1~2 cards)<br>Atlas 800I A2 (64G, 2~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) |
+| Qwen3-30B-A3B-W8A8 | Atlas 800I A3 (64G, 1~2 cards)<br>Atlas 800I A2 (64G, 2~4 cards) | [Download](https://modelscope.cn/models/vllm-ascend/Qwen3-30B-A3B-W8A8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -32,10 +32,10 @@ If the W8A8 quantized weights are not available for direct download, you can obt
 :::{note}
 Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model structure):
 
-- **Embedding layer**: FP32 (no quantization)
-- **Q/K normalization** (q_norm, k_norm): FP32
+- **Embedding layer**: BF16 (no quantization)
+- **Q/K normalization** (q_norm, k_norm): BF16
 - **Attention projections** (q/k/v/o_proj): Static W8A8 with pre-computed per-tensor scales
-- **MoE routing gate** (mlp.gate): FP32
+- **MoE routing gate** (mlp.gate): BF16
 - **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
 :::
 
@@ -84,7 +84,7 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-The default workdir is `/workspace`. vLLM and vLLM-Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`), so changes take effect immediately without requiring a new installation.
+The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
 **Installation Verification:**
 
@@ -106,14 +106,20 @@ Expected result: The version information is displayed, matching the pulled image
 
 If you prefer not to use the Docker image, you can build from source:
 
-1. Clone the repository:
+1. Install vLLM:
+
+   ```bash
+   pip install vllm
+   ```
+
+2. Clone the vLLM-Ascend repository:
 
    ```bash
    git clone https://github.com/vllm-project/vllm-ascend.git
    cd vllm-ascend
    ```
 
-2. Install in development mode:
+3. Install in development mode:
 
    ```bash
    pip install -e .
@@ -136,6 +142,8 @@ If deploying a multi-node environment, set up the environment on each node.
 ### 5.1 Single-Node Online Deployment
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
+
+> The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -163,46 +171,9 @@ vllm serve your_model_path \
     --port 8000
 ```
 
-**Key Parameter Description:**
-
-> Replace `your_model_path` with the actual model path (e.g., ModelScope ID or local path).
-> The startup command above shows a basic configuration. Additional parameters used in performance-optimized scenarios (see Section 9.1) are also listed below for reference.
-
-| Parameter | Description |
-|-----------|-------------|
-| `--async-scheduling` | Enables asynchronous scheduling to improve concurrent request processing. |
-| `--compilation-config` | FullGraph optimization that captures and replays the entire decode graph, reducing scheduling latency. |
-| `--distributed_executor_backend "mp"` | Uses the multi-process distributed backend for parallel execution. |
-| `--enable-expert-parallel` | Enables Expert Parallelism, which is required for MoE models to distribute experts across NPUs. |
-| `--gpu-memory-utilization 0.95` | Proportion of NPU memory allocated for the KV cache. Higher values increase cache capacity but risk OOM. |
-| `--max-model-len 32768` | Maximum context length. Adjust based on your use case and available NPU memory. Larger values increase KV cache usage. |
-| `--max-num-batched-tokens` | Maximum tokens processed in a single batch. Balances prefill chunking with memory usage. |
-| `--max-num-seqs` | Maximum number of concurrent requests. Adjust based on workload and available KV cache memory. |
-| `--no-enable-prefix-caching` | Disables prefix caching. Recommended for general scenarios to reduce memory overhead. |
-| `--port 8000` | Port number for the API server. Adjust to avoid conflicts with other services. |
-| `--quantization ascend` | Enables W8A8 quantization inference. Remove this parameter when using the BF16 model. |
-| `--served-model-name qwen3` | The model name exposed by the service, used as the `model` field in API calls. |
-| `--speculative-config` | Speculative decoding configuration. Uses eagle3 draft model to reduce decode latency. |
-| `--tensor-parallel-size 4` | Tensor parallelism degree. For Atlas A3 64G, at least 2 is required; 4 is recommended for optimal performance. |
-| `--trust-remote-code` | Allows custom model code to be executed from remote repositories. Required for Modelscope models. |
-
 **Service Verification:**
 
-After the service is started, verify it is running:
-
-```bash
-curl http://localhost:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "qwen3",
-        "messages": [
-            {"role": "user", "content": "Hello."}
-        ],
-        "max_tokens": 10
-    }'
-```
-
-Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
+After the service is started, verify it is running by sending a prompt. Refer to Section 6 for a usage example.
 
 ## 6 Functional Verification
 
@@ -231,7 +202,44 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ### Using AISBench
 
-For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
+For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
+
+The following is an example configuration for the accuracy evaluation config file:
+
+```python
+# Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
+from ais_bench.benchmark.models import VLLMCustomAPIChat
+
+models = [
+    dict(
+        attr="service",
+        type=VLLMCustomAPIChat,
+        abbr='vllm-api-general-chat',
+        path="your_model_path",
+        model="qwen3",
+        request_rate=0,
+        retry=2,
+        host_ip="localhost",
+        host_port=8000,
+        max_out_len=2048,
+        batch_size=32,
+        trust_remote_code=True,
+        generation_kwargs=dict(
+            temperature=0.6,
+            top_k=20,
+            top_p=0.95,
+        ),
+    )
+]
+```
+
+Run the accuracy evaluation using the `gsm8k` dataset as an example:
+
+```shell
+ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_4_shot_cot_str --mode all --dump-eval-details
+```
+
+> The `--models` parameter value corresponds to the `abbr` field in the configuration file above. Adjust `max_out_len`, `batch_size`, and dataset tasks based on your scenario.
 
 <!-- TODO: Add accuracy evaluation results when available -->
 
@@ -245,7 +253,7 @@ Using the `gsm8k` dataset as an example, run the accuracy evaluation in online m
    ```shell
    lm_eval \
      --model local-completions \
-     --model_args model=/root/.cache/vllm-ascend/Qwen3-30B-A3B-W8A8,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+     --model_args model=your_model_path,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
      --tasks gsm8k \
      --output_path ./
    ```
@@ -254,7 +262,34 @@ Using the `gsm8k` dataset as an example, run the accuracy evaluation in online m
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+For setup details, please refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation).
+
+You can use a synthetic dataset to evaluate performance with custom input/output length distributions. First, configure the synthetic dataset distribution file `ais_bench/datasets/synthetic/synthetic_config.py`:
+
+```python
+synthetic_config = {
+    "Type": "string",
+    "RequestCount": 200,
+    "StringConfig": {
+        "Input": {
+            "Method": "uniform",
+            "Params": {"MinValue": 200, "MaxValue": 2048}
+        },
+        "Output": {
+            "Method": "uniform",
+            "Params": {"MinValue": 128, "MaxValue": 2048}
+        }
+    }
+}
+```
+
+Then run the performance evaluation:
+
+```shell
+ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf
+```
+
+> The `--models` value should match the `abbr` in your model config file. Use `--num-prompts` to limit the number of test requests.
 
 ### Using vLLM Benchmark
 
@@ -286,19 +321,19 @@ vllm bench serve \
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|-------------|----------------|------------------------|
-| High Throughput | Single-Node (TP1) | 1 (A3) | W8A8 | Single-card deployment maximizes concurrent request processing |
-| Low Latency | Single-Node (TP4) | 4 (A3) | W8A8 | Multi-card TP reduces per-token latency with expert parallelism |
-| Long Context | Single-Node (TP4) | 4 (A3) | W8A8 | Reduces concurrent sequences to accommodate longer max-model-len |
+| High Throughput | Single-Node (TP1) | 1 (A3)<br>2 (A2) | W8A8 | Single-card deployment maximizes concurrent request processing |
+| Low Latency | Single-Node (TP4) | 2 (A3)<br>4 (A2) | W8A8 | Multi-card TP reduces per-token latency with expert parallelism |
+| Long Context | Single-Node (TP4) | 2 (A3)<br>4 (A2) | W8A8 | Reduces concurrent sequences to accommodate longer max-model-len |
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | NPUs | TP | DP | Concurrency | Max Context Length | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|----|-------------|--------------------|-----------|-----------|--------------|------------------|
-| High Throughput | Single-Node | 1 | 1 | 1 | 100 | 37364 | Off | Off | Off | On |
-| Low Latency | Single-Node | 4 | 4 | 1 | 100 | 37364 | Off | On | On | On |
-| Long Context | Single-Node | 4 | 4 | 1 | 14 | 131072 | Off | On | On | On |
+| Scenario | Configuration | NPUs | TP | DP | FUSED_MC2 | EP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|-----------|-----------|------------------|
+| High Throughput | Single-Node | 1 | 1 | 1 | Off | Off | On |
+| Low Latency | Single-Node | 2 | 4 | 1 | Off | On | On |
+| Long Context | Single-Node | 2 | 4 | 1 | Off | On | On |
 
 > For detailed parameter descriptions, please refer to the deployment examples in Section 5.
 
@@ -329,11 +364,11 @@ vllm serve your_model_path \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
-    --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
+    --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
 ```
 
 :::{tip}
-Recommended AISBench settings for this configuration:
+Example AISBench settings for this configuration:
 
 - `request_rate`: 0
 - `batch_size`: 32
@@ -365,11 +400,11 @@ vllm serve your_model_path \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
-    --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}'
+    --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
 ```
 
 :::{tip}
-Recommended AISBench settings for this configuration:
+Example AISBench settings for this configuration:
 
 - `request_rate`: 0
 - `batch_size`: 32
@@ -403,12 +438,12 @@ vllm serve your_model_path \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
-    --speculative-config '{"method": "eagle3","model": "/mnt/share/weight/Qwen3-30B-A3B-EAGLE3", "num_speculative_tokens": 3}' \
-    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}'
+    --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}' \
+    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}}'
 ```
 
 :::{tip}
-Recommended AISBench settings for this configuration:
+Example AISBench settings for this configuration:
 
 - `request_rate`: 0
 - `batch_size`: 32
@@ -430,7 +465,7 @@ The model can run on Atlas 800I A3 with 64G NPUs, typically using 1 to 4 cards. 
 
 ### Q: Why is `--enable-expert-parallel` required?
 
-Qwen3-30B-A3B is a Mixture-of-Experts model where different experts reside on different NPUs. Expert Parallelism (EP) distributes these experts across devices, which is required for the model to fit in memory and run efficiently. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP.
+Qwen3-30B-A3B is a Mixture-of-Experts model where different experts reside on different NPUs. Expert Parallelism (EP) distributes these experts across devices, which is required for the model to fit in memory and run efficiently. MoE layers use either pure EP (expert parallelism) or pure TP (tensor parallelism); these two modes cannot be mixed.
 
 ### Q: When should I use `VLLM_ASCEND_ENABLE_NZ=2`?
 
