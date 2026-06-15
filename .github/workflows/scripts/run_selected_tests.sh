@@ -147,10 +147,12 @@ run_pytest_batch() {
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
   if [ "${enable_coverage}" = "true" ]; then
+    echo "DEBUG: 进入【覆盖率分支】"
     setup_coverage "cpu-ut"
     set +e
     python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   else
+    echo "DEBUG: 进入【普通测试分支】"
     local start_time=0
     if [ "${record_timing}" = true ]; then
       start_time=$(date +%s%N)
