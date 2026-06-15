@@ -15,7 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Qwen3.5 prefix-cache CP guard.
+"""DeepSeek-V2-Lite prefix-cache CP guard.
 
 Run `pytest tests/e2e/pull_request/four_card/long_sequence/test_prefix_caching_cp.py`.
 """
@@ -23,11 +23,9 @@ Run `pytest tests/e2e/pull_request/four_card/long_sequence/test_prefix_caching_c
 import os
 from unittest.mock import patch
 
-import pytest
-
 from tests.e2e.conftest import VllmRunner
 
-MODEL = "Qwen/Qwen3.5-4B"
+MODEL = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 MAX_NUM_SEQS = 2
 THREAD_ENV = {
     "OMP_NUM_THREADS": "1",
@@ -36,7 +34,7 @@ THREAD_ENV = {
     "NUMEXPR_NUM_THREADS": "1",
 }
 
-QWEN3_5_PREFIX_MAMBA_PROMPT = (
+DSV2_LITE_PREFIX_PROMPT = (
     "You are reading a compact synthetic operations ledger. "
     "Use only the rows below when answering the final question.\n"
     + "\n".join(
@@ -47,19 +45,15 @@ QWEN3_5_PREFIX_MAMBA_PROMPT = (
 )
 
 INPUT_PROMPTS = [
-    QWEN3_5_PREFIX_MAMBA_PROMPT + "Question: What route is listed in row 17? Answer briefly.",
-    QWEN3_5_PREFIX_MAMBA_PROMPT + "Question: What priority is listed in row 42? Answer briefly.",
+    DSV2_LITE_PREFIX_PROMPT + "Question: What route is listed in row 17? Answer briefly.",
+    DSV2_LITE_PREFIX_PROMPT + "Question: What priority is listed in row 42? Answer briefly.",
 ]
 
 
 @patch.dict(os.environ, THREAD_ENV)
-@pytest.mark.skip(
-    reason="Temporarily skip Qwen3.5 chunked prefill with PCP until ChunkGatedDeltaRuleFwdH support is fixed."
-)
-def test_qwen3_5_prefix_cache_with_pcp() -> None:
+def test_dsv2_lite_prefix_cache_with_pcp() -> None:
     with VllmRunner(
         MODEL,
-        dtype="float16",
         block_size=128,
         max_model_len=2048,
         max_num_seqs=MAX_NUM_SEQS,
@@ -68,9 +62,9 @@ def test_qwen3_5_prefix_cache_with_pcp() -> None:
         prefill_context_parallel_size=2,
         decode_context_parallel_size=1,
         enforce_eager=True,
+        enable_expert_parallel=True,
         enable_prefix_caching=True,
-        mamba_cache_mode="align",
-        mamba_ssm_cache_dtype="float16",
+        quantization="ascend",
     ) as vllm_model:
         prefix_cache_outputs = vllm_model.generate_greedy(INPUT_PROMPTS, 8)
 
