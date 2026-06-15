@@ -27,6 +27,7 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import reduce_sample_enabled
 
+
 @triton.jit(do_not_specialize=["batch_size", "seq_len"])
 def token_bin_counts_and_mask_kernel(
     tokens_ptr,
