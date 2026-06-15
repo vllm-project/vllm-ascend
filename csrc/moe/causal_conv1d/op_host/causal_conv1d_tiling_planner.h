@@ -22,7 +22,7 @@ using namespace Ops::Transformer::OpTiling;
 inline DimTileChoice ChooseCanonicalUpdateBaseDimChoice(gert::TilingContext *context, int64_t batch, int64_t dim,
                                                         uint32_t coreNum)
 {
-    const int64_t candidates[] = {4096, 2048, 1024, 512, 384, 192};
+    const int64_t candidates[] = {3072, 2048, 1024, 512, 384, 192};
 
     auto chooseOnce = [&](bool requireExactDiv) -> DimTileChoice {
         DimTileChoice bestOver;

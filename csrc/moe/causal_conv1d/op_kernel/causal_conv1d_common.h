@@ -21,7 +21,7 @@
 namespace NsCausalConv1dCommon {
 
 constexpr int32_t MAX_WIDTH = 4;
-constexpr int32_t MAX_BLOCK_DIM = 4096;
+constexpr int32_t MAX_BLOCK_DIM = 3072;
 constexpr int32_t RING_SLOTS = 5;
 
 __aicore__ inline int32_t SlotCurr(int32_t t)
