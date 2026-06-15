@@ -440,7 +440,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         )
 
     assert w1_scale is not None and w2_scale is not None
-    act_quant_type = torch.float8_e4m3fn
+    act_quant_type = torch.int8 if mlp_compute_input.quant.is_int_quant else torch.float8_e4m3fn
     weight_quant_type = torch.float8_e4m3fn
     scale_type = None
     per_token_scale_type = None
