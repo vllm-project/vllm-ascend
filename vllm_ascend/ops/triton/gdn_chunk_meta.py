@@ -206,7 +206,8 @@ def _build_chunk_meta_device_from_seq_lens(
     )
     if out_chunk_indices is not None and (out_chunk_indices.ndim != 2 or out_chunk_indices.shape[1] != 2):
         raise ValueError(
-            f"chunk_gated_delta_rule meta: out_chunk_indices must have shape [num_chunks, 2], got {tuple(out_chunk_indices.shape)}"
+            f"chunk_gated_delta_rule meta: out_chunk_indices must have shape [num_chunks, 2],"
+            f"got {tuple(out_chunk_indices.shape)}"
         )
     _validate_optional_output(
         "out_chunk_offsets",
