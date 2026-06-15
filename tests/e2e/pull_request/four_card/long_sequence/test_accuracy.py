@@ -14,276 +14,235 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""
-Compare the outputs of vLLM with and without context parallel.
+"""PCP/DCP long-sequence accuracy guards.
 
 Run `pytest tests/e2e/pull_request/four_card/long_sequence/test_accuracy.py`.
 """
 
+import os
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
+from unittest.mock import patch
+
 import pytest
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.model_utils import check_outputs_equal
 
-MODELS = [
-    "Qwen/Qwen3-8B",
-    "vllm-ascend/DeepSeek-V2-Lite-W8A8",
+DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+
+FULL_DECODE_GRAPH = {
+    "cudagraph_mode": "FULL_DECODE_ONLY",
+    "cudagraph_capture_sizes": [4, 8, 24, 48, 60],
+}
+
+COMMON_PROMPTS = [
+    "The capital of France is",
+    "Hello, my name is Tom, I am",
+    "The president of United States is",
+    "AI future is",
+]
+
+DSV2_PROMPTS = [
+    "The president of the United States is",
+    "The capital of France is",
+]
+
+DSV2_GOLDEN = [
+    "The president of the United States is a man who is not only a liar, but",
+    "The capital of France is a city that has been the capital of France since 987",
+]
+
+QWEN3_GOLDEN = [
+    "The capital of France is Paris.\n\nThe capital",
+    "Hello, my name is Tom, I am a 20 years",
+    "The president of United States is Donald Trump.\n\nThe",
+    "AI future is here. The world is",
+]
+
+QWEN3_NEXT_GOLDEN = [
+    "The capital of France is Paris.\nThe capital",
+    "Hello, my name is Tom, I am a 20 years",
+    "The president of United States is the head of state and",
+    "AI future is not just about technology,",
+]
+
+DSV3_2_GOLDEN = [
+    "The capital of France is Paris.\n\nThe capital",
+    "Hello, my name is Tom, I am a 20-year",
+    "The president of United States is Donald Trump.\n\nThe",
+    "AI future is here, and it is",
 ]
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_tokens", [10])
-def test_models_long_sequence_output_between_tp_and_cp(
-    model: str,
-    max_tokens: int,
-) -> None:
-    prompts = ["The president of the United States is", "The capital of France is"]
+@dataclass(frozen=True)
+class AccuracyCase:
+    name: str
+    model: str
+    prompts: Sequence[str]
+    expected_outputs: Sequence[str]
+    max_tokens: int
+    runner_kwargs: dict[str, Any]
 
-    common_kwargs = {
-        "max_model_len": 1024,
-    }
 
-    if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
-        cp_kwargs = {
+def _run_accuracy_case(case: AccuracyCase) -> None:
+    with VllmRunner(case.model, **case.runner_kwargs) as runner:
+        outputs = runner.generate_greedy(list(case.prompts), case.max_tokens)
+
+    assert len(outputs) == len(case.expected_outputs)
+    for index, ((output_ids, output_text), expected_text) in enumerate(zip(outputs, case.expected_outputs)):
+        assert output_ids, f"Output {index} token ids should not be empty"
+        assert output_text == expected_text
+
+
+DSV2_COMMON_KWARGS: dict[str, Any] = {
+    "max_model_len": 1024,
+    "max_num_batched_tokens": 1024,
+    "enable_expert_parallel": True,
+    "enable_chunked_prefill": True,
+    "enable_prefix_caching": False,
+    "block_size": 128,
+    "quantization": "ascend",
+    "compilation_config": FULL_DECODE_GRAPH,
+}
+
+DSV2_PARALLEL_CASES = [
+    AccuracyCase(
+        name="dsv2_pcp_dcp_full_features",
+        model=DEEPSEEK_V2_LITE,
+        prompts=DSV2_PROMPTS,
+        expected_outputs=DSV2_GOLDEN,
+        max_tokens=10,
+        runner_kwargs={
+            **DSV2_COMMON_KWARGS,
             "tensor_parallel_size": 2,
+            "prefill_context_parallel_size": 2,
             "decode_context_parallel_size": 2,
-            "prefill_context_parallel_size": 2,
-            "enable_expert_parallel": True,
-            "compilation_config": {
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-            },
-            "quantization": "ascend",
-        }
-        tp_kwargs = {
-            "tensor_parallel_size": 4,
-            "enable_expert_parallel": True,
-            "compilation_config": {
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-            },
-            "quantization": "ascend",
-        }
-
-    else:
-        cp_kwargs = {
-            "tensor_parallel_size": 1,
-            "decode_context_parallel_size": 1,
-            "prefill_context_parallel_size": 2,
-            "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8, 24, 48, 60]},
-        }
-        tp_kwargs = {
+            "cp_kv_cache_interleave_size": 128,
+            "long_prefill_token_threshold": 64,
+        },
+    ),
+    AccuracyCase(
+        name="dsv2_pcp_only_full_features",
+        model=DEEPSEEK_V2_LITE,
+        prompts=DSV2_PROMPTS,
+        expected_outputs=DSV2_GOLDEN,
+        max_tokens=10,
+        runner_kwargs={
+            **DSV2_COMMON_KWARGS,
             "tensor_parallel_size": 2,
-            "compilation_config": {
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-            },
-        }
-
-    cp_full_kwargs = {}
-    cp_full_kwargs.update(common_kwargs)  # type: ignore
-    cp_full_kwargs.update(cp_kwargs)  # type: ignore
-
-    tp_full_kwargs = {}
-    tp_full_kwargs.update(common_kwargs)  # type: ignore
-    tp_full_kwargs.update(tp_kwargs)  # type: ignore
-    with VllmRunner(model, **cp_full_kwargs) as runner:  # type: ignore
-        vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
-
-    with VllmRunner(model, **tp_full_kwargs) as runner:  # type: ignore
-        vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
-
-    check_outputs_equal(
-        outputs_0_lst=vllm_eager_outputs,
-        outputs_1_lst=vllm_context_parallel_outputs,
-        name_0="vllm_eager_outputs",
-        name_1="vllm_context_parallel_outputs",
-    )
-
-
-model = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
-
-
-@pytest.mark.parametrize("max_tokens", [10])
-def test_accuracy_dcp_only_graph(
-    max_tokens: int,
-) -> None:
-    prompts = ["The president of the United States is", "The capital of France is"]
-    cp_kwargs = {
-        "tensor_parallel_size": 2,
-        "decode_context_parallel_size": 2,
-        "prefill_context_parallel_size": 1,
-        "enable_expert_parallel": True,
-        "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8, 24, 48, 60]},
-        "quantization": "ascend",
-        "max_model_len": 1024,
-    }
-    tp_kwargs = {
-        "tensor_parallel_size": 4,
-        "enable_expert_parallel": True,
-        "enforce_eager": True,
-        "quantization": "ascend",
-        "max_model_len": 1024,
-    }
-    with VllmRunner(model, **cp_kwargs) as runner:  # type: ignore
-        vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
-
-    with VllmRunner(model, **tp_kwargs) as runner:  # type: ignore
-        vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
-
-    check_outputs_equal(
-        outputs_0_lst=vllm_eager_outputs,
-        outputs_1_lst=vllm_context_parallel_outputs,
-        name_0="vllm_eager_outputs",
-        name_1="vllm_dcp_only_graph_outputs",
-    )
-
-
-@pytest.mark.parametrize("max_tokens", [10])
-def test_accuracy_dcp_only_eager(
-    max_tokens: int,
-) -> None:
-    prompts = ["The president of the United States is", "The capital of France is"]
-    cp_kwargs = {
-        "tensor_parallel_size": 2,
-        "decode_context_parallel_size": 2,
-        "prefill_context_parallel_size": 1,
-        "enable_expert_parallel": True,
-        "compilation_config": {
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
-        "quantization": "ascend",
-        "max_model_len": 1024,
-    }
-    tp_kwargs = {
-        "tensor_parallel_size": 4,
-        "enable_expert_parallel": True,
-        "compilation_config": {
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
-        "quantization": "ascend",
-        "max_model_len": 1024,
-    }
-    with VllmRunner(model, **cp_kwargs) as runner:  # type: ignore
-        vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
-
-    with VllmRunner(model, **tp_kwargs) as runner:  # type: ignore
-        vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
-
-    check_outputs_equal(
-        outputs_0_lst=vllm_eager_outputs,
-        outputs_1_lst=vllm_context_parallel_outputs,
-        name_0="vllm_eager_outputs",
-        name_1="vllm_dcp_only_eager_outputs",
-    )
-
-
-@pytest.mark.parametrize("max_tokens", [10])
-def test_accuracy_pcp_only(
-    max_tokens: int,
-) -> None:
-    prompts = ["The president of the United States is", "The capital of France is"]
-    cp_kwargs = {
-        "tensor_parallel_size": 2,
-        "decode_context_parallel_size": 1,
-        "prefill_context_parallel_size": 2,
-        "enable_expert_parallel": True,
-        "compilation_config": {
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
-        "quantization": "ascend",
-        "max_model_len": 1024,
-    }
-    tp_kwargs = {
-        "tensor_parallel_size": 4,
-        "enable_expert_parallel": True,
-        "compilation_config": {
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
-        "quantization": "ascend",
-        "max_model_len": 1024,
-    }
-    with VllmRunner(model, **cp_kwargs) as runner:  # type: ignore
-        vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
-
-    with VllmRunner(model, **tp_kwargs) as runner:  # type: ignore
-        vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
-
-    check_outputs_equal(
-        outputs_0_lst=vllm_eager_outputs,
-        outputs_1_lst=vllm_context_parallel_outputs,
-        name_0="vllm_eager_outputs",
-        name_1="vllm_pcp_only_outputs",
-    )
-
-
-@wait_until_npu_memory_free(target_free_percentage=0.6)
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_tokens", [10])
-def test_models_long_sequence_cp_kv_interleave_size_output_between_tp_and_cp(
-    model: str,
-    max_tokens: int,
-) -> None:
-    prompts = ["The president of the United States is"]
-
-    GOLDEN_TEXT_DS = "The president of the United States is a man who is not only a liar, but"
-    GOLDEN_TOKENS_DS = [549, 6847, 280, 254, 4794, 5110, 317, 245, 668, 779, 317, 441, 889, 245, 69524, 11, 548]
-
-    GOLDEN_TEXT_QWEN = "The president of the United States is the head of state and head of government of the"
-    GOLDEN_TOKENS_QWEN = [785, 4767, 315, 279, 3639, 4180, 374, 279, 1968, 315, 1584, 323, 1968, 315, 3033, 315, 279]
-
-    GOLDEN_DS = [(GOLDEN_TOKENS_DS, GOLDEN_TEXT_DS)]
-    GOLDEN_QWEN = [(GOLDEN_TOKENS_QWEN, GOLDEN_TEXT_QWEN)]
-
-    common_kwargs = {
-        "max_model_len": 1024,
-    }
-
-    if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
-        cp_kwargs = {
-            "tensor_parallel_size": 1,
-            "decode_context_parallel_size": 1,
             "prefill_context_parallel_size": 2,
+            "decode_context_parallel_size": 1,
+            "cp_kv_cache_interleave_size": 128,
+            "long_prefill_token_threshold": 64,
+        },
+    ),
+    AccuracyCase(
+        name="dsv2_dcp_only_full_features",
+        model=DEEPSEEK_V2_LITE,
+        prompts=DSV2_PROMPTS,
+        expected_outputs=DSV2_GOLDEN,
+        max_tokens=10,
+        runner_kwargs={
+            **DSV2_COMMON_KWARGS,
+            "tensor_parallel_size": 2,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 2,
+            "compilation_config": {
+                **FULL_DECODE_GRAPH,
+                "pass_config": {"enable_sp": True},
+            },
+        },
+    ),
+]
+
+FULL_FEATURE_MODEL_CASES = [
+    AccuracyCase(
+        name="qwen3_pcp_dcp_full_features",
+        model="vllm-ascend/Qwen3-30B-A3B-W8A8",
+        prompts=COMMON_PROMPTS,
+        expected_outputs=QWEN3_GOLDEN,
+        max_tokens=5,
+        runner_kwargs={
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 1024,
+            "tensor_parallel_size": 2,
+            "prefill_context_parallel_size": 2,
+            "decode_context_parallel_size": 2,
             "enable_expert_parallel": True,
-            "cp_kv_cache_interleave_size": 128,
-            "compilation_config": {
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-            },
+            "enable_chunked_prefill": True,
+            "enable_prefix_caching": False,
+            "block_size": 128,
             "quantization": "ascend",
-        }
-
-        cp_full_kwargs = {}
-        cp_full_kwargs.update(common_kwargs)  # type: ignore
-        cp_full_kwargs.update(cp_kwargs)  # type: ignore
-
-        with VllmRunner(model, **cp_full_kwargs) as runner:  # type: ignore
-            vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
-
-        check_outputs_equal(
-            outputs_0_lst=GOLDEN_DS,
-            outputs_1_lst=vllm_context_parallel_outputs,
-            name_0="GOLDEN_DS",
-            name_1="vllm_context_parallel_outputs",
-        )
-
-    else:
-        cp_kwargs = {
-            "tensor_parallel_size": 1,
-            "decode_context_parallel_size": 1,
+            "compilation_config": FULL_DECODE_GRAPH,
+        },
+    ),
+    AccuracyCase(
+        name="qwen3_next_pcp_dcp_full_features",
+        model="Qwen/Qwen3-Next-80B-A3B-Instruct",
+        prompts=COMMON_PROMPTS,
+        expected_outputs=QWEN3_NEXT_GOLDEN,
+        max_tokens=5,
+        runner_kwargs={
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 1024,
+            "tensor_parallel_size": 2,
             "prefill_context_parallel_size": 2,
-            "cp_kv_cache_interleave_size": 128,
-            "compilation_config": {
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-            },
-        }
+            "decode_context_parallel_size": 2,
+            "enable_expert_parallel": True,
+            "enable_chunked_prefill": True,
+            "enable_prefix_caching": False,
+            "long_prefill_token_threshold": 4,
+            "gpu_memory_utilization": 0.8,
+            "block_size": 128,
+            "compilation_config": FULL_DECODE_GRAPH,
+        },
+    ),
+    AccuracyCase(
+        name="dsv3_2_pcp_dcp_full_features",
+        model="vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+        prompts=COMMON_PROMPTS,
+        expected_outputs=DSV3_2_GOLDEN,
+        max_tokens=5,
+        runner_kwargs={
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 1024,
+            "tensor_parallel_size": 2,
+            "prefill_context_parallel_size": 2,
+            "decode_context_parallel_size": 2,
+            "enable_expert_parallel": True,
+            "enable_chunked_prefill": True,
+            "enable_prefix_caching": False,
+            "gpu_memory_utilization": 0.2,
+            "block_size": 128,
+            "quantization": "ascend",
+            "compilation_config": FULL_DECODE_GRAPH,
+        },
+    ),
+]
 
-        cp_full_kwargs = {}
-        cp_full_kwargs.update(common_kwargs)  # type: ignore
-        cp_full_kwargs.update(cp_kwargs)  # type: ignore
 
-        with VllmRunner(model, **cp_full_kwargs) as runner:  # type: ignore
-            vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
+@patch.dict(
+    os.environ,
+    {
+        "HCCL_BUFFSIZE": "768",
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.6)
+@pytest.mark.parametrize("case", DSV2_PARALLEL_CASES, ids=lambda case: case.name)
+def test_dsv2_lite_parallel_config_accuracy(case: AccuracyCase) -> None:
+    _run_accuracy_case(case)
 
-        check_outputs_equal(
-            outputs_0_lst=GOLDEN_QWEN,
-            outputs_1_lst=vllm_context_parallel_outputs,
-            name_0="GOLDEN_QWEN",
-            name_1="vllm_context_parallel_outputs",
-        )
+
+@patch.dict(
+    os.environ,
+    {
+        "HCCL_BUFFSIZE": "768",
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.6)
+@pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
+def test_models_pcp_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
+    _run_accuracy_case(case)
