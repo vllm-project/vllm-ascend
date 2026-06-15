@@ -1586,7 +1586,9 @@ class TestAscendMLAImpl(TestBase):
         mock_kv_b_proj.return_value = (torch.randn(kv_nope_shape), None)
         self.impl.kv_b_proj = mock_kv_b_proj
 
-        result = self.impl._forward_prefill(q_nope, q_pe, k_nope, k_pe, value, kv_c_and_k_pe_cache, attn_metadata)
+        result = self.impl._forward_prefill(
+            q_nope, q_pe, k_nope, k_pe, value, kv_c_and_k_pe_cache, attn_metadata, "layer_0"
+        )
 
         # verify result shape
         self.assertEqual(result.shape[0], batch_size)
@@ -1650,7 +1652,7 @@ class TestAscendMLAImpl(TestBase):
             torch.randn(num_heads, batch_size),
         )
 
-        result = impl._forward_prefill(q_nope, q_pe, k_nope, k_pe, value, kv_c_and_k_pe_cache, attn_metadata)
+        result = impl._forward_prefill(q_nope, q_pe, k_nope, k_pe, value, kv_c_and_k_pe_cache, attn_metadata, "layer_0")
 
         # FIA should be called without query_rope/key_rope when head_padding > 0
         mock_fia.assert_called_once()
@@ -2115,7 +2117,6 @@ class TestAscendMLAImpl(TestBase):
         self.impl._q_proj_and_k_up_proj = MagicMock()
         self.impl._q_proj_and_k_up_proj.return_value = [MagicMock(), MagicMock()]
         self.impl.num_kv_heads = self.impl.num_heads
-        self.impl.is_kv_producer = False
 
         decode_res, prefill_res = self.impl._mla_preprocess(
             "mock_layer", hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False

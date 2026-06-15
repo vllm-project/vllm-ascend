@@ -106,11 +106,21 @@ class FakeTokenDatabase:
 
 
 class _FakeTokenDB:
-    """Minimal ChunkedTokenDatabase-like object for LayerBatchBuilder."""
+    """Minimal ChunkedTokenDatabase-like object for LayerBatchBuilder.
 
-    def __init__(self, block_lens=None, base_addrs=None):
-        self.group_block_len = {0: block_lens or [128, 256]}
+    ``block_lens`` describes a single layer's caches and is tiled ``num_layers``
+    times to match the flat [layer0_caches..., layer1_caches...] layout that
+    ``_infer_cache_group_metadata`` produces in production. ``base_addrs`` is
+    already expected flat (one entry per cache per layer).
+    """
+
+    def __init__(self, block_lens=None, base_addrs=None, num_layers=1, block_strides=None):
+        per_layer = block_lens or [128, 256]
+        flat_block_len = list(per_layer) * num_layers
+        self.group_block_len = {0: flat_block_len}
         self.group_kv_caches_base_addr = {0: base_addrs or [1000, 2000]}
+        # group_block_stride mirrors group_block_len when not provided.
+        self.group_block_stride = {0: block_strides or flat_block_len}
 
 
 class _FakePoolKey:
@@ -503,13 +513,14 @@ class TestRecordFailedBlocks(unittest.TestCase):
 class TestLayerBatchBuilderBuildTransferArrays(unittest.TestCase):
     """Test _build_transfer_arrays which computes per-layer addresses."""
 
-    def _make_builder(self, block_lens=None, base_addrs=None, num_ranks=1, page_size=4096):
-        db = _FakeTokenDB(block_lens=block_lens, base_addrs=base_addrs)
+    def _make_builder(self, block_lens=None, base_addrs=None, num_ranks=1, page_size=4096, num_layers=1):
+        db = _FakeTokenDB(block_lens=block_lens, base_addrs=base_addrs, num_layers=num_layers)
         return LayerBatchBuilder(
             token_database=db,
             my_key_index=0,
             num_ranks_per_layer=num_ranks,
             page_size_bytes=page_size,
+            num_layers=num_layers,
         )
 
     def test_single_block_single_rank(self):
@@ -550,9 +561,10 @@ class TestLayerBatchBuilderBuildTransferArrays(unittest.TestCase):
     def test_layer_offset(self):
         builder = self._make_builder(
             block_lens=[100, 200],
-            base_addrs=[1000, 2000, 3000, 4000],  # 2 sub-blocks * 2 layers
+            base_addrs=[1000, 2000, 3000, 4000],  # 2 caches * 2 layers (flat)
             num_ranks=2,
             page_size=4096,
+            num_layers=2,
         )
         block_ids = np.array([0], dtype=np.int64)
         base_gvas = np.array([0x10000], dtype=np.int64)
@@ -572,6 +584,7 @@ class TestLayerBatchBuilderBuildTransferArrays(unittest.TestCase):
             my_key_index=2,
             num_ranks_per_layer=4,
             page_size_bytes=4096,
+            num_layers=1,
         )
         block_ids = np.array([0], dtype=np.int64)
         base_gvas = np.array([0x50000], dtype=np.int64)
@@ -622,7 +635,9 @@ class TestLayerBatchBuilderBuildShared(unittest.TestCase):
 
     def _make_builder(self):
         db = _FakeTokenDB(block_lens=[100], base_addrs=[1000])
-        return LayerBatchBuilder(token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096)
+        return LayerBatchBuilder(
+            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
+        )
 
     def _make_req(self, req_id="r1", block_ids=None, gvas=None, is_last_chunk=True, last_block_gva=None):
         block_ids = block_ids or [5, 6]
@@ -737,7 +752,9 @@ class TestLayerBatchBuilderBuildAddrs(unittest.TestCase):
 
     def _make_builder(self):
         db = _FakeTokenDB(block_lens=[100], base_addrs=[1000])
-        return LayerBatchBuilder(token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096)
+        return LayerBatchBuilder(
+            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
+        )
 
     def test_basic(self):
         builder = self._make_builder()
@@ -759,7 +776,9 @@ class TestLayerBatchBuilderBuild(unittest.TestCase):
 
     def _make_builder(self):
         db = _FakeTokenDB(block_lens=[100], base_addrs=[1000])
-        return LayerBatchBuilder(token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096)
+        return LayerBatchBuilder(
+            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
+        )
 
     def test_empty_task(self):
         builder = self._make_builder()
@@ -791,7 +810,9 @@ class TestLayerBatchBuilderBuild(unittest.TestCase):
 class TestLayerBatchBuilderRequireRequestArrays(unittest.TestCase):
     def test_missing_block_ids_np(self):
         db = _FakeTokenDB()
-        _builder = LayerBatchBuilder(token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096)
+        _builder = LayerBatchBuilder(
+            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
+        )
         req = ReqMeta(req_id="r1")
         block_range = LayerBlockRange(request=req, start_block=0, end_block=1)
         with self.assertRaises(RuntimeError):
@@ -812,13 +833,17 @@ class TestLayerBatchBuilderRequireRequestArrays(unittest.TestCase):
 class TestLayerBatchBuilderScratchArray(unittest.TestCase):
     def test_ensure_creates_new(self):
         db = _FakeTokenDB()
-        builder = LayerBatchBuilder(token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096)
+        builder = LayerBatchBuilder(
+            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
+        )
         arr = builder._ensure_scratch_array("_test_scratch", 10)
         self.assertEqual(arr.shape[0], 10)
 
     def test_ensure_reuses(self):
         db = _FakeTokenDB()
-        builder = LayerBatchBuilder(token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096)
+        builder = LayerBatchBuilder(
+            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
+        )
         arr1 = builder._ensure_scratch_array("_test_scratch2", 10)
         arr1[0] = 42
         arr2 = builder._ensure_scratch_array("_test_scratch2", 5)
@@ -826,7 +851,9 @@ class TestLayerBatchBuilderScratchArray(unittest.TestCase):
 
     def test_ensure_grows(self):
         db = _FakeTokenDB()
-        builder = LayerBatchBuilder(token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096)
+        builder = LayerBatchBuilder(
+            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
+        )
         builder._ensure_scratch_array("_test_scratch3", 5)
         arr = builder._ensure_scratch_array("_test_scratch3", 20)
         self.assertEqual(arr.shape[0], 20)

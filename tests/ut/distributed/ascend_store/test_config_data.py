@@ -202,9 +202,9 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
         self.assertEqual(block_id, 5)
         self.assertEqual(len(addr), 2)
-        # layer_id=0 => kv_caches_base_addr[0*2] and [0*2+... index mod length]
+        # layer_id=0 => kv_caches_base_addr[0*2 + i] per cache i
         self.assertEqual(addr[0], 1000 + 5 * 160)
-        self.assertEqual(addr[1], 1000 + 5 * 320)
+        self.assertEqual(addr[1], 2000 + 5 * 320)
 
     def test_decode_adaptor_prefill_pp_no_partitions(self):
         key, addr, size = self.db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])
