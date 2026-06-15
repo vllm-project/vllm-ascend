@@ -801,7 +801,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         if AscendSFAImpl.o_proj_full_weight_scale_pool is None:
             sample = self.o_proj.weight_scale
             AscendSFAImpl.o_proj_full_weight_scale_pool = torch.empty(
-                (sample.shape[0] * self.tp_size, sample.shape[1], sample.shape[2]), dtype=sample.dtype, device=sample.device
+                (sample.shape[0] * self.tp_size, sample.shape[1], sample.shape[2]),
+                dtype=sample.dtype,
+                device=sample.device,
             )
 
         # Save TP-mode parameters (original sharded weights)
@@ -1341,7 +1343,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                     )
                     if self._o_proj_dynamic_quant:
                         _, o_proj_full_weight_scale_handle = all_gather_async(
-                            self.o_proj_tp_weight_scale, get_tp_group(), output=AscendSFAImpl.o_proj_full_weight_scale_pool
+                            self.o_proj_tp_weight_scale,
+                            get_tp_group(),
+                            output=AscendSFAImpl.o_proj_full_weight_scale_pool,
                         )
 
                 if kv_cache is not None:
