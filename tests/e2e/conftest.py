@@ -426,6 +426,14 @@ class RemoteOpenAIServer:
             return
 
         children = parent.children(recursive=True)
+
+        try:
+            parent.terminate()
+            parent.wait(timeout=60)
+        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+            with contextlib.suppress(psutil.NoSuchProcess):
+                parent.kill()
+
         for child in children:
             with contextlib.suppress(psutil.NoSuchProcess):
                 child.terminate()
@@ -435,13 +443,6 @@ class RemoteOpenAIServer:
         for child in still_alive:
             with contextlib.suppress(psutil.NoSuchProcess):
                 child.kill()
-
-        try:
-            parent.terminate()
-            parent.wait(timeout=10)
-        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-            with contextlib.suppress(psutil.NoSuchProcess):
-                parent.kill()
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)

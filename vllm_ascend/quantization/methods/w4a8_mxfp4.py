@@ -65,9 +65,12 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
-
-        output_dtype = x.dtype if not isinstance(x, tuple) else x[0].dtype
+        if isinstance(x, tuple):
+            quantized_x, dynamic_scale = x
+            output_dtype = torch.bfloat16
+        else:
+            quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+            output_dtype = x.dtype
 
         output = torch_npu.npu_quant_matmul(
             quantized_x,
@@ -184,6 +187,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
             num_experts=num_logical_experts,
             tid2eid=tid2eid,
         )
@@ -221,6 +225,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_use_bf16=(x.dtype == torch.bfloat16),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                swiglu_limit=layer.swiglu_limit,
             )
         )
 

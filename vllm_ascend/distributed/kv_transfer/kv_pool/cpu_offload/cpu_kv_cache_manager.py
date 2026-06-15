@@ -5,10 +5,12 @@ from vllm.logger import logger
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
-from vllm.v1.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
+
+from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 
 class CPUCacheStats:
@@ -66,11 +68,18 @@ class CPUKVCacheManager:
         self.caching_hash_fn = sha256 if caching_hash_algo == "sha256" else hash
         self.use_eagle = use_eagle
         self.block_pool = BlockPool(self.num_cpu_blocks, True, self.block_size, enable_kv_cache_events)
-        self.single_type_manager = get_manager_for_kv_cache_spec(
+        max_model_len = self.num_cpu_blocks * self.block_size
+        manager_kwargs = dict(
             kv_cache_spec=kv_cache_spec,
             block_pool=self.block_pool,
+            enable_caching=True,
             kv_cache_group_id=0,
+            max_num_batched_tokens=max_model_len,
+            max_model_len=max_model_len,
         )
+        if not vllm_version_is("0.21.0"):
+            manager_kwargs["scheduler_block_size"] = kv_cache_spec.block_size
+        self.single_type_manager = get_manager_for_kv_cache_spec(**manager_kwargs)
         # Record kv block hashes, avoid redundant computation.
         self.req_to_block_hashes: defaultdict[str, list[BlockHash]] = defaultdict(list)
         # Record blocks touched in get_matched_num_and_touch().
@@ -94,13 +103,17 @@ class CPUKVCacheManager:
             block_hashes = request.block_hashes
             self.req_to_block_hashes[request_id] = block_hashes
         max_cache_hit_length = request.num_tokens - 1
+        if vllm_version_is("0.21.0"):
+            eagle_kwarg = {"use_eagle": self.use_eagle}
+        else:
+            eagle_kwarg = {"drop_eagle_block": self.use_eagle}
         computed_blocks = self.single_type_manager.find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.single_type_manager.kv_cache_spec,
-            use_eagle=self.use_eagle,
+            **eagle_kwarg,
             alignment_tokens=self.block_size,
         )
         num_computed_tokens = len(computed_blocks[0]) * self.block_size
@@ -130,10 +143,13 @@ class CPUKVCacheManager:
             if self.req_failed_to_allocate[request_id]:
                 continue
             new_computed_blocks = self.req_to_computed_blocks[request_id]
+            num_local_computed_tokens = len(new_computed_blocks) * self.block_size
             num_blocks_to_allocate = self.single_type_manager.get_num_blocks_to_allocate(
                 request_id=request_id,
                 num_tokens=num_tokens,
                 new_computed_blocks=new_computed_blocks,
+                total_computed_tokens=num_local_computed_tokens,
+                num_tokens_main_model=num_tokens,
             )
             if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
                 self._release_ahead_touch(request_id)
@@ -141,9 +157,18 @@ class CPUKVCacheManager:
                 continue
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
-            self.single_type_manager.save_new_computed_blocks(request_id, new_computed_blocks)
+            self.single_type_manager.allocate_new_computed_blocks(
+                request_id,
+                new_computed_blocks,
+                num_local_computed_tokens=num_local_computed_tokens,
+                num_external_computed_tokens=0,
+            )
             # Allocate new blocks but do not cache now.
-            new_blocks = self.single_type_manager.allocate_new_blocks(request_id, num_tokens)
+            new_blocks = self.single_type_manager.allocate_new_blocks(
+                request_id,
+                num_tokens,
+                num_tokens,
+            )
             self.req_to_num_tokens[request_id] = num_tokens
             # No need to release ref_cnt because we use officially.
             self.req_to_computed_blocks.pop(request_id, None)

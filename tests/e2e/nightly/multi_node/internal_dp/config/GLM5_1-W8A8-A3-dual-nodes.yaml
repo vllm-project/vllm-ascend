@@ -41,9 +41,10 @@ deployment:
       --gpu-memory-utilization 0.95
       --quantization ascend
       --enable-chunked-prefill
-      --no-enable-prefix-caching
-      --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"fuse_qknorm_rope":false}'
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,48,60,72]}'
+      --enable-prefix-caching
+      --async-scheduling
+      --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
   -
     envs:
@@ -68,9 +69,10 @@ deployment:
       --gpu-memory-utilization 0.95
       --quantization ascend
       --enable-chunked-prefill
-      --no-enable-prefix-caching
-      --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"fuse_qknorm_rope":false}'
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,48,60,72]}'
+      --enable-prefix-caching
+      --async-scheduling
+      --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 benchmarks:
   acc_aime2025:

@@ -68,6 +68,7 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
             put_step=1,
             kv_role="kv_producer",
             ready_event=threading.Event(),
+            group_uses_align_state=[False],
             enable_kv_event=False,
         )
 
@@ -114,6 +115,7 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
             current_event=None,
         )
         thread.request_queue.put(req_meta)
+        thread.add_stored_request(req_meta.req_id)
         thread._handle_request(req_meta)
 
         self.assertEqual(len(store.put_calls), 1)

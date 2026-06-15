@@ -81,7 +81,7 @@ class FusedExpertsResult:
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
-    swiglu_limit: int = 0
+    swiglu_limit: float = 0.0
 
 
 class MoECommMethod(ABC):
@@ -130,7 +130,7 @@ class MoECommMethod(ABC):
             torch.bfloat16,
             torch.int8,
             torch.float8_e4m3fn,
-        ]
+        ], f"Unsupported hidden_states dtype: {fused_experts_input.hidden_states.dtype}"
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"

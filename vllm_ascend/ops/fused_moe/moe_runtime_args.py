@@ -145,7 +145,7 @@ def build_fused_experts_input(
     w2_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
-    swiglu_limit: int = 0,
+    swiglu_limit: float = 0.0,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -223,7 +223,7 @@ def build_mlp_compute_input(
         weights=fused_experts_input.weights,
         quant=fused_experts_input.quant,
         fusion=fused_experts_input.quant.quant_type
-        in (QuantType.W8A8, QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP)
+        in (QuantType.W8A8, QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP, QuantType.W8A8FP8)
         and use_fusion_ops,
         activation=fused_experts_input.activation,
         need_trans=fused_experts_input.need_trans,
