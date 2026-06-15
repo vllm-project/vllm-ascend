@@ -4,6 +4,8 @@ import vllm
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import VllmConfig
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP, DeepSeekMultiTokenPredictorLayer
+from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
+from vllm.model_executor.models.utils import AutoWeightsLoader
 
 MTP_ROT_WEIGHT_NAME = "rot.weight"
 
@@ -61,8 +63,14 @@ class AscendDeepSeekMTP(DeepSeekMTP):
             return f"model.layers.{spec_layer}.rot.weight"
 
 
+class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
+    def load_weights(self, weights):
+        loader = AutoWeightsLoader(self, skip_prefixes=[MTP_ROT_WEIGHT_NAME])
+        return loader.load_weights(weights)
+
+
 vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
 vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
-
 vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer = AscendDeepSeekMultiTokenPredictorLayer
 vllm.model_executor.models.deepseek_mtp.DeepSeekMTP = AscendDeepSeekMTP
+vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM = AscendGlmMoeDsaForCausalLM

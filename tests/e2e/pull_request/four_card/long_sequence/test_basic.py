@@ -20,13 +20,10 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-import torch
 from PIL import Image
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "768"
 
@@ -114,17 +111,11 @@ def test_models_pcp_dcp_basic():
 @patch.dict(
     os.environ,
     {
-        "VLLM_ASCEND_APPLY_DSV4_PATCH": "1",
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     },
 )
 @wait_until_npu_memory_free()
-@pytest.mark.skipif(
-    torch.npu.device_count() < 4,
-    reason="DeepSeek V4 DSA CP e2e test requires at least 4 NPUs.",
-)
-@pytest.mark.skipif(not vllm_version_is("0.21.0"), reason="broken in main")
 def test_deepseek_v4_w4a8_dsa_cp_basic_greedy():
     prompts = [
         "Hello, my name is",
@@ -397,10 +388,6 @@ def test_dcp_piece_wise():
     },
 )
 @wait_until_npu_memory_free()
-@pytest.mark.skipif(
-    torch.npu.device_count() < 4,
-    reason="Qwen3-VL-8B-Instruct multimodal test requires at least 4 NPUs.",
-)
 def test_qwen3_vl_8b_multimodal_single_and_multi_image():
     image = Image.open(QWEN_IMAGE_PATH).convert("RGB")
 
@@ -469,10 +456,6 @@ def test_qwen3_vl_8b_multimodal_single_and_multi_image():
     },
 )
 @wait_until_npu_memory_free()
-@pytest.mark.skipif(
-    torch.npu.device_count() < 4,
-    reason="Qwen3.5-4B multimodal test requires at least 4 NPUs.",
-)
 def test_qwen3_5_4b_multimodal_single_and_multi_image():
     image_1 = Image.open(QWEN_IMAGE_PATH).convert("RGB")
     image_2 = Image.open(QWEN_IMAGE_PATH).convert("RGB")
