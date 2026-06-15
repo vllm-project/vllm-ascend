@@ -78,7 +78,9 @@ def swiglu_quant(x, group_list, group_list_type, need_quant=True):
     elif group_list.dtype == torch.int32:
         num_experts_algin = (num_experts + 15) // 16 * 16
     else:
-        raise ValueError(f"swiglu_quant: group_list dtype must be torch.int32 or torch.int64, but got {group_list.dtype}")
+        raise ValueError(
+            f"swiglu_quant: group_list dtype must be torch.int32 or torch.int64, but got {group_list.dtype}"
+        )
 
     num_vectorcore = get_vectorcore_num()
     _swiglu_quant_kernel[(num_vectorcore,)](
