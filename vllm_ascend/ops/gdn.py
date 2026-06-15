@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.20.2"):
+if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
         GatedDeltaNetAttention,
     )
@@ -43,6 +43,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_graph_params,
 )
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -291,7 +292,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             ba, _ = self.in_proj_ba(hidden_states)
             z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
-            if vllm_version_is("0.20.2"):
+            if vllm_version_is("0.21.0"):
                 b, a = ba.chunk(2, dim=-1)
             else:
                 b, a = self.split_ba(ba)
@@ -306,7 +307,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 ba, _ = self.in_proj_ba(hidden_states)
-                if vllm_version_is("0.20.2"):
+                if vllm_version_is("0.21.0"):
                     b, a = ba.chunk(2, dim=-1)
                 else:
                     b, a = self.split_ba(ba)
@@ -338,12 +339,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        if vllm_version_is("0.20.2"):
+        if vllm_version_is("0.21.0"):
             torch.ops.vllm.gdn_attention_core(
                 mixed_qkv,
                 b,
                 a,
                 core_attn_out,
+                False,
                 self.prefix,
             )
         else:
@@ -352,8 +354,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 b,
                 a,
                 core_attn_out,
-                False,
                 self.prefix,
+                False,
             )
 
         # ============================================================
@@ -617,7 +619,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
         # 2. Recurrent attention
-        g, beta = torch.ops._C_ascend.npu_fused_gdn_gating(self.A_log, a, b, self.dt_bias.to(torch.float32))
+        g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 g_spec = g
