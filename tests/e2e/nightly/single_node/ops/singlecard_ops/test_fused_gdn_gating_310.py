@@ -30,7 +30,6 @@ def golden_fused_gdn_gating_v310(a, b, A_log, dt_bias, beta=1.0, threshold=20.0)
 
     x = a_f + dt_bias_expanded
     beta_x = beta * x
-    
     softplus_x = torch.where(
         beta_x <= threshold,
         (1.0 / beta) * torch.log1p(torch.exp(beta_x)),
