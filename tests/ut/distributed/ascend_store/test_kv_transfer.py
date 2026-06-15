@@ -837,8 +837,8 @@ class TestLayerBatchBuilderScratchArray(unittest.TestCase):
 # ===========================================================================
 class TestSplitTransferPackets(unittest.TestCase):
     def _call(self, sizes, max_bytes):
-        gvas = np.arange(len(sizes), dtype=np.int64)
-        addrs = np.arange(len(sizes), dtype=np.int64) * 100
+        gvas: np.ndarray = np.arange(len(sizes), dtype=np.int64)
+        addrs: np.ndarray = np.arange(len(sizes), dtype=np.int64) * 100
         sizes_arr = np.array(sizes, dtype=np.int64)
         out_gvas, out_addrs, out_sizes = KVTransferThread._split_transfer_packets(gvas, addrs, sizes_arr, max_bytes)
         return out_gvas, out_addrs, out_sizes

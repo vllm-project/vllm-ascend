@@ -119,7 +119,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
 
         self.assertEqual(worker.block_size, 16)
         self.assertEqual(worker.num_layers, 32)
@@ -151,7 +151,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.model_config.use_mla = True
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self.assertTrue(worker.use_mla)
         self.assertEqual(worker.num_kv_head, 1)
 
@@ -181,7 +181,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.model_config.get_total_num_kv_heads.return_value = 4  # < tp_size=8
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self.assertEqual(worker.put_step, 2)  # 8 / 4
         self.assertEqual(worker.head_or_tp_rank, 1)  # 2 // 2
 
@@ -210,7 +210,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         events = worker.get_kv_events()
         self.assertEqual(events, [])
 
@@ -241,7 +241,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.kv_events_config.enable_kv_cache_events = True
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         worker.kv_send_thread = MagicMock()
         worker.kv_send_thread.get_kv_events.return_value = [MagicMock()]
         events = worker.get_kv_events()
@@ -272,7 +272,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         worker.m_store.exists.return_value = [1, 1]
         result = worker.lookup(32, ["hash0", "hash1"], use_layerwise=False)
         self.assertEqual(result, 32)
@@ -302,7 +302,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         worker.m_store.exists.return_value = [1, 0]
         result = worker.lookup(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 16)  # first non-exist at index 1 => starts[1]=16
@@ -332,7 +332,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         worker.m_store.exists.side_effect = Exception("conn error")
         result = worker.lookup(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 0)
@@ -362,7 +362,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
 
         # Setup mock send thread using a real defaultdict
         from collections import defaultdict
@@ -412,7 +412,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.model_config.hf_text_config.num_hidden_layers = 32
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self.assertIsNotNone(worker.token_database.partitions)
         self.assertEqual(worker.token_database.partitions, [16, 16])
 
@@ -477,7 +477,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config = self._make_config(kv_role=kv_role, extra_config=extra_config)
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         return worker
 
     def setUp(self):
@@ -650,7 +650,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.model_config.get_total_num_kv_heads.return_value = 2
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         # 2 blocks * 2 tp_ranks = 4 keys
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
@@ -802,7 +802,7 @@ class TestKVPoolWorkerGetBlockIdsWithLoadErrors(unittest.TestCase):
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self._patches = patches
         return worker
 
@@ -873,7 +873,7 @@ class TestKVPoolWorkerGetGroupTpSize(unittest.TestCase):
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self._patches = patches
         return worker
 
@@ -947,7 +947,7 @@ class TestKVPoolWorkerLookupGateGroupIds(unittest.TestCase):
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self._patches = patches
         return worker
 
@@ -1056,7 +1056,7 @@ class TestKVPoolWorkerBuildConnectorWorkerMeta(unittest.TestCase):
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self._patches = patches
         return worker
 
@@ -1151,7 +1151,7 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self._patches = patches
         return worker
 
@@ -1252,7 +1252,7 @@ class TestKVPoolWorkerInferGroupMethods(unittest.TestCase):
         config.cache_config.block_size = 16
         config.kv_events_config = None
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self.assertEqual(worker.group_uses_align_state, [False])
 
         for p in patches.values():
@@ -1303,7 +1303,7 @@ class TestKVPoolWorkerInferGroupMethods(unittest.TestCase):
         config.cache_config.block_size = 16
         config.kv_events_config = None
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         # group_id out of range returns first element
         self.assertEqual(worker._get_group_block_size(5), 16)
 
@@ -1359,7 +1359,7 @@ class TestKVPoolWorkerInitBackend(unittest.TestCase):
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self._patches = patches
         return worker
 
@@ -1436,7 +1436,7 @@ class TestKVPoolWorkerStartLoadKVAsync(unittest.TestCase):
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         worker.load_async = True
         self._patches = patches
         return worker
@@ -1518,7 +1518,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-        worker = KVPoolWorker(config, use_layerwize=False)
+        worker = KVPoolWorker(config, use_layerwise=False)
         self._patches = patches
         return worker
 
