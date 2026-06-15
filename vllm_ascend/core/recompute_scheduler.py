@@ -488,21 +488,13 @@ class RecomputeScheduler(Scheduler):
                             HybridKVCacheCoordinator,
                         )
                     ):
-                        computed, per_group_hits = self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                            request.block_hashes,
-                            request.num_tokens - 1,
+                        computed_blocks, num_new_local_computed_tokens = (
+                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                                request.block_hashes,
+                                request.num_tokens - 1,
+                            )
                         )
-                        new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed)
-                        # NOTE(ZhanqiuHu): For Mamba hybrid models,
-                        # num_new_local_computed_tokens should be the FA hit
-                        # length. This value is passed to the connector's
-                        # get_num_new_matched_tokens which computes:
-                        # external = total - local_computed.
-                        # Using the FA hit skips re-transferring FA blocks
-                        # already cached on D-side. The Mamba state (always
-                        # the last block) is transferred unconditionally by
-                        # _apply_prefix_caching in nixl/worker.py.
-                        num_new_local_computed_tokens = max(per_group_hits)
+                        new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed_blocks)
                         if self.kv_cache_manager.log_stats:
                             assert self.kv_cache_manager.prefix_cache_stats is not None
                             self.kv_cache_manager.prefix_cache_stats.record(
