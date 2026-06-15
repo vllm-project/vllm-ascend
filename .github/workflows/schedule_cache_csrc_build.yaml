@@ -164,6 +164,8 @@ jobs:
       - name: Configure ccache
         run: |
           set -x
+          export CCACHE_DIR="${CCACHE_DIR:-$GITHUB_WORKSPACE/.ccache}"
+          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-5G}"
           mkdir -p "$CCACHE_DIR"
           command -v ccache
           ccache --version
@@ -199,16 +201,8 @@ jobs:
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
 
           echo "start installing vllm-ascend at $(date -u +'%Y-%m-%d %H:%M:%S')"
-          if uv pip install -e . --no-build-isolation; then
-            echo "vllm-ascend installed successfully"
-          else
-            echo "start clean build for vllm-ascend at $(date -u +'%Y-%m-%d %H:%M:%S')"
-            echo "Failed to install vllm-ascend, falling back to clean build"
-            rm -rf csrc/build
-            rm -rf csrc/third_party
-            uv pip install -e . --no-build-isolation
-          fi
-
+          uv pip install -e . --no-build-isolation
+          echo "vllm-ascend installed successfully"
           echo "vllm-ascend installation completed at $(date -u +'%Y-%m-%d %H:%M:%S')"
 
       - name: Show ccache stats
