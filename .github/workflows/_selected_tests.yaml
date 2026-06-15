@@ -157,19 +157,6 @@ jobs:
             vllm_ascend/lib
             vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          restore-keys: |
-            vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-
-
-      - name: Save vllm-ascend csrc cache
-        if: ${{ matrix.group.npu_type != 'cpu' && steps.csrc-filter.outputs.csrc == 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
-        uses: runs-on/cache/save@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -204,6 +191,17 @@ jobs:
             echo "CSRC cache miss: no .so files found, compile kernels"
             uv pip install -e . --no-build-isolation
           fi
+
+      - name: Save vllm-ascend csrc cache
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.csrc-filter.outputs.csrc == 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        uses: runs-on/cache/save@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend no device
         if: ${{ matrix.group.npu_type == 'cpu' }}
