@@ -170,6 +170,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
+
+        self._share_mtp_indices = False
+        spec_config = self.vllm_config.speculative_config
+        draft_model_config = getattr(spec_config, "draft_model_config", None)
+        draft_hf_config = draft_model_config.hf_config if draft_model_config is not None else None
+        self._share_mtp_indices = getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
+
         # NOTE:
         # `draft_tensor_parallel_size` does not take effect for Eagle:
         # the draft model uses the same TP size as the target model in practice.
@@ -468,6 +475,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "[spec_decode/base] Detected MTP model with topk_indices_buffer."
                 " Sharing target model topk_indices_buffer with the draft model."
             )
+            target_buffer = target_language_model.model.topk_indices_buffer
+            draft_model = getattr(self.model, "model", None)
+            if target_buffer is not None and draft_model is not None:
+                for _, module in draft_model.named_modules():
+                    if hasattr(module, "topk_indices_buffer"):
+                        module.topk_indices_buffer = target_buffer
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -1027,12 +1040,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if self.method == "mtp":
                     model_kwargs["positions"] = model_positions
 
+        # step 0
+        draft_model = getattr(self.model, "model", None)
+        if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+            draft_model.set_skip_topk(False)
+
         ret_hidden_states = self.model(**model_kwargs)
         if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
             hidden_states = last_hidden_states
         else:
             last_hidden_states, hidden_states = ret_hidden_states
+
+        # step 1+ skip indexer
+        draft_model = getattr(self.model, "model", None)
+        if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+            draft_model.set_skip_topk(True)
 
         if self.method != "dflash":
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
