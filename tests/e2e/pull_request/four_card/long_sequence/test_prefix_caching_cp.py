@@ -26,6 +26,7 @@ from unittest.mock import patch
 from tests.e2e.conftest import _LONG_PROMPTS, VllmRunner
 
 MODEL = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+MAX_NUM_SEQS = 2
 
 with open(_LONG_PROMPTS[0], encoding="utf-8") as file:
     LONG_PROMPT = file.read()
@@ -44,6 +45,7 @@ def test_prefix_cache_with_pcp_dcp_full_graph() -> None:
         MODEL,
         block_size=128,
         max_model_len=4096,
+        max_num_seqs=MAX_NUM_SEQS,
         enforce_eager=False,
         enable_prefix_caching=True,
         enable_expert_parallel=True,
@@ -53,7 +55,7 @@ def test_prefix_cache_with_pcp_dcp_full_graph() -> None:
         prefill_context_parallel_size=2,
         decode_context_parallel_size=2,
         compilation_config={
-            "cudagraph_capture_sizes": [4, 8, 24, 48, 60],
+            "cudagraph_capture_sizes": [MAX_NUM_SEQS],
             "cudagraph_mode": "FULL_DECODE_ONLY",
         },
     ) as vllm_model:

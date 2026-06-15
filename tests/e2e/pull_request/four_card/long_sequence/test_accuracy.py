@@ -30,10 +30,11 @@ import pytest
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+MAX_NUM_SEQS = 4
 
 FULL_DECODE_GRAPH = {
     "cudagraph_mode": "FULL_DECODE_ONLY",
-    "cudagraph_capture_sizes": [4, 8, 24, 48, 60],
+    "cudagraph_capture_sizes": [MAX_NUM_SEQS],
 }
 
 COMMON_PROMPTS = [
@@ -97,6 +98,7 @@ def _run_accuracy_case(case: AccuracyCase) -> None:
 
 DSV2_COMMON_KWARGS: dict[str, Any] = {
     "max_model_len": 1024,
+    "max_num_seqs": MAX_NUM_SEQS,
     "max_num_batched_tokens": 1024,
     "enable_expert_parallel": True,
     "enable_chunked_prefill": True,
@@ -165,6 +167,7 @@ FULL_FEATURE_MODEL_CASES = [
         max_tokens=5,
         runner_kwargs={
             "max_model_len": 1024,
+            "max_num_seqs": MAX_NUM_SEQS,
             "max_num_batched_tokens": 1024,
             "tensor_parallel_size": 2,
             "prefill_context_parallel_size": 2,
@@ -185,6 +188,7 @@ FULL_FEATURE_MODEL_CASES = [
         max_tokens=5,
         runner_kwargs={
             "max_model_len": 1024,
+            "max_num_seqs": MAX_NUM_SEQS,
             "max_num_batched_tokens": 1024,
             "tensor_parallel_size": 2,
             "prefill_context_parallel_size": 2,
@@ -206,6 +210,7 @@ FULL_FEATURE_MODEL_CASES = [
         max_tokens=5,
         runner_kwargs={
             "max_model_len": 1024,
+            "max_num_seqs": MAX_NUM_SEQS,
             "max_num_batched_tokens": 1024,
             "tensor_parallel_size": 2,
             "prefill_context_parallel_size": 2,
