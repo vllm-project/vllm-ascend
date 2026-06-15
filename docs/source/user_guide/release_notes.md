@@ -113,7 +113,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 - **Python**: Python 3.12 is now officially supported and the default for all Docker images. Python 3.10 and 3.11 remain supported. [#9558](https://github.com/vllm-project/vllm-ascend/pull/9558)
 - **Upstream vLLM**: Upgraded from v0.20.2 to v0.21.0. [#9835](https://github.com/vllm-project/vllm-ascend/pull/9835)
 - **xlite**: Upgraded from `0.1.0rc9.dev210` to `0.1.0rc10.dev210`.
-- **CANN**: Remains at 9.0.0 (unchanged from v0.20.2rc1). **Note**: `FULL_AND_PIECEWISE` requires HDK 25.5.1+ / CANN 8.5.0+ for the stream-budget fix; older stacks are still limited by the legacy stream budget and may fall back to `PIECEWISE`.
+- **CANN**: 9.0.0 for A2/A3/A5 (unchanged from v0.20.2rc1); **310P uses CANN 9.1.0 beta**. **Note**: `FULL_AND_PIECEWISE` requires HDK 25.5.1+ / CANN 8.5.0+ for the stream-budget fix; older stacks are still limited by the legacy stream budget and may fall back to `PIECEWISE`.
 - **PyTorch / torch_npu**: 2.10.0 (unchanged from v0.20.2rc1).
 - **triton-ascend**: 3.2.1 (unchanged from v0.20.2rc1).
 - **Mooncake**: Upgraded from v0.3.8.post1 to v0.3.9. [#10339](https://github.com/vllm-project/vllm-ascend/pull/10339)
