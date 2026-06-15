@@ -845,11 +845,7 @@ class RecomputeScheduler(Scheduler):
         # MUST precede the per-request routing reads below.
         routing_data = None
         routing_offsets: dict[str, int] = {}
-        if (
-            not vllm_version_is("0.22.1")
-            and getattr(self, "enable_return_routed_experts", False)
-            and model_runner_output.routed_experts is not None
-        ):
+        if getattr(self, "enable_return_routed_experts", False) and model_runner_output.routed_experts is not None:
             re = model_runner_output.routed_experts
             self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
             routing_data = re.routing_data.astype(
@@ -926,13 +922,7 @@ class RecomputeScheduler(Scheduler):
                 stopped = True
 
             routed_experts = None
-            if vllm_version_is("0.22.1"):
-                if (
-                    model_runner_output.routed_experts_dict is not None
-                    and req_id in model_runner_output.routed_experts_dict
-                ):
-                    routed_experts = model_runner_output.routed_experts_dict[req_id]
-            elif getattr(self, "enable_return_routed_experts", False) and routing_data is not None and new_token_ids:
+            if getattr(self, "enable_return_routed_experts", False) and routing_data is not None and new_token_ids:
                 req_offset = routing_offsets[req_id]
                 end = req_offset + num_tokens_scheduled
                 block_ids = self._re_block_ids.pop(req_id, [])
