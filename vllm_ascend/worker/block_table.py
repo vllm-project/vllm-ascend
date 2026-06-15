@@ -144,7 +144,10 @@ class BlockTable:
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
         if self.dcp_world_size * self.pcp_world_size > 1:
-            req_indices = torch.repeat_interleave(torch.arange(num_reqs, dtype=torch.int32, device=query_start_loc.device), query_start_loc[1:] - query_start_loc[:-1])
+            req_indices = torch.repeat_interleave(
+                torch.arange(num_reqs, dtype=torch.int32, device=query_start_loc.device),
+                query_start_loc[1:] - query_start_loc[:-1],
+            )
             self._compute_pcp_dcp_slot_mapping(req_indices, positions)
         else:
             _compute_slot_mapping_kernel[(num_reqs + 1,)](
@@ -211,18 +214,12 @@ class BlockTable:
         # logical_block_idx = positions // virtual_block_size
 
         total_cp_world_size = self.dcp_world_size * self.pcp_world_size
-        # CP interleaving is defined on the physical KV cache block. Hybrid
-        # blocks then split that local physical position into kernel-sized
-        # logical blocks for block table and slot mapping.
         virtual_physical_block_size = self.physical_block_size * total_cp_world_size
         physical_block_idx = positions // virtual_physical_block_size
         virtual_block_offsets = positions % virtual_physical_block_size
 
         self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
-        mask = (
-            virtual_block_offsets // self.cp_kv_cache_interleave_size % total_cp_world_size
-            == self.current_rank
-        )
+        mask = virtual_block_offsets // self.cp_kv_cache_interleave_size % total_cp_world_size == self.current_rank
         local_physical_offsets = (
             virtual_block_offsets
             // (total_cp_world_size * self.cp_kv_cache_interleave_size)
@@ -233,9 +230,7 @@ class BlockTable:
             local_physical_offsets // self.block_size
         )
 
-        block_table_indices = (
-            req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
-        )
+        block_table_indices = req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
 
         block_offsets = local_physical_offsets % self.block_size
 
