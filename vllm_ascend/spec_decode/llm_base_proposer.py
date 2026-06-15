@@ -997,8 +997,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         # step 1+ skip indexer
-        if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
-            self.model.model.set_skip_topk(True) 
+        draft_model = getattr(self.model, "model", None)
+        if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+            draft_model.set_skip_topk(True)
 
         return draft_token_ids
 
