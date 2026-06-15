@@ -1841,7 +1841,14 @@ class AscendDSAImpl(DSAAttentionImpl):
                     bias=self.wq_b.bias,
                     output_dtype=hidden_states.dtype,
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
-                qr = self.q_norm(q_a) if self._indexer_should_prepare_fp_qr() else qr_quant
+                qr = (
+                    self.q_norm(q_a)
+                    if (
+                        self._indexer_should_prepare_fp_qr()
+                        and not self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale)
+                    )
+                    else qr_quant
+                )
             else:
                 qr = self.q_norm(q_a)
                 q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
@@ -1947,6 +1954,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=True,
+                            qr_pertoken_scale=qr_pertoken_scale,
+                            qr_quant=qr_quant,
                         )
 
             coff = 2 if self.compressor_overlap else 1
