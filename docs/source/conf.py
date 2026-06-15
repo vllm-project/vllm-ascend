@@ -64,6 +64,12 @@ extensions = [
 myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
 # Change this when cut down release
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_VLLM_MAIN_VERIFIED_COMMIT_PATH = _REPO_ROOT / ".github" / "vllm-main-verified.commit"
+_VLLM_RELEASE_TAG_PATH = _REPO_ROOT / ".github" / "vllm-release-tag.commit"
+_VLLM_MAIN_VERIFIED_COMMIT = _VLLM_MAIN_VERIFIED_COMMIT_PATH.read_text(encoding="utf-8").strip()
+_VLLM_RELEASE_TAG = _VLLM_RELEASE_TAG_PATH.read_text(encoding="utf-8").strip()
+
 myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
@@ -77,12 +83,12 @@ myst_substitutions = {
     # This value should be updated when cut down release.
     "pip_vllm_ascend_version": "0.20.2rc1",
     "pip_vllm_version": "0.20.2",
-    # CANN image tag
-    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.12",
+    # CANN image tag paired with the vllm_ascend_version above
+    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.11",
     # vLLM commit hash for main branch
-    "main_vllm_commit": "9090368b650896bf5fc990c921df7eb4c20355a5",
+    "main_vllm_commit": _VLLM_MAIN_VERIFIED_COMMIT,
     # vLLM tag for main branch
-    "main_vllm_tag": "v0.20.2",
+    "main_vllm_tag": _VLLM_RELEASE_TAG,
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.13",
     # CANN version for main branch
