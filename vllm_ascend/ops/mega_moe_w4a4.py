@@ -70,21 +70,12 @@ _TIK_DIR = os.environ.get("ASCEND_TIKCFW", f"{_CANN_HOME}/aarch64-linux/tikcpp/t
 # Production build of the self-contained S3FP16 + cube-Hadamard variant. Each flag is a
 # validated lever (see PR description / FINAL_REPORT); cube-Hadamard makes the kernel fully
 # fused so no external Hadamard op is needed.
+# The kernel ships a single production configuration: the in-kernel cube Hadamard,
+# the fast batched quant stage, fp16 SwiGLU/combine, skew-immune row partition, and
+# scale folding are now the only code paths in the source (the alternate variants
+# were removed), so the only build define still needed is the Hadamard block size.
 _BUILD_DEFINES = [
     f"-DMEGA_HADAMARD_N={HADAMARD_BLOCK_SIZE}",
-    "-DMEGA_CUBE_HADAMARD",  # in-kernel block-diag Hadamard (Stage 1) -> self-contained
-    "-DMEGA_HADAMARD_KERNEL_SKIP",  # quant-stage scale uses 1/sqrtN=1 (rotation done by the Hadamard stage)
-    "-DMEGA_OVERLAP",
-    "-DMEGA_OVERLAP_SAFESYNC",  # cube/vector overlap schedule
-    # NOTE: the Sn build-flag digits are the kernel's internal stage index and do
-    # NOT track the doc's 1-based numbering; they are named by function below.
-    "-DMEGA_S5_SCATTER",  # atomic-add unpermute/combine (the combine stage)
-    "-DMEGA_S1_FAST",  # multi-row batched quant stage
-    "-DMEGA_S3_DBUF",
-    "-DMEGA_S5_FP16",  # double-buffered SwiGLU / fp16 combine
-    "-DMEGA_S3_ROWPART",
-    "-DMEGA_S5_ROWPART",  # skew-immune row partition
-    "-DMEGA_SCALE_FOLD",  # fold the int4 *7 constant into the per-row divisor
 ]
 
 
