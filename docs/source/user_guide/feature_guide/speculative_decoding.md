@@ -110,7 +110,7 @@ The following code configures vLLM Ascend to use speculative decoding where prop
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp", "disable_padded_drafter_batch": "False"}'
+    --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp", "disable_padded_drafter_batch": false}'
     ```
 
 ## Speculating using Suffix Decoding
