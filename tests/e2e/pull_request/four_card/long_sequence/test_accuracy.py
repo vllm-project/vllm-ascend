@@ -114,6 +114,7 @@ DSV2_COMMON_KWARGS: dict[str, Any] = {
     "block_size": 128,
     "quantization": "ascend",
     "compilation_config": FULL_DECODE_GRAPH,
+    "additional_config": {"enable_flashcomm1": True},
 }
 
 DSV2_PARALLEL_CASES = [
@@ -188,6 +189,7 @@ FULL_FEATURE_MODEL_CASES = [
             "quantization": "ascend",
             "long_prefill_token_threshold": 4,
             "compilation_config": FULL_DECODE_GRAPH,
+            "additional_config": {"enable_flashcomm1": True},
         },
     ),
     AccuracyCase(
@@ -207,6 +209,7 @@ FULL_FEATURE_MODEL_CASES = [
             "long_prefill_token_threshold": 4,
             "gpu_memory_utilization": 0.8,
             "block_size": 128,
+            # "additional_config": {"enable_flashcomm1": True},
         },
     ),
     AccuracyCase(
@@ -230,6 +233,7 @@ FULL_FEATURE_MODEL_CASES = [
             "quantization": "ascend",
             "long_prefill_token_threshold": 4,
             "compilation_config": FULL_DECODE_GRAPH,
+            "additional_config": {"enable_flashcomm1": True},
         },
     ),
     AccuracyCase(
@@ -255,6 +259,7 @@ FULL_FEATURE_MODEL_CASES = [
                 "num_speculative_tokens": 3,
             },
             "compilation_config": FULL_DECODE_GRAPH,
+            "additional_config": {"enable_flashcomm1": True},
         },
     ),
 ]
@@ -264,7 +269,6 @@ FULL_FEATURE_MODEL_CASES = [
     os.environ,
     {
         "HCCL_BUFFSIZE": "768",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
@@ -277,7 +281,6 @@ def test_dsv2_lite_parallel_config_accuracy(case: AccuracyCase) -> None:
     os.environ,
     {
         "HCCL_BUFFSIZE": "768",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
