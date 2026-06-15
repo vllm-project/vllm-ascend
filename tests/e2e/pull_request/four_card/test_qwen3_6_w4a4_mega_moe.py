@@ -51,7 +51,8 @@ def test_qwen3_6_w4a4_mega_moe_generation():
         # path is fragile on some CANN versions; eager is the validated config.
         enforce_eager=True,
         gpu_memory_utilization=0.85,
-        trust_remote_code=True,
+        # NOTE: VllmRunner already passes trust_remote_code=True to LLM; passing it
+        # here too collides through **kwargs (TypeError: multiple values), so don't.
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(prompts, max_tokens=32)
 

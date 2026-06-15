@@ -532,6 +532,17 @@ setup(
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
+    package_data={
+        # JIT inputs for the fused W4A4 MoE "mega" kernel. compile_kernel() runs
+        # bisheng on these at first use, so they must ship in the wheel — find_packages
+        # only collects .py, which would leave a wheel install unable to build the
+        # kernel. Mirror vllm_ascend/ops/mega_moe_w4a4.py:_KERNEL_DEPS.
+        "vllm_ascend.ops": [
+            "mega_moe_w4a4_qwen36_pto-isa.cpp",
+            "mega_moe_w4a4_pto-isa.cpp",
+            "int4_cvt.hpp",
+        ],
+    },
     python_requires=">=3.10",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
