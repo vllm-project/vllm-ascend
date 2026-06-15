@@ -30,6 +30,7 @@ import pytest
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+DEEPSEEK_MTP = "wemaster/deepseek_mtp_main_random_bf16"
 MAX_NUM_SEQS = 4
 
 FULL_DECODE_GRAPH = {
@@ -41,7 +42,6 @@ COMMON_PROMPTS = [
     "The capital of France is",
     "Hello, my name is Tom, I am",
     "The president of United States is",
-    "AI future is",
 ]
 
 DSV2_PROMPTS = [
@@ -49,26 +49,35 @@ DSV2_PROMPTS = [
     "The capital of France is",
 ]
 
-DSV2_GOLDEN = [
+DSV2_PCP_GOLDEN = [
     "The president of the United States is a man who is not only a liar, but",
-    "The capital of France is a city that has been the capital of France since 987",
+    "The capital of France is Paris.\nThe capital of the United Kingdom is",
+]
+
+DSV2_DCP_GOLDEN = [
+    "The president of the United States is a man who is not only a liar, but",
+    "The capital of France is Paris.\nThe currency of France is the Euro",
 ]
 
 QWEN3_GOLDEN = [
-    "The capital of France is Paris.\n\nThe capital",
-    "Hello, my name is Tom, I am a 20 years",
-    "The president of United States is Donald Trump.\n\nThe",
-    "AI future is here. The world is",
+    "The capital of France is Paris. The capital of",
+    "Hello, my name is Tom, I am 12 years old",
+    "The president of United States is the head of state and",
 ]
 
 QWEN3_NEXT_GOLDEN = [
     "The capital of France is Paris.\nThe capital",
     "Hello, my name is Tom, I am a 20 years",
     "The president of United States is the head of state and",
-    "AI future is not just about technology,",
 ]
 
 DSV3_2_GOLDEN = [
+    "The capital of France is Paris.\n\nThe capital",
+    "Hello, my name is Tom, I am a 20-year",
+    "The president of United States is Donald Trump.\n\nThe",
+]
+
+DEEPSEEK_MTP3_GOLDEN = [
     "The capital of France is Paris.\n\nThe capital",
     "Hello, my name is Tom, I am a 20-year",
     "The president of United States is Donald Trump.\n\nThe",
@@ -113,7 +122,7 @@ DSV2_PARALLEL_CASES = [
         name="dsv2_pcp_dcp_full_features",
         model=DEEPSEEK_V2_LITE,
         prompts=DSV2_PROMPTS,
-        expected_outputs=DSV2_GOLDEN,
+        expected_outputs=DSV2_PCP_GOLDEN,
         max_tokens=10,
         runner_kwargs={
             **DSV2_COMMON_KWARGS,
@@ -128,7 +137,7 @@ DSV2_PARALLEL_CASES = [
         name="dsv2_pcp_only_full_features",
         model=DEEPSEEK_V2_LITE,
         prompts=DSV2_PROMPTS,
-        expected_outputs=DSV2_GOLDEN,
+        expected_outputs=DSV2_PCP_GOLDEN,
         max_tokens=10,
         runner_kwargs={
             **DSV2_COMMON_KWARGS,
@@ -143,7 +152,7 @@ DSV2_PARALLEL_CASES = [
         name="dsv2_dcp_only_full_features",
         model=DEEPSEEK_V2_LITE,
         prompts=DSV2_PROMPTS,
-        expected_outputs=DSV2_GOLDEN,
+        expected_outputs=DSV2_DCP_GOLDEN,
         max_tokens=10,
         runner_kwargs={
             **DSV2_COMMON_KWARGS,
@@ -199,6 +208,10 @@ FULL_FEATURE_MODEL_CASES = [
             "long_prefill_token_threshold": 4,
             "gpu_memory_utilization": 0.8,
             "block_size": 128,
+            "speculative_config": {
+                "method": "qwen3_next_mtp",
+                "num_speculative_tokens": 3,
+            },
             "compilation_config": FULL_DECODE_GRAPH,
         },
     ),
@@ -221,6 +234,30 @@ FULL_FEATURE_MODEL_CASES = [
             "gpu_memory_utilization": 0.2,
             "block_size": 128,
             "quantization": "ascend",
+            "compilation_config": FULL_DECODE_GRAPH,
+        },
+    ),
+    AccuracyCase(
+        name="deepseek_mtp3_pcp_dcp_full_features",
+        model=DEEPSEEK_MTP,
+        prompts=COMMON_PROMPTS,
+        expected_outputs=DEEPSEEK_MTP3_GOLDEN,
+        max_tokens=5,
+        runner_kwargs={
+            "max_model_len": 1024,
+            "max_num_seqs": MAX_NUM_SEQS,
+            "max_num_batched_tokens": 1024,
+            "tensor_parallel_size": 2,
+            "prefill_context_parallel_size": 2,
+            "decode_context_parallel_size": 2,
+            "enable_expert_parallel": True,
+            "enable_chunked_prefill": True,
+            "enable_prefix_caching": False,
+            "block_size": 128,
+            "speculative_config": {
+                "method": "mtp",
+                "num_speculative_tokens": 3,
+            },
             "compilation_config": FULL_DECODE_GRAPH,
         },
     ),
