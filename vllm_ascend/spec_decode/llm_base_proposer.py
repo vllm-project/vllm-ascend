@@ -176,14 +176,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         
         self._share_mtp_indices = False
         spec_config = self.vllm_config.speculative_config
+        draft_model_config = getattr(spec_config, "draft_model_config", None)
         draft_hf_config = (
-            spec_config.draft_model_config.hf_config
-            if spec_config is not None
+            draft_model_config.hf_config
+            if draft_model_config is not None
             else None
         )
         self._share_mtp_indices = getattr(
             draft_hf_config, "index_share_for_mtp_iteration", False
-        )       
+        )
 
         # NOTE:
         # `draft_tensor_parallel_size` does not take effect for Eagle:
