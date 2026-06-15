@@ -72,9 +72,9 @@ QWEN3_NEXT_GOLDEN = [
 ]
 
 DSV3_2_GOLDEN = [
-    "The capital of France is Paris.\n\nThe capital",
-    "Hello, my name is Tom, I am a 20-year",
-    "The president of United States is Donald Trump.\n\nThe",
+    "The capital of France isoint054 Rund compasses",
+    "Hello, my name is Tom, I amERIC slicpacelikeabra",
+    "The president of United States isoint054 Rund compasses",
 ]
 
 DEEPSEEK_MTP3_GOLDEN = [
