@@ -159,6 +159,8 @@ class CompressAttentionManager(FullAttentionManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        alignment_tokens: int | None = None,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -168,6 +170,9 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
             retention_interval: Prefix-cache retention interval.
+            alignment_tokens: Cache-hit alignment passed by hybrid KV cache
+                coordinators. Compressed attention caches logical blocks, so no
+                extra block mask is needed here.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // (self.block_size * self.compress_ratio)

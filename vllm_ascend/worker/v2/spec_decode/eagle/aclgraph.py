@@ -19,6 +19,8 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
     DecodeSpeculatorCudaGraphManager as DecodeEagleCudaGraphManager,
+)
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     PrefillSpeculatorCudaGraphManager as PrefillEagleCudaGraphManager,
 )
 from vllm.v1.worker.utils import AttentionGroup
