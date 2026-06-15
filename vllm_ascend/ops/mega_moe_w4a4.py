@@ -32,6 +32,7 @@ import functools
 import hashlib
 import math
 import os
+import platform
 import subprocess
 import sys
 
@@ -62,10 +63,21 @@ KERNEL_H_DIM = 2048
 KERNEL_I_DIM = 128
 
 _PTO_LIB_PATH = os.environ.get("PTO_LIB_PATH", "/sources/pto-isa")
-_CANN_HOME = os.environ.get("ASCEND_TOOLKIT_HOME", "/usr/local/Ascend/cann-8.5.1")
+# CANN home: the standard setup sources ascend-toolkit/set_env.sh, which exports
+# both ASCEND_HOME_PATH (the documented var) and ASCEND_TOOLKIT_HOME. Honor either,
+# falling back to the canonical `latest` symlink, so the JIT finds CANN on any
+# install / CI runner instead of a hard-coded version dir. The arch package path is
+# derived from the host machine (platform.machine() -> aarch64-linux / x86_64-linux)
+# so x86_64 hosts don't get handed a non-existent aarch64-linux path.
+_CANN_HOME = (
+    os.environ.get("ASCEND_TOOLKIT_HOME")
+    or os.environ.get("ASCEND_HOME_PATH")
+    or "/usr/local/Ascend/ascend-toolkit/latest"
+)
+_CANN_ARCH = f"{platform.machine()}-linux"  # e.g. aarch64-linux / x86_64-linux
 _CANN_INC = f"{_CANN_HOME}/include"
-_CANN_ARCH_PKG = f"{_CANN_HOME}/aarch64-linux/pkg_inc"
-_TIK_DIR = os.environ.get("ASCEND_TIKCFW", f"{_CANN_HOME}/aarch64-linux/tikcpp/tikcfw")
+_CANN_ARCH_PKG = f"{_CANN_HOME}/{_CANN_ARCH}/pkg_inc"
+_TIK_DIR = os.environ.get("ASCEND_TIKCFW", f"{_CANN_HOME}/{_CANN_ARCH}/tikcpp/tikcfw")
 
 # Production build of the self-contained S3FP16 + cube-Hadamard variant. Each flag is a
 # validated lever (see PR description / FINAL_REPORT); cube-Hadamard makes the kernel fully
