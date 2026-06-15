@@ -406,12 +406,20 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 curr_hit_length = len(hit_blocks[0]) * effective_block_size
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks
+
             if curr_hit_length >= hit_length:
                 break
             hit_length = curr_hit_length
             if is_simple_hybrid:
                 break
 
+        # Truncate full attention blocks to final hit_length (if present)
+        # NOTE(zxr): for deepseek-v4, there is two fullattn groups, but
+        # in this function, only the first fullattn group is truncate by
+        # the belowing codes(c4), c128 layer does not truncate, which may
+        # have prefix cache block hit.
+        # Due to slidingwindow attn, deepseek-v4 decode node can't have
+        # any prefix cache hit, because `hit_length` of SWA is 0.
         spec, group_ids, _ = self.attention_groups[0]
         if isinstance(spec, FullAttentionSpec):
             num_blocks = hit_length // self._get_effective_block_size(spec)
