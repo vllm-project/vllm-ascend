@@ -56,9 +56,11 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_dfx import (
+    MooncakeDFXErrorCode,
     compute_kv_cache_checksum,
     dump_metadata,
     is_mooncake_transfer_dfx_enabled,
+    make_checksum_error,
     record_kv_content_check,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
@@ -319,7 +321,7 @@ class KVCacheSendingThread(threading.Thread):
                             checksum_request.get("remote_request_id"),
                             err,
                         )
-                        checksum = {"error": str(err)}
+                        checksum = make_checksum_error(MooncakeDFXErrorCode.SOURCE_CHECKSUM_ERROR, err)
                     sock.send_multipart((identity, b"", encoder.encode({"checksum": checksum})))
                 elif msg[0] == DONE_RECVING_MSG:
                     logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
@@ -638,7 +640,7 @@ class KVCacheRecvingThread(threading.Thread):
                     checksum_group["group_idx"],
                     err,
                 )
-                target_checksum = {"error": str(err)}
+                target_checksum = make_checksum_error(MooncakeDFXErrorCode.TARGET_CHECKSUM_ERROR, err)
             record_kv_content_check(
                 request_id=req_meta["request_id"],
                 remote_request_id=remote_request_id,
@@ -792,7 +794,7 @@ class KVCacheRecvingThread(threading.Thread):
             )
         except Exception as err:
             logger.exception("Failed to compute Mooncake target KV checksum for request %s: %s", remote_request_id, err)
-            target_checksum = {"error": str(err)}
+            target_checksum = make_checksum_error(MooncakeDFXErrorCode.TARGET_CHECKSUM_ERROR, err)
         record_kv_content_check(
             request_id=req_meta["request_id"],
             remote_request_id=remote_request_id,
@@ -1016,7 +1018,7 @@ class KVCacheRecvingThread(threading.Thread):
                 checksum_request.get("remote_request_id"),
                 err,
             )
-            return None
+            return make_checksum_error(MooncakeDFXErrorCode.SOURCE_CHECKSUM_UNAVAILABLE, err)
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)

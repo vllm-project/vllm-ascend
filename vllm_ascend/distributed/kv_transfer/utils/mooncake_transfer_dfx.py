@@ -14,6 +14,31 @@ from vllm_ascend import envs as ascend_envs
 MAX_DUMP_ITEMS = 16
 
 
+class MooncakeDFXErrorCode(str, Enum):
+    OK = "ErrorCode_0000"
+    SOURCE_CHECKSUM_UNAVAILABLE = "ErrorCode_1001"
+    TARGET_CHECKSUM_UNAVAILABLE = "ErrorCode_1002"
+    SOURCE_CHECKSUM_ERROR = "ErrorCode_1003"
+    TARGET_CHECKSUM_ERROR = "ErrorCode_1004"
+    CHECKSUM_ALGORITHM_MISMATCH = "ErrorCode_1101"
+    CHECKSUM_DIGEST_MISMATCH = "ErrorCode_1102"
+    CHECKSUM_BYTES_MISMATCH = "ErrorCode_1103"
+    CHECKSUM_SEGMENTS_MISMATCH = "ErrorCode_1104"
+
+
+ERROR_CODE_REASONS = {
+    MooncakeDFXErrorCode.OK.value: "ok",
+    MooncakeDFXErrorCode.SOURCE_CHECKSUM_UNAVAILABLE.value: "source checksum is unavailable",
+    MooncakeDFXErrorCode.TARGET_CHECKSUM_UNAVAILABLE.value: "target checksum is unavailable",
+    MooncakeDFXErrorCode.SOURCE_CHECKSUM_ERROR.value: "source checksum computation failed",
+    MooncakeDFXErrorCode.TARGET_CHECKSUM_ERROR.value: "target checksum computation failed",
+    MooncakeDFXErrorCode.CHECKSUM_ALGORITHM_MISMATCH.value: "source and target checksum algorithms mismatch",
+    MooncakeDFXErrorCode.CHECKSUM_DIGEST_MISMATCH.value: "source and target checksum digests mismatch",
+    MooncakeDFXErrorCode.CHECKSUM_BYTES_MISMATCH.value: "source and target checksum byte counts mismatch",
+    MooncakeDFXErrorCode.CHECKSUM_SEGMENTS_MISMATCH.value: "source and target checksum segment counts mismatch",
+}
+
+
 def is_mooncake_transfer_dfx_enabled() -> bool:
     return bool(ascend_envs.VLLM_ASCEND_MOONCAKE_TRANSFER_DFX)
 
@@ -101,6 +126,13 @@ def _tensor_to_raw_bytes(tensor: Any) -> bytes:
     return tensor.detach().contiguous().cpu().view(torch.uint8).numpy().tobytes()
 
 
+def make_checksum_error(error_code: MooncakeDFXErrorCode, error: Any) -> dict[str, Any]:
+    return {
+        "error_code": error_code.value,
+        "error": str(error),
+    }
+
+
 def compute_kv_cache_checksum(
     *,
     kv_caches: Mapping[str, Any],
@@ -148,6 +180,55 @@ def compute_kv_cache_checksum(
     }
 
 
+def _append_checksum_error_code(
+    checksum: Mapping[str, Any] | None,
+    *,
+    unavailable_code: MooncakeDFXErrorCode,
+    default_error_code: MooncakeDFXErrorCode,
+    error_codes: list[str],
+) -> bool:
+    if checksum is None:
+        error_codes.append(unavailable_code.value)
+        return True
+    if checksum.get("error") is not None:
+        error_codes.append(str(checksum.get("error_code", default_error_code.value)))
+        return True
+    return False
+
+
+def _get_kv_content_error_codes(
+    source_checksum: Mapping[str, Any] | None,
+    target_checksum: Mapping[str, Any] | None,
+) -> list[str]:
+    error_codes: list[str] = []
+    source_failed = _append_checksum_error_code(
+        source_checksum,
+        unavailable_code=MooncakeDFXErrorCode.SOURCE_CHECKSUM_UNAVAILABLE,
+        default_error_code=MooncakeDFXErrorCode.SOURCE_CHECKSUM_ERROR,
+        error_codes=error_codes,
+    )
+    target_failed = _append_checksum_error_code(
+        target_checksum,
+        unavailable_code=MooncakeDFXErrorCode.TARGET_CHECKSUM_UNAVAILABLE,
+        default_error_code=MooncakeDFXErrorCode.TARGET_CHECKSUM_ERROR,
+        error_codes=error_codes,
+    )
+    if source_failed or target_failed:
+        return error_codes
+
+    assert source_checksum is not None
+    assert target_checksum is not None
+    if source_checksum.get("algorithm") != target_checksum.get("algorithm"):
+        error_codes.append(MooncakeDFXErrorCode.CHECKSUM_ALGORITHM_MISMATCH.value)
+    if source_checksum.get("digest") != target_checksum.get("digest"):
+        error_codes.append(MooncakeDFXErrorCode.CHECKSUM_DIGEST_MISMATCH.value)
+    if source_checksum.get("bytes") != target_checksum.get("bytes"):
+        error_codes.append(MooncakeDFXErrorCode.CHECKSUM_BYTES_MISMATCH.value)
+    if source_checksum.get("segments") != target_checksum.get("segments"):
+        error_codes.append(MooncakeDFXErrorCode.CHECKSUM_SEGMENTS_MISMATCH.value)
+    return error_codes or [MooncakeDFXErrorCode.OK.value]
+
+
 def record_kv_content_check(
     *,
     request_id: str,
@@ -160,17 +241,15 @@ def record_kv_content_check(
     if not is_mooncake_transfer_dfx_enabled():
         return True
 
-    passed = (
-        source_checksum is not None
-        and target_checksum is not None
-        and source_checksum.get("digest") == target_checksum.get("digest")
-        and source_checksum.get("bytes") == target_checksum.get("bytes")
-        and source_checksum.get("segments") == target_checksum.get("segments")
-    )
+    error_codes = _get_kv_content_error_codes(source_checksum, target_checksum)
+    passed = error_codes == [MooncakeDFXErrorCode.OK.value]
     details: dict[str, Any] = {
         "request_id": request_id,
         "remote_request_id": remote_request_id,
         "passed": passed,
+        "error_code": error_codes[0],
+        "error_codes": error_codes,
+        "error_reasons": {code: ERROR_CODE_REASONS.get(code, "unknown") for code in error_codes},
         "source_checksum": source_checksum,
         "target_checksum": target_checksum,
     }
