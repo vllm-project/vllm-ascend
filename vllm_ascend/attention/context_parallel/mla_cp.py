@@ -453,7 +453,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         DeviceOperator.reshape_and_cache(
             key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_mapping=slot_mapping
         )
-        notify_kv_cache_written(self.layer_name)
+        notify_kv_cache_written(self.layer_name or "")
         pcp_metadata = attn_metadata.prefill.pcp_metadata
         assert pcp_metadata is not None
         tail_k_c_normed = torch.index_select(prefill_k_c_normed, 0, pcp_metadata.kv_tail_proj_idx)

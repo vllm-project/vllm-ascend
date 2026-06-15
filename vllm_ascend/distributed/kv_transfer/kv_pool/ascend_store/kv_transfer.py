@@ -77,6 +77,7 @@ class LayerBatchBuilder:
         if self._block_ids_buf is None or len(self._block_ids_buf) < capacity:
             self._block_ids_buf = np.empty(capacity, dtype=np.int64)
             self._block_gvas_buf = np.empty(capacity, dtype=np.int64)
+        assert self._block_ids_buf is not None and self._block_gvas_buf is not None
         return self._block_ids_buf[:capacity], self._block_gvas_buf[:capacity]
 
     @staticmethod
@@ -304,12 +305,12 @@ class KVTransferThread(threading.Thread):
         if max_transfer_bytes <= 0:
             return gvas, addrs, sizes
 
-        split_counts = (sizes + max_transfer_bytes - 1) // max_transfer_bytes
+        split_counts: np.ndarray = (sizes + max_transfer_bytes - 1) // max_transfer_bytes
         total_splits = int(split_counts.sum())
         if total_splits == sizes.shape[0]:
             return gvas, addrs, sizes
 
-        split_indices = np.arange(int(split_counts.max()), dtype=np.int64)
+        split_indices: np.ndarray = np.arange(int(split_counts.max()), dtype=np.int64)
         split_mask = split_indices[:, None] < split_counts[None, :]
         entry_indices = np.broadcast_to(
             np.arange(sizes.shape[0], dtype=np.int64),
@@ -1271,7 +1272,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         task = transfer_tasks[0]
         shared = task.shared_block_data
         if shared is not None:
-            req_meta = self.layer_batch_builder.build_addrs(shared, task.layer_id)
+            req_meta: LayerBatchReqMeta | None = self.layer_batch_builder.build_addrs(shared, task.layer_id)
         else:
             req_meta = self.layer_batch_builder.build(task)
         if req_meta is None:
