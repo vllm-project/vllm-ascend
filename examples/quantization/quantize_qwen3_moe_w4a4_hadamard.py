@@ -82,8 +82,21 @@ def quant_int4_per_channel(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
     return q, scale.to(torch.float32)
 
 
+def _expert_stack_kind(key: str) -> tuple[str | None, str]:
+    """Match a stacked-expert tensor key, tolerating an optional ``.weight`` tail.
+    Qwen3.x-MoE stores raw stacked tensors (``...mlp.experts.gate_up_proj``); some
+    HF layouts append ``.weight``. Returns ``(kind, prefix)`` where kind is
+    ``"gate_up"`` / ``"down"`` / ``None`` and prefix is everything up to ``...mlp.``."""
+    base = key[: -len(".weight")] if key.endswith(".weight") else key
+    if base.endswith(_GATE_UP):
+        return "gate_up", base[: -len("experts.gate_up_proj")]
+    if base.endswith(_DOWN):
+        return "down", base[: -len("experts.down_proj")]
+    return None, ""
+
+
 def is_stacked_experts(key: str) -> bool:
-    return key.endswith(_GATE_UP) or key.endswith(_DOWN)
+    return _expert_stack_kind(key)[0] is not None
 
 
 def quantize_expert_stack(key: str, t: torch.Tensor, h: torch.Tensor | None) -> dict[str, torch.Tensor]:
@@ -93,13 +106,12 @@ def quantize_expert_stack(key: str, t: torch.Tensor, h: torch.Tensor | None) -> 
     down_proj    [E, H, I]  -> per-expert down_proj [H, I] (not rotated).
     Returns a dict of {new_key: tensor} ready to serialize.
     """
-    # Strip only the "experts.gate_up_proj"/"experts.down_proj" tail, keeping the
-    # "...mlp." prefix so per-expert keys are "<...>mlp.experts.{e}.{name}".
-    tail = "experts.gate_up_proj" if key.endswith(_GATE_UP) else "experts.down_proj"
-    prefix = key[: -len(tail)]  # "...mlp."
+    # Resolve kind + the "...mlp." prefix (tolerant of an optional .weight tail) so
+    # per-expert keys are "<...>mlp.experts.{e}.{name}".
+    kind, prefix = _expert_stack_kind(key)
     E = t.shape[0]
     out: dict[str, torch.Tensor] = {}
-    if key.endswith(_GATE_UP):
+    if kind == "gate_up":
         two_i = t.shape[1]
         i_dim = two_i // 2
         for e in range(E):
