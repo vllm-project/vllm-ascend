@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any
 
 from vllm import SamplingParams
 
@@ -150,6 +152,7 @@ def compare_logprobs(
     prompts: list[str],
     atol: float = 0.0689,
     decode_atol: float | None = None,
+    runner_cls=VllmRunner,
 ) -> None:
     """Run the model in eager baseline mode and in the configured compilation
     mode, generate 3 tokens per prompt, then verify numerical accuracy:
@@ -169,16 +172,36 @@ def compare_logprobs(
     baseline_kwargs = {k: v for k, v in runner_kwargs.items() if k not in _COMPILATION_KEYS}
     baseline_kwargs["enforce_eager"] = True
 
-    with VllmRunner(**baseline_kwargs) as runner:
-        baseline_outputs = runner.model.generate(prompts=prompts, sampling_params=_LOGPROB_SAMPLING_PARAMS)
+    seq_pairs: list[tuple[Any, Any]]
+    if runner_cls is VllmRunner:
+        with VllmRunner(**baseline_kwargs) as runner:
+            baseline_outputs = runner.model.generate(prompts=prompts, sampling_params=_LOGPROB_SAMPLING_PARAMS)
 
-    with VllmRunner(**runner_kwargs) as runner:
-        compiled_outputs = runner.model.generate(prompts=prompts, sampling_params=_LOGPROB_SAMPLING_PARAMS)
+        with VllmRunner(**runner_kwargs) as runner:
+            compiled_outputs = runner.model.generate(prompts=prompts, sampling_params=_LOGPROB_SAMPLING_PARAMS)
 
-    for prompt_idx, (base_out, comp_out) in enumerate(zip(baseline_outputs, compiled_outputs)):
-        base_seq = base_out.outputs[0]
-        comp_seq = comp_out.outputs[0]
+        seq_pairs = [
+            (base_out.outputs[0], comp_out.outputs[0]) for base_out, comp_out in zip(baseline_outputs, compiled_outputs)
+        ]
+    else:
+        with runner_cls(**baseline_kwargs) as runner:
+            baseline_outputs = runner.generate_w_logprobs(prompts, _LOGPROB_SAMPLING_PARAMS)
 
+        with runner_cls(**runner_kwargs) as runner:
+            compiled_outputs = runner.generate_w_logprobs(prompts, _LOGPROB_SAMPLING_PARAMS)
+
+        seq_pairs = []
+        for base_out, comp_out in zip(baseline_outputs, compiled_outputs):
+            base_token_ids, _, base_logprobs = base_out
+            comp_token_ids, _, comp_logprobs = comp_out
+            seq_pairs.append(
+                (
+                    SimpleNamespace(token_ids=base_token_ids, logprobs=base_logprobs),
+                    SimpleNamespace(token_ids=comp_token_ids, logprobs=comp_logprobs),
+                )
+            )
+
+    for prompt_idx, (base_seq, comp_seq) in enumerate(seq_pairs):
         assert base_seq.logprobs is not None and comp_seq.logprobs is not None, (
             f"logprobs not returned for prompt {prompt_idx}"
         )
