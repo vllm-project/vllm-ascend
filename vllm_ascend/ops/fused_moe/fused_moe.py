@@ -292,6 +292,28 @@ class AscendMoERunner(MoERunner):
         # output. Skip any additional reduction here.
         return shared_output
 
+    def _maybe_reduce_final_output(
+        self,
+        states: torch.Tensor,
+        trunc_size: int,
+    ) -> torch.Tensor:
+        """Run Ascend's runtime MoE all-reduce decision inside the graph.
+
+        The upstream implementation branches in Python on
+        ``_fused_output_is_reduced``. On Ascend, that value depends on
+        ``_EXTRA_CTX.moe_comm_type`` and may switch between MC2 and ALLGATHER
+        for different token counts. In compiled graph mode the Python branch can
+        be specialized from an earlier MC2 trace, dropping the late all-reduce
+        needed by ALLGATHER. Keep a custom op in the graph and let its runtime
+        implementation decide whether to all-reduce for the current context.
+        """
+        if (
+            not self.moe_config.is_sequence_parallel
+            and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
+        ):
+            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+        return states[..., :trunc_size]
+
     # TODO: Remove this after drop v0.19.1 support
     def forward_impl(
         self,
