@@ -415,6 +415,7 @@ class NPUModelRunner(GPUModelRunner):
             self.pcp_rank = 0
         if self.pcp_size > 1:
             self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
+            self.vllm_config.cache_config.mamba_block_size = self.model_config.max_model_len
         max_buffer_num_tokens = self.max_num_tokens
         if self.pcp_size * self.dcp_size > 1:
             max_buffer_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_size
