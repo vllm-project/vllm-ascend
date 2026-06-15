@@ -98,7 +98,7 @@ inline int64_t ComputeFnUbLimitedBaseDim(uint64_t ubSize)
         return 0;
     }
 
-    const int64_t bytesPerElem = (RING_SLOT_CNT * BF16_FP16_ELEM_BYTES) + (FN_OUT_SLOT_CNT * BF16_FP16_ELEM_BYTES) +
+    const int64_t bytesPerElem = (RING_SLOT_CNT * static_cast<int64_t>(sizeof(float))) + (FN_OUT_SLOT_CNT * BF16_FP16_ELEM_BYTES) +
                                  (FN_CALC_FP32_SLOT_CNT * static_cast<int64_t>(sizeof(float)));
     const int64_t budgetBytes = static_cast<int64_t>(ubSize) - FN_UB_RESERVED_BYTES;
     const int64_t ubLimitedBaseDim = AlignDownInt64(budgetBytes / bytesPerElem, DIM_ALIGN_ELEMS);
