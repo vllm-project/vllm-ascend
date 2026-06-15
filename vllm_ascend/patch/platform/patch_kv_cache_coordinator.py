@@ -323,7 +323,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_length
 
-def find_longest_cache_hit_per_group(
+    def find_longest_cache_hit_per_group(
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
@@ -337,9 +337,7 @@ def find_longest_cache_hit_per_group(
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             if kv_cache_spec.block_size == self.hash_block_size:
                 return block_hashes
-            return BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, kv_cache_spec.block_size
-            )
+            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, kv_cache_spec.block_size)
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]

@@ -488,15 +488,11 @@ class RecomputeScheduler(Scheduler):
                             HybridKVCacheCoordinator,
                         )
                     ):
-                        computed, per_group_hits = (
-                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                                request.block_hashes,
-                                request.num_tokens - 1,
-                            )
+                        computed, per_group_hits = self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                            request.block_hashes,
+                            request.num_tokens - 1,
                         )
-                        new_computed_blocks = (
-                            self.kv_cache_manager.create_kv_cache_blocks(computed)
-                        )
+                        new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed)
                         # NOTE(ZhanqiuHu): For Mamba hybrid models,
                         # num_new_local_computed_tokens should be the FA hit
                         # length. This value is passed to the connector's
@@ -515,8 +511,8 @@ class RecomputeScheduler(Scheduler):
                                 preempted=request.num_preemptions > 0,
                             )
                     else:
-                        new_computed_blocks, num_new_local_computed_tokens = (
-                            self.kv_cache_manager.get_computed_blocks(request)
+                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
+                            request
                         )
 
                     # Get externally-cached tokens if using a KVConnector.
