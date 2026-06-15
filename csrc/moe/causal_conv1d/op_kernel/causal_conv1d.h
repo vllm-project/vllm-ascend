@@ -25,106 +25,112 @@
 #include "arch35/causal_conv1d_regbase.h"
 #endif
  
-namespace NsCausalConv1d {
-
-using namespace AscendC;
-using namespace NsCausalConv1dCommon;
-
-#define CAUSAL_CONV1D_TEMPLATE_ARGS typename T, uint32_t runModeKey, uint32_t widthKey, uint32_t fnPlanKey
-#define CAUSAL_CONV1D_CLASS CausalConv1d<T, runModeKey, widthKey, fnPlanKey>
-
-enum SeqTaskWindowMode : int32_t {
-    SEQ_TASK_WINDOW_MODE_VARLEN = 0,
-    SEQ_TASK_WINDOW_MODE_BATCH = 1,
-    SEQ_TASK_WINDOW_MODE_DECODE2D = 2,
-};
-
-inline constexpr int32_t INIT_STATE_SYNCALL_NEED_SIZE = 8;
-inline constexpr int32_t INIT_STATE_SYNCALL_MAX_BLOCKS = 64;
-
-struct SeqTaskWindow {
-    bool valid = false;
-    int32_t start = 0;
-    int32_t len = 0;
-};
-
-__aicore__ inline int32_t GetSeqTaskWindowMode(int32_t inputMode)
-{
-    if (inputMode == 0) {
-        return SEQ_TASK_WINDOW_MODE_VARLEN;
-    }
-    if (inputMode == 2) {
-        return SEQ_TASK_WINDOW_MODE_DECODE2D;
-    }
-    return SEQ_TASK_WINDOW_MODE_BATCH;
-}
-
-__aicore__ inline SeqTaskWindow BuildSeqTaskWindowVarlen(int32_t startVal, int32_t endVal)
-{
-    SeqTaskWindow window;
-    window.start = startVal;
-    window.len = endVal - startVal;
-    window.valid = (window.len > 0);
-    return window;
-}
-
-__aicore__ inline int32_t RetreatRingSlot(int32_t slot, int32_t delta)
-{
-    int32_t prev = slot - delta;
-    return (prev >= 0) ? prev : (prev + RING_SLOTS);
-}
-
-__aicore__ inline SeqTaskWindow BuildSeqTaskWindowBatch(int32_t seq, int32_t seqLen)
-{
-    SeqTaskWindow window;
-    window.start = seq * seqLen;
-    window.len = seqLen;
-    window.valid = (window.len > 0);
-    return window;
-}
-
-__aicore__ inline SeqTaskWindow BuildSeqTaskWindowDecode2D(int32_t seq)
-{
-    SeqTaskWindow window;
-    window.valid = true;
-    window.start = seq;
-    window.len = 1;
-    return window;
-}
-
-__aicore__ inline constexpr int32_t DecodeWidthTplKey(uint32_t widthKey)
-{
-    switch (widthKey) {
-        case CAUSAL_CONV1D_TPL_WIDTH_2:
-            return 2;
-        case CAUSAL_CONV1D_TPL_WIDTH_3:
-            return 3;
-        case CAUSAL_CONV1D_TPL_WIDTH_4:
-            return 4;
-        default:
-            return 0;
-    }
-}
-
-template <CAUSAL_CONV1D_TEMPLATE_ARGS>
-class CausalConv1d {
-public:
-    __aicore__ inline CausalConv1d() = default;
-
-protected:
-    static constexpr bool kIsUpdateMode = (runModeKey == CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE);
-    static constexpr int32_t kTemplateWidth = DecodeWidthTplKey(widthKey);
-    static constexpr bool kHasCompileTimeWidth =
-        (runModeKey == CAUSAL_CONV1D_TPL_RUN_MODE_FN) && (kTemplateWidth >= 2) && (kTemplateWidth <= MAX_WIDTH);
-    static constexpr FnExecutionPlan kFnExecutionPlan = static_cast<FnExecutionPlan>(fnPlanKey);
-
-    __aicore__ inline void ResetRuntimeState(const CausalConv1dTilingData *tilingData);
-    __aicore__ inline void InitSharedBuffersAndEvents();
-    __aicore__ inline void LoadWeightAndBias(int32_t channelStart, int32_t baseDim);
-    __aicore__ inline void InitRing(int32_t cacheIdx, bool hasInit, int32_t stateTokenOffset, int32_t start,
-                                    int32_t len, int32_t channelStart, int32_t baseDim, int32_t dim);
-    __aicore__ inline void InitRingSeqSplit(int32_t seq, int32_t cacheIdx, bool hasInit, int32_t seqStart,
-                                            int32_t tileStart, int32_t tileLen, int32_t channelStart, int32_t baseDim,
+ namespace NsCausalConv1d {
+ 
+ using namespace AscendC;
+ using namespace NsCausalConv1dCommon;
+ 
+ #define CAUSAL_CONV1D_TEMPLATE_ARGS typename T, uint32_t runModeKey, uint32_t widthKey, uint32_t fnPlanKey
+ #define CAUSAL_CONV1D_CLASS CausalConv1d<T, runModeKey, widthKey, fnPlanKey>
+ 
+ enum SeqTaskWindowMode : int32_t {
+     SEQ_TASK_WINDOW_MODE_VARLEN = 0,
+     SEQ_TASK_WINDOW_MODE_BATCH = 1,
+     SEQ_TASK_WINDOW_MODE_DECODE2D = 2,
+ };
+ 
+ inline constexpr int32_t INIT_STATE_SYNCALL_NEED_SIZE = 8;
+ inline constexpr int32_t INIT_STATE_SYNCALL_MAX_BLOCKS = 64;
+ 
+ struct SeqTaskWindow {
+     bool valid = false;
+     int32_t start = 0;
+     int32_t len = 0;
+ };
+ 
+ __aicore__ inline int32_t GetSeqTaskWindowMode(int32_t inputMode)
+ {
+     if (inputMode == 0) {
+         return SEQ_TASK_WINDOW_MODE_VARLEN;
+     }
+     if (inputMode == 2) {
+         return SEQ_TASK_WINDOW_MODE_DECODE2D;
+     }
+     return SEQ_TASK_WINDOW_MODE_BATCH;
+ }
+ 
+ __aicore__ inline SeqTaskWindow BuildSeqTaskWindowVarlen(int32_t startVal, int32_t endVal)
+ {
+     SeqTaskWindow window;
+     window.start = startVal;
+     window.len = endVal - startVal;
+     window.valid = (window.len > 0);
+     return window;
+ }
+ 
+ __aicore__ inline int32_t RetreatRingSlot(int32_t slot, int32_t delta)
+ {
+     int32_t prev = slot - delta;
+     return (prev >= 0) ? prev : (prev + RING_SLOTS);
+ }
+ 
+ __aicore__ inline SeqTaskWindow BuildSeqTaskWindowBatch(int32_t seq, int32_t seqLen)
+ {
+     SeqTaskWindow window;
+     window.start = seq * seqLen;
+     window.len = seqLen;
+     window.valid = (window.len > 0);
+     return window;
+ }
+ 
+ __aicore__ inline SeqTaskWindow BuildSeqTaskWindowDecode2D(int32_t seq)
+ {
+     SeqTaskWindow window;
+     window.valid = true;
+     window.start = seq;
+     window.len = 1;
+     return window;
+ }
+ 
+ __aicore__ inline constexpr int32_t DecodeWidthTplKey(uint32_t widthKey)
+ {
+     switch (widthKey) {
+         case CAUSAL_CONV1D_TPL_WIDTH_2:
+             return 2;
+         case CAUSAL_CONV1D_TPL_WIDTH_3:
+             return 3;
+         case CAUSAL_CONV1D_TPL_WIDTH_4:
+             return 4;
+         default:
+             return 0;
+     }
+ }
+ 
+ template <CAUSAL_CONV1D_TEMPLATE_ARGS>
+ class CausalConv1d {
+ public:
+     __aicore__ inline CausalConv1d() = default;
+ 
+ protected:
+     static constexpr bool kIsUpdateMode = (runModeKey == CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE);
+     static constexpr int32_t kTemplateWidth = DecodeWidthTplKey(widthKey);
+     static constexpr bool kHasCompileTimeWidth =
+         (runModeKey == CAUSAL_CONV1D_TPL_RUN_MODE_FN) && (kTemplateWidth >= 2) && (kTemplateWidth <= MAX_WIDTH);
+     static constexpr FnExecutionPlan kFnExecutionPlan = static_cast<FnExecutionPlan>(fnPlanKey);
+ 
+     __aicore__ inline void ResetRuntimeState(const CausalConv1dTilingData *tilingData);
+     __aicore__ inline void InitSharedBuffersAndEvents();
+     __aicore__ inline void LoadWeightAndBias(int32_t channelStart, int32_t baseDim);
+     __aicore__ inline void InitRing(int32_t cacheIdx, bool hasInit, int32_t stateTokenOffset, int32_t start,
+                                     int32_t len, int32_t channelStart, int32_t baseDim, int32_t dim);
+     __aicore__ inline void InitRingSeqSplit(int32_t seq, int32_t cacheIdx, bool hasInit, int32_t seqStart,
+                                             int32_t tileStart, int32_t tileLen, int32_t channelStart, int32_t baseDim,
+                                             int32_t dim);
+     __aicore__ inline void PrefetchInitStatesToWorkspace(int32_t channelStart, int32_t baseDimSize);
+     __aicore__ inline void RestoreFnLocalPartials(int32_t baseDim);
+     __aicore__ inline void ComputeFnRollingOutput(int32_t slotCurr, int32_t baseDim);
+     __aicore__ inline void AdvanceFnLocalPartials(int32_t slotCurr, int32_t baseDim);
+     __aicore__ inline void RunSeqFnRolling(int32_t start, int32_t len, int32_t channelStart, int32_t baseDim,
                                             int32_t dim);
      __aicore__ inline void RunSeq(int32_t start, int32_t len, int32_t channelStart, int32_t baseDim, int32_t dim);
      __aicore__ inline void WriteBackState(int32_t cacheIdx, int32_t len, int32_t channelStart, int32_t baseDim,
@@ -604,43 +610,12 @@ protected:
 
         Mul(state1F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
         PipeBarrier<PIPE_V>();
-        MulAddDst(state0F, ringF[(ringStart + 1) * MAX_BLOCK_DIM], weightF[(w0Idx + 1) * MAX_BLOCK_DIM], baseDim);
+        Add(state1F, state1F, state2F, baseDim);
         PipeBarrier<PIPE_V>();
 
         Mul(state2F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[w0Idx * MAX_BLOCK_DIM], baseDim);
         PipeBarrier<PIPE_V>();
     }
-}
-
-template <CAUSAL_CONV1D_TEMPLATE_ARGS>
-__aicore__ inline void CAUSAL_CONV1D_CLASS::ComputeFnRollingOutput(int32_t slotCurr, int32_t baseDim)
-{
-    if constexpr (!kHasCompileTimeWidth) {
-        return;
-    }
-
-    auto cl = CalcBufLayout::FromCalcBuf(calcBuf);
-    LocalTensor<float> &weightF = cl.weightF;
-    LocalTensor<float> &state0F = cl.tmpF;
-    LocalTensor<float> &currF = cl.currF;
-    LocalTensor<float> ringF = inBuf.Get<float>();
-
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-const bool hasActivation = HasActivation();
-if (hasActivation) {
-    ComputeFnRollingOutputRegbase<true>(ringF[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
-} else {
-    ComputeFnRollingOutputRegbase<false>(ringF[slotCurr * MAX_BLOCK_DIM], currF, state0F, weightF[3 * MAX_BLOCK_DIM], baseDim);
-}
-#else
-MulAddDst(state0F, ringF[slotCurr * MAX_BLOCK_DIM], weightF[3 * MAX_BLOCK_DIM], baseDim);
-PipeBarrier<PIPE_V>();
-
-const bool hasActivation = HasActivation();
-if (hasActivation) {
-    Silu(currF, state0F, baseDim);
-    PipeBarrier<PIPE_V>();
-}
 #endif
  }
  
