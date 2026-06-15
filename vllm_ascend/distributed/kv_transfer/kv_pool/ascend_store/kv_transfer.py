@@ -53,10 +53,12 @@ class LayerBatchBuilder:
         my_key_index: int,
         num_ranks_per_layer: int,
         page_size_bytes: int,
+        num_layers: int,
     ) -> None:
         self.my_key_index = my_key_index
         self.num_ranks_per_layer = num_ranks_per_layer
         self.page_size_bytes = page_size_bytes
+        self.num_layers = num_layers
         self._block_len_np = np.asarray(token_database.group_block_len[0], dtype=np.int64)
         self._kv_caches_base_addr_np = np.asarray(
             token_database.group_kv_caches_base_addr[0],
@@ -64,25 +66,11 @@ class LayerBatchBuilder:
         )
         group_block_stride = token_database.group_block_stride.get(0, token_database.group_block_len[0])
         self._block_stride_np = np.asarray(group_block_stride, dtype=np.int64)
-        # [DEBUG kv_pool broadcast] diagnose (1,0) vs (N,54) shape mismatch
-        logger.warning(
-            "[LayerBatchBuilder] group_block_len[0]=%s group_kv_caches_base_addr[0]=%s "
-            "group_block_stride keys=%s group_block_stride.get(0)=%s | "
-            "block_len_np.shape=%s base_addr_np.shape=%s block_stride_np.shape=%s",
-            token_database.group_block_len.get(0),
-            token_database.group_kv_caches_base_addr.get(0),
-            list(token_database.group_block_stride.keys()),
-            token_database.group_block_stride.get(0, token_database.group_block_len[0]),
-            self._block_len_np.shape,
-            self._kv_caches_base_addr_np.shape,
-            self._block_stride_np.shape,
-        )
-        self._full_block_inner_offsets_np = np.concatenate(
-            (
-                np.zeros(1, dtype=np.int64),
-                np.cumsum(self._block_len_np[:-1], dtype=np.int64),
-            )
-        )
+        # group_block_len[0] / kv_caches_base_addr[0] are laid out flat as
+        # [layer0_caches..., layer1_caches..., ...]; the per-layer stride is the
+        # total length divided by the number of layers (mirrors
+        # ChunkedTokenDatabase caches_per_layer computation).
+        self._caches_per_layer = max(1, self._block_len_np.shape[0] // max(1, num_layers))
         self._block_ids_buf: np.ndarray | None = None
         self._block_gvas_buf: np.ndarray | None = None
 
@@ -121,28 +109,24 @@ class LayerBatchBuilder:
         base_gvas_arr: np.ndarray,
         layer_id: int,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        block_len_np = self._block_len_np
-        length = block_len_np.shape[0]
-        base_offset = layer_id * length
-        layer_base_addrs = self._kv_caches_base_addr_np[base_offset : base_offset + length]
+        caches_per_layer = self._caches_per_layer
+        # group_* arrays are laid out flat as [layer0_caches..., layer1_caches...];
+        # slice the per-layer window for ``layer_id``. Using the full length as the
+        # stride (the old behaviour) overshoots for layer_id >= 1 and yields empty
+        # slices -> broadcast errors.
+        base_offset = layer_id * caches_per_layer
+        layer_base_addrs = self._kv_caches_base_addr_np[base_offset : base_offset + caches_per_layer]
+        layer_block_len = self._block_len_np[base_offset : base_offset + caches_per_layer]
+        layer_block_stride = self._block_stride_np[base_offset : base_offset + caches_per_layer]
+        # Per-cache inner offsets within one layer's page: [0, len0, len0+len1, ...].
+        layer_inner_offsets = np.concatenate(
+            (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
+        )
         rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
 
-        # [DEBUG kv_pool broadcast] shapes right before the failing broadcast
-        logger.warning(
-            "[_build_transfer_arrays] layer_id=%s length=%s base_offset=%s "
-            "layer_base_addrs.shape=%s block_ids_arr.shape=%s block_stride_np.shape=%s "
-            "kv_caches_base_addr_np.shape=%s",
-            layer_id,
-            length,
-            base_offset,
-            layer_base_addrs.shape,
-            block_ids_arr.shape,
-            self._block_stride_np.shape,
-            self._kv_caches_base_addr_np.shape,
-        )
-        addr_arr = layer_base_addrs[None, :] + block_ids_arr[:, None] * self._block_stride_np[None, :]
-        size_arr = np.broadcast_to(block_len_np, addr_arr.shape)
-        gvas_arr = base_gvas_arr[:, None] + rank_layer_offset + self._full_block_inner_offsets_np[None, :]
+        addr_arr = layer_base_addrs[None, :] + block_ids_arr[:, None] * layer_block_stride[None, :]
+        size_arr = np.broadcast_to(layer_block_len, addr_arr.shape)
+        gvas_arr = base_gvas_arr[:, None] + rank_layer_offset + layer_inner_offsets[None, :]
 
         return (
             addr_arr.ravel(),
@@ -1134,6 +1118,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             my_key_index,
             num_ranks_per_layer,
             page_size_bytes,
+            num_layers,
         )
 
     def add_stored_request(self, req_id: str):
@@ -1248,6 +1233,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             my_key_index,
             num_ranks_per_layer,
             page_size_bytes,
+            num_layers,
         )
 
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
