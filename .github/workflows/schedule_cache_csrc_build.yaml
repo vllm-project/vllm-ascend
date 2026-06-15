@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: 'Cache csrc Build Directory'
+name: 'Cache csrc Compiler Cache (ccache)'
 
 on:
   pull_request:
@@ -23,7 +23,7 @@ on:
       - main
     paths:
       - '.github/workflows/scripts/generate_cache_matrix.py'
-      - '.github/workflows/schedule_cache_csrc_build.yaml'
+      - '.github/workflows/schedule_cache_csrc_ccache.yaml'
       - '.github/workflows/test_csrc_build_cache.yaml'
   push:
     branches:
@@ -38,7 +38,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-csrc-build-${{ github.workflow }}-${{ github.ref }}
+  group: ascend-csrc-ccache-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -52,6 +52,8 @@ env:
   # CI-internal CANN image registry mirror — this is infrastructure configuration,
   # not a per-image dependency. All consumers use the same registry prefix.
   IMAGE_REGISTRY: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann
+  CSRC_COMPILER_CACHE_VERSION: ccache-v1
+  CCACHE_MAXSIZE: 5G
 
 jobs:
   # -------------------------------------------------------------------------
@@ -86,7 +88,7 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------------
-  # Job 2: build csrc cache for all branches × dockerfiles × archs
+  # Job 2: build csrc compiler cache for all branches × dockerfiles × archs
   # -------------------------------------------------------------------------
   build-cache:
     name: ${{ matrix.branch_normalized }}-${{ matrix.dockerfile }}-${{ matrix.arch }}
@@ -99,19 +101,24 @@ jobs:
 
     container:
       image: ${{ matrix.image }}
+
     env:
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
-        UV_INDEX_STRATEGY: unsafe-best-match
-        UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
-        UV_HTTP_TIMEOUT: 120
-        UV_NO_CACHE: 1
-        UV_SYSTEM_PYTHON: 1
+      UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 5G
+      CCACHE_COMPILERCHECK: content
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v6
         with:
-            ref: ${{ matrix.branch }}
+          ref: ${{ matrix.branch }}
 
       - name: Config mirrors (ubuntu)
         if: matrix.os_type == 'ubuntu'
@@ -136,34 +143,41 @@ jobs:
         if: matrix.os_type == 'ubuntu'
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15 ninja-build
+          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15 ninja-build ccache
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           pip install uv
-      
 
       - name: Install system dependencies (openeuler)
         if: matrix.os_type == 'openeuler'
         run: |
-          yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch
+          yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch ccache
+          yum install -y ninja-build || yum install -y ninja || true
           pip install uv
 
-      - name: Get current cache time
-        id: get_cache_time
-        run: |
-          cache_time=$(date -u +'%Y%m%d%H%M%S')
-          echo "cache_time=$cache_time" >> "$GITHUB_OUTPUT"
-
-      - name: Restore vllm-ascend csrc build cache
-        id: restore-csrc-build-cache
+      - name: Restore ccache
+        id: restore-ccache
         uses: runs-on/cache/restore@v5
         with:
-          path: |
-            csrc/build
-            csrc/third_party
-          key: vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ steps.get_cache_time.outputs.cache_time }}
+          path: ${{ env.CCACHE_DIR }}
+          key: vllm-ascend-${{ env.CSRC_COMPILER_CACHE_VERSION }}-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ github.sha }}
           restore-keys: |
-            vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-
+            vllm-ascend-${{ env.CSRC_COMPILER_CACHE_VERSION }}-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-
+            vllm-ascend-${{ env.CSRC_COMPILER_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-
+
+      - name: Configure ccache
+        run: |
+          set -x
+          mkdir -p "$CCACHE_DIR"
+          command -v ccache
+          ccache --version
+          ccache --set-config=max_size="$CCACHE_MAXSIZE"
+          ccache --set-config=compression=true
+          ccache --set-config=compiler_check=content
+          ccache --set-config=base_dir="$GITHUB_WORKSPACE"
+          ccache --zero-stats
+          ccache --show-config || true
+          ccache --show-stats || true
 
       - name: Install vllm-ascend
         env:
@@ -173,33 +187,43 @@ jobs:
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
           echo "Environment variables initialized"
+
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
+
+          export CCACHE_DIR="$CCACHE_DIR"
+          export CCACHE_MAXSIZE="$CCACHE_MAXSIZE"
+          export CMAKE_C_COMPILER_LAUNCHER=ccache
+          export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+          export CMAKE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ${CMAKE_ARGS:-}"
+
           echo "start installing requirements at $(date -u +'%Y-%m-%d %H:%M:%S')"
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+
           echo "start installing vllm-ascend at $(date -u +'%Y-%m-%d %H:%M:%S')"
-          if uv pip install -e . --no-build-isolation ;then
+          if uv pip install -e . --no-build-isolation; then
             echo "vllm-ascend installed successfully"
           else
             echo "start clean build for vllm-ascend at $(date -u +'%Y-%m-%d %H:%M:%S')"
-            echo "Failed to install vllm-ascend with incremental build, falling back to clean build"
+            echo "Failed to install vllm-ascend, falling back to clean build"
             rm -rf csrc/build
-            find csrc/third_party -mindepth 1 \
-              ! -path 'csrc/third_party/catlass' \
-              ! -path 'csrc/third_party/catlass/*' \
-              -depth \
-              -exec rm -rf {} +
+            rm -rf csrc/third_party
             uv pip install -e . --no-build-isolation
           fi
+
           echo "vllm-ascend installation completed at $(date -u +'%Y-%m-%d %H:%M:%S')"
-          
-      - name: Save vllm-ascend csrc build cache
-        if: success() && steps.restore-csrc-build-cache.outputs.cache-hit != 'true'
+
+      - name: Show ccache stats
+        if: always()
+        run: |
+          ccache --show-stats || true
+          ccache --show-compression || true
+
+      - name: Save ccache
+        if: success() && github.event_name != 'pull_request' && steps.restore-ccache.outputs.cache-hit != 'true'
         uses: runs-on/cache/save@v5
         with:
-          path: |
-            csrc/build
-            csrc/third_party
-          key: vllm-ascend-build-ninja-v1-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ steps.get_cache_time.outputs.cache_time }}
+          path: ${{ env.CCACHE_DIR }}
+          key: vllm-ascend-${{ env.CSRC_COMPILER_CACHE_VERSION }}-${{ matrix.branch_normalized }}-${{ runner.os }}-${{ matrix.arch }}-${{ env.IMAGE_REGISTRY }}:${{ matrix.image_tag }}-${{ github.sha }}
