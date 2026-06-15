@@ -152,6 +152,42 @@ class TestAscendRejectionSampler(TestBase):
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))
     @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
+    def test_rejection_random_sample_pytorch_rejects_all_placeholder_mtp3(self):
+        batch_size = 1
+        max_spec_len = 3
+        output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+
+        cu_num_draft_tokens = torch.tensor([3])
+        draft_token_ids = torch.tensor([PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID])
+        # Placeholder draft tokens must reject regardless of target probability.
+        # The recovered token is passed in after recovery sampling.
+        target_probs = torch.zeros((max_spec_len, 3))
+        bonus_token_ids = torch.tensor([[100]])
+        recovered_token_ids = torch.tensor([2, 1, 0])
+        uniform_probs = torch.tensor([0.0, 0.0, 0.0])
+        is_greedy = torch.tensor([False])
+
+        rejection_random_sample_pytorch(
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            None,
+            target_probs,
+            bonus_token_ids,
+            recovered_token_ids,
+            uniform_probs,
+            is_greedy,
+            max_spec_len,
+            vocab_size=3,
+            IS_NGRAM=True,
+        )
+
+        assert output_token_ids.tolist() == [[2, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]]
+
+    @patch("torch.arange", new=mock_pin_memory(torch.arange))
+    @patch("torch.ones", new=mock_pin_memory(torch.ones))
+    @patch("torch.full", new=mock_pin_memory(torch.full))
+    @patch("torch.tensor", new=mock_pin_memory(torch.tensor))
     def test_sample_recovered_tokens_pytorch_keeps_placeholder_distribution(self):
         output_token_ids = torch.empty(1, dtype=torch.int32)
         cu_num_draft_tokens = torch.tensor([1])
