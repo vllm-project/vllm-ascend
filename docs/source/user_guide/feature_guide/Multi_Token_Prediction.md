@@ -8,7 +8,7 @@ MTP boosts inference performance by parallelizing the prediction of multiple tok
 
 To enable MTP for DeepSeek-V3 models, add the following parameter when starting the service:
 
---speculative_config ' {"method": "mtp", "num_speculative_tokens": 1, "disable_padded_drafter_batch": False} '
+--speculative-config '{"method": "mtp", "num_speculative_tokens": 1, "disable_padded_drafter_batch": false}'
 
 - `num_speculative_tokens`: The number of speculative tokens that enables the model to predict multiple tokens at once, if provided. It will default to the number in the draft model config if present, otherwise, it is required.
 - `disable_padded_drafter_batch`: Disable input padding for speculative decoding. If set to True, speculative input batches can contain sequences of different lengths, which may only be supported by certain attention backends. This currently only affects the MTP method of speculation, default is False.
