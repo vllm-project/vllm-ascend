@@ -444,6 +444,12 @@ class NPUPlatform(Platform):
 
         ascend_config = init_ascend_config(vllm_config)
 
+        from vllm_ascend.logger import configure_ascend_file_logging
+        from vllm_ascend.logger import configure_ascend_logging
+
+        configure_ascend_file_logging()
+        configure_ascend_logging()
+
         if vllm_config.kv_transfer_config is not None:
             check_kv_extra_config(vllm_config)
             if not getattr(vllm_config.kv_transfer_config, "_engine_id_patched", False):
