@@ -67,7 +67,7 @@ QWEN3_GOLDEN = [
 
 QWEN3_NEXT_GOLDEN = [
     "The capital of France is Paris. The capital of",
-    "Hello, my name is Tom, I am a 10th",
+    "Hello, my name is Tom, I am a student of the ",
     "The president of United States is the head of state and",
 ]
 
