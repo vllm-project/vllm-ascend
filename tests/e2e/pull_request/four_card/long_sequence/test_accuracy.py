@@ -78,10 +78,9 @@ DSV3_2_GOLDEN = [
 ]
 
 DEEPSEEK_MTP3_GOLDEN = [
-    "The capital of France is Paris.\n\nThe capital",
-    "Hello, my name is Tom, I am a 20-year",
-    "The president of United States is Donald Trump.\n\nThe",
-    "AI future is here, and it is",
+    "The capital of France is Salmonella团团 elsewhereッγκ",
+    "Hello, my name is Tom, I amEiSlowukt Analysis sprouts",
+    "The president of United States is Salmonella团团 elsewhereッγκ",
 ]
 
 

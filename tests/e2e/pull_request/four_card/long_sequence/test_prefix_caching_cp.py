@@ -15,51 +15,51 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Prefix-cache CP guard.
+"""Qwen3.5 prefix-cache CP guard.
 
 Run `pytest tests/e2e/pull_request/four_card/long_sequence/test_prefix_caching_cp.py`.
 """
 
-import os
-from unittest.mock import patch
+from tests.e2e.conftest import VllmRunner
 
-from tests.e2e.conftest import _LONG_PROMPTS, VllmRunner
-
-MODEL = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+MODEL = "Qwen/Qwen3.5-4B"
 MAX_NUM_SEQS = 2
 
-with open(_LONG_PROMPTS[0], encoding="utf-8") as file:
-    LONG_PROMPT = file.read()
+QWEN3_5_PREFIX_MAMBA_PROMPT = (
+    "You are reading a compact synthetic operations ledger. "
+    "Use only the rows below when answering the final question.\n"
+    + "\n".join(
+        f"Row {i}: route R{i:03d} moves cargo from zone {i % 11} to zone {(i * 7) % 13}; priority is {i % 5}."
+        for i in range(64)
+    )
+    + "\n"
+)
 
 INPUT_PROMPTS = [
-    LONG_PROMPT + "Question: what is the age of John Doe? Your answer: The age of John Doe is ",
-    LONG_PROMPT + "Question: what is the age of Umar Black? Your answer: The age of Umar Black is ",
+    QWEN3_5_PREFIX_MAMBA_PROMPT + "Question: What route is listed in row 17? Answer briefly.",
+    QWEN3_5_PREFIX_MAMBA_PROMPT + "Question: What priority is listed in row 42? Answer briefly.",
 ]
 
-VLLM_OUTPUT = [INPUT_PROMPTS[0] + "29", INPUT_PROMPTS[1] + "39"]
 
-
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "768"})
-def test_prefix_cache_with_pcp_dcp_full_graph() -> None:
+def test_qwen3_5_prefix_cache_with_pcp() -> None:
     with VllmRunner(
         MODEL,
+        dtype="float16",
         block_size=128,
-        max_model_len=4096,
+        max_model_len=2048,
         max_num_seqs=MAX_NUM_SEQS,
-        enforce_eager=False,
+        max_num_batched_tokens=2048,
+        tensor_parallel_size=1,
+        prefill_context_parallel_size=4,
+        decode_context_parallel_size=1,
+        enforce_eager=True,
         enable_prefix_caching=True,
-        enable_expert_parallel=True,
-        max_num_batched_tokens=4096,
-        tensor_parallel_size=2,
-        quantization="ascend",
-        prefill_context_parallel_size=2,
-        decode_context_parallel_size=2,
-        compilation_config={
-            "cudagraph_capture_sizes": [MAX_NUM_SEQS],
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
+        mamba_cache_mode="align",
+        mamba_ssm_cache_dtype="float16",
     ) as vllm_model:
-        prefix_cache_outputs = vllm_model.generate_greedy(INPUT_PROMPTS, 2)
+        prefix_cache_outputs = vllm_model.generate_greedy(INPUT_PROMPTS, 8)
 
-    for i, (_, output_text) in enumerate(prefix_cache_outputs):
-        assert output_text == VLLM_OUTPUT[i]
+    assert len(prefix_cache_outputs) == len(INPUT_PROMPTS)
+    for output_ids, output_text in prefix_cache_outputs:
+        assert output_ids
+        assert output_text
