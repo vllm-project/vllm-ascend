@@ -230,10 +230,10 @@ public:
             auto gmTileGMM1 = gmGMM1[loopIdx * blockN];
 #endif
             LayoutC layoutUbC{2, blockN};
-
+            LayoutC layoutGmC{2, blockN, blockK};
             // Copy data from GM workspace to UB
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
-            copyGmToUbC(ubC, gmTileC, layoutUbC, layoutUbC);
+            copyGmToUbC(ubC, gmTileC, layoutUbC, layoutGmC);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
 
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbWAVMTE2List[ubListId]);
