@@ -26,7 +26,7 @@ from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.utils import communicator_switch
 
-if vllm_version_is("0.21.0"):
+if vllm_version_is("0.22.1"):
     from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (  # type: ignore[import-not-found]
         CapturedAttentionState,
         DecodeEagleCudaGraphManager,

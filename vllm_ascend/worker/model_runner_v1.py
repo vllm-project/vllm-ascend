@@ -82,7 +82,7 @@ from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
-if vllm_version_is("0.21.0"):
+if vllm_version_is("0.22.1"):
     from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
         extract_routed_experts_for_current_batch,
         get_global_experts_capturer,
@@ -1906,7 +1906,7 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.vllm_config.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.21.0"):
+            if vllm_version_is("0.22.1"):
                 capturer = get_global_experts_capturer()
                 if capturer is not None:
                     capturer.finalize_pending_copy()
@@ -2098,7 +2098,7 @@ class NPUModelRunner(GPUModelRunner):
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
-                    if vllm_version_is("0.21.0"):
+                    if vllm_version_is("0.22.1"):
                         mamba_bufs = self._get_mamba_copy_bufs()
                         preprocess_bufs = mamba_bufs
                     else:
@@ -2124,7 +2124,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
-                    if not vllm_version_is("0.21.0") and mamba_bufs.postprocess_align is not None:
+                    if not vllm_version_is("0.22.1") and mamba_bufs.postprocess_align is not None:
                         mamba_utils.stage_postprocess_inputs_to_gpu(
                             mamba_bufs.postprocess_align,
                             scheduler_output,
@@ -2457,7 +2457,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
-        if self.routed_experts_initialized and vllm_version_is("0.21.0"):
+        if self.routed_experts_initialized and vllm_version_is("0.22.1"):
             issue_routing_d2h_copy(
                 input_batch_req_ids=self.input_batch.req_ids,
                 num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
@@ -2468,7 +2468,7 @@ class NPUModelRunner(GPUModelRunner):
         routed_experts_dict = None
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.21.0") and self.routed_experts_initialized:
+            if vllm_version_is("0.22.1") and self.routed_experts_initialized:
                 routed_experts_dict = extract_routed_experts_for_current_batch(
                     req_ids=req_ids_output_copy,
                     requests=self.requests,
@@ -2502,7 +2502,7 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
             **(
                 {"routed_experts_dict": routed_experts_dict}
-                if vllm_version_is("0.21.0")
+                if vllm_version_is("0.22.1")
                 else {"routed_experts": routed_experts_lists}
             ),
         )
@@ -3058,7 +3058,7 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid,
                 )
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
-                if not vllm_version_is("0.21.0") and self.routed_experts_initialized:
+                if not vllm_version_is("0.22.1") and self.routed_experts_initialized:
                     # snapshot slot_mapping into a private device
                     # buffer so the next ``_prepare_inputs`` does not
                     # overwrite it while D2H is still pending.
@@ -3747,7 +3747,7 @@ class NPUModelRunner(GPUModelRunner):
         # plain attribute on every FusedMoE layer; ``apply()`` reads it
         # back on the hot path.
         if capturer is None:
-            # v0.21.0: capturer not passed by caller, get from global
+            # v0.22.1: capturer not passed by caller, get from global
             capturer = get_global_experts_capturer()
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE
         for module in self.compilation_config.static_forward_context.values():

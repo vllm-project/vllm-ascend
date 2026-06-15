@@ -39,7 +39,7 @@ class AscendBlockTables(BlockTables):
     ):
         from vllm_ascend.utils import vllm_version_is
 
-        if vllm_version_is("0.21.0"):
+        if vllm_version_is("0.22.1"):
             super().__init__(
                 block_sizes,
                 max_num_reqs,

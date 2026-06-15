@@ -37,7 +37,7 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
 
-if vllm_version_is("0.21.0"):
+if vllm_version_is("0.22.1"):
     from vllm.v1.worker.gpu.spec_decode.eagle import (  # type: ignore[import-not-found]
         speculator as vllm_speculator_module,  # type: ignore[import-not-found]
     )
@@ -187,7 +187,7 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         self.attn_backends = attn_backends
 
-    if vllm_version_is("0.21.0"):
+    if vllm_version_is("0.22.1"):
 
         def generate_draft(
             self,
@@ -451,7 +451,7 @@ def graph_manager_wrapper(speculator):
     def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
         return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
-    if vllm_version_is("0.21.0"):
+    if vllm_version_is("0.22.1"):
         manager_attr = "PrefillEagleCudaGraphManager"
     else:
         manager_attr = "PrefillSpeculatorCudaGraphManager"

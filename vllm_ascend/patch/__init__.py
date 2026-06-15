@@ -328,7 +328,7 @@
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionRequest`
 #      `vllm.tokenizers.deepseek_v4`
 #    Why:
-#       Supported vLLM v0.21.0 predates newer DeepSeek V4 reasoning-effort
+#       Supported vLLM v0.22.1 predates newer DeepSeek V4 reasoning-effort
 #       handling: `minimal`, `xhigh`, and `max` are rejected at request
 #       validation time, reasoning effort does not automatically enable
 #       thinking, and `reasoning_effort="none"` does not force chat mode in
@@ -338,7 +338,7 @@
 #       backport the newer `build_chat_params` enable_thinking behavior, and
 #       monkey-patch the DeepSeek V4 tokenizer reasoning-effort mapping.
 #    Related PR (if no, explain why):
-#       Upstream vLLM main behavior after v0.21.0.
+#       Upstream vLLM main behavior after v0.22.1.
 #    Future Plan:
 #       Remove this patch once vllm-ascend upgrades to a vLLM version with the
 #       same DeepSeek V4 thinking behavior.
@@ -347,7 +347,7 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tool_parsers.minimax_m2_tool_parser.MinimaxM2ToolParser`
 #    Why:
-#       vLLM 0.21.0 only emits MiniMax-M2 tool-call arguments after a complete
+#       vLLM 0.22.1 only emits MiniMax-M2 tool-call arguments after a complete
 #       `<invoke>...</invoke>` block, so long arguments are buffered instead of
 #       streamed incrementally.
 #    How:

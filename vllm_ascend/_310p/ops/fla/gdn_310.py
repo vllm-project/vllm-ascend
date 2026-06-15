@@ -26,7 +26,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params
 from vllm_ascend.utils import enable_sp, vllm_version_is, weak_ref_tensors
 
-if vllm_version_is("0.21.0"):
+if vllm_version_is("0.22.1"):
     from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
         GatedDeltaNetAttention,
     )

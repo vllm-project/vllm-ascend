@@ -62,7 +62,7 @@ class AscendRequestState(RequestState):
         num_computed_tokens,
         max_tokens=None,
     ):
-        if vllm_version_is("0.21.0"):
+        if vllm_version_is("0.22.1"):
             super().add_request(
                 req_id,
                 prompt_len,

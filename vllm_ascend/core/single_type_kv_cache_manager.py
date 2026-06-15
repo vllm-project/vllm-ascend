@@ -200,7 +200,7 @@ class CompressAttentionManager(FullAttentionManager):
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...]:
         # vLLM B renamed ``use_eagle`` to ``drop_eagle_block``; accept both.
-        eagle_drop = use_eagle if vllm_version_is("0.21.0") else drop_eagle_block
+        eagle_drop = use_eagle if vllm_version_is("0.22.1") else drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
         # ), (
@@ -259,7 +259,7 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
-    if vllm_version_is("0.21.0"):
+    if vllm_version_is("0.22.1"):
         from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map  # type: ignore[import-not-found]
 
         manager_class = spec_manager_map[type(kv_cache_spec)]

@@ -320,7 +320,7 @@ class NPUModelRunner(GPUModelRunner):
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
 
         version_b_fields: dict = {}
-        if not vllm_version_is("0.21.0"):
+        if not vllm_version_is("0.22.1"):
             num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
             max_seq_len_np = None
             if getattr(self, "use_pp", False):

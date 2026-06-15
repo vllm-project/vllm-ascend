@@ -28,7 +28,7 @@ AscendSpecDecodeBaseProposer.prepare_next_token_ids_padded = (  # type: ignore[m
 # Patch _warmup_prefill_kernels to no-op on 310P: triton.next_power_of_2 does
 # not exist in the triton version used on 310P CI, and NPU does not use these
 # CUDA warmup kernel anyway.
-if vllm_version_is("0.21.0"):
+if vllm_version_is("0.22.1"):
     from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
         GatedDeltaNetAttention,
     )

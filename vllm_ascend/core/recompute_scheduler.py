@@ -66,7 +66,7 @@ def register_ascend_mla_spec_in_manager():
     from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
 
-    if vllm_version_is("0.21.0"):
+    if vllm_version_is("0.22.1"):
         import sys as _sys
 
         _stm = _sys.modules.get("vllm.v1.core.single_type_kv_cache_manager")
@@ -846,7 +846,7 @@ class RecomputeScheduler(Scheduler):
         routing_data = None
         routing_offsets: dict[str, int] = {}
         if (
-            not vllm_version_is("0.21.0")
+            not vllm_version_is("0.22.1")
             and getattr(self, "enable_return_routed_experts", False)
             and model_runner_output.routed_experts is not None
         ):
@@ -926,7 +926,7 @@ class RecomputeScheduler(Scheduler):
                 stopped = True
 
             routed_experts = None
-            if vllm_version_is("0.21.0"):
+            if vllm_version_is("0.22.1"):
                 if (
                     model_runner_output.routed_experts_dict is not None
                     and req_id in model_runner_output.routed_experts_dict
