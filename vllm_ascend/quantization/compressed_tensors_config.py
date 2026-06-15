@@ -353,7 +353,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 return "W8A8"
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-                return "W8A8_DYNAMIC"
+                if weight_quant.type == QuantizationType.FLOAT and input_quant.type == QuantizationType.FLOAT:
+                    return "W8A8FP8_DYNAMIC"
+                else:
+                    return "W8A8_DYNAMIC"
 
             if self._is_dynamic_token_w4a8(weight_quant, input_quant):
                 return "W4A8_DYNAMIC"
