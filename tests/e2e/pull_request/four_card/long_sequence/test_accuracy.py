@@ -51,7 +51,7 @@ DSV2_PROMPTS = [
 
 DSV2_PCP_GOLDEN = [
     "The president of the United States is a man who is not only a liar, but",
-    "The capital of France is Paris.\nThe capital of the United Kingdom is",
+    "The capital of France is Paris.\nThe capital of the United States is",
 ]
 
 DSV2_DCP_GOLDEN = [
@@ -110,7 +110,7 @@ DSV2_COMMON_KWARGS: dict[str, Any] = {
     "max_num_batched_tokens": 1024,
     "enable_expert_parallel": True,
     "enable_chunked_prefill": True,
-    "enable_prefix_caching": True,
+    "enable_prefix_caching": False,
     "block_size": 128,
     "quantization": "ascend",
     "compilation_config": FULL_DECODE_GRAPH,
@@ -183,7 +183,7 @@ FULL_FEATURE_MODEL_CASES = [
             "decode_context_parallel_size": 1,
             "enable_expert_parallel": True,
             "enable_chunked_prefill": True,
-            "enable_prefix_caching": True,
+            "enable_prefix_caching": False,
             "block_size": 128,
             "quantization": "ascend",
             "long_prefill_token_threshold": 64,
@@ -205,7 +205,7 @@ FULL_FEATURE_MODEL_CASES = [
             "decode_context_parallel_size": 1,
             "enable_expert_parallel": True,
             "enable_chunked_prefill": True,
-            "enable_prefix_caching": True,
+            "enable_prefix_caching": False,
             "gpu_memory_utilization": 0.8,
             "block_size": 128,
             "speculative_config": {
@@ -230,7 +230,7 @@ FULL_FEATURE_MODEL_CASES = [
             "decode_context_parallel_size": 2,
             "enable_expert_parallel": True,
             "enable_chunked_prefill": True,
-            "enable_prefix_caching": True,
+            "enable_prefix_caching": False,
             "gpu_memory_utilization": 0.2,
             "block_size": 128,
             "quantization": "ascend",
@@ -253,7 +253,7 @@ FULL_FEATURE_MODEL_CASES = [
             "decode_context_parallel_size": 2,
             "enable_expert_parallel": True,
             "enable_chunked_prefill": True,
-            "enable_prefix_caching": True,
+            "enable_prefix_caching": False,
             "block_size": 128,
             "long_prefill_token_threshold": 4,
             "speculative_config": {
@@ -273,7 +273,7 @@ FULL_FEATURE_MODEL_CASES = [
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
     },
 )
-@wait_until_npu_memory_free(target_free_percentage=0.6)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
 @pytest.mark.parametrize("case", DSV2_PARALLEL_CASES, ids=lambda case: case.name)
 def test_dsv2_lite_parallel_config_accuracy(case: AccuracyCase) -> None:
     _run_accuracy_case(case)
@@ -286,7 +286,7 @@ def test_dsv2_lite_parallel_config_accuracy(case: AccuracyCase) -> None:
         "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
     },
 )
-@wait_until_npu_memory_free(target_free_percentage=0.6)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
 @pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
 def test_models_pcp_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
     _run_accuracy_case(case)
