@@ -21,10 +21,6 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - '.github/workflows/scripts/generate_cache_matrix.py'
-      - '.github/workflows/schedule_cache_csrc_ccache.yaml'
-      - '.github/workflows/test_csrc_build_cache.yaml'
   push:
     branches:
       - main
