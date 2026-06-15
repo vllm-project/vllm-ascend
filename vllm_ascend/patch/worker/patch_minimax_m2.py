@@ -35,7 +35,7 @@ from vllm.model_executor.models.minimax_m2 import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
+from vllm_ascend.ops.rope_cache_ops import split_qkv_tp_rmsnorm_rope_by_cache
 
 FP8_DTYPES = tuple(
     getattr(torch, dtype_name)
@@ -100,8 +100,7 @@ def _patch_forward(
     hidden_states: torch.Tensor,
 ) -> torch.Tensor:
     qkv, _ = self.qkv_proj(hidden_states)
-    cos, sin = get_cos_and_sin_slice()
-    q, k, v = torch.ops.vllm.split_qkv_tp_rmsnorm_rope(
+    q, k, v = split_qkv_tp_rmsnorm_rope_by_cache(
         input=qkv,
         q_weight=self.q_norm.weight,
         k_weight=self.k_norm.weight,
@@ -111,8 +110,8 @@ def _patch_forward(
         rotary_dim=getattr(self.rotary_emb, "rotary_dim", self.head_dim),
         eps=self.q_norm.variance_epsilon,
         tp_world=self.q_norm.tp_world,
-        cos=cos,
-        sin=sin,
+        positions=positions,
+        rotary_emb=self.rotary_emb,
     )
     attn_output = self.attn(q, k, v)
     output, _ = self.o_proj(attn_output)

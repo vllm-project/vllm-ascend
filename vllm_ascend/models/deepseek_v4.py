@@ -31,7 +31,6 @@ from itertools import islice
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm._aiter_ops import rocm_aiter_ops
@@ -72,6 +71,7 @@ from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
+from vllm_ascend.ops.rope_cache_ops import rotary_mul_by_cache
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
@@ -547,29 +547,33 @@ class Compressor(nn.Module):
         self,
         x: torch.Tensor,
         start_pos: int,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
+        rotary_emb,
     ) -> torch.Tensor:
         pass
 
     def rope_single(
         self,
         x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
+        rotary_emb,
         inverse: bool = False,
     ) -> torch.Tensor:
         dtype = x.dtype
-        if inverse:
-            sin = sin * -1
         tnd_layout = 1
         if len(x.shape) == 3:
             num_tokens, num_heads, rotary_dim = x.shape
         else:
             tnd_layout = 0
             _, num_tokens, num_heads, rotary_dim = x.shape
-        x_rot = torch_npu.npu_rotary_mul(
-            x.reshape(num_tokens, num_heads, 1, rotary_dim).to(torch.float32), cos, sin, rotary_mode="interleave"
+        x_for_rope = x.reshape(num_tokens, num_heads, 1, rotary_dim)
+        x_rot = rotary_mul_by_cache(
+            x_for_rope,
+            positions,
+            rotary_emb,
+            rotary_mode="interleave",
+            inverse=inverse,
+            fp32_compute=True,
         )
         if tnd_layout:
             x = x_rot.reshape(num_tokens, -1, rotary_dim)
@@ -756,6 +760,7 @@ class DeepseekV4Attention(nn.Module):
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
+            rope_layer_name=self.rotary_emb.rope_cache_key,
         )
 
     def forward(

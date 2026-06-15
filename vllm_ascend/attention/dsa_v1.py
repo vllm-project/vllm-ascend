@@ -20,7 +20,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.ops.rope_cache_ops import compressor_dsa_by_cache, inplace_partial_rotary_mul_dsa_by_cache
+from vllm_ascend.ops.rope_dsv4 import DSARopeCacheView, get_dsa_rope_cache_proxy
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -225,10 +226,9 @@ class AscendDSAPrefillMetadata:
     max_query_len: int
     max_seq_lens: int
 
-    sin: torch.Tensor = None
-    cos: torch.Tensor = None
-    compress_sin: torch.Tensor = None
-    compress_cos: torch.Tensor = None
+    compress_positions: torch.Tensor | dict[str, torch.Tensor] = None
+    rope_use_cache: bool = False
+    compress_rope_use_cache: bool = False
     start_pos: torch.Tensor | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
@@ -252,10 +252,9 @@ class AscendDSADecodeMetadata:
     query_start_loc: torch.tensor = None
     query_start_loc_cpu: torch.tensor = None
     attn_mask: torch.Tensor | None = None
-    sin: torch.Tensor = None
-    cos: torch.Tensor = None
-    compress_sin: torch.Tensor = None
-    compress_cos: torch.Tensor = None
+    compress_positions: torch.Tensor | dict[str, torch.Tensor] = None
+    rope_use_cache: bool = False
+    compress_rope_use_cache: bool = False
     cp_seq_len: torch.Tensor = None
     batch_seq_mask: torch.Tensor = None
     start_pos: torch.Tensor = None
@@ -275,12 +274,12 @@ class AscendDSAMetadata:
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
     block_tables: torch.Tensor
-    sin: torch.Tensor
-    cos: torch.Tensor
+    input_positions: torch.Tensor
 
     num_decodes: int
     num_decode_tokens: int
     num_prefills: int
+    rope_use_cache: bool = False
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -384,8 +383,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         self.reorder_batch_threshold = self.decode_threshold
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-        self.cos_cache = None
-        self.sin_cache = None
 
         self.cu_seq_lens_cpu: torch.Tensor = None
         self.num_decodes = 0
@@ -525,12 +522,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_input_tokens = common_attn_metadata.num_input_tokens
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
             self.common_ratio_to_sas_metadata["input_positions"] = input_positions
-            if self.num_prefills:
-                cos, sin = get_cos_and_sin_dsa(input_positions)
-            else:
-                cos, sin = get_cos_and_sin_dsa(input_positions, True)
-            self.common_ratio_to_sas_metadata["cos"] = cos
-            self.common_ratio_to_sas_metadata["sin"] = sin
+            self.common_ratio_to_sas_metadata["rope_use_cache"] = not self.num_prefills
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
             self.common_ratio_to_sas_metadata["seq_lens"] = self.seq_lens
 
@@ -548,7 +540,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.set_num_actual_tokens(common_attn_metadata)
             num_input_tokens = common_attn_metadata.num_input_tokens
             input_positions = self.common_ratio_to_sas_metadata["input_positions"]
-            cos, sin = self.common_ratio_to_sas_metadata["cos"], self.common_ratio_to_sas_metadata["sin"]
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
             self.query_lens = self.common_ratio_to_sas_metadata["query_lens"]
 
@@ -587,8 +578,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc=query_start_loc,
             block_tables=None,
             seq_lens=self.seq_lens,
-            cos=cos,
-            sin=sin,
+            input_positions=input_positions,
+            rope_use_cache=self.common_ratio_to_sas_metadata["rope_use_cache"],
             hadamard=AscendDSAMetadataBuilder.hadamard,
         )
 
@@ -627,10 +618,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.prefill_ratio_to_sas_metadata["prefill_input_positions"] = prefill_input_positions
             self.prefill_ratio_to_sas_metadata["prefill_query_start_loc"] = prefill_query_start_loc
 
-            cos, sin = get_cos_and_sin_dsa(prefill_input_positions)
-            self.prefill_ratio_to_sas_metadata["cos"] = cos
-            self.prefill_ratio_to_sas_metadata["sin"] = sin
-
             prefill_seq_lens = self.seq_lens[reqs_start:]
             num_prefill = prefill_seq_lens.shape[0]
             self.prefill_ratio_to_sas_metadata["prefill_seq_lens"] = prefill_seq_lens
@@ -641,8 +628,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seq_lens = self.prefill_ratio_to_sas_metadata["max_seq_lens"]
             prefill_input_positions = self.prefill_ratio_to_sas_metadata["prefill_input_positions"]
             prefill_query_start_loc = self.prefill_ratio_to_sas_metadata["prefill_query_start_loc"]
-            cos = self.prefill_ratio_to_sas_metadata["cos"]
-            sin = self.prefill_ratio_to_sas_metadata["sin"]
             prefill_seq_lens = self.prefill_ratio_to_sas_metadata["prefill_seq_lens"]
             num_prefill = self.prefill_ratio_to_sas_metadata["num_prefill"]
 
@@ -678,15 +663,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             end = min(self.num_prefill_tokens, self.num_prefill_tokens // compress_ratio + self.num_prefills)
             return compressed_decode_num, end
 
-        if self.prefill_ratio_to_sas_metadata.get(f"c{self.compressor_ratio}_cos", None) is None:
-            compress_cos, compress_sin = get_cos_and_sin_dsa(
-                _get_padded_compressed_position(prefill_input_positions, self.compressor_ratio)
-            )
-            self.prefill_ratio_to_sas_metadata[f"c{self.compressor_ratio}_cos"] = compress_cos
-            self.prefill_ratio_to_sas_metadata[f"c{self.compressor_ratio}_sin"] = compress_sin
+        compress_positions_key = f"c{self.compressor_ratio}_positions"
+        if self.prefill_ratio_to_sas_metadata.get(compress_positions_key, None) is None:
+            compressed_positions = _get_padded_compressed_position(prefill_input_positions, self.compressor_ratio)
+            if self.compressor_ratio > 1:
+                compress_positions = {f"c{self.compressor_ratio}": compressed_positions}
+            else:
+                compress_positions = compressed_positions
+            self.prefill_ratio_to_sas_metadata[compress_positions_key] = compress_positions
         else:
-            compress_cos = self.prefill_ratio_to_sas_metadata[f"c{self.compressor_ratio}_cos"]
-            compress_sin = self.prefill_ratio_to_sas_metadata[f"c{self.compressor_ratio}_sin"]
+            compress_positions = self.prefill_ratio_to_sas_metadata[compress_positions_key]
 
         if self.prefill_ratio_to_sas_metadata.get(f"compressed_c{self.compressor_ratio}_tokens_start", None) is None:
             decode_input_positions = input_positions[:tokens_start]
@@ -837,10 +823,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_query_len=max_query_len,
             max_seq_lens=max_seq_lens,
             query_start_loc=prefill_query_start_loc,
-            sin=sin,
-            cos=cos,
-            compress_sin=compress_sin,
-            compress_cos=compress_cos,
+            compress_positions=compress_positions,
+            compress_rope_use_cache=False,
             start_pos=self.start_pos_prefill[:num_prefill],
             sas_metadata=sas_metadata,
             qli_metadata=qli_metadata,
@@ -860,9 +844,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.decode_ratio_to_sas_metadata["query_start_loc"] = query_start_loc
             input_positions = common_attn_metadata.positions[: self.num_decode_tokens].long()
             self.decode_ratio_to_sas_metadata["input_positions"] = input_positions
-            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True)
-            self.decode_ratio_to_sas_metadata["cos"] = cos
-            self.decode_ratio_to_sas_metadata["sin"] = sin
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: self.num_decodes + 1]
             input_positions_cpu = common_attn_metadata.positions_cpu[: self.num_decode_tokens].long()
@@ -894,8 +875,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         else:
             query_start_loc = self.decode_ratio_to_sas_metadata["query_start_loc"]
             input_positions = self.decode_ratio_to_sas_metadata["input_positions"]
-            cos = self.decode_ratio_to_sas_metadata["cos"]
-            sin = self.decode_ratio_to_sas_metadata["sin"]
             query_start_loc_cpu = self.decode_ratio_to_sas_metadata["query_start_loc_cpu"]
             decode_input_positions = self.decode_ratio_to_sas_metadata["decode_input_positions"]
             max_seq_lens = self.decode_ratio_to_sas_metadata["max_seq_lens"]
@@ -921,20 +900,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             return gpu_pad_positions
 
         layer_name = f"c{self.compressor_ratio}"
-        if self.decode_ratio_to_sas_metadata.get(layer_name + "_cos", None) is None:
-            compress_cos, compress_sin = get_cos_and_sin_dsa(
-                {
-                    layer_name: _get_padded_compressed_position(
-                        decode_input_positions, self.compressor_ratio, input_positions.device
-                    )
-                },
-                use_cache=True,
-            )
-            self.decode_ratio_to_sas_metadata[layer_name + "_cos"] = compress_cos
-            self.decode_ratio_to_sas_metadata[layer_name + "_sin"] = compress_sin
+        compress_positions_key = layer_name + "_positions"
+        if self.decode_ratio_to_sas_metadata.get(compress_positions_key, None) is None:
+            compress_positions = {
+                layer_name: _get_padded_compressed_position(
+                    decode_input_positions, self.compressor_ratio, input_positions.device
+                )
+            }
+            self.decode_ratio_to_sas_metadata[compress_positions_key] = compress_positions
         else:
-            compress_cos = self.decode_ratio_to_sas_metadata[layer_name + "_cos"]
-            compress_sin = self.decode_ratio_to_sas_metadata[layer_name + "_sin"]
+            compress_positions = self.decode_ratio_to_sas_metadata[compress_positions_key]
 
         def _get_compressed_decode_token_start(decode_input_positions, compress_ratio):
             # Note(qcs): some models use compress_ratio=0 as non-compression tag.
@@ -1084,10 +1059,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             attn_mask=None,
             query_start_loc=query_start_loc,  # cached
             query_start_loc_cpu=query_start_loc_cpu,
-            sin=sin[: self.num_decode_tokens, ...],
-            cos=cos[: self.num_decode_tokens, ...],
-            compress_sin=compress_sin,
-            compress_cos=compress_cos,
+            compress_positions=compress_positions,
+            rope_use_cache=True,
+            compress_rope_use_cache=True,
             cp_seq_len=cp_seq_len,
             batch_seq_mask=batch_seq_mask,
             start_pos=self.start_pos_decode[: self.num_decodes],  # cached
@@ -1109,12 +1083,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         num_input_tokens = common_attn_metadata.num_input_tokens
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
-        if num_prefills:
-            cos, sin = get_cos_and_sin_dsa(input_positions)
-        else:
-            # disable use_cache, otherwise, draft_step>0 will override draft_step=0
-            # take care of this, if full graph is needed then rope cache is inevitable
-            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.spec_slot_mapping[draft_step - 1][:num_input_tokens] = torch.stack(  # type: ignore[index]
@@ -1156,8 +1124,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc=None,
             block_tables=None,
             seq_lens=None,
-            cos=cos,
-            sin=sin,
+            input_positions=input_positions,
+            rope_use_cache=False,
             hadamard=None,
         )
 
@@ -1181,7 +1149,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         input_positions = common_attn_metadata.positions[:num_actual_tokens].long()
         prefill_input_positions = input_positions[tokens_start:]
-        cos, sin = get_cos_and_sin_dsa(prefill_input_positions)
 
         prefill_slot_mapping = self.spec_slot_mapping[draft_step - 1][tokens_start:num_prefill_tokens]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
@@ -1214,16 +1181,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_lens=None,
             seq_lens=seq_lens,
             context_lens=None,
-            input_positions=None,  # type: ignore[arg-type]
+            input_positions=prefill_input_positions,
             block_table=block_table[reqs_start:, ...],
             slot_mapping=prefill_slot_mapping,
             max_query_len=None,  # type: ignore[arg-type]
             max_seq_lens=None,  # type: ignore[arg-type]
             query_start_loc=prefill_query_start_loc,
-            sin=sin,
-            cos=cos,
-            compress_sin=None,
-            compress_cos=None,
+            rope_use_cache=False,
             start_pos=None,
             sas_metadata=sas_metadata,
             qli_metadata=None,
@@ -1258,9 +1222,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_kv = torch.max(_seq_lens_cpu[:num_decodes]).item()
 
         input_positions = common_attn_metadata.positions[:num_decode_tokens_typed].long()
-        # disable use_cache, otherwise, draft_step>0 will override draft_step=0
-        # take care of this, if full graph is needed then rope cache is inevitable
-        cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
 
         slot_mapping = self.spec_slot_mapping[draft_step - 1][:num_decode_tokens_typed]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor
@@ -1290,7 +1251,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
 
         decode_metadata = AscendDSADecodeMetadata(
-            input_positions=None,
+            input_positions=input_positions,
             block_table=block_table[:num_decodes, ...],
             slot_mapping=slot_mapping,
             seq_lens=seq_lens[:num_decodes],
@@ -1301,10 +1262,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             attn_mask=None,
             query_start_loc=query_start_loc,
             query_start_loc_cpu=None,
-            sin=sin[:num_decode_tokens, ...],
-            cos=cos[:num_decode_tokens, ...],
-            compress_sin=None,
-            compress_cos=None,
+            rope_use_cache=False,
             cp_seq_len=None,
             batch_seq_mask=None,
             start_pos=None,
@@ -1536,18 +1494,53 @@ class AscendDSAImpl(DSAAttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
 
+    @staticmethod
+    def _dsa_rope_cache(
+        positions: torch.Tensor | dict[str, torch.Tensor],
+        *,
+        use_cache: bool = False,
+    ):
+        return get_dsa_rope_cache_proxy(positions, use_cache=use_cache)
+
+    def _dsa_layer_rope_cache(
+        self,
+        layer_name: str,
+        positions: torch.Tensor | dict[str, torch.Tensor],
+        *,
+        use_cache: bool = False,
+    ) -> DSARopeCacheView:
+        return self._dsa_rope_cache(positions, use_cache=use_cache)[layer_name]
+
+    @staticmethod
+    def _apply_dsa_rope(
+        x: torch.Tensor,
+        rope_cache: DSARopeCacheView,
+        *,
+        partial_slice: list[int],
+        inverse: bool = False,
+    ) -> None:
+        inplace_partial_rotary_mul_dsa_by_cache(
+            x,
+            rope_cache,
+            rotary_mode="interleave",
+            partial_slice=partial_slice,
+            inverse=inverse,
+        )
+
     # TODO: cast to bfloat16 to speed up
-    def rope_single(self, x, cos, sin, inverse=False):
-        if inverse:
-            sin = -sin
+    def rope_single(self, x, rope_cache: DSARopeCacheView, inverse=False):
         tnd_layout = 1
         if len(x.shape) == 3:
             num_tokens, num_heads, rotary_dim = x.shape
         else:
             tnd_layout = 0
             _, num_tokens, num_heads, rotary_dim = x.shape
-        x_rot = torch_npu.npu_rotary_mul(
-            x.reshape(num_tokens, num_heads, 1, rotary_dim), cos, sin, rotary_mode="interleave"
+        x_rot = x.reshape(num_tokens, num_heads, 1, rotary_dim)
+        self._apply_dsa_rope(
+            x_rot,
+            rope_cache,
+            partial_slice=[0, rotary_dim],
+            inverse=inverse,
         )
         if tnd_layout:
             x = x_rot.reshape(num_tokens, -1, rotary_dim)
@@ -1610,26 +1603,24 @@ class AscendDSAImpl(DSAAttentionImpl):
                 need_prefill_gather,
             )  # type: ignore[arg-type]
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
-            cos = attn_metadata[0].prefill.cos[layer_name]
-            sin = attn_metadata[0].prefill.sin[layer_name]
 
         if has_decode:
             assert attn_metadata[0].decode is not None
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
             o_proj_input[:decode_tokens] = output_decode
-            cos = attn_metadata[0].decode.cos[layer_name]
-            sin = attn_metadata[0].decode.sin[layer_name]
 
-        cos = attn_metadata[0].cos[layer_name]
-        sin = attn_metadata[0].sin[layer_name]
+        rope_cache = self._dsa_layer_rope_cache(
+            layer_name,
+            attn_metadata[0].input_positions,
+            use_cache=attn_metadata[0].rope_use_cache,
+        )
         num_tokens = o_proj_input.shape[0]
 
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        self._apply_dsa_rope(
             o_proj_input.unsqueeze(1),
-            cos,
-            -sin,
-            rotary_mode="interleave",
+            rope_cache,
             partial_slice=[self.nope_head_dim, self.head_dim],
+            inverse=True,
         )
 
         # o
@@ -1654,7 +1645,14 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         return output_padded
 
-    def _mla_prolog_multistream(self, hidden_states, cos, sin, swa_kv_cache, slot_mapping, is_prefill=False):
+    def _mla_prolog_multistream(
+        self,
+        hidden_states,
+        rope_cache: DSARopeCacheView,
+        swa_kv_cache,
+        slot_mapping,
+        is_prefill=False,
+    ):
         """3-block multi-stream: 3-stage CV parallel + serial tail
 
         Block partition (V: Vector, C: Cube, AIV: AI Vector):
@@ -1716,11 +1714,9 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            self._apply_dsa_rope(
                 kv.unsqueeze(1),
-                cos,
-                sin,
-                rotary_mode="interleave",
+                rope_cache,
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
             torch.ops._C_ascend.npu_scatter_nd_update_v2(swa_kv_cache, slot_mapping, kv)
@@ -1743,17 +1739,21 @@ class AscendDSAImpl(DSAAttentionImpl):
         main_stream.wait_stream(aux_stream)
 
         q = triton_q_rms(q, self.eps)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        self._apply_dsa_rope(
             q.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
+            rope_cache,
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
         return q, qr, qr_pertoken_scale
 
-    def _mla_prolog_prefill_overlap(self, hidden_states, cos, sin, swa_kv_cache, slot_mapping):
+    def _mla_prolog_prefill_overlap(
+        self,
+        hidden_states,
+        rope_cache: DSARopeCacheView,
+        swa_kv_cache,
+        slot_mapping,
+    ):
         """Delayed allgather + compute-communication overlap for pure prefill.
 
         hidden_states: [N/tp, dim] local SP partition.
@@ -1764,7 +1764,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         """
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
-        num_actual_tokens = cos.shape[0]
+        num_actual_tokens = rope_cache.positions.shape[0]
 
         # === Phase 1: q_a_down [main/C] || kv_quant [aux/V] ===
         q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
@@ -1810,21 +1810,17 @@ class AscendDSAImpl(DSAAttentionImpl):
         main_stream.wait_stream(aux_stream)
 
         # === Tail: q_rope + kv_rope + scatter (main stream, serial) ===
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        self._apply_dsa_rope(
             q.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
+            rope_cache,
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
         assert self.rope_head_dim is not None
         kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        self._apply_dsa_rope(
             kv.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
+            rope_cache,
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
         torch.ops._C_ascend.npu_scatter_nd_update_v2(swa_kv_cache, slot_mapping, kv)
@@ -1867,23 +1863,25 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         common_prefill_metadata = _require_prefill_metadata(compress_common_attn_metadata)
         swa_prefill_metadata = _require_prefill_metadata(swa_metadata)
-        cos = common_prefill_metadata.cos[layer_name]
-        sin = common_prefill_metadata.sin[layer_name]
+        rope_cache = self._dsa_layer_rope_cache(
+            layer_name,
+            common_prefill_metadata.input_positions,
+            use_cache=common_prefill_metadata.rope_use_cache,
+        )
         actual_seq_lengths_query = common_prefill_metadata.query_start_loc
         actual_seq_lengths_key = common_prefill_metadata.seq_lens
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
             q, qr, _ = self._mla_prolog_multistream(
-                hidden_states, cos, sin, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
+                hidden_states, rope_cache, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
             )
         elif need_prefill_gather:
             # Delayed allgather + compute-communication overlap
             assert swa_metadata.prefill is not None
             q, qr, hidden_states = self._mla_prolog_prefill_overlap(
                 hidden_states,
-                cos,
-                sin,
+                rope_cache,
                 swa_kv_cache,
                 swa_metadata.prefill.slot_mapping,
             )
@@ -1895,11 +1893,9 @@ class AscendDSAImpl(DSAAttentionImpl):
             q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
             q = triton_q_rms(q, self.eps)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            self._apply_dsa_rope(
                 q.unsqueeze(1),
-                cos,
-                sin,
-                rotary_mode="interleave",
+                rope_cache,
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
             # win kv & tok_dis
@@ -1908,20 +1904,21 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            self._apply_dsa_rope(
                 kv.unsqueeze(1),
-                cos,
-                sin,
-                rotary_mode="interleave",
+                rope_cache,
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
 
             # swa exec kv
             torch.ops._C_ascend.npu_scatter_nd_update_v2(swa_kv_cache, swa_prefill_metadata.slot_mapping, kv)
 
-        compress_cos = common_prefill_metadata.compress_cos[layer_name]
-        compress_sin = common_prefill_metadata.compress_sin[layer_name]
         if self.compress_ratio > 1:
+            compressed_rope_cache = self._dsa_layer_rope_cache(
+                layer_name,
+                common_prefill_metadata.compress_positions,
+                use_cache=common_prefill_metadata.compress_rope_use_cache,
+            )
             compressor_prefill_metadata = _require_prefill_metadata(compressor_attn_metadata)
             compressor_state_prefill_metadata = _require_prefill_metadata(compressor_kv_state_metadata)
             compress_topk_idxs = None
@@ -1941,10 +1938,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                             qr=qr,
                             kv_cache=kv_cache,
                             attn_metadata=attn_metadata,
-                            cos=cos,
-                            sin=sin,
-                            compressed_cos=compress_cos,
-                            compressed_sin=compress_sin,
+                            rope_cache=rope_cache,
+                            compressed_rope_cache=compressed_rope_cache,
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             with_prefill=True,
                         )
@@ -1954,10 +1949,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                             qr=qr,
                             kv_cache=kv_cache,
                             attn_metadata=attn_metadata,
-                            cos=cos,
-                            sin=sin,
-                            compressed_cos=compress_cos,
-                            compressed_sin=compress_sin,
+                            rope_cache=rope_cache,
+                            compressed_rope_cache=compressed_rope_cache,
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=True,
@@ -1966,15 +1959,14 @@ class AscendDSAImpl(DSAAttentionImpl):
             coff = 2 if self.compressor_overlap else 1
 
             # Inline compressor + scatter (c128, c4 non-dual)
-            compressed_kv = torch.ops._C_ascend.compressor(
+            compressed_kv = compressor_dsa_by_cache(
                 hidden_states,
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
                 state_cache.squeeze(-2),
                 self.compressor_ape,
                 self.compressor_norm.weight,
-                compress_sin.view(-1, compress_sin.shape[-1]),
-                compress_cos.view(-1, compress_cos.shape[-1]),
+                compressed_rope_cache,
                 state_block_table=compressor_state_prefill_metadata.block_table,
                 cu_seqlens=actual_seq_lengths_query,
                 seqused=None,
@@ -2140,15 +2132,18 @@ class AscendDSAImpl(DSAAttentionImpl):
             compress_common_attn_metadata = swa_metadata
         common_decode_metadata = _require_decode_metadata(compress_common_attn_metadata)
         swa_decode_metadata = _require_decode_metadata(swa_metadata)
-        cos = common_decode_metadata.cos[layer_name]
-        sin = common_decode_metadata.sin[layer_name]
+        rope_cache = self._dsa_layer_rope_cache(
+            layer_name,
+            common_decode_metadata.input_positions,
+            use_cache=common_decode_metadata.rope_use_cache,
+        )
         actual_seq_lengths_query = common_decode_metadata.query_start_loc
         actual_seq_lengths_key = common_decode_metadata.seq_lens
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
             q, qr, qr_pertoken_scale = self._mla_prolog_multistream(
-                hidden_states, cos, sin, swa_kv_cache, swa_decode_metadata.slot_mapping, is_prefill=False
+                hidden_states, rope_cache, swa_kv_cache, swa_decode_metadata.slot_mapping, is_prefill=False
             )
         else:
             wait_hidden_state_cal_event = (
@@ -2178,11 +2173,9 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             q = triton_q_rms(q, self.eps)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            self._apply_dsa_rope(
                 q.unsqueeze(1),
-                cos,
-                sin,
-                rotary_mode="interleave",
+                rope_cache,
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
 
@@ -2196,11 +2189,9 @@ class AscendDSAImpl(DSAAttentionImpl):
                 assert self.rope_head_dim is not None
                 kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
-                torch.ops._C_ascend.inplace_partial_rotary_mul(
+                self._apply_dsa_rope(
                     kv.unsqueeze(1),
-                    cos,
-                    sin,
-                    rotary_mode="interleave",
+                    rope_cache,
                     partial_slice=[self.nope_head_dim, self.head_dim],
                 )
 
@@ -2217,8 +2208,11 @@ class AscendDSAImpl(DSAAttentionImpl):
         if self.compress_ratio > 1:
             compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)
             compressor_state_decode_metadata = _require_decode_metadata(compressor_kv_state_metadata)
-            compress_cos = common_decode_metadata.compress_cos[layer_name]
-            compress_sin = common_decode_metadata.compress_sin[layer_name]
+            compressed_rope_cache = self._dsa_layer_rope_cache(
+                layer_name,
+                common_decode_metadata.compress_positions,
+                use_cache=common_decode_metadata.compress_rope_use_cache,
+            )
             compress_topk_idxs = None
             if self.compress_ratio == 4:
                 # IndexCache: decode segment occupies buffer[:num_decode_tokens]
@@ -2232,10 +2226,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                             qr=qr,
                             kv_cache=kv_cache,
                             attn_metadata=attn_metadata,
-                            cos=cos,
-                            sin=sin,
-                            compressed_cos=compress_cos,
-                            compressed_sin=compress_sin,
+                            rope_cache=rope_cache,
+                            compressed_rope_cache=compressed_rope_cache,
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             with_prefill=False,
                             qr_pertoken_scale=qr_pertoken_scale,
@@ -2246,10 +2238,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                             qr=qr,
                             kv_cache=kv_cache,
                             attn_metadata=attn_metadata,
-                            cos=cos,
-                            sin=sin,
-                            compressed_cos=compress_cos,
-                            compressed_sin=compress_sin,
+                            rope_cache=rope_cache,
+                            compressed_rope_cache=compressed_rope_cache,
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=False,
@@ -2259,15 +2249,14 @@ class AscendDSAImpl(DSAAttentionImpl):
             coff = 2 if self.compressor_overlap else 1
 
             # Inline compressor + scatter (c128, c4 non-dual)
-            compressed_kv = torch.ops._C_ascend.compressor(
+            compressed_kv = compressor_dsa_by_cache(
                 hidden_states,
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
                 state_cache.squeeze(-2),
                 self.compressor_ape,
                 self.compressor_norm.weight,
-                compress_sin.view(-1, compress_sin.shape[-1]),
-                compress_cos.view(-1, compress_cos.shape[-1]),
+                compressed_rope_cache,
                 state_block_table=compressor_state_decode_metadata.block_table,
                 cu_seqlens=actual_seq_lengths_query,
                 seqused=None,
@@ -2402,10 +2391,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         qr: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        compressed_cos: torch.Tensor,
-        compressed_sin: torch.Tensor,
+        rope_cache: DSARopeCacheView,
+        compressed_rope_cache: DSARopeCacheView,
         actual_seq_lengths_query: torch.Tensor,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
@@ -2443,11 +2430,9 @@ class AscendDSAImpl(DSAAttentionImpl):
             q = self.inderxer_wq_b(qr)
         q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)  # [T, N, D]
 
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        self._apply_dsa_rope(
             q.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
+            rope_cache,
             partial_slice=[self.indexcom_head_dim - self.rope_head_dim, self.indexcom_head_dim],
         )
 
@@ -2465,15 +2450,14 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv_block_table = indexer_state_decode_metadata.block_table
             start_pos = indexer_scale_decode_metadata.start_pos
 
-        kv = torch.ops._C_ascend.compressor(
+        kv = compressor_dsa_by_cache(
             x,
             self.indexcom_wkv.weight,
             self.indexcom_wgate.weight,
             indexer_state_cache.squeeze(-2),
             self.indexcom_ape,
             self.indexcom_norm.weight,
-            compressed_sin.view(-1, compressed_sin.shape[-1]),
-            compressed_cos.view(-1, compressed_cos.shape[-1]),
+            compressed_rope_cache,
             state_block_table=kv_block_table,
             cu_seqlens=actual_seq_lengths_query,
             seqused=None,
@@ -2628,10 +2612,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         qr: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        compressed_cos: torch.Tensor,
-        compressed_sin: torch.Tensor,
+        rope_cache: DSARopeCacheView,
+        compressed_rope_cache: DSARopeCacheView,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor | None = None,
         with_prefill: bool = False,
@@ -2642,10 +2624,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             qr,
             kv_cache,
             attn_metadata,
-            cos,
-            sin,
-            compressed_cos,
-            compressed_sin,
+            rope_cache,
+            compressed_rope_cache,
             actual_seq_lengths_query,
             with_prefill,
             qr_pertoken_scale,
@@ -2661,10 +2641,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         qr: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        compressed_cos: torch.Tensor,
-        compressed_sin: torch.Tensor,
+        rope_cache: DSARopeCacheView,
+        compressed_rope_cache: DSARopeCacheView,
         actual_seq_lengths_query: torch.Tensor,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
@@ -2714,15 +2692,14 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv_block_table = indexer_state_decode_metadata.block_table
             start_pos = indexer_scale_decode_metadata.start_pos
 
-        kv = torch.ops._C_ascend.compressor(
+        kv = compressor_dsa_by_cache(
             x,
             self.indexcom_wkv.weight,
             self.indexcom_wgate.weight,
             indexer_state_cache.squeeze(-2),
             self.indexcom_ape,
             self.indexcom_norm.weight,
-            compressed_sin.view(-1, compressed_sin.shape[-1]),
-            compressed_cos.view(-1, compressed_cos.shape[-1]),
+            compressed_rope_cache,
             state_block_table=kv_block_table,
             cu_seqlens=actual_seq_lengths_query,
             seqused=None,
@@ -2782,11 +2759,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)
 
         # ===== Part2: rope[V] (main only) =====
-        torch.ops._C_ascend.inplace_partial_rotary_mul(  # rope
+        self._apply_dsa_rope(
             q.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
+            rope_cache,
             partial_slice=[self.indexcom_head_dim - self.rope_head_dim, self.indexcom_head_dim],
         )
 

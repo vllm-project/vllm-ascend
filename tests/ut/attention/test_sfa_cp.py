@@ -308,8 +308,7 @@ class TestAscendSFACPMetadataBuilder(TestBase):
             seq_lens_cpu=torch.tensor([4, 4], dtype=torch.int32),
             cum_query_lens=torch.tensor([1, 2], dtype=torch.int32),
             block_table=torch.zeros((2, 4), dtype=torch.int32),
-            sin=torch.randn(2, 32),
-            cos=torch.randn(2, 32),
+            input_positions=torch.arange(2),
             num_input_tokens=2,
             attn_state=AscendAttentionState.DecodeOnly,
         )
@@ -367,8 +366,7 @@ class TestAscendSFACPMetadataBuilder(TestBase):
             seq_lens_cpu=torch.tensor([4, 8, 8], dtype=torch.int32),
             cum_query_lens=torch.tensor([1, 4, 7], dtype=torch.int32),
             block_table=block_table,
-            sin=torch.randn(7, 32),
-            cos=torch.randn(7, 32),
+            input_positions=torch.arange(7),
             num_input_tokens=7,
             attn_state=AscendAttentionState.ChunkedPrefill,
         )
@@ -418,8 +416,7 @@ class TestAscendSFACPMetadataBuilder(TestBase):
             seq_lens_cpu=torch.tensor([8, 8], dtype=torch.int32),
             cum_query_lens=torch.tensor([3, 6], dtype=torch.int32),
             block_table=block_table,
-            sin=torch.randn(6, 32),
-            cos=torch.randn(6, 32),
+            input_positions=torch.arange(6),
             num_input_tokens=6,
             attn_state=AscendAttentionState.ChunkedPrefill,
         )
@@ -466,8 +463,7 @@ class TestAscendSFACPMetadataBuilder(TestBase):
             seq_lens_cpu=torch.tensor([4, 4], dtype=torch.int32),
             cum_query_lens=torch.tensor([1, 2], dtype=torch.int32),
             block_table=torch.zeros((2, 4), dtype=torch.int32),
-            sin=torch.randn(2, 32),
-            cos=torch.randn(2, 32),
+            input_positions=torch.arange(2),
             num_input_tokens=2,
             attn_state=AscendAttentionState.DecodeOnly,
         )
@@ -514,8 +510,7 @@ class TestAscendSFACPMetadataBuilder(TestBase):
             seq_lens_cpu=torch.tensor([4, 4], dtype=torch.int32),
             cum_query_lens=torch.tensor([2, 3], dtype=torch.int32),
             block_table=torch.zeros((2, 4), dtype=torch.int32),
-            sin=torch.randn(3, 32),
-            cos=torch.randn(3, 32),
+            input_positions=torch.arange(3),
             num_input_tokens=3,
             attn_state=AscendAttentionState.SpecDecoding,
         )
@@ -871,8 +866,7 @@ class TestAscendSFACPImpl(TestBase):
         with patch.object(AscendSFAImpl, "exec_kv", return_value=("a", "b")) as mock_super:
             result = self.impl.exec_kv(
                 kv_no_split=torch.randn(2, 64),
-                cos=torch.randn(2, 32),
-                sin=torch.randn(2, 32),
+                positions=torch.arange(2),
                 kv_cache=(torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 32)),
                 slots=torch.tensor([0, 1], dtype=torch.int32),
                 attn_metadata=MagicMock(),
@@ -892,12 +886,11 @@ class TestAscendSFACPImpl(TestBase):
         kv_a_layernorm = MagicMock()
         kv_a_layernorm.side_effect = lambda x: x
         self.impl.kv_a_layernorm = kv_a_layernorm
-        self.impl.rope_single = MagicMock(side_effect=lambda x, cos, sin: x)
+        self.impl.rope_single = MagicMock(side_effect=lambda x, positions: x)
 
         # 2 input tokens, [num_tokens, kv_lora_rank + qk_rope_head_dim]
         kv_no_split = torch.randn(2, 32 + 16)
-        cos = torch.randn(2, 16)
-        sin = torch.randn(2, 16)
+        positions = torch.arange(2)
         kv_cache = (torch.randn(4, 1, 1, 32), torch.randn(4, 1, 1, 16))
         slots = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
 
@@ -907,7 +900,7 @@ class TestAscendSFACPImpl(TestBase):
         attn_metadata.sfa_cp_metadata = sfa_cp_metadata
         attn_metadata.slot_mapping = slots
 
-        result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+        result = self.impl.exec_kv(kv_no_split, positions, kv_cache, slots, attn_metadata)
         self.assertEqual(result, (None, None))
         mock_torch_npu._npu_reshape_and_cache.assert_called_once()
 
@@ -1152,8 +1145,7 @@ class TestAscendSFACPImpl(TestBase):
             torch.randn(4, 1, 1, 16),
             torch.randn(4, 1, 1, self.impl.head_dim),
         )
-        cos = torch.randn(2, self.impl.qk_rope_head_dim)
-        sin = torch.randn(2, self.impl.qk_rope_head_dim)
+        positions = torch.arange(2)
 
         kw_out = torch.randn(2, self.impl.head_dim * 2)
         self.impl.wk_weights_proj.return_value = (kw_out, None)
@@ -1183,14 +1175,14 @@ class TestAscendSFACPImpl(TestBase):
             return_value=torch.tensor([[0]] * 2),
         ):
             result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+                x, q_c, kv_cache, attn_metadata, positions, actual_seq_lengths_query, actual_seq_lengths_key
             )
         self.assertIsNotNone(result)
 
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", False)
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.rotary_mul_by_cache")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
-    def test_indexer_select_post_process_decode_only_no_triton(self, mock_torch_npu):
+    def test_indexer_select_post_process_decode_only_no_triton(self, mock_rotary_mul_by_cache):
         # Test no-triton path
         self.impl.pcp_size = 1
         self.impl.dcp_size = 1
@@ -1204,8 +1196,7 @@ class TestAscendSFACPImpl(TestBase):
             torch.randn(4, 1, 1, 16),
             torch.randn(4, 1, 1, self.impl.head_dim),
         )
-        cos = torch.randn(2, self.impl.qk_rope_head_dim)
-        sin = torch.randn(2, self.impl.qk_rope_head_dim)
+        positions = torch.arange(2)
 
         kw_out = torch.randn(2, self.impl.head_dim * 2)
         self.impl.wk_weights_proj.return_value = (kw_out, None)
@@ -1213,7 +1204,7 @@ class TestAscendSFACPImpl(TestBase):
             torch.randn(2, self.impl.n_head * self.impl.head_dim),
             None,
         )
-        mock_torch_npu.npu_rotary_mul.return_value = torch.randn(2, self.impl.n_head, 1, self.impl.qk_rope_head_dim)
+        mock_rotary_mul_by_cache.return_value = torch.randn(2, self.impl.n_head, 1, self.impl.qk_rope_head_dim)
 
         attn_metadata = MagicMock()
         attn_metadata.num_decodes = 2
@@ -1235,7 +1226,7 @@ class TestAscendSFACPImpl(TestBase):
             return_value=torch.tensor([[0]] * 2),
         ):
             result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+                x, q_c, kv_cache, attn_metadata, positions, actual_seq_lengths_query, actual_seq_lengths_key
             )
         self.assertIsNotNone(result)
 
@@ -1255,8 +1246,7 @@ class TestAscendSFACPImpl(TestBase):
             torch.randn(4, 1, 1, 16),
             torch.randn(4, 1, 1, self.impl.head_dim),
         )
-        cos = torch.randn(2, self.impl.qk_rope_head_dim)
-        sin = torch.randn(2, self.impl.qk_rope_head_dim)
+        positions = torch.arange(2)
 
         kw_out = torch.randn(2, self.impl.head_dim * 2)
         self.impl.wk_weights_proj.return_value = (kw_out, None)
@@ -1289,7 +1279,7 @@ class TestAscendSFACPImpl(TestBase):
             return_value=torch.tensor([[0]] * 2),
         ):
             result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+                x, q_c, kv_cache, attn_metadata, positions, actual_seq_lengths_query, actual_seq_lengths_key
             )
         self.assertIsNotNone(result)
 
@@ -1308,8 +1298,7 @@ class TestAscendSFACPImpl(TestBase):
             torch.randn(4, 1, 1, 16),
             torch.randn(4, 1, 1, self.impl.head_dim),
         )
-        cos = torch.randn(3, self.impl.qk_rope_head_dim)
-        sin = torch.randn(3, self.impl.qk_rope_head_dim)
+        positions = torch.arange(3)
 
         kw_out = torch.randn(3, self.impl.head_dim * 2)
         self.impl.wk_weights_proj.return_value = (kw_out, None)
@@ -1349,7 +1338,7 @@ class TestAscendSFACPImpl(TestBase):
             side_effect=fake_indexer,
         ):
             result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+                x, q_c, kv_cache, attn_metadata, positions, actual_seq_lengths_query, actual_seq_lengths_key
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 3)
@@ -1371,8 +1360,7 @@ class TestAscendSFACPImpl(TestBase):
             torch.randn(4, 1, 1, 16),
             torch.randn(4, 1, 1, self.impl.head_dim),
         )
-        cos = torch.randn(4, self.impl.qk_rope_head_dim)
-        sin = torch.randn(4, self.impl.qk_rope_head_dim)
+        positions = torch.arange(4)
 
         kw_out = torch.randn(4, self.impl.head_dim * 2)
         self.impl.wk_weights_proj.return_value = (kw_out, None)
@@ -1413,7 +1401,7 @@ class TestAscendSFACPImpl(TestBase):
             side_effect=fake_indexer,
         ):
             result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+                x, q_c, kv_cache, attn_metadata, positions, actual_seq_lengths_query, actual_seq_lengths_key
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 4)
@@ -1435,8 +1423,7 @@ class TestAscendSFACPImpl(TestBase):
             torch.randn(4, 1, 1, 16),
             torch.randn(4, 1, 1, self.impl.head_dim),
         )
-        cos = torch.randn(5, self.impl.qk_rope_head_dim)
-        sin = torch.randn(5, self.impl.qk_rope_head_dim)
+        positions = torch.arange(5)
 
         kw_out = torch.randn(5, self.impl.head_dim * 2)
         self.impl.wk_weights_proj.return_value = (kw_out, None)
@@ -1477,7 +1464,7 @@ class TestAscendSFACPImpl(TestBase):
             side_effect=fake_indexer,
         ):
             result = self.impl.indexer_select_post_process(
-                x, q_c, kv_cache, attn_metadata, cos, sin, actual_seq_lengths_query, actual_seq_lengths_key
+                x, q_c, kv_cache, attn_metadata, positions, actual_seq_lengths_query, actual_seq_lengths_key
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 5)

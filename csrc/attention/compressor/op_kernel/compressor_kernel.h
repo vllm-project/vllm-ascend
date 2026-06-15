@@ -46,7 +46,8 @@ public:
         __gm__ uint8_t *seqUsed,
         __gm__ uint8_t *startPos,
         __gm__ uint8_t *cmpKvOut,
-        __gm__ uint8_t *workspace);
+        __gm__ uint8_t *workspace,
+        __gm__ uint8_t *ropePositions = nullptr);
     __aicore__ inline void Process();
 
     // ==============================TilingData&TPipe==============================
@@ -69,7 +70,8 @@ __aicore__ inline void CompressorKernel<COMP>::Init(
         __gm__ uint8_t *seqUsed,
         __gm__ uint8_t *startPos,
         __gm__ uint8_t *cmpKvOut,
-        __gm__ uint8_t *workspace)
+        __gm__ uint8_t *workspace,
+        __gm__ uint8_t *ropePositions)
 {
     // printf("Init\n");
 }

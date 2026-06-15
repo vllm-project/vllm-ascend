@@ -134,6 +134,11 @@ struct OpParam {
     uint32_t qkNopeHeadDim;
     uint32_t qkRopeHeadDim;
     uint32_t kvLoraRank;
+    uint32_t ropeByCache;
+    uint32_t cosSinCacheStride0;
+    uint32_t cosSinCacheHalfDim;
+    uint32_t isNeoxStyle;
+    uint32_t enableRawQOut;
 };
 
 class PpMatmulTilingApi
@@ -628,6 +633,11 @@ void MlaPreprocessTiling::Init()
     tilingData->hiddenStrideRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
     tilingData->qkNopeHeadDim = opParam.qkNopeHeadDim;
     tilingData->avgFactor = 1.0f / static_cast<float>(opParam.qLoraRank);
+    tilingData->ropeByCache = opParam.ropeByCache;
+    tilingData->cosSinCacheStride0 = opParam.cosSinCacheStride0;
+    tilingData->cosSinCacheHalfDim = opParam.cosSinCacheHalfDim;
+    tilingData->isNeoxStyle = opParam.isNeoxStyle;
+    tilingData->enableRawQOut = opParam.enableRawQOut;
 
     return;
 }
@@ -660,7 +670,10 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     const at::Tensor &kv_cache_rope,
     c10::optional<c10::string_view> cache_mode,
     c10::optional<c10::string_view> quant_mode,
-    bool enable_inner_out
+    bool enable_inner_out,
+    bool enable_raw_q_out = false,
+    const at::Tensor *cos_sin_cache = nullptr,
+    bool is_neox_style = true
 )
 {
     auto cacheMode = get_op_mode(cache_mode_map, cache_mode, "krope_ctkv", "cache_mode");
@@ -688,6 +701,22 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     uint32_t kvLoraRank = wuk.sizes()[2];
     uint32_t qLoraRank = gamma1.sizes()[0];
     uint32_t qkRopeHeadDim = kv_cache_rope.sizes().back();
+    const bool ropeByCache = cos_sin_cache != nullptr;
+    if (ropeByCache) {
+        TORCH_CHECK(is_neox_style, "mla_preprocess_by_cache currently supports only Neox-style RoPE");
+        TORCH_CHECK(cos_sin_cache->dim() == 2,
+                    "mla_preprocess_by_cache expects cos_sin_cache with shape [max_position, rotary_dim], got dim ",
+                    cos_sin_cache->dim());
+        TORCH_CHECK(cos_sin_cache->size(-1) == qkRopeHeadDim,
+                    "mla_preprocess_by_cache expects cos_sin_cache last dim to match qk_rope_head_dim, got ",
+                    cos_sin_cache->size(-1), " and ", qkRopeHeadDim);
+        TORCH_CHECK(cos_sin_cache->size(-1) % 2 == 0,
+                    "mla_preprocess_by_cache expects even cos_sin_cache last dim, got ",
+                    cos_sin_cache->size(-1));
+        TORCH_CHECK(cos_sin_cache->scalar_type() == hiddenState.scalar_type(),
+                    "mla_preprocess_by_cache expects cos_sin_cache dtype to match hiddenState dtype, got ",
+                    cos_sin_cache->scalar_type(), " and ", hiddenState.scalar_type());
+    }
 
     OpParam opParam;
     opParam.hiddenStateDim = hiddenStateDim;
@@ -701,6 +730,12 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     opParam.qkNopeHeadDim = qkNopeHeadDim;
     opParam.qkRopeHeadDim = qkRopeHeadDim;
     opParam.kvLoraRank = kvLoraRank;
+    opParam.ropeByCache = static_cast<uint32_t>(ropeByCache);
+    opParam.cosSinCacheStride0 = ropeByCache ? static_cast<uint32_t>(cos_sin_cache->stride(0)) : qkRopeHeadDim;
+    opParam.cosSinCacheHalfDim = ropeByCache ? static_cast<uint32_t>(cos_sin_cache->size(-1) / 2)
+                                             : static_cast<uint32_t>(qkRopeHeadDim / 2);
+    opParam.isNeoxStyle = static_cast<uint32_t>(is_neox_style);
+    opParam.enableRawQOut = static_cast<uint32_t>(enable_raw_q_out);
     if (wdqkv.options().dtype() == at::kBFloat16 || wdqkv.options().dtype() == at::kHalf) {
         opParam.isWeightQuantized = 0;
     } else {

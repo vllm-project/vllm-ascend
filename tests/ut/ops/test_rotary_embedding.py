@@ -21,7 +21,7 @@ import pytest
 import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
 
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding, rope_forward_oot
 
 HEAD_SIZE = 64
 ROTARY_DIM = 64
@@ -160,6 +160,70 @@ class TestAscendEmbeddingForwardOOT:
         )
         assert result is expected_output
 
+    @patch("vllm_ascend.ops.rotary_embedding.RotaryEmbedding.forward_static")
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_key_none_uses_local_static_path(
+        self, mock_get_forward_context, mock_npu_op, mock_forward_static, make_embedding
+    ):
+        """The ordinary RoPE wrapper preserves vLLM's optional-key API."""
+        mock_get_forward_context.return_value = MagicMock()
+        mock_get_forward_context.return_value.is_draft_model = False
+        mock_get_forward_context.return_value.flash_comm_v1_enabled = False
+        expected_output = (torch.randn(SEQ_LEN, NUM_HEADS * HEAD_SIZE), None)
+        mock_forward_static.return_value = expected_output
+
+        emb = make_embedding()
+        positions, query, _ = _make_tensors()
+
+        result = emb.forward_oot(positions, query, None)
+
+        mock_npu_op.assert_not_called()
+        mock_forward_static.assert_called_once_with(
+            positions,
+            query,
+            None,
+            HEAD_SIZE,
+            ROTARY_DIM,
+            emb.cos_sin_cache,
+            emb.is_neox_style,
+        )
+        assert result is expected_output
+
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_output_uses_layer_owned_cache_rows(self, mock_get_forward_context, mock_npu_op, make_embedding):
+        """The public wrapper must pass the owning module's cache to the backend."""
+        mock_get_forward_context.return_value = MagicMock()
+        mock_get_forward_context.return_value.is_draft_model = False
+        mock_get_forward_context.return_value.flash_comm_v1_enabled = False
+
+        def fake_npu_rope(positions, query, key, cos_sin_cache, head_size, rotary_dim, is_neox_style):
+            cos, sin = cos_sin_cache.index_select(0, positions).chunk(2, dim=-1)
+            marker = torch.cat((cos, sin), dim=-1).repeat(1, query.shape[-1] // rotary_dim)
+            return query + marker, key + marker
+
+        mock_npu_op.side_effect = fake_npu_rope
+        positions, query, key = _make_tensors()
+        cache_a = torch.arange(MAX_POS * ROTARY_DIM, dtype=query.dtype).view(MAX_POS, ROTARY_DIM)
+        cache_b = cache_a + 1000
+
+        emb_a = make_embedding()
+        emb_a.cos_sin_cache = cache_a
+        emb_b = make_embedding()
+        emb_b.cos_sin_cache = cache_b
+
+        out_q_a, out_k_a = emb_a.forward_oot(positions, query.clone(), key.clone())
+        out_q_b, out_k_b = emb_b.forward_oot(positions, query.clone(), key.clone())
+
+        expected_a = query + cache_a.index_select(0, positions).repeat(1, query.shape[-1] // ROTARY_DIM)
+        expected_b = query + cache_b.index_select(0, positions).repeat(1, query.shape[-1] // ROTARY_DIM)
+        torch.testing.assert_close(out_q_a, expected_a)
+        torch.testing.assert_close(out_k_a, key + expected_a - query)
+        torch.testing.assert_close(out_q_b, expected_b)
+        torch.testing.assert_close(out_k_b, key + expected_b - query)
+        assert not torch.equal(out_q_a, out_q_b)
+
     @patch("torch.ops.vllm.npu_rotary_embedding")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_neox_style_override_true(self, mock_get_forward_context, mock_npu_op, make_embedding):
@@ -279,6 +343,33 @@ class TestAscendEmbeddingForwardOOT:
         accordingly.
         """
         check_parent_init_signature_has_not_changed(RotaryEmbedding.__init__, AscendRotaryEmbedding.__init__)
+
+
+def test_rope_forward_oot_key_none_uses_reference_path():
+    positions, query, _ = _make_tensors()
+    cos_sin_cache = torch.randn(MAX_POS, ROTARY_DIM * 2)
+    expected = (query, None)
+
+    with patch.object(RotaryEmbedding, "forward_static", return_value=expected) as mock_forward_static:
+        result = rope_forward_oot(
+            positions,
+            query,
+            None,
+            cos_sin_cache,
+            HEAD_SIZE,
+            ROTARY_DIM,
+            True,
+        )
+
+    assert result is expected
+    args = mock_forward_static.call_args.args
+    assert args[0] is positions
+    assert args[1] is query
+    assert args[2] is None
+    assert args[3] == HEAD_SIZE
+    assert args[4] == ROTARY_DIM
+    assert args[5] is cos_sin_cache
+    assert args[6] is True
 
 
 class TestAscendYaRNRotaryEmbeddingForwardOOT:

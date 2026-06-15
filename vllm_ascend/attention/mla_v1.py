@@ -48,7 +48,15 @@ from vllm_ascend.ops.layer_shard_linear import (
     reach_layer_for_shard_weight_series,
     register_all_layers_to_shard_weight_series,
 )
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rope_cache_ops import (
+    has_mla_preprocess_by_cache_backend,
+    has_mla_preprocess_by_cache_kernel,
+    has_mla_prolog_v2_by_cache_kernel,
+    has_mla_prolog_v3_by_cache_kernel,
+    interleave_rope_by_cache,
+    kv_rmsnorm_rope_cache_by_cache,
+    mla_preprocess_by_cache,
+)
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -57,6 +65,7 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
     get_weight_prefetch_method,
+    ensure_npu_internal_format_enabled,
     maybe_trans_nz,
     weak_ref_tensors,
 )
@@ -146,8 +155,6 @@ class AscendMLAPrefillMetadata:
     max_query_len: int
     max_seq_lens: int
     chunked_context: ChunkedContextMetadata | CPChunkedContextMetadata | None = None
-    sin: torch.Tensor = None
-    cos: torch.Tensor = None
     pcp_metadata: AscendPCPMetadata | None = None
     actual_seq_lengths_q: list[int] | None = None
 
@@ -165,8 +172,6 @@ class AscendMLADecodeMetadata:
     seq_lens_list: list[int]
     actual_seq_lengths_q: list[int] | None = None
     attn_mask: torch.Tensor | None = None
-    sin: torch.Tensor = None
-    cos: torch.Tensor = None
     cp_seq_len: torch.Tensor = None
 
 
@@ -268,8 +273,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         self.reorder_batch_threshold = self.decode_threshold
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-        self.cos_cache = None
-        self.sin_cache = None
 
         self.chunk_seq_lens: torch.Tensor = None
         self.cu_seq_lens_cpu: torch.Tensor = None
@@ -558,7 +561,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         prefill_query_start_loc = query_start_loc[reqs_start:] - query_start_loc[reqs_start]
 
         prefill_input_positions = input_positions[tokens_start:]
-        cos, sin = get_cos_and_sin_mla(prefill_input_positions)
         prefill_query_lens = self.query_lens[reqs_start:].to(torch.int32)
         actual_seq_lengths_q = torch.cumsum(prefill_query_lens, dim=0).tolist()
         return AscendMLAPrefillMetadata(
@@ -572,8 +574,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             max_seq_lens=max_seq_lens,
             query_start_loc=prefill_query_start_loc,
             chunked_context=chunked_context_metadata,
-            sin=sin,
-            cos=cos,
             actual_seq_lengths_q=actual_seq_lengths_q,
         )
 
@@ -644,7 +644,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
                 )
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
             block_table=self.block_table,
@@ -653,8 +652,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             max_seq_lens=max_seq_lens,
             attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             actual_seq_lengths_q=actual_seq_lengths_q,
-            sin=sin[: self.num_decode_tokens, ...],
-            cos=cos[: self.num_decode_tokens, ...],
             cp_seq_len=cp_seq_len,
         )
         return decode_metadata
@@ -912,6 +909,20 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
+    def _mlapo_has_by_cache_backend(self) -> bool:
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            return has_mla_prolog_v3_by_cache_kernel()
+        return has_mla_preprocess_by_cache_backend()
+
+    def _decode_fast_path_has_by_cache_backend(self) -> bool:
+        if self.fa_quant_layer:
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                return has_mla_prolog_v3_by_cache_kernel()
+            return has_mla_prolog_v2_by_cache_kernel()
+        if self.enable_mlapo:
+            return self._mlapo_has_by_cache_backend()
+        return False
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
         assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
@@ -968,6 +979,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     "Some layers in your model are not quantized with W8A8,"
                     "thus mlapo is disabled for these layers."
                 )
+            elif not self._mlapo_has_by_cache_backend():
+                self.enable_mlapo = False
+                logger.warning_once(
+                    "MLAPO is disabled because no by-cache MLA preprocess/prolog "
+                    "backend is available."
+                )
         if self.enable_mlapo:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self._process_weights_for_fused_mlapo_a5(act_dtype)
@@ -1011,6 +1028,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.fused_qkv_a_proj is not None
         assert self.q_a_layernorm is not None
         assert self.kv_a_layernorm is not None
+        ensure_npu_internal_format_enabled()
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
         q_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
         kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
@@ -1081,6 +1099,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _process_weights_for_fused_mlapo_a5(self, act_dtype: torch.dtype):
         assert self.fused_qkv_a_proj is not None
+        ensure_npu_internal_format_enabled()
 
         weight_dq = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
         self.weight_dq = torch_npu.npu_format_cast(weight_dq, 29)
@@ -1289,8 +1308,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
     ):
@@ -1304,11 +1322,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         c_kv_scale = None
         if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
-        k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
+        k_pe, k_nope, _, _ = kv_rmsnorm_rope_cache_by_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-            cos,
-            sin,
+            positions,
+            self.rotary_emb,
             slots.to(torch.int64),
             kv_cache[1],
             kv_cache[0],
@@ -1321,10 +1339,11 @@ class AscendMLAImpl(MLAAttentionImpl):
     def exec_kv_prefill(
         self,
         kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
+        *,
+        allow_negative_slots: bool = False,
     ):
         assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
@@ -1336,11 +1355,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         c_kv_scale = None
         if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
-        _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
+        _, _, k_pe, k_nope = kv_rmsnorm_rope_cache_by_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-            cos,
-            sin,
+            positions,
+            self.rotary_emb,
             slots.to(torch.int64),
             kv_cache[1],
             kv_cache[0],
@@ -1348,19 +1367,123 @@ class AscendMLAImpl(MLAAttentionImpl):
             epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
             cache_mode=cache_mode,
             is_output_kv=True,
+            allow_negative_slots=allow_negative_slots,
         )
         return k_pe, k_nope
+
+    def _prefill_mlapo_has_raw_q_backend(self) -> bool:
+        return (
+            self.enable_mlapo
+            and not self.fa_quant_layer
+            and get_ascend_device_type() != AscendDeviceType.A5
+            and has_mla_preprocess_by_cache_kernel()
+        )
+
+    def _run_mla_preprocess_by_cache_prefill(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_tokens = hidden_states.shape[0]
+        q_nope = torch.empty(
+            (num_tokens, self.num_heads, self.qk_nope_head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        q_pe = torch.empty(
+            (num_tokens, self.num_heads, self.qk_rope_head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        ql_nope = torch.empty(
+            (num_tokens, self.num_heads, self.kv_lora_rank),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        k_c_normed = torch.empty(
+            (num_tokens, self.num_kv_heads, self.kv_lora_rank),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        k_pe = torch.empty(
+            (num_tokens, self.num_kv_heads, self.qk_rope_head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        slots = torch.arange(num_tokens, dtype=torch.int32, device=hidden_states.device)
+
+        mla_preprocess_by_cache(
+            hidden_states,
+            self.wd_qkv,
+            self.deq_scale_qkv,
+            self.gamma1,
+            self.beta1,
+            self.wu_q,
+            self.qb_deq_scl,
+            self.gamma2,
+            positions,
+            self.rotary_emb,
+            self.W_UK_T,
+            k_c_normed,
+            k_pe,
+            slots,
+            layout="TD",
+            quant_scale0=self.quant_scale0,
+            quant_offset0=self.quant_offset0,
+            bias0=self.quant_bias_qkv,
+            quant_scale1=self.quant_scale1,
+            quant_offset1=self.quant_offset1,
+            bias1=self.qb_qt_bias,
+            ctkv_scale=self.ctkv_scale,
+            q_nope_scale=self.q_nope_scale,
+            cache_mode="krope_ctkv",
+            quant_mode="per_tensor_quant_asymm",
+            enable_inner_out=False,
+            q_out0=ql_nope,
+            kv_cache_out0=k_c_normed,
+            q_out1=q_pe,
+            kv_cache_out1=k_pe,
+            inner_out=torch.tensor([], dtype=hidden_states.dtype, device=hidden_states.device),
+            enable_raw_q_out=True,
+            raw_q_out=q_nope,
+        )
+        return q_nope, q_pe, k_c_normed, k_pe
+
+    def mla_preprocess_prefill_with_mlapo(self, hidden_states, kv_cache, attn_metadata):
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        prefill_hidden_states = hidden_states[num_decode_tokens:num_actual_tokens]
+        prefill_positions = attn_metadata.prefill.input_positions
+        prefill_q_nope, prefill_q_pe, prefill_k_c_normed, prefill_k_pe = self._run_mla_preprocess_by_cache_prefill(
+            prefill_hidden_states,
+            prefill_positions,
+        )
+        prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
+        DeviceOperator.reshape_and_cache(
+            key=prefill_k_c_normed,
+            value=prefill_k_pe,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=prefill_slots,
+        )
+        prefill_k_nope, prefill_value = (
+            self.kv_b_proj(prefill_k_c_normed.view(-1, self.kv_lora_rank))[0]
+            .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        )
+        prefill_k_pe = prefill_k_pe.view(prefill_hidden_states.shape[0], self.num_kv_heads, -1)
+        prefill_k_pe = prefill_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
+        return PrefillMLAPreprocessResult(prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
 
     def rope_single(
         self,
         x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        positions: torch.Tensor,
     ) -> torch.Tensor:
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
-        x = torch_npu.npu_interleave_rope(x, cos, sin)
+        x = interleave_rope_by_cache(x, positions, self.rotary_emb)
         return x.view(B, N, D)
 
     def _forward_decode(
@@ -1560,11 +1683,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
         prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
-        cos = attn_metadata.prefill.cos
-        sin = attn_metadata.prefill.sin
+        prefill_positions = attn_metadata.prefill.input_positions
         prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
-        prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
-        prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(prefill_kv_no_split, cos, sin, kv_cache, prefill_slots)
+        prefill_q_pe = self.rope_single(prefill_q_pe, prefill_positions)
+        prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(
+            prefill_kv_no_split, prefill_positions, kv_cache, prefill_slots
+        )
         prefill_k_nope, prefill_value = (
             self.kv_b_proj(prefill_k_c_normed)[0]
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -1577,10 +1701,9 @@ class AscendMLAImpl(MLAAttentionImpl):
     def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
         num_decode_tokens = attn_metadata.num_decode_tokens
         decode_q_c = q_c[:num_decode_tokens]
-        cos = attn_metadata.decode.cos
-        sin = attn_metadata.decode.sin
         decode_ql_nope, decode_q_pe = self._q_proj_and_k_up_proj(decode_q_c)
-        decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
+        decode_positions = attn_metadata.decode.input_positions[:num_decode_tokens]
+        decode_q_pe = self.rope_single(decode_q_pe, decode_positions)
         dequant_scale_q_nope = None
         if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
             decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
@@ -1589,7 +1712,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_q_pe = (decode_q_pe / dequant_scale_q_nope.unsqueeze(-1) / self.fak_descale_float).to(torch.bfloat16)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens:1]
         decode_kv_no_split = kv_no_split[:num_decode_tokens]
-        decode_k_pe, decode_k_nope = self.exec_kv_decode(decode_kv_no_split, cos, sin, kv_cache, decode_slots)
+        decode_k_pe, decode_k_nope = self.exec_kv_decode(
+            decode_kv_no_split, decode_positions, kv_cache, decode_slots
+        )
         return DecodeMLAPreprocessResult(
             decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
         )
@@ -1606,26 +1731,36 @@ class AscendMLAImpl(MLAAttentionImpl):
         # prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
-        if self.fused_qkv_a_proj is not None:
-            weight_prefetch_method = get_weight_prefetch_method()
-            weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
-                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
+        use_mlapo_prefill = has_prefill and self._prefill_mlapo_has_raw_q_backend()
+        mlapo_hidden_states = None
+        if use_mlapo_prefill:
+            mlapo_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states.contiguous(), need_gather_q_kv
             )
-            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c, kv_no_split = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-            q_c = self.q_a_layernorm(q_c)  # type: ignore[misc]
-            # allgather need contiguous data
-            kv_no_split = kv_no_split.contiguous()
-        else:
-            q_c = hidden_states
-            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]  # type: ignore[misc]
 
-        # Process for Flash Comm V1
-        q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c.contiguous(), need_gather_q_kv)
-        kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv_no_split.contiguous(), need_gather_q_kv)
+        q_c = None
+        kv_no_split = None
+        if has_decode or not use_mlapo_prefill:
+            if self.fused_qkv_a_proj is not None:
+                weight_prefetch_method = get_weight_prefetch_method()
+                weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
+                    inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
+                )
+                qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+                q_c, kv_no_split = qkv_lora.split(
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    dim=-1,
+                )
+                q_c = self.q_a_layernorm(q_c)  # type: ignore[misc]
+                # allgather need contiguous data
+                kv_no_split = kv_no_split.contiguous()
+            else:
+                q_c = hidden_states
+                kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]  # type: ignore[misc]
+
+            # Process for Flash Comm V1
+            q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c.contiguous(), need_gather_q_kv)
+            kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv_no_split.contiguous(), need_gather_q_kv)
 
         for layer in self.layer_sharding_kwargs or []:
             if is_hidden_layer(layer):
@@ -1639,10 +1774,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.is_kv_producer and not self.is_kv_both:
             attn_metadata.reshape_cache_event = torch.npu.Event()
         if has_decode:
+            assert q_c is not None and kv_no_split is not None
             decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata)
         # Preprocess for prefill tokens
         if has_prefill:
-            prefill_preprocess_res = self.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
+            if use_mlapo_prefill:
+                assert mlapo_hidden_states is not None
+                prefill_preprocess_res = self.mla_preprocess_prefill_with_mlapo(
+                    mlapo_hidden_states, kv_cache, attn_metadata
+                )
+            else:
+                assert q_c is not None and kv_no_split is not None
+                prefill_preprocess_res = self.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
         if self.is_kv_producer and not self.is_kv_both:
             attn_metadata.reshape_cache_event.record()
         return decode_preprocess_res, prefill_preprocess_res
@@ -1703,8 +1846,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess
-        if (self.fa_quant_layer or self.enable_mlapo) and (
-            attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS and attn_metadata.num_prefills == 0
+        if (
+            (self.fa_quant_layer or self.enable_mlapo)
+            and self._decode_fast_path_has_by_cache_backend()
+            and (
+                attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+                and attn_metadata.num_prefills == 0
+            )
         ):
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv

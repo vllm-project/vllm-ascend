@@ -87,8 +87,42 @@ class MockLayerNorm:
 
 
 class MockRotary:
-    def __init__(self):
-        pass
+    def __init__(
+        self,
+        max_seq_len: int,
+        rotary_dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        half_dim = rotary_dim // 2
+        cos = torch.ones(max_seq_len, half_dim, dtype=dtype, device=device)
+        sin = torch.zeros(max_seq_len, half_dim, dtype=dtype, device=device)
+        self.cos_sin_cache = torch.cat((cos, sin), dim=-1)
+        self.is_neox_style = True
+
+
+def test_mock_rotary_uses_layer_owned_rope_cache():
+    from vllm_ascend.ops.rotary_embedding import select_cos_sin_from_cache
+
+    positions = torch.tensor([0, 3], dtype=torch.long)
+    rotary = MockRotary(
+        max_seq_len=8,
+        rotary_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    rotary.cos_sin_cache = torch.arange(8 * 4, dtype=torch.float32).view(8, 4)
+    ref_tensor = torch.empty(positions.shape[0], 1, 4, dtype=torch.float32)
+
+    cos, sin = select_cos_sin_from_cache(rotary, positions, ref_tensor, layout="T11D")
+    expected_cos, expected_sin = rotary.cos_sin_cache.index_select(0, positions).chunk(2, dim=-1)
+    expected_cos = torch.cat((expected_cos, expected_cos), dim=-1).view(positions.shape[0], 1, 1, 4)
+    expected_sin = torch.cat((expected_sin, expected_sin), dim=-1).view(positions.shape[0], 1, 1, 4)
+
+    assert cos.shape == (positions.shape[0], 1, 1, 4)
+    assert sin.shape == (positions.shape[0], 1, 1, 4)
+    assert torch.equal(cos, expected_cos)
+    assert torch.equal(sin, expected_sin)
 
 
 def create_mla_kv_cache(
@@ -169,15 +203,8 @@ def run_mla_attention_backend(
 
     init_ascend_config(vllm_config)
 
-    from vllm_ascend.ops import rotary_embedding
-
     hf_config = vllm_config.model_config.hf_text_config
     qk_rope_head_dim = getattr(hf_config, "qk_rope_head_dim", 64)
-
-    rotary_embedding._cos_cache = torch.ones(8192, qk_rope_head_dim, dtype=dtype, device=device)
-    rotary_embedding._sin_cache = torch.zeros(8192, qk_rope_head_dim, dtype=dtype, device=device)
-    rotary_embedding._cos_mla = torch.ones(8192, 1, 1, qk_rope_head_dim, dtype=dtype, device=device)
-    rotary_embedding._sin_mla = torch.zeros(8192, 1, 1, qk_rope_head_dim, dtype=dtype, device=device)
 
     from vllm.distributed.parallel_state import GroupCoordinator
 
@@ -257,7 +284,12 @@ def run_mla_attention_backend(
                 o_proj=MockLinear(out_features=o_proj_out_dim, in_features=o_proj_in_dim, device=device, dtype=dtype),
                 kv_a_layernorm=MockLayerNorm(normalized_shape=kv_lora_rank, device=device, dtype=dtype),
                 q_a_layernorm=MockLayerNorm(normalized_shape=q_lora_rank, device=device, dtype=dtype),
-                rotary_emb=MockRotary(),
+                rotary_emb=MockRotary(
+                    max_seq_len=8192,
+                    rotary_dim=qk_rope_head_dim,
+                    device=device,
+                    dtype=dtype,
+                ),
                 fused_qkv_a_proj=None,
                 kv_a_proj_with_mqa=MockLinear(
                     out_features=num_kv_heads * (kv_lora_rank + qk_rope_head_dim),

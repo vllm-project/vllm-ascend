@@ -91,12 +91,18 @@ TILING_DATA_FIELD_DEF(int64_t, ubCalcBTail);
 TILING_DATA_FIELD_DEF(int64_t, ubCalcNNum);
 TILING_DATA_FIELD_DEF(int64_t, ubCalcNLoop);
 TILING_DATA_FIELD_DEF(int64_t, ubCalcNTail);
+TILING_DATA_FIELD_DEF(int64_t, cacheStride);
+TILING_DATA_FIELD_DEF(int64_t, cacheOffset);
+TILING_DATA_FIELD_DEF(int64_t, inverse);
 
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(InplacePartialRotaryMul, RopeRegbaseTilingData)
+REGISTER_TILING_DATA_CLASS(InplacePartialRotaryMulDsaByCache, RopeRegbaseTilingData)
 
 ge::graphStatus Tiling4InplacePartialRotaryMul(gert::TilingContext* context);
+ge::graphStatus Tiling4InplacePartialRotaryMulDsaByCache(gert::TilingContext* context);
+ge::graphStatus TilingPrepareForRotaryPositionEmbedding(gert::TilingParseContext *context);
 struct RotaryPositionEmbeddingCompileInfo {
     int64_t blockDim;
     uint64_t ubSize;

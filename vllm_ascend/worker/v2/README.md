@@ -7,11 +7,11 @@ to get specific plans.
 
 ## Gaps with vLLM (To Be Addressed)
 
-- [ ] `set_cos_and_sin` & `update_cos_sin`
+- [x] global RoPE slice pre-initialization
 
-    Why: DeepSeek-like models (mla) still need cos/sin setting and updating in model_runner. These should be removed when mla can solve cos/sin internally.
+    Status: Removed from model runner. RoPE views are resolved from `input_positions` and the layer-owned rotary cache inside attention/model patch execution.
 
-    Location: `NPUModelRunner.__init__`, `NPUModelRunner.prepare_inputs`, `AscendInputBatch.make_dummy`.
+    Previous location: `NPUModelRunner.__init__`, `NPUModelRunner.prepare_inputs`, `AscendInputBatch.make_dummy`.
 
 - [ ] `_allocate_kv_cache` & `_reshape_kv_cache`
 

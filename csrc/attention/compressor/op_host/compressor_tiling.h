@@ -49,12 +49,18 @@ constexpr uint32_t APE_INPUT_INDEX = 4;
 constexpr uint32_t NORM_WEIGHT_INPUT_INDEX = 5;
 constexpr uint32_t ROPE_SIN_INPUT_INDEX = 6;
 constexpr uint32_t ROPE_COS_INPUT_INDEX = 7;
+constexpr uint32_t COMPRESS_POSITIONS_INPUT_INDEX = 6;
+constexpr uint32_t BY_CACHE_COS_SIN_CACHE_INPUT_INDEX = 7;
 
 // INPUT(OPTION)
 constexpr uint32_t STATE_BLOCK_TABLE_INPUT_INDEX = 8;
 constexpr uint32_t CU_SEQ_LEN_INPUT_INDEX = 9;
 constexpr uint32_t SEQ_USED_INPUT_INDEX = 10;
 constexpr uint32_t START_POS_INPUT_INDEX = 11;
+constexpr uint32_t BY_CACHE_STATE_BLOCK_TABLE_INPUT_INDEX = 8;
+constexpr uint32_t BY_CACHE_CU_SEQ_LEN_INPUT_INDEX = 9;
+constexpr uint32_t BY_CACHE_SEQ_USED_INPUT_INDEX = 10;
+constexpr uint32_t BY_CACHE_START_POS_INPUT_INDEX = 11;
 
 // ATTR
 constexpr uint32_t ROPE_HEAD_DIM_ATTR_INDEX = 0;
@@ -91,6 +97,8 @@ static const std::string WGATE_NAME = "wgate";
 static const std::string STATE_CACHE_NAME = "state_cache";
 static const std::string APE_NAME = "ape";
 static const std::string NORM_WEIGHT_NAME = "norm_weight";
+static const std::string COMPRESS_POSITIONS_NAME = "compress_positions";
+static const std::string COS_SIN_CACHE_NAME = "cos_sin_cache";
 static const std::string ROPE_SIN_NAME = "rope_sin";
 static const std::string ROPE_COS_NAME = "rope_cos";
 static const std::string STATE_BLOCK_TABLE_NAME = "state_block_table";
@@ -114,6 +122,8 @@ const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
     {STATE_CACHE_NAME,        {ge::DT_FLOAT}},
     {APE_NAME,                {ge::DT_FLOAT}},
     {NORM_WEIGHT_NAME,        {ge::DT_BF16, ge::DT_FLOAT16}},
+    {COMPRESS_POSITIONS_NAME, {ge::DT_INT64}},
+    {COS_SIN_CACHE_NAME,      {ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT}},
     {ROPE_SIN_NAME,           {ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT}},
     {ROPE_COS_NAME,           {ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT}},
     {STATE_BLOCK_TABLE_NAME,  {ge::DT_INT32}},
@@ -130,6 +140,8 @@ const std::map<std::string, std::vector<uint32_t>> DIM_NUM_MAP = {
     {STATE_CACHE_NAME,        {COMPRESSOR_DIM_NUM_3}},
     {APE_NAME,                {COMPRESSOR_DIM_NUM_2}},
     {NORM_WEIGHT_NAME,        {COMPRESSOR_DIM_NUM_1}},
+    {COMPRESS_POSITIONS_NAME, {COMPRESSOR_DIM_NUM_1}},
+    {COS_SIN_CACHE_NAME,      {COMPRESSOR_DIM_NUM_2, COMPRESSOR_DIM_NUM_3, COMPRESSOR_DIM_NUM_4}},
     {ROPE_SIN_NAME,           {COMPRESSOR_DIM_NUM_2, COMPRESSOR_DIM_NUM_3}},
     {ROPE_COS_NAME,           {COMPRESSOR_DIM_NUM_2, COMPRESSOR_DIM_NUM_3}},
     {STATE_BLOCK_TABLE_NAME,  {COMPRESSOR_DIM_NUM_2, COMPRESSOR_DIM_NUM_1}},
@@ -207,6 +219,7 @@ enum class TemplateId:uint8_t {
 };
 
 CMP_EXTERN_C ge::graphStatus TilingCompressor(gert::TilingContext *context);
+CMP_EXTERN_C ge::graphStatus TilingCompressorDsaByCache(gert::TilingContext *context);
 struct CompressorBaseShapeInfo {
     uint32_t bSize = 0; // B
     uint32_t sSize = 0; // S
@@ -254,6 +267,7 @@ struct CompressorContext {
     RequiredParaInfo stateCache;
     RequiredParaInfo ape;
     RequiredParaInfo normWeight;
+    RequiredParaInfo compressPositions;
     RequiredParaInfo ropeSin;
     RequiredParaInfo ropeCos;
     OptionalParaInfo stateBlockTable;
@@ -273,6 +287,7 @@ struct CompressorContext {
 
     ge::DataType dtype = ge::DT_BF16;
     LayoutType layout = LayoutType::LAYOUT_BSH;
+    bool isDsaByCache = false;
 
     size_t *workSpaces;
     uint64_t tilingKey;
@@ -325,6 +340,7 @@ private:
     ge::graphStatus CheckSingleParaStateCache() const;
     ge::graphStatus CheckSingleParaApe() const;
     ge::graphStatus CheckSingleParaNormWeight() const;
+    ge::graphStatus CheckSingleParaCompressPositions() const;
     ge::graphStatus CheckSingleParaRopeSin() const;
     ge::graphStatus CheckSingleParaRopeCos() const;
     ge::graphStatus CheckSingleParaStateBlockTable() const;

@@ -32,6 +32,10 @@ namespace ops {
     constexpr uint32_t CU_SEQ_LEN_INPUT_INDEX = 11;
     constexpr uint32_t SEQ_USED_INPUT_INDEX = 12;
     constexpr uint32_t START_POS_INPUT_INDEX = 13;
+    constexpr uint32_t DSA_TOKEN_X_INPUT_INDEX = 0;
+    constexpr uint32_t DSA_STATE_CACHE_INPUT_INDEX = 3;
+    constexpr uint32_t DSA_NORM_WEIGHT_INPUT_INDEX = 5;
+    constexpr uint32_t DSA_COMPRESS_POSITIONS_INPUT_INDEX = 6;
 
     // ATTR
     constexpr uint32_t ROPE_HEAD_DIM_ATTR_INDEX = 0;
@@ -43,6 +47,7 @@ namespace ops {
 
     // OUTPUT
     constexpr uint32_t CMP_KV_OUTPUT_INDEX = 0;
+    constexpr uint32_t DSA_STATE_CACHE_OUTPUT_INDEX = 1;
     constexpr uint32_t WKV_PROJ_OUTPUT_INDEX = 1;
     constexpr uint32_t SOFTMAX_RES_OUTPUT_INDEX = 2;
     constexpr uint32_t NORM_X_OUTPUT_INDEX = 3;
@@ -245,4 +250,68 @@ ge::graphStatus InferShapeCompressor(gert::InferShapeContext* context)
 }
 
 IMPL_OP_INFERSHAPE(Compressor).InferShape(InferShapeCompressor).InferDataType(InferDataTypeCompressor);
+
+ge::graphStatus InferDataTypeCompressorDsaByCache(gert::InferDataTypeContext* context)
+{
+    OP_CHECK_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("CompressorDsaByCache", "Context is nullptr."),
+               return ge::GRAPH_FAILED);
+    OPS_LOG_I(context->GetNodeName(), "Enter CompressorDsaByCache inferDataType impl.");
+
+    context->SetOutputDataType(CMP_KV_OUTPUT_INDEX, context->GetRequiredInputDataType(DSA_TOKEN_X_INPUT_INDEX));
+    context->SetOutputDataType(DSA_STATE_CACHE_OUTPUT_INDEX,
+                               context->GetRequiredInputDataType(DSA_STATE_CACHE_INPUT_INDEX));
+
+    return GRAPH_SUCCESS;
+}
+
+ge::graphStatus InferShapeCompressorDsaByCache(gert::InferShapeContext* context)
+{
+    OP_CHECK_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("CompressorDsaByCache", "Context is nullptr."),
+               return ge::GRAPH_FAILED);
+    OPS_LOG_I(context->GetNodeName(), "Enter CompressorDsaByCache infershape impl.");
+
+    auto xShape = context->GetRequiredInputShape(DSA_TOKEN_X_INPUT_INDEX);
+    OPS_LOG_E_IF_NULL(context, xShape, return ge::GRAPH_FAILED)
+    auto stateCacheShape = context->GetRequiredInputShape(DSA_STATE_CACHE_INPUT_INDEX);
+    OPS_LOG_E_IF_NULL(context, stateCacheShape, return ge::GRAPH_FAILED)
+    auto normWeightShape = context->GetRequiredInputShape(DSA_NORM_WEIGHT_INPUT_INDEX);
+    OPS_LOG_E_IF_NULL(context, normWeightShape, return ge::GRAPH_FAILED)
+    auto positionsShape = context->GetRequiredInputShape(DSA_COMPRESS_POSITIONS_INPUT_INDEX);
+    OPS_LOG_E_IF_NULL(context, positionsShape, return ge::GRAPH_FAILED)
+    auto cmpKvShape = context->GetOutputShape(CMP_KV_OUTPUT_INDEX);
+    OPS_LOG_E_IF_NULL(context, cmpKvShape, return ge::GRAPH_FAILED)
+    auto stateCacheOutShape = context->GetOutputShape(DSA_STATE_CACHE_OUTPUT_INDEX);
+    OPS_LOG_E_IF_NULL(context, stateCacheOutShape, return ge::GRAPH_FAILED)
+
+    auto attr = context->GetAttrs();
+    OPS_LOG_E_IF_NULL(context, attr, return ge::GRAPH_FAILED)
+    const int *cmpRatioPtr = attr->GetAttrPointer<int>(CMP_RATIO_ATTR_INDEX);
+    int64_t cmpRatio = (cmpRatioPtr != nullptr) ? static_cast<int64_t>(*cmpRatioPtr) : CMP_RATIO_VALUE;
+    if (cmpRatio <= 0) {
+        cmpRatio = CMP_RATIO_VALUE;
+    }
+
+    if (xShape->GetDimNum() == DIM_NUM_3) {
+        cmpKvShape->SetDimNum(DIM_NUM_3);
+        cmpKvShape->SetDim(DIM_INDEX_0, xShape->GetDim(DIM_INDEX_0));
+        cmpKvShape->SetDim(DIM_INDEX_1, (xShape->GetDim(DIM_INDEX_1) + cmpRatio - 1) / cmpRatio);
+        cmpKvShape->SetDim(DIM_INDEX_2, normWeightShape->GetDim(DIM_INDEX_0));
+    } else {
+        cmpKvShape->SetDimNum(DIM_NUM_2);
+        cmpKvShape->SetDim(DIM_INDEX_0, positionsShape->GetDim(DIM_INDEX_0));
+        cmpKvShape->SetDim(DIM_INDEX_1, normWeightShape->GetDim(DIM_INDEX_0));
+    }
+
+    const size_t stateDimNum = stateCacheShape->GetDimNum();
+    stateCacheOutShape->SetDimNum(stateDimNum);
+    for (size_t dim = 0; dim < stateDimNum; ++dim) {
+        stateCacheOutShape->SetDim(dim, stateCacheShape->GetDim(dim));
+    }
+
+    return GRAPH_SUCCESS;
+}
+
+IMPL_OP_INFERSHAPE(CompressorDsaByCache)
+    .InferShape(InferShapeCompressorDsaByCache)
+    .InferDataType(InferDataTypeCompressorDsaByCache);
 }  // namespace ops
