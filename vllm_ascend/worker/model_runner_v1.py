@@ -1610,7 +1610,7 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_scheduled_tokens = cu_num_scheduled_tokens.copy()
                 cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] = (
                     cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] * self.pcp_size 
-                    - num_pcp_pads[self.pcp_manager.num_decode_reqs:])
+                    - num_pcp_pads[self.pcp_manager.num_decode_reqs:]) # type: ignore
             logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
             logits_indices_pcp += self._arange_scratch[: cu_num_sampled_tokens[-1]]
             logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(self.device, non_blocking=True)
