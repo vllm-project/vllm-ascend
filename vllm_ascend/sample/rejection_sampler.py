@@ -18,7 +18,6 @@ from vllm.v1.sample.rejection_sampler import (
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
-from vllm_ascend.utils import reduce_sample_enabled
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     expand_triton,
@@ -29,7 +28,7 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
-
+from vllm_ascend.utils import reduce_sample_enabled
 
 class AscendRejectionSampler(RejectionSampler):
     """Ascend-optimized rejection sampler for speculative decoding.

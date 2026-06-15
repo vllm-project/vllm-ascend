@@ -8,9 +8,14 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import reduce_sample_enabled
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+    global_stream,
+    npu_stream_switch,
+    reduce_sample_enabled,
+)
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
