@@ -6,7 +6,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 
 ### Highlights
 
-- **DeepSeek-V4 for Ascend950**: Full end-to-end support for DeepSeek-V4 on Ascend950, including piecewise graph mode, DSA attention, KV cache management, and custom GDN operators. [#9757](https://github.com/vllm-project/vllm-ascend/pull/9757) [#9382](https://github.com/vllm-project/vllm-ascend/pull/9382) [#9601](https://github.com/vllm-project/vllm-ascend/pull/9601) [#9935](https://github.com/vllm-project/vllm-ascend/pull/9935)
+- **DeepSeek-V4 for Ascend950**: Full end-to-end support for DeepSeek-V4 on Ascend950, including piecewise graph mode, DSA attention, KV cache management, and MTP. [#9757](https://github.com/vllm-project/vllm-ascend/pull/9757) [#9935](https://github.com/vllm-project/vllm-ascend/pull/9935)
 - **Hybrid & Mamba Align Prefix Cache**: New alignment-based prefix caching mechanism for Hybrid and Mamba architectures, improving cache hit rates across related sequences. [#9533](https://github.com/vllm-project/vllm-ascend/pull/9533)
 - **GLM4.7-Flash Model Support**: Flash Attention backend support for GLM4.7 models. [#9560](https://github.com/vllm-project/vllm-ascend/pull/9560)
 - **FULL_AND_PIECEWISE Graph Mode**: Introduced a hybrid graph compilation mode combining full-graph and piecewise strategies. **Requires HDK 25.5.1+ / CANN 8.5.0+** to remove the old stream-budget limitation, enabling up to ~32K graphs on A3 and ~64K on A5. [#9572](https://github.com/vllm-project/vllm-ascend/pull/9572) [#9962](https://github.com/vllm-project/vllm-ascend/pull/9962)
