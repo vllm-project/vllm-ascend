@@ -28,6 +28,7 @@ from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
+from itertools import accumulate
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
@@ -1597,6 +1598,17 @@ class NPUModelRunner(GPUModelRunner):
         # update logits_indices after getting draft_token_ids from ori logits_indices
         if self.pcp_size > 1:
             cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
+            if self.pcp_manager.pcp_use_hybrid_attn and self.pcp_manager.num_prefill_reqs > 0:
+                num_scheduled_tokens = cu_num_scheduled_tokens[1:] - cu_num_scheduled_tokens[:-1]
+                prefill_num_scheduled_tokens = num_scheduled_tokens[-self.pcp_manager.num_prefill_reqs: ]
+                prefill_num_scheduled_tokens = [math.ceil(num / (self.pcp_size * 2)) * 2 * self.pcp_size for num in prefill_num_scheduled_tokens]
+                prefill_num_scheduled_tokens = list(accumulate(prefill_num_scheduled_tokens))
+                prefill_num_scheduled_tokens = [cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs - 1] + num for num in prefill_num_scheduled_tokens]
+                cu_num_scheduled_tokens[-self.pcp_manager.num_prefill_reqs:] = prefill_num_scheduled_tokens
+                cu_num_scheduled_tokens = cu_num_scheduled_tokens.copy()
+                cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] = (
+                    cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] * self.pcp_size 
+                    - num_pcp_pads[self.pcp_manager.num_decode_reqs:])
             logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
             logits_indices_pcp += self._arange_scratch[: cu_num_sampled_tokens[-1]]
             logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(self.device, non_blocking=True)
