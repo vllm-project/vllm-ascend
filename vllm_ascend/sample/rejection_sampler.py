@@ -18,7 +18,7 @@ from vllm.v1.sample.rejection_sampler import (
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
-from vllm_ascend.ascend_forward_context import is_reduce_sample_enabled
+from vllm_ascend.utils import reduce_sample_enabled
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     expand_triton,
@@ -322,7 +322,7 @@ def apply_sampling_constraints(
 
     # New flow: top_k -> allgather -> top_p
     # Returns processed logits and indices
-    if get_ascend_config().enable_reduce_sample:
+    if reduce_sample_enabled():
         logger.debug_once(
             "[sample/rejection_sampler] Using reduce-sample path for "
             "apply_sampling_constraints. top-k/top-p with TP all-gather.",
@@ -448,7 +448,7 @@ def rejection_sample(
 
     # For greedy sampling, we need to do allgather first to get global argmax
     if not sampling_metadata.all_random:
-        if is_reduce_sample_enabled():
+        if reduce_sample_enabled():
             target_argmax = greedy_sample(target_logits)
         else:
             target_argmax = target_logits.argmax(dim=-1).view(-1)

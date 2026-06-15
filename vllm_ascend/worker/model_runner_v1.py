@@ -104,7 +104,6 @@ from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import is_reduce_sample_enabled, override_reduce_sample
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -146,6 +145,7 @@ from vllm_ascend.spec_decode.utils import (
 )
 from vllm_ascend.utils import (
     AscendDeviceType,
+    _should_disable_reduce_sample,
     calc_split_factor,
     check_gdn_layer,
     embedding_tp_enable,
@@ -153,10 +153,13 @@ from vllm_ascend.utils import (
     enable_sp_by_pass,
     get_ascend_device_type,
     get_c_env,
+    get_reduce_sample_force_disabled,
     global_stream,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
+    reduce_sample_enabled,
+    set_reduce_sample_force_disabled,
     oproj_tp_enable,
     set_potential_max_tokens,
     set_weight_prefetch_method,
@@ -2388,14 +2391,15 @@ class NPUModelRunner(GPUModelRunner):
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
         
-        # When logprobs are requested and reduce_sample is enabled, force
-        # reduce_sample off for the model forward pass so that the
-        # LogitsProcessor all-gathers the full [B, V_global] logits.
-        sampling_metadata = self.input_batch.sampling_metadata
-        needs_reduce_sample_override = is_reduce_sample_enabled() and (
-            sampling_metadata.max_num_logprobs is not None or sampling_metadata.logprob_token_ids is not None
-        )
-        reduce_sample_ctx = override_reduce_sample(False) if needs_reduce_sample_override else nullcontext()
+        # When unsupported sampling params are present and reduce_sample is
+        # enabled, force reduce_sample off so that the LogitsProcessor
+        # all-gathers the full [B, V_global] logits.
+        _prev_reduce_sample_disabled = get_reduce_sample_force_disabled()
+        if reduce_sample_enabled() and _should_disable_reduce_sample(
+            self.requests[req_id].sampling_params
+            for req_id in self.input_batch.req_ids
+        ):
+            set_reduce_sample_force_disabled(True)
 
         with (
             record_function_or_nullcontext("forward"),
@@ -2426,22 +2430,20 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
-        with (
-            reduce_sample_ctx,
-            record_function_or_nullcontext("post process"),
-        ):
-            aux_hidden_states = None
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, aux_hidden_states = hidden_states
-            if self.pcp_size > 1:
-                # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
-                # ignores the padding from CUDA Graph.
-                hidden_states = self.pcp_manager.get_restore_hidden_states(hidden_states)
-                if aux_hidden_states is not None:
-                    aux_hidden_states = [
-                        self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
-                        for aux_hidden_states_pcp in aux_hidden_states
-                    ]
+        try:
+            with record_function_or_nullcontext("post process"):
+                aux_hidden_states = None
+                if self.use_aux_hidden_state_outputs:
+                    hidden_states, aux_hidden_states = hidden_states
+                if self.pcp_size > 1:
+                    # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
+                    # ignores the padding from CUDA Graph.
+                    hidden_states = self.pcp_manager.get_restore_hidden_states(hidden_states)
+                    if aux_hidden_states is not None:
+                        aux_hidden_states = [
+                            self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
+                            for aux_hidden_states_pcp in aux_hidden_states
+                        ]
 
             if not self.broadcast_pp_output:
                 # Common case.
@@ -2463,45 +2465,47 @@ class NPUModelRunner(GPUModelRunner):
                     self._finalize_dump_data()
                     return output
 
-                sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
-            else:
-                # Rare case.
-                assert not self.is_pooling_model
-
-                if not get_pp_group().is_last_rank:
-                    sample_hidden_states = hidden_states[logits_indices]
-                    get_pp_group().send_tensor_dict(hidden_states.tensors, all_gather_group=get_tp_group())
-                    logits = None
-                else:
                     sample_hidden_states = hidden_states[logits_indices]
                     logits = self.model.compute_logits(sample_hidden_states)
+                else:
+                    # Rare case.
+                    assert not self.is_pooling_model
 
-                model_output_broadcast_data: dict[str, Any] = {}
-                if logits is not None:
-                    model_output_broadcast_data["logits"] = logits.contiguous()
-                broadcasted = get_pp_group().broadcast_tensor_dict(
-                    model_output_broadcast_data, src=len(get_pp_group().ranks) - 1
+                    if not get_pp_group().is_last_rank:
+                        sample_hidden_states = hidden_states[logits_indices]
+                        get_pp_group().send_tensor_dict(hidden_states.tensors, all_gather_group=get_tp_group())
+                        logits = None
+                    else:
+                        sample_hidden_states = hidden_states[logits_indices]
+                        logits = self.model.compute_logits(sample_hidden_states)
+
+                    model_output_broadcast_data: dict[str, Any] = {}
+                    if logits is not None:
+                        model_output_broadcast_data["logits"] = logits.contiguous()
+                    broadcasted = get_pp_group().broadcast_tensor_dict(
+                        model_output_broadcast_data, src=len(get_pp_group().ranks) - 1
+                    )
+                    assert broadcasted is not None
+                    logits = broadcasted["logits"]
+
+                # Apply structured output bitmasks if present
+                self.execute_model_state = ExecuteModelState(
+                    scheduler_output,
+                    logits,
+                    spec_decode_metadata,
+                    spec_decode_common_attn_metadata,
+                    hidden_states,
+                    sample_hidden_states,
+                    aux_hidden_states,
+                    attn_metadata,
+                    positions,
+                    ec_connector_output,
+                    cudagraph_stats,
+                    batch_desc,
                 )
-                assert broadcasted is not None
-                logits = broadcasted["logits"]
-
-            # Apply structured output bitmasks if present
-            self.execute_model_state = ExecuteModelState(
-                scheduler_output,
-                logits,
-                spec_decode_metadata,
-                spec_decode_common_attn_metadata,
-                hidden_states,
-                sample_hidden_states,
-                aux_hidden_states,
-                attn_metadata,
-                positions,
-                ec_connector_output,
-                cudagraph_stats,
-                batch_desc,
-            )
-            self.kv_connector_output = kv_connector_output
+                self.kv_connector_output = kv_connector_output
+        finally:
+            set_reduce_sample_force_disabled(_prev_reduce_sample_disabled)
 
         # Now the batch has been launched we can wait for corrections from the
         # previous model forward without breaking async scheduling.
@@ -2744,17 +2748,28 @@ class NPUModelRunner(GPUModelRunner):
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
         self.input_batch.update_async_output_token_ids()
-        sampling_metadata = self.input_batch.sampling_metadata
-        if spec_decode_metadata is None:
-            if lmhead_tp_enable() and logits is not None:
-                logits = logits[: self.input_batch.num_reqs]
-            if self.input_batch.sampling_metadata.top_k is not None and is_reduce_sample_enabled():
-                max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-                self.sampler.prepare_sampling(max_topk)
-            return self.sampler(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-            )
+        
+        # When unsupported sampling params are present and reduce_sample is
+        # enabled, force reduce_sample off. The LogitsProcessor has already
+        # all-gathered the logits (via the override set in execute_model),
+        # so we also need the sampler to use the standard (non-reduce) path.
+        _prev_reduce_sample_disabled = get_reduce_sample_force_disabled()
+        if reduce_sample_enabled() and _should_disable_reduce_sample(
+            self.requests[req_id].sampling_params
+            for req_id in self.input_batch.req_ids
+        ):
+            set_reduce_sample_force_disabled(True)
+        try:
+            if spec_decode_metadata is None:
+                if lmhead_tp_enable() and logits is not None:
+                    logits = logits[: self.input_batch.num_reqs]
+                if self.input_batch.sampling_metadata.top_k is not None and reduce_sample_enabled():
+                    max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+                    self.sampler.prepare_sampling(max_topk)
+                return self.sampler(
+                    logits=logits,
+                    sampling_metadata=sampling_metadata,
+                )
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]

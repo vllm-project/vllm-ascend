@@ -44,8 +44,6 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.ascend_forward_context import (
     _EXTRA_CTX,
-    is_reduce_sample_enabled,
-    override_reduce_sample,
     set_ascend_forward_context,
 )
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -58,7 +56,15 @@ from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import (
+    enable_sp,
+    lmhead_tp_enable,
+    shared_expert_dp_enabled,
+    reduce_sample_enabled,
+    _should_disable_reduce_sample,
+    get_reduce_sample_force_disabled,
+    set_reduce_sample_force_disabled,
+)
 
 
 @contextmanager
@@ -1040,29 +1046,28 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
-        # When logprobs are requested and reduce_sample is enabled, force
-        # reduce_sample off so that the draft model's LogitsProcessor
-        # all-gathers the full [B, V_global] logits and the sampler uses
-        # the standard (non-reduce) path.
-        needs_reduce_sample_override = is_reduce_sample_enabled() and (
-            sampling_metadata.max_num_logprobs is not None or sampling_metadata.logprob_token_ids is not None
-        )
-        reduce_sample_ctx = override_reduce_sample(False) if needs_reduce_sample_override else nullcontext()
-        with (
-            reduce_sample_ctx,
-            set_ascend_forward_context(
-                multi_steps_attn_metadata[0],
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                num_actual_tokens=num_tokens,
-                batch_descriptor=batch_descriptor,
-                aclgraph_runtime_mode=aclgraph_runtime_mode,
-                is_draft_model=True,
-                draft_attn_metadatas=multi_steps_attn_metadata,
-                eplb_heat_collection_status=(
-                    self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
-                ),
+        # When unsupported sampling params are present and reduce_sample is
+        # enabled, force reduce_sample off so that the draft model's
+        # LogitsProcessor all-gathers the full [B, V_global] logits.
+        _prev_reduce_sample_disabled = get_reduce_sample_force_disabled()
+        if reduce_sample_enabled() and _should_disable_reduce_sample(
+            self.runner.requests[req_id].sampling_params
+            for req_id in self.runner.input_batch.req_ids
+        ):
+            set_reduce_sample_force_disabled(True)
+
+        with set_ascend_forward_context(
+            multi_steps_attn_metadata[0],
+            self.vllm_config,
+            num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            num_actual_tokens=num_tokens,
+            batch_descriptor=batch_descriptor,
+            aclgraph_runtime_mode=aclgraph_runtime_mode,
+            is_draft_model=True,
+            draft_attn_metadatas=multi_steps_attn_metadata,
+            eplb_heat_collection_status=(
+                self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
             ),
         ):
             # Reset MOE layer index for forward pass
@@ -1088,6 +1093,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        set_reduce_sample_force_disabled(_prev_reduce_sample_disabled)
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
@@ -1206,7 +1212,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        if is_reduce_sample_enabled():
+        if reduce_sample_enabled():
             if self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1368,7 +1374,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
-            if is_reduce_sample_enabled():
+            if reduce_sample_enabled():
                 if self.method in ("eagle3", "dflash", "mtp"):
                     draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                     if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:

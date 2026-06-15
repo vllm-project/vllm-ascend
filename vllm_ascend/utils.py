@@ -1716,3 +1716,85 @@ def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
     if raw is None:
         return None
     return raw.decode(encoding)
+
+
+# ---------------------------------------------------------------------------
+# Reduce-sample runtime control
+# ---------------------------------------------------------------------------
+# Global flag to force-disable reduce_sample at runtime.
+# When True, is_reduce_sample_enabled() returns False regardless of
+# the AscendConfig setting. Set by the model runner before compute_logits
+# and _sample when unsupported sampling parameters are detected.
+# Safe for v1: each worker process runs a single model runner serially.
+_reduce_sample_force_disabled: bool = False
+
+
+def get_reduce_sample_force_disabled() -> bool:
+    """Get the current value of the reduce_sample force-disable flag."""
+    return _reduce_sample_force_disabled
+
+
+def set_reduce_sample_force_disabled(value: bool) -> bool:
+    """Set the reduce_sample force-disable flag. Returns the previous value."""
+    global _reduce_sample_force_disabled
+    prev = _reduce_sample_force_disabled
+    _reduce_sample_force_disabled = value
+    return prev
+
+_REDUCE_SAMPLE_CHECK_FIELDS: tuple[tuple[str, object], ...] | None = None
+
+
+def _get_reduce_sample_check_fields() -> tuple[tuple[str, object], ...]:
+    """Lazily build and cache the (field_name, default_value) pairs that
+    _should_disable_reduce_sample needs to check."""
+    global _REDUCE_SAMPLE_CHECK_FIELDS
+    if _REDUCE_SAMPLE_CHECK_FIELDS is not None:
+        return _REDUCE_SAMPLE_CHECK_FIELDS
+
+    import msgspec
+    from vllm.sampling_params import SamplingParams
+
+    _SUPPORTED = frozenset({
+        "temperature", "top_p", "top_k",
+        "presence_penalty", "frequency_penalty", "repetition_penalty",
+    })
+    _INTERNAL = frozenset({
+        "output_text_buffer_length", "_eos_token_id",
+        "stop_token_ids", "_all_stop_token_ids", "skip_clone", "max_tokens", "output_kind"
+    })
+    _SKIP = _SUPPORTED | _INTERNAL
+
+    default_params = SamplingParams()
+    _REDUCE_SAMPLE_CHECK_FIELDS = tuple(
+        (f.name, getattr(default_params, f.name))
+        for f in msgspec.structs.fields(SamplingParams)
+        if f.name not in _SKIP
+    )
+    return _REDUCE_SAMPLE_CHECK_FIELDS
+
+
+def reduce_sample_enabled() -> bool:
+    """Check if reduce_sample is currently enabled.
+
+    Returns False if _reduce_sample_force_disabled is set (runtime override),
+    otherwise falls back to the AscendConfig setting.
+    """
+    if _reduce_sample_force_disabled:
+        return False
+    return get_ascend_config().enable_reduce_sample
+
+
+def _should_disable_reduce_sample(sampling_params_list) -> bool:
+    """Check whether reduce_sample should be disabled for the current batch.
+
+    Reduce sample only supports: temperature, top_p, top_k,
+    presence_penalty, frequency_penalty, repetition_penalty.
+    Returns True if any other SamplingParams field deviates from its default.
+    """
+    check_fields = _get_reduce_sample_check_fields()
+    for params in sampling_params_list:
+        for name, default_val in check_fields:
+            if getattr(params, name) != default_val:
+                print(f"SamplingParams.{name} cannot be used with reduce_sample, {getattr(params, name)} vs {default_val}")
+                return True
+    return False
