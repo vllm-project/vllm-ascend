@@ -171,7 +171,9 @@ def main() -> None:
 
     def add(key: str, t: torch.Tensor, quant: bool) -> None:
         nonlocal buf_bytes
-        t = t.contiguous()
+        # safetensors.save_file requires CPU tensors; move off NPU/GPU if --device
+        # put the quantized weights on an accelerator.
+        t = t.cpu().contiguous()
         buf[key] = t
         buf_bytes += t.numel() * t.element_size()
         description[key] = "W4A4_DYNAMIC" if quant else "FLOAT"

@@ -27,7 +27,9 @@ to CANN -- see the contribution notes / PR description.
 
 import contextlib
 import ctypes
+import fcntl
 import functools
+import hashlib
 import math
 import os
 import subprocess
@@ -36,13 +38,28 @@ import sys
 import numpy as np
 import torch
 
+import vllm_ascend.envs as envs_ascend
+
 _OPS_DIR = os.path.dirname(os.path.abspath(__file__))
 _KERNEL_SRC = os.path.join(_OPS_DIR, "mega_moe_w4a4_qwen36_pto-isa.cpp")
-_KERNEL_LIB = os.environ.get("VLLM_ASCEND_MEGA_MOE_SO", os.path.join(_OPS_DIR, "mega_moe_w4a4_jit.so"))
+_KERNEL_LIB = envs_ascend.VLLM_ASCEND_MEGA_MOE_SO or os.path.join(_OPS_DIR, "mega_moe_w4a4_jit.so")
+# Every source the .so is built from — the staleness check must compare against
+# all of them (the qwen36 shim only ``#include``s the real implementation).
+_KERNEL_DEPS = [
+    _KERNEL_SRC,
+    os.path.join(_OPS_DIR, "mega_moe_w4a4_pto-isa.cpp"),
+    os.path.join(_OPS_DIR, "int4_cvt.hpp"),
+]
 
 # Block-diagonal Hadamard size (must match the offline rotation baked into the
 # gate_up weights). 64 is the validated production value for Qwen3.x-MoE.
 HADAMARD_BLOCK_SIZE = 64
+
+# Per-rank shapes the kernel is COMPILED for (constants in the .cpp). The scheme
+# must fail fast if a model/TP produces different per-rank dims (see
+# w4a4_dynamic.process_weights_after_loading).
+KERNEL_H_DIM = 2048
+KERNEL_I_DIM = 128
 
 _PTO_LIB_PATH = os.environ.get("PTO_LIB_PATH", "/sources/pto-isa")
 _CANN_HOME = os.environ.get("ASCEND_TOOLKIT_HOME", "/usr/local/Ascend/cann-8.5.1")
@@ -71,17 +88,45 @@ _BUILD_DEFINES = [
 ]
 
 
+def _defines_hash() -> str:
+    """Hash of the build flags so a change in -D defines forces a rebuild."""
+    return hashlib.sha1(" ".join(_BUILD_DEFINES).encode()).hexdigest()
+
+
 def _is_lib_fresh() -> bool:
+    """Fresh iff the .so is newer than every kernel source AND was built with the
+    current build defines (recorded in a ``.defines`` sidecar)."""
     try:
-        return os.path.getmtime(_KERNEL_LIB) >= os.path.getmtime(_KERNEL_SRC)
+        so_mtime = os.path.getmtime(_KERNEL_LIB)
+    except OSError:
+        return False
+    for dep in _KERNEL_DEPS:
+        if os.path.exists(dep) and so_mtime < os.path.getmtime(dep):
+            return False
+    try:
+        with open(_KERNEL_LIB + ".defines") as f:
+            return f.read().strip() == _defines_hash()
     except OSError:
         return False
 
 
 def compile_kernel(verbose: bool = False) -> str:
-    """Compile the mega-MoE kernel .so with bisheng if missing/stale. Returns the .so path."""
+    """Compile the mega-MoE kernel .so with bisheng if missing/stale. Returns the .so path.
+
+    Serialized with a file lock so concurrent TP worker processes don't race on
+    the shared ``-o`` target (a half-written .so would fail to load)."""
     if _is_lib_fresh():
         return _KERNEL_LIB
+    lock_path = _KERNEL_LIB + ".lock"
+    with open(lock_path, "w") as lock_f:
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
+        # Another worker may have built it while we waited for the lock.
+        if _is_lib_fresh():
+            return _KERNEL_LIB
+        return _compile_kernel_locked(verbose)
+
+
+def _compile_kernel_locked(verbose: bool) -> str:
     command = [
         "bisheng",
         "-fPIC",
@@ -120,6 +165,9 @@ def compile_kernel(verbose: bool = False) -> str:
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"mega-moe-w4a4 kernel build failed:\n{result.stderr[:3000]}")
+    # Record the build-defines hash so a later flag change forces a rebuild.
+    with open(_KERNEL_LIB + ".defines", "w") as f:
+        f.write(_defines_hash())
     return _KERNEL_LIB
 
 
@@ -362,7 +410,11 @@ def _get_workspaces(device: torch.device, M_total: int, T_orig: int, H: int, i_d
         t_cap = max(T_orig, entry[3] if entry else 0)
         h_act = H // 2  # int4-packed activations
         i_act = i_dim // 2
-        d = torch.empty(m_cap, H, dtype=torch.float16, device=device)
+        # ``d`` (fp16, [rows, H]) also backs the aliased xq (offset 0, m_cap*h_act
+        # bytes) + xrot (offset m_cap*h_act, t_cap*H*2 bytes). Worst case is top_k=1
+        # where t_cap == m_cap, needing m_cap*h_act + m_cap*H*2 == 2.5*m_cap*H bytes;
+        # 1.25*m_cap fp16 rows == 2.5*m_cap*H bytes covers it for every top_k.
+        d = torch.empty(m_cap + m_cap // 4, H, dtype=torch.float16, device=device)
         xs = torch.empty(m_cap * 32, dtype=torch.float32, device=device)
         gu = torch.empty(m_cap, 2 * i_dim, dtype=torch.float16, device=device)
         iq = torch.empty(m_cap, i_act, dtype=torch.int8, device=device)

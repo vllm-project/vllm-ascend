@@ -13,10 +13,12 @@ from vllm_ascend.quantization.methods.w4a4_dynamic import AscendW4A4DynamicFused
 
 
 class TestAscendW4A4DynamicFusedMoEMethod(TestBase):
-    # gate_up transpose -> K=H (%16==0), N=2I (%64==0); down -> K=I (%16==0), N=H (%64==0).
+    # Per-rank shapes the mega kernel is compiled for (process_weights fails fast
+    # on anything else). gate_up transpose -> K=H (%16==0), N=2I (%64==0);
+    # down -> K=I (%16==0), N=H (%64==0).
     num_experts = 2
-    hidden_size = 128
-    intermediate_size = 64
+    hidden_size = 2048
+    intermediate_size = 128
 
     # get_mc2_group() needs a distributed env; raise AttributeError so the
     # parent __init__'s own try/except falls back to an empty comm-group name.
