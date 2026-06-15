@@ -235,6 +235,8 @@ FULL_FEATURE_MODEL_CASES = [
             "long_prefill_token_threshold": 4,
             "compilation_config": FULL_DECODE_GRAPH,
             "additional_config": {"enable_flashcomm1": True},
+            # graph_mode is disabled for dsv32 until the PCP gatherv3 out of index issue is fixed.
+            "enforce_eager": True,
         },
     ),
     pytest.param(
