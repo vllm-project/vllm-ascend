@@ -115,13 +115,6 @@ class AscendRejectionSampler(RejectionSampler):
 
         # Calculate indices of target logits.
         if sampling_metadata.allowed_token_ids_mask is not None or has_penalties:
-            # num_requests = len(metadata.num_draft_tokens)
-            # num_draft_tokens = torch.tensor(metadata.num_draft_tokens, device="cpu")
-            # original_indices = torch.arange(num_requests, device="cpu")
-            # repeat_indices_cpu = original_indices.repeat_interleave(num_draft_tokens)
-            # repeat_indices = repeat_indices_cpu.to(
-            #     device=logits.device, non_blocking=True
-            # )
             num_requests = len(metadata.num_draft_tokens)
             original_indices = torch.arange(num_requests, device=logits.device, dtype=torch.long)
             repeat_indices = expand_batch_to_tokens(
