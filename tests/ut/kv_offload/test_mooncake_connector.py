@@ -468,6 +468,7 @@ class TestCoreFunctionality(unittest.TestCase):
         self.thread.task_tracker = MagicMock()
         self.engine.batch_transfer_sync_read.return_value = 0
         self.thread.remote_te_port = {"remote_engine": {6666: 7777}}
+        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[1024]]
 
     @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
     @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
@@ -1222,7 +1223,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
         self.assertEqual(block_ids, ([30, 31],))
 
-    def test_get_transfer_block_ids_clips_sliding_window_group(self):
+    def test_get_transfer_block_ids_trims_sliding_window_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
             types.SimpleNamespace(
                 tokens_per_block=16,
@@ -1231,11 +1232,24 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
             )
         ]
 
-        block_ids = self.scheduler._get_transfer_block_ids(([40, 41, 42, 43, 44],), prompt_len=80)
+        block_ids = self.scheduler._get_transfer_block_ids(([40, 41, 42, 43, 44],), prompt_len=48)
+
+        self.assertEqual(block_ids, ([40, 41, 42],))
+
+    def test_get_swa_transfer_block_ids_clips_sliding_window_group(self):
+        self.scheduler.group_transfer_info = [
+            types.SimpleNamespace(
+                tokens_per_block=16,
+                blocks_per_window=3,
+                is_state_group=False,
+            )
+        ]
+
+        block_ids = self.scheduler._get_swa_transfer_block_ids(([40, 41, 42, 43, 44],))
 
         self.assertEqual(block_ids, ([42, 43, 44],))
 
-    def test_get_transfer_block_ids_drops_zero_from_sliding_window_group(self):
+    def test_get_swa_transfer_block_ids_drops_zero_from_sliding_window_tail(self):
         self.scheduler.group_transfer_info = [
             types.SimpleNamespace(
                 tokens_per_block=16,
@@ -1244,7 +1258,21 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
             )
         ]
 
-        block_ids = self.scheduler._get_transfer_block_ids(([0, 10],), prompt_len=32)
+        block_ids = self.scheduler._get_swa_transfer_block_ids(([0, 10],))
+
+        self.assertEqual(block_ids, ([10],))
+
+    def test_transfer_block_ids_trims_mtp_before_swa_zero_filter(self):
+        self.scheduler.group_transfer_info = [
+            types.SimpleNamespace(
+                tokens_per_block=16,
+                blocks_per_window=3,
+                is_state_group=False,
+            )
+        ]
+
+        block_ids = self.scheduler._get_transfer_block_ids(([0, 10, 11, 12, 13],), prompt_len=32)
+        block_ids = self.scheduler._get_swa_transfer_block_ids(block_ids)
 
         self.assertEqual(block_ids, ([10],))
 

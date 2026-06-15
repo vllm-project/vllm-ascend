@@ -219,7 +219,7 @@ class KVCacheTaskTracker:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
-                logger.info(
+                logger.error(
                     "Force freed expired request: %s. "
                     "Reason: Request exceeded timeout threshold (%s seconds). "
                     "Action: Resources have been forcibly released to prevent memory leak.",
@@ -998,9 +998,7 @@ class KVCacheRecvingThread(threading.Thread):
                 length_list.append(remote_conv_size * conv_dtype_size)
 
         src_list.append(
-            local_ssm_addr
-            + local_block_id * local_ssm_stride
-            + remote_tp_offset * local_ssm_len // tp_num_need_pulls
+            local_ssm_addr + local_block_id * local_ssm_stride + remote_tp_offset * local_ssm_len // tp_num_need_pulls
         )
         dst_list.append(remote_ssm_addr + remote_block_id * remote_ssm_stride)
         length_list.append(remote_ssm_len)
@@ -1502,11 +1500,11 @@ class MooncakeConnectorScheduler:
         return specs
 
     def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
-        """Return the P-side blocks that contain transferable prompt KV.
+        """Return blocks that contain prompt KV, dropping MTP extra blocks.
 
-        Attention KV can have extra blocks allocated by MTP. State groups such
-        as Mamba are not context-block aligned with attention KV, so keep them
-        unchanged and only clip attention-like groups.
+        State groups such as Mamba are not context-block aligned with attention
+        KV, so keep them unchanged and only clip attention-like groups here.
+        SWA tail clipping is handled as a separate step after this.
         """
         if len(block_ids) == 0:
             return block_ids
@@ -1517,20 +1515,30 @@ class MooncakeConnectorScheduler:
         for blocks, group_info in zip(block_ids, self.group_transfer_info):
             if group_info.is_state_group:
                 transfer_block_ids.append(blocks)
-            elif group_info.blocks_per_window > 0:
-                window_blocks = blocks[-group_info.blocks_per_window :]
-                if len(window_blocks) > 1:
-                    window_blocks = [block_id for block_id in window_blocks if block_id != 0]
-                transfer_block_ids.append(window_blocks)
             else:
                 num_prompt_blocks = cdiv(prompt_len, group_info.tokens_per_block)
                 transfer_block_ids.append(blocks[:num_prompt_blocks])
         return tuple(transfer_block_ids)
 
+    def _get_swa_transfer_block_ids(self, block_ids: BlockIds) -> BlockIds:
+        """Clip SWA groups to their window tail and drop placeholder block 0."""
+        if len(block_ids) == 0:
+            return block_ids
+
+        assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
+
+        transfer_block_ids = []
+        for blocks, group_info in zip(block_ids, self.group_transfer_info):
+            if group_info.is_state_group or group_info.blocks_per_window == 0:
+                transfer_block_ids.append(blocks)
+            else:
+                window_blocks = blocks[-group_info.blocks_per_window :]
+                transfer_block_ids.append([block_id for block_id in window_blocks if block_id != 0])
+        return tuple(transfer_block_ids)
+
     def _state_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
         always recomputes the last token and must start from h(N-1)."""
-        # logger.info(f"[===] enter _state_prefill_token_count")
         if self.need_truncate and num_prompt_tokens > 1:
             return num_prompt_tokens - 1
         return num_prompt_tokens
@@ -1542,7 +1550,6 @@ class MooncakeConnectorScheduler:
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
-        # logger.info(f"[===] enter _truncate_request_for_prefill")
         params = request.kv_transfer_params
         if (
             params is not None
@@ -1673,15 +1680,14 @@ class MooncakeConnectorScheduler:
         ):
             return False, None
 
-        computed_block_ids = block_ids
+        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        computed_block_ids = self._get_transfer_block_ids(block_ids, len(request.prompt_token_ids))
+        computed_block_ids = self._get_swa_transfer_block_ids(computed_block_ids)
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
         delay_free_blocks = sum(computed_block_lens) > 0
         if delay_free_blocks:
-            logger.info("Delaying free of %d blocks for request %s", len(computed_block_ids), request.request_id)
+            logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
-
-        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
-        computed_block_ids = self._get_transfer_block_ids(computed_block_ids, len(request.prompt_token_ids))
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -1990,7 +1996,11 @@ class MooncakeConnectorWorker:
         # Per-layer byte length of one tensor block:
         # [layer_idx][cache_idx] -> element_size * prod(block_shape).
         self.block_len_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
+        # Per-layer full tensor shape for each registered KV cache address:
+        # [layer_idx][cache_idx] -> cache tensor shape, including num_blocks.
         self.block_shape_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
+        # Per-layer byte stride between consecutive tensor blocks:
+        # [layer_idx][cache_idx] -> stride(0) * element_size.
         self.block_stride_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
 
         for layer_name, kv_cache_tuple in kv_caches.items():
