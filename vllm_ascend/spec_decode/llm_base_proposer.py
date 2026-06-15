@@ -1354,7 +1354,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
                 target_positions = target_positions[0]
 
-            self._set_positions(num_tokens, target_positions)
+            self._set_positions(target_positions.shape[-1], target_positions)
             self.hidden_states[:num_tokens] = target_hidden_states.view(num_tokens, -1)
 
             return num_tokens, token_indices_to_sample, cad, (query_lens_d, ori_token_indices_to_sample)
