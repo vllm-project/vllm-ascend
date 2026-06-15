@@ -747,11 +747,19 @@ class NPUWorker(WorkerBase):
         # metadata across workers.
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
+
+        # Mooncake-style connectors do not support PP-disaggregated KV
+        # transfer. Only the first PP rank (rank 0) reports handshake
+        # metadata; higher PP ranks skip reporting to avoid the upstream
+        # pp_rank > 0 assertion in set_xfer_handshake_metadata_pp_aware.
+        pp_rank = get_pp_group().rank_in_group
+        if pp_rank > 0:
+            return None
+
         tp_rank = get_tp_group().rank_in_group
         if vllm_version_is("0.21.0"):
             return {tp_rank: metadata}
 
-        pp_rank = get_pp_group().rank_in_group
         return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
