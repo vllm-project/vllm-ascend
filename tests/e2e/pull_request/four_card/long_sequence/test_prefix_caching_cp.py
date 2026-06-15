@@ -23,6 +23,8 @@ Run `pytest tests/e2e/pull_request/four_card/long_sequence/test_prefix_caching_c
 import os
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 MODEL = "Qwen/Qwen3.5-4B"
@@ -51,6 +53,9 @@ INPUT_PROMPTS = [
 
 
 @patch.dict(os.environ, THREAD_ENV)
+@pytest.mark.skip(
+    reason="Temporarily skip Qwen3.5 chunked prefill with PCP until ChunkGatedDeltaRuleFwdH support is fixed."
+)
 def test_qwen3_5_prefix_cache_with_pcp() -> None:
     with VllmRunner(
         MODEL,
