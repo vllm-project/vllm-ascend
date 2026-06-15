@@ -308,7 +308,7 @@ class AscendMoERunner(MoERunner):
         needed by ALLGATHER. Keep a custom op in the graph and let its runtime
         implementation decide whether to all-reduce for the current context.
         """
-        if not self.moe_config.is_sequence_parallel and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1):
+        if not enable_sp() and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1):
             states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
 
