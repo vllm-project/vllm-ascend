@@ -20,10 +20,19 @@
 Run `pytest tests/e2e/pull_request/four_card/long_sequence/test_prefix_caching_cp.py`.
 """
 
+import os
+from unittest.mock import patch
+
 from tests.e2e.conftest import VllmRunner
 
 MODEL = "Qwen/Qwen3.5-4B"
 MAX_NUM_SEQS = 2
+THREAD_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
 
 QWEN3_5_PREFIX_MAMBA_PROMPT = (
     "You are reading a compact synthetic operations ledger. "
@@ -41,6 +50,7 @@ INPUT_PROMPTS = [
 ]
 
 
+@patch.dict(os.environ, THREAD_ENV)
 def test_qwen3_5_prefix_cache_with_pcp() -> None:
     with VllmRunner(
         MODEL,
