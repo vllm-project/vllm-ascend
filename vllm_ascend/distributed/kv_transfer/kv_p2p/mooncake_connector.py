@@ -62,6 +62,7 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_dfx import (
     is_mooncake_transfer_dfx_enabled,
     make_checksum_error,
     record_kv_content_check,
+    record_metadata_error,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
@@ -271,7 +272,17 @@ class KVCacheSendingThread(threading.Thread):
 
     def run_busy_loop(self, sock: zmq.Socket):  # type: ignore
         encoder = msgspec.msgpack.Encoder()
-        encoded_data = encoder.encode(self.metadata)
+        try:
+            encoded_data = encoder.encode(self.metadata)
+        except Exception as err:
+            record_metadata_error(
+                label="encode_agent_metadata",
+                error_code=MooncakeDFXErrorCode.METADATA_ENCODE_ERROR,
+                error=err,
+                role="kv_producer",
+                metadata=self.metadata,
+            )
+            raise
         size_in_bytes = len(encoded_data)
         logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
@@ -297,7 +308,18 @@ class KVCacheSendingThread(threading.Thread):
                         role="kv_producer",
                         extra={"encoded_size_bytes": size_in_bytes},
                     )
-                    sock.send_multipart((identity, b"", encoded_data))
+                    try:
+                        sock.send_multipart((identity, b"", encoded_data))
+                    except Exception as err:
+                        record_metadata_error(
+                            label="send_agent_metadata",
+                            error_code=MooncakeDFXErrorCode.METADATA_SEND_ERROR,
+                            error=err,
+                            role="kv_producer",
+                            metadata=self.metadata,
+                            extra={"encoded_size_bytes": size_in_bytes},
+                        )
+                        raise
                 elif msg[0] == GET_KV_CACHE_CHECKSUM_MSG:
                     checksum_request = msg[1]
                     layer_names = checksum_request.get("layer_names", [])
@@ -968,11 +990,46 @@ class KVCacheRecvingThread(threading.Thread):
     def _get_remote_metadata(self, remote_host: str, remote_handshake_port: int) -> None:
         """Get the metadata from the remote host."""
         sock: zmq.Socket | None = None  # type: ignore
+        remote_addr = f"{remote_host}:{remote_handshake_port}"
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
-            ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), f"{remote_host}:{remote_handshake_port}")
-            metadata_bytes = ensure_zmq_recv(sock, self.remote_poller, f"{remote_host}:{remote_handshake_port}")
-            agent_meta = self.decoder.decode(metadata_bytes)
+            try:
+                ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), remote_addr)
+            except Exception as err:
+                record_metadata_error(
+                    label="request_agent_metadata",
+                    error_code=MooncakeDFXErrorCode.METADATA_SEND_ERROR,
+                    error=err,
+                    role="kv_consumer",
+                    extra={"remote_host": remote_host, "remote_handshake_port": remote_handshake_port},
+                )
+                raise
+            try:
+                metadata_bytes = ensure_zmq_recv(sock, self.remote_poller, remote_addr)
+            except Exception as err:
+                record_metadata_error(
+                    label="recv_agent_metadata",
+                    error_code=MooncakeDFXErrorCode.METADATA_RECV_ERROR,
+                    error=err,
+                    role="kv_consumer",
+                    extra={"remote_host": remote_host, "remote_handshake_port": remote_handshake_port},
+                )
+                raise
+            try:
+                agent_meta = self.decoder.decode(metadata_bytes)
+            except Exception as err:
+                record_metadata_error(
+                    label="decode_agent_metadata",
+                    error_code=MooncakeDFXErrorCode.METADATA_DECODE_ERROR,
+                    error=err,
+                    role="kv_consumer",
+                    extra={
+                        "remote_host": remote_host,
+                        "remote_handshake_port": remote_handshake_port,
+                        "encoded_size_bytes": len(metadata_bytes),
+                    },
+                )
+                raise
             dump_metadata(
                 label="recv_agent_metadata",
                 metadata=agent_meta,
@@ -980,9 +1037,25 @@ class KVCacheRecvingThread(threading.Thread):
                 extra={"remote_host": remote_host, "remote_handshake_port": remote_handshake_port},
             )
             engine_id = agent_meta.engine_id
-            assert engine_id != self.local_engine_id, (
-                f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
-            )
+            try:
+                assert engine_id != self.local_engine_id, (
+                    f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
+                )
+            except AssertionError as err:
+                record_metadata_error(
+                    label="validate_agent_metadata",
+                    error_code=MooncakeDFXErrorCode.METADATA_VALIDATE_ERROR,
+                    error=err,
+                    role="kv_consumer",
+                    metadata=agent_meta,
+                    extra={
+                        "remote_host": remote_host,
+                        "remote_handshake_port": remote_handshake_port,
+                        "local_engine_id": self.local_engine_id,
+                        "remote_engine_id": engine_id,
+                    },
+                )
+                raise
             self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
         finally:

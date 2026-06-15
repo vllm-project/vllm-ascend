@@ -24,6 +24,11 @@ class MooncakeDFXErrorCode(str, Enum):
     CHECKSUM_DIGEST_MISMATCH = "ErrorCode_1102"
     CHECKSUM_BYTES_MISMATCH = "ErrorCode_1103"
     CHECKSUM_SEGMENTS_MISMATCH = "ErrorCode_1104"
+    METADATA_ENCODE_ERROR = "ErrorCode_2001"
+    METADATA_SEND_ERROR = "ErrorCode_2002"
+    METADATA_RECV_ERROR = "ErrorCode_2003"
+    METADATA_DECODE_ERROR = "ErrorCode_2004"
+    METADATA_VALIDATE_ERROR = "ErrorCode_2005"
 
 
 ERROR_CODE_REASONS = {
@@ -36,6 +41,11 @@ ERROR_CODE_REASONS = {
     MooncakeDFXErrorCode.CHECKSUM_DIGEST_MISMATCH.value: "source and target checksum digests mismatch",
     MooncakeDFXErrorCode.CHECKSUM_BYTES_MISMATCH.value: "source and target checksum byte counts mismatch",
     MooncakeDFXErrorCode.CHECKSUM_SEGMENTS_MISMATCH.value: "source and target checksum segment counts mismatch",
+    MooncakeDFXErrorCode.METADATA_ENCODE_ERROR.value: "metadata encode failed",
+    MooncakeDFXErrorCode.METADATA_SEND_ERROR.value: "metadata send failed",
+    MooncakeDFXErrorCode.METADATA_RECV_ERROR.value: "metadata receive failed",
+    MooncakeDFXErrorCode.METADATA_DECODE_ERROR.value: "metadata decode failed",
+    MooncakeDFXErrorCode.METADATA_VALIDATE_ERROR.value: "metadata validation failed",
 }
 
 
@@ -86,13 +96,43 @@ def dump_metadata(
     role: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> None:
+    error_codes = [MooncakeDFXErrorCode.OK.value]
     details = {
         "label": label,
+        "passed": True,
+        "error_code": error_codes[0],
+        "error_codes": error_codes,
+        "error_reasons": {code: ERROR_CODE_REASONS.get(code, "unknown") for code in error_codes},
         "metadata": _sanitize_for_dump(metadata),
     }
     if extra:
         details.update(extra)
     _record("metadata_dump", role=role, details=details)
+
+
+def record_metadata_error(
+    *,
+    label: str,
+    error_code: MooncakeDFXErrorCode,
+    error: Any,
+    role: str | None = None,
+    metadata: Any | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    error_codes = [error_code.value]
+    details: dict[str, Any] = {
+        "label": label,
+        "passed": False,
+        "error_code": error_codes[0],
+        "error_codes": error_codes,
+        "error_reasons": {code: ERROR_CODE_REASONS.get(code, "unknown") for code in error_codes},
+        "error": str(error),
+    }
+    if metadata is not None:
+        details["metadata"] = _sanitize_for_dump(metadata)
+    if extra:
+        details.update(extra)
+    _record("metadata_error", role=role, details=details)
 
 
 def _iter_cache_tensors(kv_caches: Mapping[str, Any]) -> list[Any]:
