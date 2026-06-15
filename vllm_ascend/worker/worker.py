@@ -221,7 +221,7 @@ class NPUWorker(WorkerBase):
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", True)
+        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
 
@@ -246,7 +246,7 @@ class NPUWorker(WorkerBase):
                 "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
             )
         allocator = CaMemAllocator.get_instance()
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", True)
+        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
         allocator.wake_up(tags=tags)
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
