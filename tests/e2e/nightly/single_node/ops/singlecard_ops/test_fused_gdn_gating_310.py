@@ -36,7 +36,6 @@ def golden_fused_gdn_gating_v310(a, b, A_log, dt_bias, beta=1.0, threshold=20.0)
         (1.0 / beta) * torch.log1p(torch.exp(beta_x)),
         x,
     )
-    
     g = -torch.exp(A_log_expanded) * softplus_x
     g_out = g.unsqueeze(0)
 
@@ -51,9 +50,7 @@ def golden_fused_gdn_gating_v310(a, b, A_log, dt_bias, beta=1.0, threshold=20.0)
 def test_fused_gdn_gating_v310(batch_size, num_heads):
     """Test FusedGdnGatingV310 correctness against PyTorch golden implementation."""
     enable_custom_op()
-    
     torch.manual_seed(2026)
-    
     dtype = torch.float16
     beta = 1.0
     threshold = 20.0
@@ -66,16 +63,13 @@ def test_fused_gdn_gating_v310(batch_size, num_heads):
     g_golden, beta_output_golden = golden_fused_gdn_gating_v310(a, b, A_log, dt_bias, beta, threshold)
 
     g_npu, beta_output_npu = npu_fused_gdn_gating_v310(a.npu(), b.npu(), A_log.npu(), dt_bias.npu(), beta, threshold)
-    
     g_npu_cpu = g_npu.cpu().to(torch.float32)
     beta_output_npu_cpu = beta_output_npu.cpu().to(torch.float32)
-    
     beta_output_golden = beta_output_golden.to(torch.float32)
 
     torch.testing.assert_close(
         g_npu_cpu, g_golden, rtol=3e-3, atol=1e-2, equal_nan=True, msg="Gating (g) output mismatch!"
     )
-    
     torch.testing.assert_close(
         beta_output_npu_cpu,
         beta_output_golden,
