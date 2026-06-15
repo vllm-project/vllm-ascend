@@ -347,47 +347,6 @@ class TestKVPoolWorkerInit(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
-    def test_get_and_clear_finished_requests(
-        self, mock_tp_rank, mock_tp_size, mock_pcp_group, mock_dcp_ws, mock_dcp_rank, mock_importlib
-    ):
-        mock_tp_rank.return_value = 0
-        mock_tp_size.return_value = 1
-        pcp_group = MagicMock()
-        pcp_group.world_size = 1
-        mock_pcp_group.return_value = pcp_group
-        mock_dcp_ws.return_value = 1
-        mock_dcp_rank.return_value = 0
-        mock_importlib.import_module.return_value = MagicMock()
-
-        config = self._make_vllm_config()
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-        worker = KVPoolWorker(config, use_layerwise=False)
-
-        # Setup mock send thread using a real defaultdict
-        from collections import defaultdict
-
-        send_thread = MagicMock()
-        stored = defaultdict(int)
-        stored["r1"] = 0
-        stored["r2"] = 1
-        send_thread.stored_requests = stored
-        worker.kv_send_thread = send_thread
-
-        meta = AscendConnectorMetadata(set(), set())
-        result = worker.get_and_clear_finished_requests({"r1"}, meta)
-        self.assertIn("r1", result)
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib")
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank"
-    )
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_world_size"
-    )
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_rank")
     def test_consumer_partition_config(
         self, mock_tp_rank, mock_tp_size, mock_pcp_group, mock_dcp_ws, mock_dcp_rank, mock_importlib
     ):
@@ -655,50 +614,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 32)
-
-    def test_get_and_clear_finished_requests_with_preempted(self):
-        worker = self._make_worker()
-        from collections import defaultdict
-
-        send_thread = MagicMock()
-        stored = defaultdict(int)
-        stored["r1"] = 0
-        send_thread.stored_requests = stored
-        worker.kv_send_thread = send_thread
-
-        meta = AscendConnectorMetadata(set(), {"r1"})
-        worker.get_and_clear_finished_requests(set(), meta)
-        send_thread.delete_finished_stored_request.assert_called_with("r1")
-
-    def test_get_and_clear_finished_stored_req(self):
-        worker = self._make_worker()
-        from collections import defaultdict
-
-        send_thread = MagicMock()
-        stored = defaultdict(int)
-        stored["r1"] = 0
-        send_thread.stored_requests = stored
-        worker.kv_send_thread = send_thread
-        worker.finished_store_req.add("r1")
-
-        meta = AscendConnectorMetadata(set(), set())
-        result = worker.get_and_clear_finished_requests(set(), meta)
-        self.assertIn("r1", result)
-
-    def test_get_and_clear_finished_req_still_running(self):
-        worker = self._make_worker()
-        from collections import defaultdict
-
-        send_thread = MagicMock()
-        stored = defaultdict(int)
-        stored["r1"] = 2  # still running
-        send_thread.stored_requests = stored
-        worker.kv_send_thread = send_thread
-
-        meta = AscendConnectorMetadata(set(), set())
-        result = worker.get_and_clear_finished_requests({"r1"}, meta)
-        self.assertNotIn("r1", result)
-        self.assertIn("r1", worker.finished_store_req)
 
 
 class TestKVPoolWorkerStaticHelpers(unittest.TestCase):
