@@ -958,8 +958,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
         # step 0   
-        if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
-            self.model.model.set_skip_topk(False)
+        draft_model = getattr(self.model, "model", None)
+        if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+            draft_model.set_skip_topk(False)
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
