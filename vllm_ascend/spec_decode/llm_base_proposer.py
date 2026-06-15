@@ -1955,13 +1955,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 torch.zeros([0]),
                 torch.tensor([0], dtype=torch.int32),
             )
-        
+
         if self.runner.pcp_manager.pcp_use_hybrid_attn:
-            return self._split_pcp_input_hybrid(
-                req_scheduled_tokens, 
-                input_ids, 
-                target_hidden_states
-            )
+            return self._split_pcp_input_hybrid(req_scheduled_tokens, input_ids, target_hidden_states)
 
         def _pcp_pad_and_split(num_tokens):
             num_pcp_padded_scheduled_tokens = cdiv(num_tokens, 2 * self.pcp_size) * 2 * self.pcp_size
@@ -2005,9 +2001,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         cu_num_tokens = torch.tensor(np.insert(np.cumsum(np.array(num_pcp_scheduled_tokens)), 0, 0))
         return num_tokens, input_ids, target_hidden_states, max_query_len, seq_lens, cu_num_tokens
 
-    def _split_pcp_input_hybrid(
-        self, req_scheduled_tokens, input_ids, target_hidden_states
-    ):
+    def _split_pcp_input_hybrid(self, req_scheduled_tokens, input_ids, target_hidden_states):
         """
         Linear-split prefill input_ids and target_hidden_states for hybrid attn PCP.
 
