@@ -1047,7 +1047,7 @@ class NPUModelRunner(GPUModelRunner):
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
         if self.use_async_spec_decode:
-            cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
+            computed_token_tensor_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
                 device=self.device, non_blocking=True
             )
         if (
@@ -1063,7 +1063,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.prev_positions.gpu[:num_reqs],
                 self.valid_sampled_token_count_gpu, # type: ignore[has-type]
                 self.prev_num_draft_tokens.gpu,
-                cpu_values,
+                computed_token_tensor_cpu,
             )
         else:
             self.num_computed_tokens[:num_reqs].copy_(
@@ -1265,7 +1265,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
-            ) - cpu_values[req_indices_gpu]
+            ) - computed_token_tensor_cpu[req_indices_gpu]
             target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
             target.gpu[:, :total_num_scheduled_tokens] += drift
 
