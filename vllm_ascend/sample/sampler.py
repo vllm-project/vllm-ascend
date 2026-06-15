@@ -8,7 +8,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import is_reduce_sample_enabled
+from vllm_ascend.utils import reduce_sample_enabled
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
 
@@ -104,7 +104,7 @@ class AscendSampler(Sampler):
 
     @staticmethod
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
-        if get_ascend_config().enable_reduce_sample:
+        if reduce_sample_enabled():
             logger.debug_once(
                 "[sample/sampler] Using reduce-sample greedy sampling. "
                 "TP all-gather will be performed to find global argmax.",
@@ -154,7 +154,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             )
             return super().forward_native(logits, generators, k, p)
 
-        if get_ascend_config().enable_reduce_sample:
+        if reduce_sample_enabled():
             logger.debug_once(
                 "[sample/sampler] Using reduce-sample path in forward_native. "
                 "top-k/top-p with TP all-gather for distributed sampling.",
@@ -197,7 +197,7 @@ def _apply_top_k_top_p_pytorch(
     p: torch.Tensor,  # [B] or None
     top_k: int | None = None,
 ) -> torch.Tensor:
-    if is_reduce_sample_enabled():
+    if reduce_sample_enabled():
         tp_group = get_tp_group()
         B, V_local = logits.shape
         rank = tp_group.rank_in_group
@@ -272,7 +272,7 @@ def _apply_top_k_top_p_ascendc(
     p: torch.Tensor,
     top_k: int | None = None,
 ) -> torch.Tensor:
-    if is_reduce_sample_enabled():
+    if reduce_sample_enabled():
         tp_group = get_tp_group()
         B, V_local = logits.shape
         rank = tp_group.rank_in_group

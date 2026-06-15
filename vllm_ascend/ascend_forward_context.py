@@ -33,33 +33,6 @@ class MoECommType(Enum):
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 
-# When set to a non-None value, overrides enable_reduce_sample from AscendConfig.
-# This allows the reduce_sample behavior to be disabled per-forward when logprobs
-# are requested, without modifying the global config.
-_REDUCE_SAMPLE_OVERRIDE: ContextVar[bool | None] = ContextVar("_REDUCE_SAMPLE_OVERRIDE", default=None)
-
-
-def is_reduce_sample_enabled() -> bool:
-    """Check if reduce_sample is currently enabled.
-
-    Returns the ContextVar override value if set, otherwise falls back to
-    the AscendConfig setting.
-    """
-    override = _REDUCE_SAMPLE_OVERRIDE.get()
-    if override is not None:
-        return override
-    return get_ascend_config().enable_reduce_sample
-
-
-@contextmanager
-def override_reduce_sample(enabled: bool):
-    """Context manager to temporarily override enable_reduce_sample."""
-    token = _REDUCE_SAMPLE_OVERRIDE.set(enabled)
-    try:
-        yield
-    finally:
-        _REDUCE_SAMPLE_OVERRIDE.reset(token)
-
 
 @contextmanager
 def override_mrv2_in_profile_run(enabled: bool):
