@@ -246,11 +246,9 @@ def _patch_parallel_state() -> None:
 def _patch_utils() -> None:
     import vllm.utils as vllm_utils
 
+    from vllm_ascend.utils import is_restore
+
     if not hasattr(vllm_utils, "is_restore"):
-
-        def is_restore() -> bool:
-            return os.path.exists("/root/.grusflag")
-
         vllm_utils.is_restore = is_restore  # type: ignore[attr-defined]
 
     if not hasattr(vllm_utils, "get_local_ip"):

@@ -135,9 +135,7 @@ def test_patch_mp_client_empty_client_addresses_uses_launch_capture():
     def fake_original_init(self, asyncio_mode, vllm_config, executor_class, log_stats, client_addresses=None):
         if client_addresses:
             return
-        import vllm.v1.engine.core_client as cm
-
-        with cm.launch_core_engines(None, None, None, None):
+        with core_client_mod.launch_core_engines(None, None, None, None):
             pass
 
     @contextmanager

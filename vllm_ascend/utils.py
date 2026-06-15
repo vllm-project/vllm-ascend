@@ -78,6 +78,13 @@ _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
 
+RESTORE_FLAG_PATH = "/root/.grusflag"
+
+
+def is_restore() -> bool:
+    """Return True when the process is running after a container snapshot restore."""
+    return os.path.exists(RESTORE_FLAG_PATH)
+
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
     """Extract DSV4 index for config per-layer arrays.

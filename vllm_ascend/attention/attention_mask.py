@@ -16,16 +16,7 @@ import torch
 from vllm.distributed import get_pcp_group
 
 from vllm_ascend.platform import ModelConfig
-from vllm_ascend.utils import singleton
-
-
-def is_restore() -> bool:
-    # Imported lazily: is_restore is injected into vllm.utils by the
-    # container_snapshot runtime patch, which may be applied after this
-    # module is first imported.
-    from vllm.utils import is_restore as _is_restore
-
-    return _is_restore()
+from vllm_ascend.utils import is_restore, singleton
 
 
 def _generate_attn_mask(max_seq_len, dtype):
