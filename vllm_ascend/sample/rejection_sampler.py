@@ -18,6 +18,7 @@ from vllm.v1.sample.rejection_sampler import (
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     expand_triton,
@@ -92,7 +93,7 @@ class AscendRejectionSampler(RejectionSampler):
             "reduce_sample=%s",
             self._ascend_optimizations_enabled,
             HAS_TRITON,
-            get_ascend_config().enable_reduce_sample,
+            reduce_sample_enabled(),
         )
 
     def apply_logits_processors(
@@ -407,7 +408,7 @@ def rejection_sample(
         using_entropy_verify,
         sampling_metadata.all_greedy,
         sampling_metadata.all_random,
-        get_ascend_config().enable_reduce_sample,
+        reduce_sample_enabled(),
         HAS_TRITON,
     )
 
@@ -633,7 +634,7 @@ def rejection_sample(
             "[sample/rejection_sampler] Using fallback (non-reduce-sample) path in "
             "rejection_sample. This path should not be used in the new distributed flow. "
             "enable_reduce_sample=%s, has_target_indices=%s",
-            get_ascend_config().enable_reduce_sample,
+            reduce_sample_enabled(),
             target_indices is not None,
         )
         vocab_size = target_logits.shape[-1]
