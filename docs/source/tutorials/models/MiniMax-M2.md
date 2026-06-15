@@ -1,12 +1,12 @@
-# MiniMax-M2.7
+# MiniMax-M2
 
 ## 1 Introduction
 
-MiniMax-M2.7 is MiniMax's flagship large language model, reinforced for high-value scenarios such as code generation, agentic tool calling/search, and complex office workflows, with an emphasis on reasoning efficiency and end-to-end speed on challenging tasks. It supports both M2.5 and M2.7 model versions.
+MiniMax-M2 is MiniMax's flagship large language model series, including **MiniMax-M2.5** and **MiniMax-M2.7**. It is reinforced for high-value scenarios such as code generation, agentic tool calling/search, and complex office workflows, with an emphasis on reasoning efficiency and end-to-end speed on challenging tasks.
 
-This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
+This document will show the main verification steps for both MiniMax-M2.5 and MiniMax-M2.7, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-This document is validated and written based on **vLLM-Ascend v0.13.0**. The current model (MiniMax-M2.7/M2.5) is fully supported in this version, and all **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, EAGLE3 speculative decoding), it is recommended to use v0.13.0 or a later version.
+This document is validated and written based on **vLLM-Ascend v0.13.0**. Both MiniMax-M2.5 and MiniMax-M2.7 are fully supported in this version, and all **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, EAGLE3 speculative decoding), it is recommended to use v0.13.0 or a later version.
 
 ## 2 Supported Features
 
@@ -493,7 +493,7 @@ The following optimizations are enabled by default and require no additional con
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers MiniMax-M2.7/M2.5 model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
 
 - **Q: What should I do if the output is garbled in EP mode?**
 
