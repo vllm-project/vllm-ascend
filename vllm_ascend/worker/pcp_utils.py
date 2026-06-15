@@ -738,7 +738,6 @@ class PCPManager:
             enter_fa_decode_restore_idx = None
             if self.num_decode_reqs > 0:
                 # [0,1,2], [4,4,4] -> [0,0,0,0,1,1,1,1,2,2,2,2]
-                num_decode_pcp_size = np.ones(self.num_decode_tokens, dtype=np.int64) * self.pcp_world_size
                 decode_reqs_offset = np.tile(np.arange(self.num_decode_tokens, dtype=np.int64), self.pcp_world_size)
                 decode_ranks_offset = (
                     np.repeat(np.arange(self.pcp_world_size, dtype=np.int64), self.num_decode_tokens)

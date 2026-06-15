@@ -107,13 +107,12 @@ def causal_conv1d_fn(
     out: (batch, dim, seqlen)
     """
     forward_context = get_forward_context()
-    num_decodes = 0
     num_prefills = 0
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is not None and isinstance(attn_metadata, dict):
         attn_metadata = next(iter(attn_metadata.values()), None)
     if attn_metadata is not None:
-        num_decodes = attn_metadata.num_decodes
+        num_prefills = attn_metadata.num_prefills
 
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError(f"causal_conv1d_fn: activation must be None, silu, or swish, got {activation}")

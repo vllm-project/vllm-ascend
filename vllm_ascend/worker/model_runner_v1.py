@@ -1601,9 +1601,11 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_manager.pcp_use_hybrid_attn and self.pcp_manager.num_prefill_reqs > 0:
                 num_scheduled_tokens = cu_num_scheduled_tokens[1:] - cu_num_scheduled_tokens[:-1]
                 prefill_num_scheduled_tokens = num_scheduled_tokens[-self.pcp_manager.num_prefill_reqs: ]
-                prefill_num_scheduled_tokens = [math.ceil(num / (self.pcp_size * 2)) * 2 * self.pcp_size for num in prefill_num_scheduled_tokens]
+                prefill_num_scheduled_tokens = [math.ceil(num / (self.pcp_size * 2)) * 2 * self.pcp_size 
+                                                for num in prefill_num_scheduled_tokens]
                 prefill_num_scheduled_tokens = list(accumulate(prefill_num_scheduled_tokens))
-                prefill_num_scheduled_tokens = [cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs - 1] + num for num in prefill_num_scheduled_tokens]
+                prefill_num_scheduled_tokens = [cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs - 1] + num 
+                                                for num in prefill_num_scheduled_tokens]
                 cu_num_scheduled_tokens[-self.pcp_manager.num_prefill_reqs:] = prefill_num_scheduled_tokens
                 cu_num_scheduled_tokens = cu_num_scheduled_tokens.copy()
                 cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] = (
