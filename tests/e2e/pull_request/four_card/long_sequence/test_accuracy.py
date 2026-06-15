@@ -129,7 +129,7 @@ DSV2_PARALLEL_CASES = [
             "prefill_context_parallel_size": 2,
             "decode_context_parallel_size": 2,
             "cp_kv_cache_interleave_size": 128,
-            "long_prefill_token_threshold": 64,
+            "long_prefill_token_threshold": 4,
         },
     ),
     AccuracyCase(
@@ -144,7 +144,7 @@ DSV2_PARALLEL_CASES = [
             "prefill_context_parallel_size": 2,
             "decode_context_parallel_size": 1,
             "cp_kv_cache_interleave_size": 128,
-            "long_prefill_token_threshold": 64,
+            "long_prefill_token_threshold": 4,
         },
     ),
     AccuracyCase(
@@ -158,6 +158,7 @@ DSV2_PARALLEL_CASES = [
             "tensor_parallel_size": 2,
             "prefill_context_parallel_size": 1,
             "decode_context_parallel_size": 2,
+            "long_prefill_token_threshold": 64,
             "compilation_config": {
                 **FULL_DECODE_GRAPH,
                 "pass_config": {"enable_sp": True},
@@ -185,6 +186,7 @@ FULL_FEATURE_MODEL_CASES = [
             "enable_prefix_caching": True,
             "block_size": 128,
             "quantization": "ascend",
+            "long_prefill_token_threshold": 64,
             "compilation_config": FULL_DECODE_GRAPH,
         },
     ),
@@ -204,7 +206,6 @@ FULL_FEATURE_MODEL_CASES = [
             "enable_expert_parallel": True,
             "enable_chunked_prefill": True,
             "enable_prefix_caching": True,
-            "long_prefill_token_threshold": 4,
             "gpu_memory_utilization": 0.8,
             "block_size": 128,
             "speculative_config": {
@@ -233,6 +234,7 @@ FULL_FEATURE_MODEL_CASES = [
             "gpu_memory_utilization": 0.2,
             "block_size": 128,
             "quantization": "ascend",
+            "long_prefill_token_threshold": 4,
             "compilation_config": FULL_DECODE_GRAPH,
         },
     ),
@@ -253,6 +255,7 @@ FULL_FEATURE_MODEL_CASES = [
             "enable_chunked_prefill": True,
             "enable_prefix_caching": True,
             "block_size": 128,
+            "long_prefill_token_threshold": 4,
             "speculative_config": {
                 "method": "mtp",
                 "num_speculative_tokens": 3,
