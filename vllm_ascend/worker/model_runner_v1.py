@@ -2748,7 +2748,8 @@ class NPUModelRunner(GPUModelRunner):
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
         self.input_batch.update_async_output_token_ids()
-        
+        sampling_metadata = self.input_batch.sampling_metadata
+
         # When unsupported sampling params are present and reduce_sample is
         # enabled, force reduce_sample off. The LogitsProcessor has already
         # all-gathered the logits (via the override set in execute_model),

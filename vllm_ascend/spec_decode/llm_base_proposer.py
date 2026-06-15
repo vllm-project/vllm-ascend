@@ -57,13 +57,13 @@ from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import (
-    enable_sp,
-    lmhead_tp_enable,
-    shared_expert_dp_enabled,
-    reduce_sample_enabled,
     _should_disable_reduce_sample,
+    enable_sp,
     get_reduce_sample_force_disabled,
+    lmhead_tp_enable,
+    reduce_sample_enabled,
     set_reduce_sample_force_disabled,
+    shared_expert_dp_enabled,
 )
 
 
@@ -1051,8 +1051,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # LogitsProcessor all-gathers the full [B, V_global] logits.
         _prev_reduce_sample_disabled = get_reduce_sample_force_disabled()
         if reduce_sample_enabled() and _should_disable_reduce_sample(
-            self.runner.requests[req_id].sampling_params
-            for req_id in self.runner.input_batch.req_ids
+            self.runner.requests[req_id].sampling_params for req_id in self.runner.input_batch.req_ids
         ):
             set_reduce_sample_force_disabled(True)
 

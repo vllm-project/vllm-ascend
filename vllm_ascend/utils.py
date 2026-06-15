@@ -1754,21 +1754,32 @@ def _get_reduce_sample_check_fields() -> tuple[tuple[str, object], ...]:
     import msgspec
     from vllm.sampling_params import SamplingParams
 
-    _SUPPORTED = frozenset({
-        "temperature", "top_p", "top_k",
-        "presence_penalty", "frequency_penalty", "repetition_penalty",
-    })
-    _INTERNAL = frozenset({
-        "output_text_buffer_length", "_eos_token_id",
-        "stop_token_ids", "_all_stop_token_ids", "skip_clone", "max_tokens", "output_kind"
-    })
+    _SUPPORTED = frozenset(
+        {
+            "temperature",
+            "top_p",
+            "top_k",
+            "presence_penalty",
+            "frequency_penalty",
+            "repetition_penalty",
+        }
+    )
+    _INTERNAL = frozenset(
+        {
+            "output_text_buffer_length",
+            "_eos_token_id",
+            "stop_token_ids",
+            "_all_stop_token_ids",
+            "skip_clone",
+            "max_tokens",
+            "output_kind",
+        }
+    )
     _SKIP = _SUPPORTED | _INTERNAL
 
     default_params = SamplingParams()
     _REDUCE_SAMPLE_CHECK_FIELDS = tuple(
-        (f.name, getattr(default_params, f.name))
-        for f in msgspec.structs.fields(SamplingParams)
-        if f.name not in _SKIP
+        (f.name, getattr(default_params, f.name)) for f in msgspec.structs.fields(SamplingParams) if f.name not in _SKIP
     )
     return _REDUCE_SAMPLE_CHECK_FIELDS
 
@@ -1795,6 +1806,8 @@ def _should_disable_reduce_sample(sampling_params_list) -> bool:
     for params in sampling_params_list:
         for name, default_val in check_fields:
             if getattr(params, name) != default_val:
-                print(f"SamplingParams.{name} cannot be used with reduce_sample, {getattr(params, name)} vs {default_val}")
+                print(
+                    f"SamplingParams.{name} cannot be used with reduce_sample, {getattr(params, name)} vs {default_val}"
+                )                
                 return True
     return False
