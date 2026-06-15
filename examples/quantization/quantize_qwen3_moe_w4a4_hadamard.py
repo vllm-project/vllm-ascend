@@ -130,7 +130,10 @@ def main() -> None:
         "--hadamard-block-size",
         type=int,
         default=64,
-        help="Block-diag Hadamard size baked into gate_up (0 = none). Must match the kernel's HADAMARD_BLOCK_SIZE.",
+        choices=[64],
+        help="Block-diag Hadamard size baked into gate_up. Only 64 is supported: the "
+        "W4A4_DYNAMIC runtime kernel always applies a fixed 64-wide in-kernel Hadamard, "
+        "so any other size (or none) would produce a silently-wrong checkpoint.",
     )
     p.add_argument("--device", default="cpu", help="Device for the quant math")
     args = p.parse_args()

@@ -635,7 +635,7 @@
 
 # W4A4 fused MoE mega kernel
 - name: quantization_w4a4_mega
-  optional: false
+  optional: true
   source_file_dependencies:
     - vllm_ascend/ops/mega_moe_w4a4.py
     - vllm_ascend/quantization/methods/w4a4_dynamic.py

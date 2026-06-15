@@ -173,7 +173,7 @@ def get_mega_moe_kernel():
     """
     lib = ctypes.CDLL(compile_kernel())
     func = lib.call_mega_kernel_hybrid_qwen36
-    func.argtypes = [ctypes.c_uint32, ctypes.c_void_p] + [ctypes.c_void_p] * 20 + [ctypes.c_uint32] * 4
+    func.argtypes = [ctypes.c_uint32, ctypes.c_void_p] + [ctypes.c_void_p] * 20 + [ctypes.c_uint32] * 4  # type: ignore[assignment]
     func.restype = None
     return func
 
