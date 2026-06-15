@@ -26,6 +26,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
 
 
+# TODO: UB size differs across chips; consider whether BLOCK_SIZE can
+# be dynamically computed with a formula instead of autotuning {1,2,4}.
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE": 1}),
