@@ -9,14 +9,7 @@ torch_npu.npu.set_compile_mode(jit_compile=False)
 
 def npu_fused_gdn_gating_v310(a, b, A_log, dt_bias, beta=1.0, threshold=20.0):
     """Call FusedGdnGatingV310 custom operator on Ascend NPU."""
-    out_g, out_beta = torch.ops._C_ascend.npu_fused_gdn_gating_310(
-        a,
-        b,
-        A_log,
-        dt_bias,
-        float(beta),
-        float(threshold)
-    )
+    out_g, out_beta = torch.ops._C_ascend.npu_fused_gdn_gating_310(a, b, A_log, dt_bias, float(beta), float(threshold))
     return out_g, out_beta
 
 
@@ -69,18 +62,9 @@ def test_fused_gdn_gating_v310(batch_size, num_heads):
     A_log = (torch.rand((num_heads,), dtype=dtype) * 20.0) - 10.0
     dt_bias = (torch.rand((num_heads,), dtype=dtype) * 20.0) - 10.0
 
-    g_golden, beta_output_golden = golden_fused_gdn_gating_v310(
-        a, b, A_log, dt_bias, beta, threshold
-    )
+    g_golden, beta_output_golden = golden_fused_gdn_gating_v310(a, b, A_log, dt_bias, beta, threshold)
 
-    g_npu, beta_output_npu = npu_fused_gdn_gating_v310(
-        a.npu(),
-        b.npu(),
-        A_log.npu(),
-        dt_bias.npu(),
-        beta,
-        threshold
-    )
+    g_npu, beta_output_npu = npu_fused_gdn_gating_v310(a.npu(), b.npu(), A_log.npu(), dt_bias.npu(), beta, threshold)
     
     g_npu_cpu = g_npu.cpu().to(torch.float32)
     beta_output_npu_cpu = beta_output_npu.cpu().to(torch.float32)
@@ -88,12 +72,7 @@ def test_fused_gdn_gating_v310(batch_size, num_heads):
     beta_output_golden = beta_output_golden.to(torch.float32)
 
     torch.testing.assert_close(
-        g_npu_cpu,
-        g_golden,
-        rtol=3e-3,
-        atol=1e-2,
-        equal_nan=True,
-        msg="Gating (g) output mismatch!"
+        g_npu_cpu, g_golden, rtol=3e-3, atol=1e-2, equal_nan=True, msg="Gating (g) output mismatch!"
     )
     
     torch.testing.assert_close(
@@ -102,5 +81,5 @@ def test_fused_gdn_gating_v310(batch_size, num_heads):
         rtol=3e-3,
         atol=1e-2,
         equal_nan=True,
-        msg="Beta output (sigmoid) mismatch!"
+        msg="Beta output (sigmoid) mismatch!",
     )
