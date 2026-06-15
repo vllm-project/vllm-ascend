@@ -230,18 +230,17 @@ jobs:
         continue-on-error: ${{ inputs.continue_on_error }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          if [ "${{ inputs.enable-coverage }}" = "true" ]; then
+            export ENABLE_COVERAGE=true
+          fi
           TIMING_FLAG=""
           if [ "${{ inputs.upload_timing }}" = "true" ]; then
             TIMING_FLAG="--timing"
           fi
-          COVERAGE_FLAG=""
-          if [ "${{ inputs.enable-coverage }}" = "true" ]; then
-            COVERAGE_FLAG="--enable-coverage"
-          fi
           .github/workflows/scripts/run_selected_tests.sh \
-            ${COVERAGE_FLAG} \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "with-device" \
@@ -254,13 +253,12 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
         run: |
-          COVERAGE_FLAG=""
           if [ "${{ inputs.enable-coverage }}" = "true" ]; then
-            COVERAGE_FLAG="--enable-coverage"
+            export ENABLE_COVERAGE=true
           fi
           .github/workflows/scripts/run_selected_tests.sh \
-            ${COVERAGE_FLAG} \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
             "without-device" \
