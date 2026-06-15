@@ -3,6 +3,7 @@ import torch
 import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import is_310p as is_310p_hw
 
 torch_npu.npu.set_compile_mode(jit_compile=False)
 
@@ -44,7 +45,7 @@ def golden_fused_gdn_gating_v310(a, b, A_log, dt_bias, beta=1.0, threshold=20.0)
 
     return g_out.to(torch.float32), beta_output_out
 
-
+@pytest.mark.skipif(not is_310p_hw(), reason="Tested separately on a 310P machine.")
 @pytest.mark.parametrize("batch_size", [1, 4, 16, 64])
 @pytest.mark.parametrize("num_heads", [12, 64, 128, 256])
 def test_fused_gdn_gating_v310(batch_size, num_heads):
