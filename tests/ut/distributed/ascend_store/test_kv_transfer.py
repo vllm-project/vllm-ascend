@@ -27,7 +27,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     KeyMetadata,
     LayerBlockRange,
     LayerLoadTask,
-    LayerMultiBlockReqMeta,
     LayerTransferTask,
     LoadSpec,
     PoolKey,
@@ -1112,7 +1111,7 @@ class TestKVCacheStoreKeyLayerRecvingThread(unittest.TestCase):
 # KVCacheStoreLayerSendingThread (GVA path additional tests)
 # ===========================================================================
 class TestKVCacheStoreLayerSendingThreadGVA(unittest.TestCase):
-    def _make_thread(self, num_layers=2, max_transfer_blocks=0, max_transfer_bytes=0, enable_kv_event=False):
+    def _make_thread(self, num_layers=2, max_transfer_blocks=0, max_transfer_bytes=0):
         store = _FakeStore([0, 0])
         db = _FakeDB()
         t = KVCacheStoreLayerSendingThread(
@@ -1132,7 +1131,6 @@ class TestKVCacheStoreLayerSendingThreadGVA(unittest.TestCase):
             sync_save_events=[MagicMock() for _ in range(num_layers)],
             max_transfer_blocks=max_transfer_blocks,
             max_transfer_bytes=max_transfer_bytes,
-            enable_kv_event=enable_kv_event,
         )
         return t, store
 
@@ -1254,86 +1252,6 @@ class TestKVCacheStoreLayerSendingThreadGVA(unittest.TestCase):
         # On failure, request should NOT be marked as finished
         finished = t.get_and_clear_finished_requests()
         self.assertNotIn("r1", finished)
-
-    def test_record_and_build_stored_events(self):
-        """Test _record_layerwise_event_starts and _build_stored_events together."""
-        t, _ = self._make_thread(num_layers=2, enable_kv_event=True)
-
-        multi_req = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[],
-            starts=[0, 16],
-            ends=[16, 32],
-            block_ids_by_group=[[5, 6]],
-            layer_id=1,  # final layer
-            block_hashes=[b"\xaa", b"\xbb"],
-            token_ids=list(range(32)),
-            original_block_size=16,
-        )
-
-        # Record event starts
-        t._record_layerwise_event_starts(multi_req, [0, 16])
-        self.assertIn("r1", t.layerwise_event_starts)
-        self.assertEqual(t.layerwise_event_starts["r1"], {0, 16})
-
-        # Build stored events - should produce 2 events
-        events = t._build_stored_events(multi_req)
-        self.assertEqual(len(events), 2)
-        self.assertEqual(events[0].block_hashes, [b"\xaa"])
-        self.assertEqual(events[0].token_ids, list(range(16)))
-        self.assertEqual(events[1].block_hashes, [b"\xbb"])
-        self.assertEqual(events[1].parent_block_hash, b"\xaa")
-
-    def test_build_stored_events_non_final_layer_returns_empty(self):
-        """_build_stored_events returns empty list for non-final layer."""
-        t, _ = self._make_thread(num_layers=2, enable_kv_event=True)
-        multi_req = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[],
-            starts=[],
-            ends=[],
-            block_ids_by_group=[[]],
-            layer_id=0,  # NOT final layer
-        )
-        t._record_layerwise_event_starts(multi_req, [0])
-        events = t._build_stored_events(multi_req)
-        self.assertEqual(events, [])
-
-    def test_build_stored_events_kv_event_disabled(self):
-        """_build_stored_events returns empty list when kv_event disabled."""
-        t, _ = self._make_thread(num_layers=2, enable_kv_event=False)
-        multi_req = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[],
-            starts=[],
-            ends=[],
-            block_ids_by_group=[[]],
-            layer_id=1,
-        )
-        t._record_layerwise_event_starts(multi_req, [0])
-        events = t._build_stored_events(multi_req)
-        self.assertEqual(events, [])
-
-    def test_build_stored_events_skips_out_of_range_blocks(self):
-        """_build_stored_events skips start positions beyond block_hashes length."""
-        t, _ = self._make_thread(num_layers=2, enable_kv_event=True)
-        multi_req = LayerMultiBlockReqMeta(
-            req_id="r1",
-            keys=[],
-            starts=[],
-            ends=[],
-            block_ids_by_group=[[]],
-            layer_id=1,
-            block_hashes=[b"\xaa"],  # only 1 block
-            token_ids=list(range(16)),
-            original_block_size=16,
-        )
-        # Record a start at position 16 (block_idx=1), but only 1 hash
-        t._record_layerwise_event_starts(multi_req, [0, 16])
-        events = t._build_stored_events(multi_req)
-        # Only block_idx=0 should produce an event
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].block_hashes, [b"\xaa"])
 
 
 # ===========================================================================
