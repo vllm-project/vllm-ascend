@@ -1193,28 +1193,46 @@ class NPUModelRunner(GPUModelRunner):
                 precomputed_positions_np=positions_full,
             )
 
-        # In async spec decode mode, num_computed_tokens was corrected on GPU
-        # by update_num_computed_tokens_for_batch_change, so seq_lens (GPU) is
-        # correct but optimistic_seq_lens_cpu is stale (it assumed all drafts
-        # were accepted). Sync the corrected values back to CPU so that NPU
-        # attention backends (which use _seq_lens_cpu) get the right values.
-        # Use non_blocking copy to pinned memory and record an event;
-        # _build_attention_metadata will synchronize before reading.
+        # In async spec decode mode, optimistic_seq_lens_cpu assumes all
+        # tokens from the previous speculative step were accepted. Correct it
+        # on CPU using the valid-sampled-token counts that are already copied
+        # asynchronously for scheduler bookkeeping. This avoids an extra
+        # NPU->CPU seq_lens copy and the synchronize() in attention metadata.
+        corrected_seq_lens_cpu = False
+
+        def _correct_optimistic_seq_lens_cpu() -> None:
+            assert self.valid_sampled_token_count_event is not None
+            assert self.valid_sampled_token_count_cpu is not None
+            self.valid_sampled_token_count_event.synchronize()
+
+            prev_positions = self.prev_positions.np[:num_reqs]
+            gather_indices = np.maximum(prev_positions, 0)
+            prev_accepted_counts = self.prev_num_draft_tokens.np[
+                gather_indices
+            ]
+            valid_counts = self.valid_sampled_token_count_cpu.numpy()[
+                gather_indices
+            ]
+            participating = (prev_positions >= 0) & (prev_accepted_counts > 0)
+            correction = np.where(
+                participating,
+                prev_accepted_counts - valid_counts,
+                0,
+            )
+            optimistic_seq_lens_np = self.optimistic_seq_lens_cpu.numpy()
+            optimistic_seq_lens_np[:num_reqs] -= correction.astype(
+                optimistic_seq_lens_np.dtype, copy=False
+            )
+
         if (
             self._needs_seq_lens_cpu_sync
             and self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
             and prev_req_id_to_index
         ):
-            self.optimistic_seq_lens_cpu[:num_reqs].copy_(
-                self.seq_lens[:num_reqs], non_blocking=True
-            )
-            if self._seq_lens_cpu_event is None:
-                self._seq_lens_cpu_event = torch.npu.Event()
-            self._seq_lens_cpu_event.record()
-            self._seq_lens_cpu_event_pending = True
-        else:
-            self._seq_lens_cpu_event_pending = False
+            _correct_optimistic_seq_lens_cpu()
+            corrected_seq_lens_cpu = True
+        self._seq_lens_cpu_event_pending = False
 
         num_computed_tokens_for_compress = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs]
@@ -1227,22 +1245,16 @@ class NPUModelRunner(GPUModelRunner):
         ):
             # Async spec decode keeps the CPU counter optimistic until after
             # target forward is launched. DSV4 compressed KV slot mapping is
-            # CPU-built today, so use the GPU-corrected counter before
-            # computing compressed cache positions.
-            if (
-                self._seq_lens_cpu_event_pending
-                and self._seq_lens_cpu_event is not None
-            ):
-                self._seq_lens_cpu_event.synchronize()
-                self._seq_lens_cpu_event_pending = False
-                num_computed_tokens_for_compress = (
-                    self.optimistic_seq_lens_cpu[:num_reqs].numpy()
-                    - num_scheduled_tokens[:num_reqs]
-                )
-            else:
-                num_computed_tokens_for_compress = (
-                    self.num_computed_tokens[:num_reqs].to("cpu").numpy()
-                )
+            # CPU-built today, so derive the corrected counter from the
+            # already-corrected seq_lens_cpu and avoid another NPU->CPU sync.
+            if not corrected_seq_lens_cpu:
+                _correct_optimistic_seq_lens_cpu()
+                corrected_seq_lens_cpu = True
+
+            num_computed_tokens_for_compress = (
+                self.optimistic_seq_lens_cpu[:num_reqs].numpy()
+                - num_scheduled_tokens[:num_reqs]
+            )
 
         (positions_compressed_list, req_indices_compressed_list,
          num_scheduled_tokens_compressed_list) = get_compressed_pos_and_indices(
