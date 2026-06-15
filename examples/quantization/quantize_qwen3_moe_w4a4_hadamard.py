@@ -46,6 +46,7 @@ import math
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 import torch
 from safetensors import safe_open
@@ -178,8 +179,9 @@ def main() -> None:
 
     for shard in shards:
         with safe_open(str(src / shard), framework="pt", device=args.device) as f:
-            for key in f.keys():  # noqa: SIM118 (safetensors handle, not a dict)
-                t = f.get_tensor(key)
+            handle: Any = f  # safetensors cm; mypy mistypes it as Path
+            for key in handle.keys():  # noqa: SIM118 (safetensors handle, not a dict)
+                t = handle.get_tensor(key)
                 if is_stacked_experts(key):
                     for nk, nt in quantize_expert_stack(key, t, h).items():
                         add(nk, nt, quant=True)
