@@ -633,6 +633,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
 
                     msg = decoder.decode(payload[0])
                     if msg[0] == GET_META_MSG:
+                        logger.info("Got GET META INFO for request %s", msg[0])
                         sock.send_multipart((identity, b"", encoded_data))
                     elif msg[0] == DONE_SENDING_MSG:
                         logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
