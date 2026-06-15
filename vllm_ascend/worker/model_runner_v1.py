@@ -139,6 +139,7 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
+    embedding_tp_enable,
     enable_sp,
     enable_sp_by_pass,
     get_ascend_device_type,
@@ -147,6 +148,7 @@ from vllm_ascend.utils import (
     global_stream,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
+    oproj_tp_enable,
     set_weight_prefetch_method,
     should_skip_allreduce_across_dp_group,
 )
@@ -631,7 +633,20 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return num_tokens, None, cudagraph_mode
 
-        if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
+        # Fine-grained TP paths (oproj all_to_all / embedding all_gather) run
+        # their collectives across a DP-spanning group, which requires uniform
+        # num_tokens across all DP ranks or the collective deadlocks on a
+        # shape mismatch. The MC2 uneven-token skip path below leaves every
+        # rank at its own num_tokens, so it is incompatible with these paths.
+        # When a fine-grained TP path is active, force the all-reduce + padding
+        # path so tokens are padded to the DP max. This replicates the
+        # uniform-token condition the recompute scheduler otherwise imposes,
+        # without needing recompute_scheduler_enable.
+        needs_uniform_dp_tokens = oproj_tp_enable() or embedding_tp_enable()
+        if (
+            should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model)
+            and not needs_uniform_dp_tokens
+        ):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
@@ -2868,7 +2883,10 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
-                allow_dp_padding=(cudagraph_mode != CUDAGraphMode.NONE) or enable_sp(self.vllm_config),
+                allow_dp_padding=((cudagraph_mode != CUDAGraphMode.NONE)
+                                  or enable_sp(self.vllm_config)
+                                  or oproj_tp_enable()
+                                  or embedding_tp_enable()),
             )
 
             # Extract DP padding if there is any
