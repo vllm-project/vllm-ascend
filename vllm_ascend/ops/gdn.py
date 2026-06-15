@@ -352,7 +352,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
         if vllm_version_is("0.22.1"):
-            torch.ops.vllm.gdn_attention_core(
+            torch.ops.vllm.qwen_gdn_attention_core(
                 mixed_qkv,
                 b,
                 a,
