@@ -483,8 +483,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 " Sharing target model topk_indices_buffer with the draft model."
             )
             target_buffer = target_language_model.model.topk_indices_buffer
-            if target_buffer is not None:
-                for _, module in self.model.model.named_modules():
+            draft_model = getattr(self.model, "model", None)
+            if target_buffer is not None and draft_model is not None:
+                for _, module in draft_model.named_modules():
                     if hasattr(module, "topk_indices_buffer"):
                         module.topk_indices_buffer = target_buffer
 
