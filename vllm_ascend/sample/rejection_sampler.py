@@ -30,6 +30,7 @@ from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
 from vllm_ascend.utils import reduce_sample_enabled
 
+
 class AscendRejectionSampler(RejectionSampler):
     """Ascend-optimized rejection sampler for speculative decoding.
 
