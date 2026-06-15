@@ -64,6 +64,19 @@ class LayerBatchBuilder:
         )
         group_block_stride = token_database.group_block_stride.get(0, token_database.group_block_len[0])
         self._block_stride_np = np.asarray(group_block_stride, dtype=np.int64)
+        # [DEBUG kv_pool broadcast] diagnose (1,0) vs (N,54) shape mismatch
+        logger.warning(
+            "[LayerBatchBuilder] group_block_len[0]=%s group_kv_caches_base_addr[0]=%s "
+            "group_block_stride keys=%s group_block_stride.get(0)=%s | "
+            "block_len_np.shape=%s base_addr_np.shape=%s block_stride_np.shape=%s",
+            token_database.group_block_len.get(0),
+            token_database.group_kv_caches_base_addr.get(0),
+            list(token_database.group_block_stride.keys()),
+            token_database.group_block_stride.get(0, token_database.group_block_len[0]),
+            self._block_len_np.shape,
+            self._kv_caches_base_addr_np.shape,
+            self._block_stride_np.shape,
+        )
         self._full_block_inner_offsets_np = np.concatenate(
             (
                 np.zeros(1, dtype=np.int64),
@@ -114,6 +127,19 @@ class LayerBatchBuilder:
         layer_base_addrs = self._kv_caches_base_addr_np[base_offset : base_offset + length]
         rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
 
+        # [DEBUG kv_pool broadcast] shapes right before the failing broadcast
+        logger.warning(
+            "[_build_transfer_arrays] layer_id=%s length=%s base_offset=%s "
+            "layer_base_addrs.shape=%s block_ids_arr.shape=%s block_stride_np.shape=%s "
+            "kv_caches_base_addr_np.shape=%s",
+            layer_id,
+            length,
+            base_offset,
+            layer_base_addrs.shape,
+            block_ids_arr.shape,
+            self._block_stride_np.shape,
+            self._kv_caches_base_addr_np.shape,
+        )
         addr_arr = layer_base_addrs[None, :] + block_ids_arr[:, None] * self._block_stride_np[None, :]
         size_arr = np.broadcast_to(block_len_np, addr_arr.shape)
         gvas_arr = base_gvas_arr[:, None] + rank_layer_offset + self._full_block_inner_offsets_np[None, :]
