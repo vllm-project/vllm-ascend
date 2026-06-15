@@ -12,7 +12,7 @@ import torch
 # Third Party
 from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_world_group
+from vllm.distributed.parallel_state import get_dp_group, get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
@@ -103,9 +103,15 @@ class MooncakeBackend(Backend):
         # Each TP rank must use a separate SSD directory to avoid bucket file
         # collisions (independent BucketStorageBackend instances generate the
         # same bucket_id sequence and would overwrite each other's data).
+        # Under DP, every DP replica is a separate process with its own dp
+        # group, so its local_rank also starts from 0. On a single machine
+        # (e.g. DP2TP4) DP0 and DP1 would both create tp0..tp3 and overwrite
+        # each other. Include the DP rank in the sub-path to keep each (dp, tp)
+        # rank isolated.
         if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
             local_rank = get_world_group().local_rank
-            rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{local_rank}")
+            dp_rank = get_dp_group().rank_in_group
+            rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"dp{dp_rank}_tp{local_rank}")
             try:
                 os.makedirs(rank_path, exist_ok=True)
             except OSError as e:
