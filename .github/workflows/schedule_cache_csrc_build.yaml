@@ -57,7 +57,7 @@ jobs:
   # -------------------------------------------------------------------------
   setup-matrix:
     name: Setup build matrix
-    runs-on: linux-aarch64-a2b3-0
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       matrix: ${{ steps.generate.outputs.matrix }}
     steps:
@@ -139,7 +139,7 @@ jobs:
         if: matrix.os_type == 'ubuntu'
         run: |
           apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15 ninja-build ccache
+          apt-get -y install gcc g++ cmake libnuma-dev zstd clang-15 ccache
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           pip install uv
@@ -148,7 +148,6 @@ jobs:
         if: matrix.os_type == 'openeuler'
         run: |
           yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch ccache
-          yum install -y ninja-build || yum install -y ninja || true
           pip install uv
 
       - name: Restore ccache
