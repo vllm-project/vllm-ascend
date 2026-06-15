@@ -218,7 +218,7 @@ jobs:
           ccache --show-compression || true
 
       - name: Save ccache
-        if: success() && github.event_name != 'pull_request' && steps.restore-ccache.outputs.cache-hit != 'true'
+        if: success() &&  steps.restore-ccache.outputs.cache-hit != 'true'
         uses: runs-on/cache/save@v5
         with:
           path: ${{ env.CCACHE_DIR }}
