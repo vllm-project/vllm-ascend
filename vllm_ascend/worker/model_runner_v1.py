@@ -130,7 +130,6 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
-from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
@@ -482,7 +481,6 @@ class NPUModelRunner(GPUModelRunner):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-        set_cos_and_sin(vllm_config, self.max_num_reqs, self.uniform_decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.uniform_decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
@@ -2201,9 +2199,6 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors,
             )
 
-            # update global cos, sin
-            update_cos_sin(positions)
-
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
@@ -3488,9 +3483,6 @@ class NPUModelRunner(GPUModelRunner):
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
-
-            # update global cos, sin
-            update_cos_sin(positions)
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None

@@ -34,7 +34,7 @@ from vllm.model_executor.models.minimax_m2 import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
+from vllm_ascend.ops.rotary_embedding import select_cos_sin_from_cache
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.21.0"):
@@ -109,7 +109,7 @@ def _patch_forward(
     hidden_states: torch.Tensor,
 ) -> torch.Tensor:
     qkv, _ = self.qkv_proj(hidden_states)
-    cos, sin = get_cos_and_sin_slice()
+    cos, sin = select_cos_sin_from_cache(self.rotary_emb, positions, qkv, layout="1T1D")
     q, k, v = torch.ops.vllm.split_qkv_tp_rmsnorm_rope(
         input=qkv,
         q_weight=self.q_norm.weight,

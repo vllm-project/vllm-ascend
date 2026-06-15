@@ -19,7 +19,9 @@ class RopeGlobalState:
 _ROPE_STATE = RopeGlobalState()
 
 
-class RopeDataProxy:
+class DSARopeDataProxy:
+    """Lazy per-layer view over DSA RoPE tensors materialized at the op boundary."""
+
     def __init__(self, data_map, is_cos=True):
         self._data = data_map
         self.idx = 0 if is_cos else 1
@@ -34,7 +36,7 @@ class RopeDataProxy:
                     s_val = item[1][index]
                     new_map[config_k][group_name] = (c_val, s_val)
 
-            return RopeDataProxy(new_map, is_cos=(self.idx == 0))
+            return DSARopeDataProxy(new_map, is_cos=(self.idx == 0))
 
         else:
             layername = index
@@ -58,7 +60,8 @@ class RopeDataProxy:
             return layer_result
 
 
-def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_cache: bool = False):
+def materialize_dsa_cos_sin(positions: torch.Tensor | dict[str, torch.Tensor], use_cache: bool = False):
+    """Materialize DSA cos/sin only where legacy DSA kernels still require tensors."""
     if isinstance(positions, torch.Tensor):
         pos_map = {"default": positions}
     else:
@@ -96,7 +99,7 @@ def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_c
             else:
                 batch_result[config_key][group_name] = (curr_cos, curr_sin)
 
-    return RopeDataProxy(batch_result, is_cos=True), RopeDataProxy(batch_result, is_cos=False)
+    return DSARopeDataProxy(batch_result, is_cos=True), DSARopeDataProxy(batch_result, is_cos=False)
 
 
 class ComplexExpRotaryEmbedding(nn.Module):

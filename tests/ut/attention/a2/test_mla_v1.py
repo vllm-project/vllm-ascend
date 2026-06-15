@@ -367,12 +367,9 @@ class TestAscendMLAMetadataBuilder(TestBase):
             self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(builder.chunked_prefill_enabled, mock_vllm_config.scheduler_config.enable_chunked_prefill)
 
-    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
-    def test_ascend_mla_metadata_builder_build_full_graph(
-        self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla
-    ):
+    def test_ascend_mla_metadata_builder_build_full_graph(self, mock_get_pcp_group, mock_get_pcp_group_mask):
         pcp_group = MagicMock()
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
@@ -408,7 +405,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         block_table = torch.Tensor([[1, 0], [2, 0], [3, 0], [4, 0]]).int()
         common_metadata.block_table_tensor = block_table
         common_metadata.prefill_context_parallel_metadata = None
-        mock_get_cos_and_sin_mla.return_value = (torch.tensor([6, 6]), torch.Tensor([6, 6]))
         metadata = builder.build(0, common_metadata)
 
         self.assertEqual(metadata.decode.actual_seq_lengths_q, [1, 2, 4, 5, 6, 6, 7, 8])
@@ -617,14 +613,13 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     def tearDown(self):
         self.parent_init_patcher.stop()
 
-    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
     @patch("torch.Tensor.npu", new=lambda self: self)
     @patch("torch.npu.is_available")
     def test_build_prefix_no_cache_metadata(
-        self, mock_npu_available, mock_zeros, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla
+        self, mock_npu_available, mock_zeros, mock_get_pcp_group, mock_get_pcp_group_mask
     ):
         mock_npu_available.return_value = False
         torch.Tensor.pin_memory = lambda x: x  # noqa
@@ -671,7 +666,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             vllm_config=self.mock_vllm_config,
             device=self.mock_device,
         )
-        mock_get_cos_and_sin_mla.return_value = (torch.tensor(10), torch.Tensor(10))
         metadata = builder.build(1, common_attn_metadata)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
@@ -679,14 +673,13 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertTrue(torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
-    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
     @patch("torch.Tensor.npu", new=lambda self: self)
     @patch("torch.npu.is_available")
     def test_build_chunked_prefix_metadata(
-        self, mock_npu_available, mock_zeros, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla
+        self, mock_npu_available, mock_zeros, mock_get_pcp_group, mock_get_pcp_group_mask
     ):
         mock_npu_available.return_value = False
         torch.Tensor.pin_memory = lambda x: x  # noqa
@@ -734,7 +727,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             vllm_config=self.mock_vllm_config,
             device=self.mock_device,
         )
-        mock_get_cos_and_sin_mla.return_value = (torch.tensor(10), torch.Tensor(10))
         metadata = builder.build(1, common_attn_metadata)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
@@ -742,10 +734,9 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertTrue(torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
-    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
-    def test_build_decode_only_metadata(self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla):
+    def test_build_decode_only_metadata(self, mock_get_pcp_group, mock_get_pcp_group_mask):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         pcp_group = MagicMock()
         pcp_group.world_size = 1
@@ -784,7 +775,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             vllm_config=self.mock_vllm_config,
             device=self.mock_device,
         )
-        mock_get_cos_and_sin_mla.return_value = (torch.tensor([10, 10]), torch.Tensor([10, 10]))
         metadata = builder.build(1, common_attn_metadata)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
@@ -792,8 +782,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertTrue(torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
-    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
-    def test_build_decode_metadata_without_disable_padded_drafter_batch(self, mock_get_cos_and_sin_mla):
+    def test_build_decode_metadata_without_disable_padded_drafter_batch(self):
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 3
         common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 1, 2, 3])
@@ -822,18 +811,13 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         builder.attn_mask_builder = MagicMock()
         builder.attn_mask_builder.get_splitfuse_attn_mask.return_value = torch.randn(1, 1, 5, 5)
 
-        mock_get_cos_and_sin_mla.return_value = (torch.randn(5, 32), torch.randn(5, 32))
-
         metadata = builder.build_decode_metadata(0, common_attn_metadata)
 
         self.assertIsInstance(metadata, AscendMLADecodeMetadata)
 
-    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
-    def test_build_for_graph_capture_decode_only(
-        self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla
-    ):
+    def test_build_for_graph_capture_decode_only(self, mock_get_pcp_group, mock_get_pcp_group_mask):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         pcp_group = MagicMock()
         pcp_group.world_size = 1
@@ -872,7 +856,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             vllm_config=self.mock_vllm_config,
             device=self.mock_device,
         )
-        mock_get_cos_and_sin_mla.return_value = (torch.tensor([10, 10]), torch.Tensor([10, 10]))
         metadata = builder.build_for_graph_capture(common_attn_metadata, AscendAttentionState.DecodeOnly)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
@@ -880,8 +863,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertTrue(torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
-    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
-    def test_build_for_graph_capture_prefill(self, mock_get_cos_and_sin_mla):
+    def test_build_for_graph_capture_prefill(self):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 3, 7]),
@@ -907,7 +889,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             vllm_config=self.mock_vllm_config,
             device=self.mock_device,
         )
-        mock_get_cos_and_sin_mla.return_value = (torch.tensor(10), torch.Tensor(10))
         with self.assertRaises(NotImplementedError) as ctx:
             builder.build_for_graph_capture(common_attn_metadata, AscendAttentionState.PrefillNoCache)
         self.assertIn(
@@ -915,10 +896,9 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             str(ctx.exception),
         )
 
-    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
-    def test_build_with_seq_lens_only(self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla):
+    def test_build_with_seq_lens_only(self, mock_get_pcp_group, mock_get_pcp_group_mask):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         pcp_group = MagicMock()
         pcp_group.world_size = 1
@@ -950,7 +930,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             vllm_config=self.mock_vllm_config,
             device=self.mock_device,
         )
-        mock_get_cos_and_sin_mla.return_value = (torch.randn(3, 32), torch.randn(3, 32))
         metadata = builder.build(0, common_attn_metadata)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
@@ -2077,10 +2056,8 @@ class TestAscendMLAImpl(TestBase):
         attn_metadata.num_actual_tokens = 4
         num_prefill_tokens = 2
         attn_metadata.slot_mapping = torch.arange(4)
-        attn_metadata.decode.cos = torch.randn(2, 64)
-        attn_metadata.decode.sin = torch.randn(2, 64)
-        attn_metadata.prefill.cos = torch.randn(2, 64)
-        attn_metadata.prefill.sin = torch.randn(2, 64)
+        attn_metadata.decode.input_positions = torch.arange(attn_metadata.num_decode_tokens)
+        attn_metadata.prefill.input_positions = torch.arange(num_prefill_tokens)
 
         self.impl.q_a_layernorm = MagicMock()
         self.impl.q_a_layernorm.return_value = torch.randn(
@@ -2104,6 +2081,12 @@ class TestAscendMLAImpl(TestBase):
         self.impl.kv_b_proj.return_value = [
             torch.randn(num_prefill_tokens, self.impl.num_heads, self.impl.v_head_dim + self.impl.qk_nope_head_dim)
         ]
+        self.impl._select_mla_cos_sin = MagicMock(
+            side_effect=lambda positions, ref_tensor: (
+                torch.randn(positions.shape[0], 1, 1, ref_tensor.shape[-1]),
+                torch.randn(positions.shape[0], 1, 1, ref_tensor.shape[-1]),
+            )
+        )
         self.impl.rope_single = MagicMock(side_effect=lambda x, cos, sin: x)
         self.impl.exec_kv_decode = MagicMock()
         self.impl.exec_kv_decode.return_value = [MagicMock(), MagicMock()]

@@ -426,8 +426,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         prefill_q = self.q_proj(prefill_q_c)[0].view(-1, self.num_heads, self.qk_head_dim)
         prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
         prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
-        cos = attn_metadata.prefill.cos[: num_actual_tokens - num_decode_tokens]
-        sin = attn_metadata.prefill.sin[: num_actual_tokens - num_decode_tokens]
+        prefill_positions = attn_metadata.prefill.input_positions[: num_actual_tokens - num_decode_tokens]
+        cos, sin = self._select_mla_cos_sin(prefill_positions, prefill_q_pe)
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
         prefill_kv_no_split = kv_no_split[:num_actual_tokens]
         kv_c, k_pe = prefill_kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -472,10 +472,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
     def mla_preprocess_decode(self, q_c, kv_no_split, kv_cache, attn_metadata):
         num_decode_tokens = attn_metadata.num_decode_tokens
         decode_q_c = q_c[:num_decode_tokens]
-        cos = attn_metadata.decode.cos
-        sin = attn_metadata.decode.sin
         decode_ql_nope, decode_q_pe = self._q_proj_and_k_up_proj(decode_q_c)
         decode_ql_nope, decode_q_pe = self.reorg_decode_q(decode_ql_nope, decode_q_pe)
+        cos, sin = self._select_mla_cos_sin(attn_metadata.decode.input_positions[:num_decode_tokens], decode_q_pe)
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens]
         decode_kv_no_split = kv_no_split[:num_decode_tokens]

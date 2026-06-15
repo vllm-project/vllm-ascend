@@ -44,7 +44,6 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
-from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import set_weight_prefetch_method, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -121,8 +120,6 @@ class NPUModelRunner(GPUModelRunner):
         # set _WEIGHT_PREFETCH_METHOD, _mc2_tokens_capacity and _reserved_mc2_mask which
         # is necessary for weight_prfetching function, and MoE communication optimization.
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
-        # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
-        set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
 
@@ -263,9 +260,9 @@ class NPUModelRunner(GPUModelRunner):
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
-        num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
-        is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
+        is_prefilling_np = (
+            self.req_states.num_computed_prefill_tokens[idx_mapping_np] < self.req_states.prefill_len.np[idx_mapping_np]
+        )
 
         # Get prefill tokens if any.
         if np.any(is_prefilling_np):
@@ -319,20 +316,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
 
-        version_b_fields: dict = {}
-        if not vllm_version_is("0.21.0"):
-            num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
-            max_seq_len_np = None
-            if getattr(self, "use_pp", False):
-                # max_seq_len is only consumed by the PP `compute_need_sampled_mask`.
-                max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
-            version_b_fields = dict(
-                num_computed_tokens_np=num_computed_tokens_np,
-                prefill_len_np=prefill_len_np,
-                num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
-                max_seq_len_np=max_seq_len_np,
-            )
-
         self.input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -352,7 +335,6 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
             is_prefilling_np=is_prefilling_np,
-            **version_b_fields,
             input_ids=input_ids,
             positions=positions,
             logits_indices=logits_indices,
@@ -363,9 +345,6 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-
-        # For mla/sfa, update cos/sin. Here is for execute_model.
-        update_cos_sin(self.input_batch.positions)
 
         return self.input_batch
 
@@ -387,28 +366,6 @@ class NPUModelRunner(GPUModelRunner):
             num_rejected,
         )
 
-        self._copy_num_computed_tokens_to_cpu()
-
-    def postprocess_sampled(
-        self,
-        idx_mapping,
-        sampled_tokens,
-        num_sampled,
-        num_rejected,
-        query_start_loc=None,
-    ):
-        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs."""
-        super().postprocess_sampled(
-            idx_mapping,
-            sampled_tokens,
-            num_sampled,
-            num_rejected,
-            query_start_loc,
-        )
-
-        self._copy_num_computed_tokens_to_cpu()
-
-    def _copy_num_computed_tokens_to_cpu(self):
         # npu attention backend still need to use seq_lens_cpu,
         # we need to copy num_computed_tokens back to cpu.
         default_stream = torch.cuda.current_stream()

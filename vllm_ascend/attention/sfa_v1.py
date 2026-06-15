@@ -43,7 +43,7 @@ from vllm_ascend.ops.layer_shard_linear import (
     reach_layer_for_shard_weight_series,
     register_all_layers_to_shard_weight_series,
 )
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.rotary_embedding import select_cos_sin_from_cache
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import (
@@ -142,8 +142,7 @@ class AscendSFAMetadata:
     seq_lens_cpu: torch.Tensor
     cum_query_lens: torch.Tensor
     block_table: torch.Tensor
-    sin: torch.Tensor
-    cos: torch.Tensor
+    input_positions: torch.Tensor
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -261,7 +260,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         else:
             seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
-        cos, sin = get_cos_and_sin_mla(input_positions, True)
+        rope_positions = input_positions
 
         dsa_cp_context = None
         if self.enable_dsa_cp:
@@ -273,12 +272,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             local_end_with_pad = local_start + num_tokens_per_device
             local_end = min(local_end_with_pad, num_actual_tokens)
 
-            pad_size = num_tokens_pad - cos.shape[0]
-            assert cos.shape == sin.shape, f"cos.shape must be equal to sin.shape, got {cos.shape} and {sin.shape}"
-
+            pad_size = num_tokens_pad - rope_positions.shape[0]
             if pad_size > 0:
-                cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
-                sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
+                rope_positions = nn.functional.pad(rope_positions, (0, pad_size), value=0)
 
             pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
             if pad_size_slot > 0:
@@ -287,12 +283,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 slot_mapping = slot_mapping[:num_tokens_pad]
             slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
 
-            cos = cos[local_start:local_end_with_pad]
-            sin = sin[local_start:local_end_with_pad]
+            rope_positions = rope_positions[local_start:local_end_with_pad]
 
-            assert cos.shape[0] == num_tokens_per_device, (
-                f"cos.shape[0] must be equal to num_tokens_per_device, \
-                    got {cos.shape[0]} and {num_tokens_per_device}"
+            assert rope_positions.shape[0] == num_tokens_per_device, (
+                f"rope_positions.shape[0] must be equal to num_tokens_per_device, \
+                    got {rope_positions.shape[0]} and {num_tokens_per_device}"
             )
             assert slot_mapping_cp.shape[0] == num_tokens_per_device, (
                 f"slot_mapping_cp.shape[0] must be equal to num_tokens_per_device, \
@@ -361,8 +356,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
             block_table=block_table,
-            sin=sin[:num_input_tokens],
-            cos=cos[:num_input_tokens],
+            input_positions=rope_positions[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
             block_size=block_size,
             group_len=group_len,
@@ -772,6 +766,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
+    def _select_sfa_cos_sin(
+        self,
+        positions: torch.Tensor,
+        ref_tensor: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return select_cos_sin_from_cache(self.rotary_emb, positions, ref_tensor, layout="T11D")
+
     def _init_o_proj_tp_full_params(self):
         """
         Initialize TP-mode and Full-mode parameters for o_proj weight,
@@ -1122,8 +1123,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
-        cos = attn_metadata.cos
-        sin = attn_metadata.sin
+        cos, sin = self._select_sfa_cos_sin(attn_metadata.input_positions, hidden_states)
         slot_mapping = attn_metadata.slot_mapping
         slot_mapping_cp = None
         if self.enable_dsa_cp:
