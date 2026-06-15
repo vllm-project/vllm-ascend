@@ -736,7 +736,7 @@ class NPUWorker(WorkerBase):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> dict[int, KVConnectorHandshakeMetadata] | dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
+    ) -> dict[int, KVConnectorHandshakeMetadata] | None:
         """Get KV connector metadata from this worker if available."""
         if not has_kv_transfer_group():
             return None
@@ -748,19 +748,16 @@ class NPUWorker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
-        # Mooncake-style connectors do not support PP-disaggregated KV
-        # transfer. Only the first PP rank (rank 0) reports handshake
-        # metadata; higher PP ranks skip reporting to avoid the upstream
-        # pp_rank > 0 assertion in set_xfer_handshake_metadata_pp_aware.
+        # Use a unique integer key combining pp_rank and tp_rank to avoid
+        # tuple keys that would trigger the upstream vllm's
+        # set_xfer_handshake_metadata_pp_aware assertion for pp_rank > 0.
+        # The upstream method interprets tuple (pp_rank, tp_rank) keys as
+        # "PP-disaggregated transfer" and rejects them for mooncake.
+        # Flat integer keys: pp_rank * tp_size + tp_rank preserves uniqueness.
         pp_rank = get_pp_group().rank_in_group
-        if pp_rank > 0:
-            return None
-
         tp_rank = get_tp_group().rank_in_group
-        if vllm_version_is("0.21.0"):
-            return {tp_rank: metadata}
-
-        return {(pp_rank, tp_rank): metadata}
+        tp_size = get_tp_group().world_size
+        return {pp_rank * tp_size + tp_rank: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
