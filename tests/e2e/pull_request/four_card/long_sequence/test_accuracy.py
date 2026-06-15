@@ -60,7 +60,7 @@ DSV2_DCP_GOLDEN = [
 ]
 
 QWEN3_GOLDEN = [
-    "The capital of France is Paris. The capital of",
+    "The capital of France is Paris. Which of the",
     "Hello, my name is Tom, I am 12 years old",
     "The president of United States is the head of state and",
 ]
