@@ -92,7 +92,9 @@ concurrency:
 jobs:
   e2e:
     name: ${{ inputs.config_file_path }}
-    timeout-minutes: 120
+    # PR-triggered nightly runs carry a request_id and use a 4-hour timeout;
+    # workflow-triggered nightly runs keep the default 2-hour timeout.
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || 120 }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
