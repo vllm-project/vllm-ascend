@@ -1321,7 +1321,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
-            notify_kv_cache_written(self.layer_name)
+            notify_kv_cache_written(self.layer_name or "")
 
         wait_for_kv_layer_from_connector(layer_name)
         topk_num_tokens = num_input_tokens or hidden_states.shape[0]
