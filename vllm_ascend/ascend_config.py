@@ -94,6 +94,13 @@ class AscendConfig:
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = self._resolve_dump_config_path(additional_config)
+
+        # Log configuration
+        self.ascend_log_path = additional_config.get(
+            "ascend_log_path",
+            os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend"),
+        )
+
         self.layer_sharding = additional_config.get("layer_sharding", None)
         if self.layer_sharding:
             logger.info_once(

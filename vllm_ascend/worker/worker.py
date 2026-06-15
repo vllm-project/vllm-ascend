@@ -111,6 +111,9 @@ class NPUWorker(WorkerBase):
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
+        from vllm_ascend.logger import configure_ascend_file_logging
+
+        configure_ascend_file_logging()
         check_ascend_device_type()
 
         super().__init__(
