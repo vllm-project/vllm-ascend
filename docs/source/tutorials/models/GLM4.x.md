@@ -165,7 +165,7 @@ The parameters are explained as follows:
 
 ### Multi-node Deployment
 
-Although the former tutorial said "Not recommended to deploy multi-node on Atlas 800 A2 (64G × 8)", but if you insist to deploy GLM-4.x model on multi-node like 2 × Atlas 800 A2 (64G × 8), run the following scripts on two nodes respectively.
+While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64G × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
 
 **Node 0**
 
