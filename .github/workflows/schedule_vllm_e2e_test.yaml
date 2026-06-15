@@ -49,7 +49,6 @@ jobs:
           fail-fast: false
           matrix:
             part: [0, 1, 2, 3]
-            vllm: [v0.21.0]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
           env:
@@ -58,6 +57,9 @@ jobs:
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v6
+          - name: Read vLLM release tag
+            id: vllm
+            uses: ./.github/actions/read-vllm-release-tag
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -84,7 +86,7 @@ jobs:
             uses: actions/checkout@v6
             with:
               repository: vllm-project/vllm
-              ref: ${{ matrix.vllm }}
+              ref: ${{ steps.vllm.outputs.release_tag }}
               path: ./vllm-empty
               fetch-depth: 1
 
@@ -132,7 +134,6 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            vllm: [v0.21.0]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
           env:
@@ -141,6 +142,9 @@ jobs:
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v6
+          - name: Read vLLM release tag
+            id: vllm
+            uses: ./.github/actions/read-vllm-release-tag
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -167,7 +171,7 @@ jobs:
             uses: actions/checkout@v6
             with:
               repository: vllm-project/vllm
-              ref: ${{ matrix.vllm }}
+              ref: ${{ steps.vllm.outputs.release_tag }}
               path: ./vllm-empty
               fetch-depth: 1
 
@@ -206,7 +210,6 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            vllm: [v0.21.0]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
           env:
@@ -215,6 +218,9 @@ jobs:
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v6
+          - name: Read vLLM release tag
+            id: vllm
+            uses: ./.github/actions/read-vllm-release-tag
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -241,7 +247,7 @@ jobs:
             uses: actions/checkout@v6
             with:
               repository: vllm-project/vllm
-              ref: ${{ matrix.vllm }}
+              ref: ${{ steps.vllm.outputs.release_tag }}
               path: ./vllm-empty
               fetch-depth: 1
 
