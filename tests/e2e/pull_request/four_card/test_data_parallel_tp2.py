@@ -17,7 +17,7 @@ DATA_PARALLEL_SCRIPT = REPO_ROOT / "examples" / "offline_data_parallel.py"
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3"})
-@wait_until_npu_memory_free(target_free_percentage=0.95)
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_inference_dp2_tp2(model, max_tokens):
     env = os.environ.copy()
 

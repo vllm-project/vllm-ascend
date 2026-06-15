@@ -80,7 +80,7 @@ def test_qwen3_external_launcher(model):
 
 
 @pytest.mark.parametrize("model", MOE_MODELS)
-@wait_until_npu_memory_free(target_free_percentage=0.95)
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_moe_external_launcher_ep_tp2(model):
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
@@ -119,7 +119,7 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
-@wait_until_npu_memory_free(target_free_percentage=0.95)
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_external_launcher_with_sleepmode():
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
@@ -162,7 +162,7 @@ def test_qwen3_external_launcher_with_sleepmode():
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
-@wait_until_npu_memory_free(target_free_percentage=0.95)
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_external_launcher_with_sleepmode_level2():
     env = os.environ.copy()
     model_path = snapshot_download(
@@ -215,7 +215,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
     reason="This test is only for Ascend910B devices.",
 )
 @pytest.mark.parametrize("model", MODELS)
-@wait_until_npu_memory_free(target_free_percentage=0.95)
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1", "HCCL_BUFFSIZE": "500"})
 def test_qwen3_external_launcher_with_matmul_allreduce(model):
     env = os.environ.copy()
