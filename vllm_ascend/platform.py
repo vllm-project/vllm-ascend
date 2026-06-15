@@ -130,6 +130,16 @@ def config_deprecated_logging():
 
     warnings_logger.propagate = False
 
+def update_aclgraph_sizes(vllm_config):
+    """Reduce the number of stages captured by cudagraph
+    """
+    original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
+    max_num_batch_sizes = 4
+    step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
+    indices = [round(i * step) for i in range(max_num_batch_sizes)]
+    indices[0], indices[-1] = 0, len(original_sizes) - 1
+    sampled_sizes = [original_sizes[i] for i in indices]
+    update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
 
 class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
@@ -586,6 +596,9 @@ class NPUPlatform(Platform):
                     "vllm::dsa_forward",
                 ]
             )
+            # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,
