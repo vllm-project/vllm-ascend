@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -346,6 +347,8 @@ class TestAscendStoreConnector(unittest.TestCase):
 
 class TestAscendStoreConnectorLayerwise(unittest.TestCase):
     """Test connector methods that are specific to layerwise mode."""
+
+    connector_mod: types.ModuleType
 
     @classmethod
     def setUpClass(cls):
