@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-06-04 05:04+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -34,8 +34,8 @@ msgid ""
 " designed to explore and validate optimizations for training and "
 "inference efficiency in long-context scenarios."
 msgstr ""
-"DeepSeek-V3.2 是一个稀疏注意力模型。其主要架构与 DeepSeek-V3.1 相似，但采用了稀疏注意力机制，"
-"旨在探索和验证长上下文场景下训练和推理效率的优化方案。"
+"DeepSeek-V3.2 是一个稀疏注意力模型。其主要架构与 DeepSeek-V3.1 "
+"相似，但采用了稀疏注意力机制，旨在探索和验证长上下文场景下训练和推理效率的优化方案。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:7
 msgid ""
@@ -43,8 +43,7 @@ msgid ""
 "including supported features, feature configuration, environment "
 "preparation, single-node and multi-node deployment, accuracy and "
 "performance evaluation."
-msgstr ""
-"本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度评估和性能评估。"
+msgstr "本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度评估和性能评估。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:9
 msgid "Supported Features"
@@ -55,15 +54,13 @@ msgid ""
 "Refer to [supported "
 "features](../../user_guide/support_matrix/supported_models.md) to get the"
 " model's supported feature matrix."
-msgstr ""
-"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+msgstr "请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:13
 msgid ""
 "Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
 "the feature's configuration."
-msgstr ""
-"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:15
 msgid "Environment Preparation"
@@ -80,8 +77,9 @@ msgid ""
 "weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-"
 "W8A8)"
 msgstr ""
-"`DeepSeek-V3.2-Exp-W8A8`（量化版本）：需要 1 个 Atlas 800 A3（64G × 16）节点或 2 个 Atlas 800 A2（64G × 8）节点。"
-"[下载模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)"
+"`DeepSeek-V3.2-Exp-W8A8`（量化版本）：需要 1 个 Atlas 800 A3（64G × 16）节点或 2 个 Atlas"
+" 800 A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-V3.2-Exp-W8A8)"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:20
 msgid ""
@@ -89,8 +87,9 @@ msgid ""
 "16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model "
 "weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)"
 msgstr ""
-"`DeepSeek-V3.2-w8a8`（量化版本）：需要 1 个 Atlas 800 A3（64G × 16）节点或 2 个 Atlas 800 A2（64G × 8）节点。"
-"[下载模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)"
+"`DeepSeek-V3.2-w8a8`（量化版本）：需要 1 个 Atlas 800 A3（64G × 16）节点或 2 个 Atlas 800"
+" A2（64G × 8）节点。[下载模型权重](https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-V3.2-W8A8/)"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:22
 msgid ""
@@ -108,7 +107,8 @@ msgid ""
 "node communication according to [verify multi-node communication "
 "environment](../../installation.md#verify-multi-node-communication)."
 msgstr ""
-"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
+"communication)验证多节点通信。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:28
 msgid "Installation"
@@ -173,71 +173,71 @@ msgstr "量化模型 `DeepSeek-V3.2-w8a8` 可以部署在 1 台 Atlas 800 A3（6
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:164
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:163
 msgid "Multi-node Deployment"
 msgstr "多节点部署"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:166
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:165
 msgid "`DeepSeek-V3.2-w8a8`: require at least 2 Atlas 800 A2 (64G × 8)."
 msgstr "`DeepSeek-V3.2-w8a8`：至少需要 2 台 Atlas 800 A2（64G × 8）。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:168
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:167
 msgid "Run the following scripts on two nodes respectively."
 msgstr "分别在两个节点上运行以下脚本。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:177
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:281
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:176
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:278
 msgid "**Node0**"
 msgstr "**节点 0**"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:226
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:335
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:224
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:330
 msgid "**Node1**"
 msgstr "**节点 1**"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:393
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:386
 msgid "Prefill-Decode Disaggregation"
 msgstr "预填充-解码分离部署"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:395
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:388
 msgid ""
 "We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node "
 "environment with 1P1D for better performance."
 msgstr "我们将在多节点环境下以 1P1D 方式展示 `DeepSeek-V3.2` 的部署指南，以获得更好的性能。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:397
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:390
 msgid "Before you start, please"
 msgstr "开始之前，请"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:399
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:392
 msgid "prepare the script `launch_online_dp.py` on each node:"
 msgstr "在每个节点上准备脚本 `launch_online_dp.py`："
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:502
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:495
 msgid "prepare the script `run_dp_template.sh` on each node."
 msgstr "在每个节点上准备脚本 `run_dp_template.sh`。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:504
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:807
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:497
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:802
 msgid "Prefill node 0"
 msgstr "预填充节点 0"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:578
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:814
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:572
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:809
 msgid "Prefill node 1"
 msgstr "预填充节点 1"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:651
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:821
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:646
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:816
 msgid "Decode node 0"
 msgstr "解码节点 0"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:728
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:828
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:723
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:823
 msgid "Decode node 1"
 msgstr "解码节点 1"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:804
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:799
 msgid ""
 "Once the preparation is done, you can start the server with the following"
 " command on each node: Refer to [Distributed DP Server With Large-Scale "
@@ -245,15 +245,14 @@ msgid ""
 "Parallelism](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html)"
 " to get the detailed boot method."
 msgstr ""
-"准备工作完成后，您可以在每个节点上使用以下命令启动服务器："
-"详细启动方法请参考[大规模专家并行分布式 DP 服务器]"
-"(https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html)。"
+"准备工作完成后，您可以在每个节点上使用以下命令启动服务器：详细启动方法请参考[大规模专家并行分布式 DP "
+"服务器](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html)。"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:835
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:830
 msgid "Request Forwarding"
 msgstr "请求转发"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:837
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:832
 msgid ""
 "To set up request forwarding, run the following script on any machine. "
 "You can get the proxy program in the repository's examples: "
@@ -261,18 +260,36 @@ msgid ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)"
 msgstr ""
-"要设置请求转发，请在任意机器上运行以下脚本。您可以在仓库的示例中获取代理程序："
-"[load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-"
-"project/vllm-"
+"要设置请求转发，请在任意机器上运行以下脚本。您可以在仓库的示例中获取代理程序：[load_balance_proxy_layerwise_server_example.py](https://github.com"
+"/vllm-project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:866
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:861
 msgid "Functional Verification"
 msgstr "功能验证"
 
-#: ../../source/tutorials/models/DeepSeek-V3.2.md:868
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:863
 msgid "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:865
+#, fuzzy
+msgid "**Note**:"
+msgstr "**注意**："
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:867
+msgid ""
+"`<node0_ip>`: The IP address of the node where the server is running "
+"(e.g., localhost)."
+msgstr ""
+"`<node0_ip>`：运行服务器的节点 IP 地址（例如 localhost）。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:868
+msgid ""
+"`<port>`: The port number specified in the server startup command (e.g., "
+"8000)."
+msgstr ""
+"`<port>`：服务器启动命令中指定的端口号（例如 8000）。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:881
 msgid "Accuracy Evaluation"
@@ -293,7 +310,8 @@ msgid ""
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
 "details."
 msgstr ""
-"详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+"详细信息请参考[使用 AISBench "
+"进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:889
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:907
@@ -308,8 +326,7 @@ msgstr "使用 Language Model Evaluation Harness"
 msgid ""
 "As an example, take the `gsm8k` dataset as a test dataset, and run "
 "accuracy evaluation of `DeepSeek-V3.2-W8A8` in online mode."
-msgstr ""
-"以 `gsm8k` 数据集为例，以在线模式运行 `DeepSeek-V3.2-W8A8` 的精度评估。"
+msgstr "以 `gsm8k` 数据集为例，以在线模式运行 `DeepSeek-V3.2-W8A8` 的精度评估。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:895
 msgid ""
@@ -317,7 +334,9 @@ msgid ""
 "lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for `lm_eval`"
 " installation."
 msgstr ""
-"请参考[使用 lm_eval 进行精度评估](../../developer_guide/evaluation/using_lm_eval.md)了解 `lm_eval` 的安装方法。"
+"请参考[使用 lm_eval "
+"进行精度评估](../../developer_guide/evaluation/using_lm_eval.md)了解 `lm_eval` "
+"的安装方法。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:897
 msgid "Run `lm_eval` to execute the accuracy evaluation."
@@ -333,7 +352,9 @@ msgid ""
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
 msgstr ""
-"详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+"详细信息请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
 
 #: ../../source/tutorials/models/DeepSeek-V3.2.md:915
 msgid "The performance result is:"
@@ -405,6 +426,6 @@ msgid ""
 "Guide](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html"
 "#tool-calling-example) for details."
 msgstr ""
-"详细信息请参考 [DeepSeek-V3.2 使用指南]"
-"(https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html"
+"详细信息请参考 [DeepSeek-V3.2 "
+"使用指南](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html"
 "#tool-calling-example)。"

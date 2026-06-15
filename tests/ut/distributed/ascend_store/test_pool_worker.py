@@ -50,27 +50,27 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         result = cls.check_all_layers_exists(None, [0, 0, 0], 3)
         self.assertEqual(result, [0])
 
-    def test_find_min_first_non_one_index_found(self):
+    def test_find_max_hit_index_found(self):
         cls = self._make_worker_class()
         arr = [[1, 1, 0], [1, 0, 1]]
-        result = cls.find_min_first_non_one_index(None, arr)
-        self.assertEqual(result, 1)
-
-    def test_find_min_first_non_one_index_all_one(self):
-        cls = self._make_worker_class()
-        arr = [[1, 1, 1], [1, 1, 1]]
-        result = cls.find_min_first_non_one_index(None, arr)
-        self.assertEqual(result, -1)
-
-    def test_find_min_first_non_one_index_first_pos(self):
-        cls = self._make_worker_class()
-        arr = [[0, 1], [1, 0]]
-        result = cls.find_min_first_non_one_index(None, arr)
+        result = cls.find_max_hit_index(None, arr, 3)
         self.assertEqual(result, 0)
 
-    def test_find_min_first_non_one_index_empty(self):
+    def test_find_max_hit_index_all_one(self):
         cls = self._make_worker_class()
-        result = cls.find_min_first_non_one_index(None, [])
+        arr = [[1, 1, 1], [1, 1, 1]]
+        result = cls.find_max_hit_index(None, arr, 3)
+        self.assertEqual(result, 2)
+
+    def test_find_max_hit_index_first_pos(self):
+        cls = self._make_worker_class()
+        arr = [[0, 1], [1, 0]]
+        result = cls.find_max_hit_index(None, arr, 3)
+        self.assertEqual(result, -1)
+
+    def test_find_max_hit_index_empty(self):
+        cls = self._make_worker_class()
+        result = cls.find_max_hit_index(None, [], 0)
         self.assertEqual(result, -1)
 
 
@@ -494,15 +494,14 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         fake_cache.data_ptr.return_value = 10000
         kv_caches = {"layer.0": (fake_cache, fake_cache)}
         worker.register_kv_caches(kv_caches)
-        self.assertEqual(len(worker.kv_caches_base_addr), 2)
+        self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
         worker.m_store.register_buffer.assert_called_once()
 
     def test_start_load_kv_sync(self):
         worker = self._make_worker()
         worker.m_store.get = MagicMock()
         # Setup token database
-        worker.token_database.set_kv_caches_base_addr([1000, 2000])
-        worker.token_database.set_block_len([160])
+        worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
 
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
         req = ReqMeta(

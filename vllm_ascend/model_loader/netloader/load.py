@@ -29,6 +29,7 @@ def elastic_load(
     sources: list,
     tp: int,
     pp: int,
+    group_name: str = "netloader",
 ):
     """
     Loads a model using elastic loading across multiple devices.
@@ -40,6 +41,7 @@ def elastic_load(
     - sources: A list of source configurations, each containing device_id and sources.
     - tp: Tensor parallel size, indicating the number of devices for tensor parallelism.
     - pp: Pipeline parallel size, indicating the number of devices for pipeline parallelism.
+    - group_name: Name of the HCCL process group.
 
     Returns:
     - The loaded model if successful, otherwise None.
@@ -55,7 +57,7 @@ def elastic_load(
 
     try:
         # Initialize the interaction layer with the ElasticClient
-        with ElasticClient(sources_this_device, device_id, model_path, tp, pp) as client_interaction_layer:
+        with ElasticClient(sources_this_device, device_id, model_path, tp, pp, group_name) as client_interaction_layer:
             if client_interaction_layer.s is None or client_interaction_layer.server_addr is None:
                 raise RuntimeError("Failed to initialize ElasticClient: socket or server_addr is None")
             ack = client_interaction_layer.ack
@@ -63,7 +65,7 @@ def elastic_load(
                 raise RuntimeError("ElasticClient.register did not return ack")
 
             t0 = time.perf_counter()
-            elastic_loader = P2PLoad(ack[0], client_interaction_layer.server_addr, ack[1])
+            elastic_loader = P2PLoad(ack[0], client_interaction_layer.server_addr, ack[1], group_name)
             model_loaded = elastic_loader.load(model=model)
             if model_loaded is None:
                 logger.error("Failed to load model")
