@@ -21,6 +21,7 @@ from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+from typing import List, Optional
 
 from vllm_ascend.utils import vllm_version_is
 
@@ -93,6 +94,16 @@ def get_spec_causal_conv1d_update_host_args(attn_metadata) -> tuple[tuple[int, .
         to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
         to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
         to_int64_tuple(causal_conv1d_meta.num_accepted_tokens_cpu),
+    )
+
+
+def get_chunk_list_host_args(attn_metadata) -> tuple[Optional[List[int]], Optional[List[int]]]:
+    fallback_meta = _check_and_get_host_args(attn_metadata, "chunk_list_meta", "chunk_list")
+    chunk_list_meta = fallback_meta.chunk_list
+
+    return (
+        chunk_list_meta.non_spec_query_start_loc_list,
+        chunk_list_meta.chunk_indices_list,
     )
 
 
@@ -666,6 +677,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata.num_prefills > 0:
             initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
             clear_ssm_states(initial_state, has_initial_state)
+            (non_spec_query_start_loc_list, chunk_indices_list) = get_chunk_list_host_args(attn_metadata)
             (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
@@ -678,6 +690,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 prebuilt_meta=get_non_spec_chunked_prefill_meta(attn_metadata),
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
+                non_spec_query_start_loc_list=non_spec_query_start_loc_list,
+                chunk_indices_list=chunk_indices_list,
             )
             ssm_state[non_spec_state_indices_tensor] = (
                 last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)

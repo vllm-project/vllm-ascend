@@ -16,6 +16,7 @@
 from dataclasses import dataclass
 
 import torch
+from typing import List, Optional
 import vllm.v1.attention.backends.gdn_attn as gdn_attn
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -77,6 +78,17 @@ class GDNDecodeFallbackMeta:
 @dataclass
 class GDNSpecDecodeFallbackMeta:
     spec_causal_conv1d: GDNSpecCausalConv1dHostMetadata
+
+
+@dataclass
+class GDNChunkedPrefillReluListMeta:
+    chunk_list: _GDNChunkedReluListMeta
+
+
+@dataclass
+class _GDNChunkedReluListMeta:
+    non_spec_query_start_loc_list: Optional[List[int]] = None,
+    chunk_indices_list: Optional[List[int]] = None,
 
 
 @dataclass
@@ -706,6 +718,19 @@ def _build_non_spec_chunked_prefill_meta(
     return _build_chunked_prefill_metadata(builder, tensors, slot=slot)
 
 
+def _build_chunked_list_meta(
+    builder,
+    cu_seqlens,
+    chunk_indices,
+) -> _GDNChunkedReluListMeta:
+    cu_seqlens_list: Optional[List[int]] = cu_seqlens.to(torch.int64).tolist()
+    chunk_indices_list: Optional[List[int]] = chunk_indices.flatten().tolist()
+    return _GDNChunkedReluListMeta(
+        non_spec_query_start_loc_list=cu_seqlens_list,
+        chunk_indices_list=chunk_indices_list,
+    )
+
+
 def _patched_build(
     self,
     common_prefix_len: int,
@@ -725,6 +750,7 @@ def _patched_build(
     attn_metadata.non_spec_prefill_fallback_meta = None
     attn_metadata.non_spec_decode_fallback_meta = None
     attn_metadata.spec_decode_fallback_meta = None
+    attn_metadata.chunk_list_meta = None
     if attn_metadata.spec_sequence_masks is not None:
         _patched_build_spec(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
 
@@ -776,6 +802,13 @@ def _patched_build_prefill(
             non_spec_query_start_loc_cpu,
             attn_metadata.non_spec_query_start_loc,
         ),
+    )
+    attn_metadata.chunk_list_meta = GDNChunkedPrefillReluListMeta(
+        chunk_list=_build_chunked_list_meta(
+            self,
+            non_spec_query_start_loc_cpu,
+            attn_metadata.non_spec_prefill_fallback_meta.chunk.chunk_indices_chunk64,
+        )
     )
     return attn_metadata
 
@@ -864,6 +897,7 @@ if not _IS_PATCHED and not is_310p():
     gdn_attn.GDNChunkedPrefillMetadata = GDNChunkedPrefillMetadata
     gdn_attn.GDNCausalConv1dHostMetadata = GDNCausalConv1dHostMetadata
     gdn_attn.GDNPrefillFallbackMeta = GDNPrefillFallbackMeta
+    gdn_attn.GDNChunkedPrefillReluListMeta = GDNChunkedPrefillReluListMeta
     gdn_attn.GDNAttentionMetadataBuilder.build = _patched_build
     gdn_attn.GDNAttentionMetadataBuilder._init_reorder_batch_threshold = _init_reorder_batch_threshold
     _IS_PATCHED = True

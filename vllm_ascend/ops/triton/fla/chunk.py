@@ -11,6 +11,7 @@
 import warnings
 
 import torch
+from typing import List, Optional
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
@@ -38,6 +39,8 @@ def chunk_gated_delta_rule_fwd(
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
     prebuilt_meta=None,
+    non_spec_query_start_loc_list: Optional[List[int]] = None,
+    chunk_indices_list: Optional[List[int]] = None,
 ):
     forward_context = get_forward_context()
     num_decodes = 0
@@ -91,7 +94,6 @@ def chunk_gated_delta_rule_fwd(
     g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
-    cu_seqlens = cu_seqlens.to(torch.int64)
     chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
@@ -103,13 +105,14 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=True,
         chunk_size=64,
         save_new_value=True,
-        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
-        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
+        cu_seqlens=non_spec_query_start_loc_list if cu_seqlens is not None else None,
+        chunk_indices=chunk_indices_list if chunk_indices is not None else None,
         use_exp2=False,
         transpose_state_layout=False,
     )
 
     if get_pcp_group().world_size > 1:
+        cu_seqlens = cu_seqlens.to(torch.int64)
         h_update = chunk_gated_delta_rule_fwd_hupdate(
             k=k,
             w=w,
@@ -169,8 +172,8 @@ def chunk_gated_delta_rule_fwd(
         scale,
         g=g_ascendc,
         g_gamma=None,
-        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
-        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
+        cu_seqlens=non_spec_query_start_loc_list if cu_seqlens is not None else None,
+        chunk_indices=chunk_indices_list if chunk_indices is not None else None,
         chunk_size=64,
         transpose_state_layout=False,
     )
@@ -201,6 +204,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         cu_seqlens: torch.LongTensor | None = None,
         prebuilt_meta=None,
         use_qk_l2norm_in_kernel: bool = False,
+        non_spec_query_start_loc_list: Optional[List[int]] = None,
+        chunk_indices_list: Optional[List[int]] = None,
     ):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
@@ -216,6 +221,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             prebuilt_meta=prebuilt_meta,
+            non_spec_query_start_loc_list=non_spec_query_start_loc_list,
+            chunk_indices_list=chunk_indices_list,
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -239,6 +246,8 @@ def chunk_gated_delta_rule(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     core_attn_out: torch.Tensor | None = None,
+    non_spec_query_start_loc_list: Optional[List[int]] = None,
+    chunk_indices_list: Optional[List[int]] = None,
 ):
     r"""
     Args:
@@ -347,6 +356,8 @@ def chunk_gated_delta_rule(
         cu_seqlens,
         prebuilt_meta,
         use_qk_l2norm_in_kernel,
+        non_spec_query_start_loc_list,
+        chunk_indices_list,
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")
