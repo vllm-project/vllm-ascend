@@ -107,9 +107,9 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 `vllm-ascend` is a hardware plugin for vLLM. Stable releases usually align with the same vLLM version, while RC releases may use the corresponding vLLM final release version. For example, `vllm-ascend` `v0.18.0rc1` matches vLLM `v0.18.0`. For the main branch, we ensure that `vllm-ascend` and `vllm` are compatible at every commit.
 
-### 8. Does vllm-ascend support Prefill Disaggregation feature?
+### 8. Does vllm-ascend support Prefill-Decode (PD) Disaggregation feature?
 
-Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html) for example.
+Yes, vllm-ascend supports Prefill-Decode Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html) for example.
 
 ### 9. Does vllm-ascend support quantization method?
 
