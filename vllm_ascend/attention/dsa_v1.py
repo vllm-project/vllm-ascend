@@ -1778,6 +1778,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         actual_seq_lengths_query = common_prefill_metadata.query_start_loc
         actual_seq_lengths_key = common_prefill_metadata.seq_lens
 
+        qr_quant = None
+        qr_pertoken_scale = None
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
             q, qr, _, _ = self._mla_prolog_multistream(
@@ -1812,7 +1814,14 @@ class AscendDSAImpl(DSAAttentionImpl):
                     bias=self.wq_b.bias,
                     output_dtype=hidden_states.dtype,
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
-                qr = self.q_norm(q_a) if self._indexer_should_prepare_fp_qr() else qr_quant
+                qr = (
+                    self.q_norm(q_a)
+                    if (
+                        self._indexer_should_prepare_fp_qr()
+                        and not self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale)
+                    )
+                    else qr_quant
+                )
             else:
                 qr = self.q_norm(q_a)
                 q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
@@ -1918,6 +1927,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=True,
+                            qr_pertoken_scale=qr_pertoken_scale,
+                            qr_quant=qr_quant,
                         )
 
             coff = 2 if self.compressor_overlap else 1
