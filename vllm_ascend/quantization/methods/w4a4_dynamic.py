@@ -146,7 +146,7 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW4A8DynamicFusedMoEMethod):
     ) -> FusedExpertsResult:
         # The kernel sorts the global topk_ids against the full local expert set;
         # it does not consume expert-parallel routing metadata. Under EP/EPLB,
-        # tokens routed to non-local experts would be dropped or mis-combined, so
+        # tokens routed to non-local experts would be dropped or combined with the wrong expert, so
         # reject it explicitly rather than return wrong results.
         if expert_map is not None or log2phy is not None:
             raise NotImplementedError(

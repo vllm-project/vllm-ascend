@@ -167,7 +167,7 @@ __tf__ AICORE inline __ubuf__ T* ub_ptr(TileT& tile) {
       #define MEGA_S1_FAST_R 16
     #endif
 constexpr int32_t S1_R = MEGA_S1_FAST_R;
-AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* eri_gm, __gm__ int8_t* q_gm, __gm__ float* s_gm,
+AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* sort_idx_gm, __gm__ int8_t* q_gm, __gm__ float* s_gm,
                                uint32_t M_total, uint32_t top_k, uint32_t t_lo = 0, uint32_t t_hi = 0) {
   set_mask_norm();
   set_vector_mask(-1, -1);
@@ -221,7 +221,7 @@ AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* eri_gm, __gm__
     TASSIGN(xT, X_BASE);
     {
       for (int32_t r = 0; r < rows; ++r) {
-        const int32_t oi = eri_gm[base + r];
+        const int32_t oi = sort_idx_gm[base + r];
         const uint32_t orig_t = (uint32_t)(oi / (int32_t)top_k);
         TRowF16 xrow;
         TASSIGN(xrow, X_BASE + (unsigned)r * H_DIM * sizeof(half));
@@ -309,7 +309,7 @@ AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* eri_gm, __gm__
   }
 }
   #elif defined(MEGA_S1_DBUF)
-AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* eri_gm, __gm__ int8_t* q_gm, __gm__ float* s_gm,
+AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* sort_idx_gm, __gm__ int8_t* q_gm, __gm__ float* s_gm,
                                uint32_t M_total, uint32_t top_k, uint32_t t_lo = 0, uint32_t t_hi = 0) {
   set_mask_norm();
   set_vector_mask(-1, -1);
@@ -367,7 +367,7 @@ AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* eri_gm, __gm__
     #define S1_LOAD(B, MM)                               \
       do {                                               \
         cur_M##B = (uint32_t)(MM);                       \
-        int32_t _oi = eri_gm[(MM)];                      \
+        int32_t _oi = sort_idx_gm[(MM)];                      \
         uint32_t _ot = (uint32_t)(_oi / (int32_t)top_k); \
         GmF _xg(x_gm + (int64_t)_ot * H_DIM, fsh);       \
         TLOAD(x##B, _xg);                                \
@@ -466,7 +466,7 @@ AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* eri_gm, __gm__
     #undef S1_COMPUTE
 }
   #else
-AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* eri_gm, __gm__ int8_t* q_gm, __gm__ float* s_gm,
+AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* sort_idx_gm, __gm__ int8_t* q_gm, __gm__ float* s_gm,
                                uint32_t M_total, uint32_t top_k, uint32_t t_lo = 0, uint32_t t_hi = 0) {
   set_mask_norm();
   set_vector_mask(-1, -1);
@@ -511,7 +511,7 @@ AICORE void stage1_int4_routed(__gm__ half* x_gm, __gm__ int32_t* eri_gm, __gm__
   for (uint32_t M = t_lo + vid; M < m_end; M += num_cores) {
     set_flag(PIPE_V, PIPE_S, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
-    const int32_t orig_idx = eri_gm[M];
+    const int32_t orig_idx = sort_idx_gm[M];
     const uint32_t orig_t = (uint32_t)(orig_idx / (int32_t)top_k);
     set_flag(PIPE_S, PIPE_V, EVENT_ID0);
     wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
