@@ -73,7 +73,7 @@ QWEN3_NEXT_GOLDEN = [
 
 DSV3_2_GOLDEN = [
     "The capital of France isoint054 Rund compasses",
-    "Hello, my name is Tom, I amERIC slicpacelikeabra",
+    "Hello, my name is Tom, I am" + "ERIC slicpacelikeabra",
     "The president of United States isoint054 Rund compasses",
 ]
 
@@ -209,7 +209,8 @@ FULL_FEATURE_MODEL_CASES = [
             "long_prefill_token_threshold": 4,
             "gpu_memory_utilization": 0.8,
             "block_size": 128,
-            # "additional_config": {"enable_flashcomm1": True},
+            # FlashComm1 is disabled for qwen3_next until the PCP decode path is fixed.
+            "additional_config": {"enable_flashcomm1": False},
         },
     ),
     AccuracyCase(
