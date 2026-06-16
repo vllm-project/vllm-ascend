@@ -541,10 +541,10 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
-    def _mark_failed_recv_request(self, request_id: str, local_block_ids: list[int]) -> None:
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            self.invalid_block_ids.update(local_block_ids)
+            self.invalid_block_ids.update(local_block_ids[0])
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -698,9 +698,8 @@ class KVCacheRecvingThread(threading.Thread):
                     )
                 )
             else:
-                # For MambaSpec num block should equal on P node and D node
-                if len(local_group_block_ids) != len(remote_group_block_ids):
-                    raise RuntimeError("For MambaSpec num block should equal on P node and D node.")
+                # When Prefix Caching is enabled on both P and D nodes, num_block should not be forced to match,
+                # as the D-node requires dynamic allocation based on its specific cache hit rate.
                 transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
                 grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
@@ -1593,7 +1592,7 @@ class MooncakeConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
-        self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.total_layers = vllm_config.model_config.get_total_num_hidden_layers()
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
@@ -1712,12 +1711,22 @@ class MooncakeConnectorWorker:
         next_mtp_layer_idx = self.total_layers
         for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
             layer_indices = []
+            # For eagle3 method there is no "mtp" in layer names, and upstream model initiation assigns the layer id
+            # that is sliced by Pipeline Parallel. So the eagle layer id will confilt with target model layers.
+            # Here we determine whether the current layer is an eagle layer based on whether the layer id has been
+            # assigned to previous layers. If the layer id has been assigned, we treat the current layer as
+            # an eagle layer and assign a new layer id starting from total_layers.
+            assigned_indices: set[int] = set()
             for layer_name in group_spec.layer_names:
                 if "mtp" in layer_name:
                     layer_idx = next_mtp_layer_idx
                     next_mtp_layer_idx += 1
                 else:
                     layer_idx = extract_layer_index(layer_name, num_attn_module)
+                    if assigned_indices and layer_idx < min(assigned_indices) or layer_idx in assigned_indices:
+                        layer_idx = next_mtp_layer_idx
+                        next_mtp_layer_idx += 1
+                assigned_indices.add(layer_idx)
                 layer_indices.append(layer_idx)
             kv_group2layeridx[group_id] = (self._serialize_kv_group_spec(group_spec), layer_indices)
         return kv_group2layeridx

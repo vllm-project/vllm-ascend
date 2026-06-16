@@ -9,12 +9,12 @@ from vllm_ascend.distributed.parallel_state import get_fc3_quant_x_group
 
 
 def get_decode_context_model_parallel_world_size() -> int:
-    """Return DCP world size (v0.21.0 helper removed on vLLM main)."""
+    """Return DCP world size (v0.22.1 helper removed on vLLM main)."""
     return get_dcp_group().world_size
 
 
 def get_decode_context_model_parallel_rank() -> int:
-    """Return DCP rank within group (v0.21.0 helper removed on vLLM main)."""
+    """Return DCP rank within group (v0.22.1 helper removed on vLLM main)."""
     return get_dcp_group().rank_in_group
 
 

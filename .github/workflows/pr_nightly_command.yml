@@ -40,7 +40,7 @@ jobs:
       vllm_ascend_ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.PAT_TOKEN }}
           sparse-checkout: |

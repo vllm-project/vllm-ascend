@@ -53,7 +53,7 @@ class _DummyDelegatingParser(DelegatingParser):
 
 
 @pytest.mark.skipif(
-    not vllm_version_is("0.21.0"), reason="OpenAIServing._parse_tool_calls_from_content exists only in v0.21.0"
+    not vllm_version_is("0.22.1"), reason="OpenAIServing._parse_tool_calls_from_content exists only in v0.22.1"
 )
 def test_parse_tool_calls_from_content_allows_named_tool_choice_with_none_content():
     request = ChatCompletionRequest.model_validate(

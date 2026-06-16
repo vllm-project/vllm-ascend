@@ -28,6 +28,7 @@ from vllm.distributed.kv_events import KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import logger
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
@@ -66,7 +67,7 @@ def register_ascend_mla_spec_in_manager():
     from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
 
-    if vllm_version_is("0.21.0"):
+    if vllm_version_is("0.22.1"):
         import sys as _sys
 
         _stm = _sys.modules.get("vllm.v1.core.single_type_kv_cache_manager")
@@ -479,9 +480,32 @@ class RecomputeScheduler(Scheduler):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                        request
-                    )
+                    if (
+                        self.connector is not None
+                        and self.has_mamba_layers
+                        and isinstance(
+                            self.kv_cache_manager.coordinator,
+                            HybridKVCacheCoordinator,
+                        )
+                    ):
+                        computed_blocks, num_new_local_computed_tokens = (
+                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                                request.block_hashes,
+                                request.num_tokens - 1,
+                            )
+                        )
+                        new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed_blocks)
+                        if self.kv_cache_manager.log_stats:
+                            assert self.kv_cache_manager.prefix_cache_stats is not None
+                            self.kv_cache_manager.prefix_cache_stats.record(
+                                num_tokens=request.num_tokens,
+                                num_hits=num_new_local_computed_tokens,
+                                preempted=request.num_preemptions > 0,
+                            )
+                    else:
+                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
+                            request
+                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -566,7 +590,7 @@ class RecomputeScheduler(Scheduler):
                             # The request cannot be scheduled.
                             break
 
-                if self.need_mamba_block_aligned_split:
+                if self.need_mamba_block_aligned_split and not load_kv_async:
                     num_new_tokens = self._mamba_block_aligned_split(
                         request,
                         num_new_tokens,
@@ -845,11 +869,7 @@ class RecomputeScheduler(Scheduler):
         # MUST precede the per-request routing reads below.
         routing_data = None
         routing_offsets: dict[str, int] = {}
-        if (
-            not vllm_version_is("0.21.0")
-            and getattr(self, "enable_return_routed_experts", False)
-            and model_runner_output.routed_experts is not None
-        ):
+        if getattr(self, "enable_return_routed_experts", False) and model_runner_output.routed_experts is not None:
             re = model_runner_output.routed_experts
             self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
             routing_data = re.routing_data.astype(
@@ -926,13 +946,7 @@ class RecomputeScheduler(Scheduler):
                 stopped = True
 
             routed_experts = None
-            if vllm_version_is("0.21.0"):
-                if (
-                    model_runner_output.routed_experts_dict is not None
-                    and req_id in model_runner_output.routed_experts_dict
-                ):
-                    routed_experts = model_runner_output.routed_experts_dict[req_id]
-            elif getattr(self, "enable_return_routed_experts", False) and routing_data is not None and new_token_ids:
+            if getattr(self, "enable_return_routed_experts", False) and routing_data is not None and new_token_ids:
                 req_offset = routing_offsets[req_id]
                 end = req_offset + num_tokens_scheduled
                 block_ids = self._re_block_ids.pop(req_id, [])
