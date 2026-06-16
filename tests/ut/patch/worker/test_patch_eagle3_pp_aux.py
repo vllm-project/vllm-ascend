@@ -101,7 +101,14 @@ def test_non_last_pp_rank_carries_previous_and_local_aux_states(monkeypatch):
         }
     )
 
-    output = forward(model, None, torch.arange(2), intermediate_tensors=intermediate)
+    output = forward(
+        model,
+        None,
+        torch.arange(2),
+        kv_caches=[None] * 4,
+        attn_metadata=None,
+        intermediate_tensors=intermediate,
+    )
 
     assert isinstance(output, IntermediateTensors)
     assert set(output.tensors) == {"hidden_states", "residual", "aux_layer_0", "aux_layer_1"}
