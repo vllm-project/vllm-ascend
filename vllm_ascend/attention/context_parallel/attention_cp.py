@@ -898,7 +898,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         pcp_unpad_mask = attn_metadata.prefill.pcp_metadata.pcp_unpad_mask[attn_metadata.num_decodes * self.pcp_size :]
         qkv_fa_padding_workspace[decode_offset:][pcp_unpad_mask] = actual_qkv[decode_offset:]
-        qkv_fa_padding_workspace[decode_offset:][~pcp_unpad_mask].fill_(0)
+        qkv_fa_padding_workspace[decode_offset:][~pcp_unpad_mask] = 0
 
         q, k, v = qkv_fa_padding_workspace.split(
             [

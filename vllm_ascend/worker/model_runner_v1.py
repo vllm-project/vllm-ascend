@@ -4509,6 +4509,7 @@ class NPUModelRunner(GPUModelRunner):
                 kernel_block_sizes=self.kernel_block_sizes,
                 max_num_blocks_per_req=max_num_blocks,
                 kv_cache_groups=kv_cache_config.kv_cache_groups,
+                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             )
 
     def initialize_attn_backend(

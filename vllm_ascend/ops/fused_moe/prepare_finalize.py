@@ -515,4 +515,5 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
+            hidden_states = hidden_states[: self.num_tokens_pcp]
         return hidden_states
