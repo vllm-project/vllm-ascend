@@ -74,11 +74,15 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
         num_computed_tokens: int,
-    ) -> None:
+    ) -> bool:
+        offloaded = False
         for c in self._connectors:
             hook = getattr(c, "update_state_before_preempt", None)
             if hook is not None:
-                hook(request, block_ids, num_computed_tokens)
+                offloaded = bool(
+                    hook(request, block_ids, num_computed_tokens)
+                ) or offloaded
+        return offloaded
 
     def request_finished_all_groups(
         self,

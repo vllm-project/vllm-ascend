@@ -39,10 +39,16 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import EngineCoreEventType
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
-from vllm.v1.utils import record_function_or_nullcontext
+from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
 from vllm_ascend.utils import vllm_version_is
 
@@ -80,6 +86,13 @@ class PreemptedRequestData:
 
 
 @dataclass
+class RecomputeReqInfo:
+    request_id: str
+    output_token_ids: ConstantList
+    client_index: int = 0
+
+
+@dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
     scheduler_cls: str | type[object] = "vllm_ascend.core.recompute_scheduler.RecomputeScheduler"
 
@@ -103,6 +116,7 @@ class RecomputeSchedulerConfig(SchedulerConfig):
 @dataclass
 class RecomputeSchedulerOutput(SchedulerOutput):
     preempted_reqs: list[PreemptedRequestData] | None = None
+    recomputed_reqs: list[RecomputeReqInfo] | None = None
 
 
 class RecomputeScheduler(Scheduler):
@@ -125,6 +139,16 @@ class RecomputeScheduler(Scheduler):
             "qwen3_next" in self.vllm_config.model_config.hf_text_config.model_type
             or "qwen3_5" in self.vllm_config.model_config.hf_text_config.model_type
         )
+
+    def _fallback_to_recompute_on_preempt(self) -> bool:
+        transfer_config = self.vllm_config.kv_transfer_config
+        return transfer_config is not None and not transfer_config.is_kv_producer
+
+    @staticmethod
+    def _clear_async_preempt_state(request: Request) -> None:
+        if request.num_output_placeholders > 0:
+            request.num_output_placeholders = 0
+            request.discard_latest_async_tokens = True
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
@@ -231,6 +255,7 @@ class RecomputeScheduler(Scheduler):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
         preempted_req_data: list[PreemptedRequestData] = []
+        recomputed_reqs: list[RecomputeReqInfo] = []
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
@@ -368,29 +393,43 @@ class RecomputeScheduler(Scheduler):
                         preempted_req.num_computed_tokens
                         - preempted_req.num_output_placeholders,
                     )
-                    preempted_req_data.append(
-                        PreemptedRequestData(
-                            req_id=preempted_req_id,
-                            block_ids=preempted_block_ids,
-                            num_computed_tokens=preempted_num_computed_tokens,
-                        )
-                    )
                     preempt_hook = (
                         getattr(self.connector, "update_state_before_preempt", None)
                         if self.connector is not None
                         else None
                     )
+                    offloaded = False
                     if preempt_hook is not None:
-                        preempt_hook(
-                            preempted_req,
-                            preempted_block_ids,
-                            preempted_num_computed_tokens,
+                        offloaded = bool(
+                            preempt_hook(
+                                preempted_req,
+                                preempted_block_ids,
+                                preempted_num_computed_tokens,
+                            )
                         )
-                    self._preempt_request(preempted_req, scheduled_timestamp)
-                    if preempted_req.num_output_placeholders > 0:
-                        preempted_req.num_output_placeholders = 0
-                        preempted_req.discard_latest_async_tokens = True
-                    preempted_reqs.append(preempted_req)
+                    if offloaded or not self._fallback_to_recompute_on_preempt():
+                        if offloaded:
+                            preempted_req_data.append(
+                                PreemptedRequestData(
+                                    req_id=preempted_req_id,
+                                    block_ids=preempted_block_ids,
+                                    num_computed_tokens=preempted_num_computed_tokens,
+                                )
+                            )
+                        self._preempt_request(preempted_req, scheduled_timestamp)
+                        self._clear_async_preempt_state(preempted_req)
+                        preempted_reqs.append(preempted_req)
+                    else:
+                        self.kv_cache_manager.free(preempted_req)
+                        self.encoder_cache_manager.free(preempted_req)
+                        self._clear_async_preempt_state(preempted_req)
+                        recomputed_reqs.append(
+                            RecomputeReqInfo(
+                                preempted_req_id,
+                                preempted_req.output_token_ids,
+                                preempted_req.client_index,
+                            )
+                        )
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
                         break
@@ -448,7 +487,11 @@ class RecomputeScheduler(Scheduler):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if (
+            not preempted_reqs
+            and not recomputed_reqs
+            and self._pause_state == PauseState.UNPAUSED
+        ):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
@@ -808,6 +851,7 @@ class RecomputeScheduler(Scheduler):
             num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids={req.request_id for req in preempted_reqs},
             preempted_reqs=preempted_req_data,
+            recomputed_reqs=recomputed_reqs,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
@@ -833,6 +877,40 @@ class RecomputeScheduler(Scheduler):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    def update_from_output(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
+    ) -> dict[int, EngineCoreOutputs]:
+        engine_core_outputs = super().update_from_output(
+            scheduler_output,
+            model_runner_output,
+        )
+        recomputed_reqs = getattr(scheduler_output, "recomputed_reqs", None)
+        if recomputed_reqs is None:
+            return engine_core_outputs
+
+        for req_info in recomputed_reqs:
+            logger.warning(
+                "Recompute triggered for request %s.",
+                req_info.request_id,
+            )
+            engine_outputs = engine_core_outputs.setdefault(
+                req_info.client_index,
+                EngineCoreOutputs(),
+            )
+            engine_outputs.outputs.append(
+                EngineCoreOutput(
+                    request_id=req_info.request_id,
+                    new_token_ids=[],
+                    finish_reason=FinishReason.STOP,
+                    stop_reason="recomputed",
+                )
+            )
+
+        return engine_core_outputs
+
 
 class AsyncRecomputeScheduler(AsyncScheduler, RecomputeScheduler):
     def __init__(self, *args, **kwargs):

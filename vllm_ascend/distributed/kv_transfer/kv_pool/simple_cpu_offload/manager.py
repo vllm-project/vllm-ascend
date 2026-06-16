@@ -191,10 +191,10 @@ class SimpleCPUOffloadScheduler:
         request: "Request",
         block_ids: tuple[list[int], ...],
         num_computed_tokens: int,
-    ) -> None:
+    ) -> bool:
         if request.request_id in self._preempted_req_states:
-            return
-        self._create_preempt_state(
+            return True
+        return self._create_preempt_state(
             request.request_id,
             block_ids,
             num_computed_tokens,

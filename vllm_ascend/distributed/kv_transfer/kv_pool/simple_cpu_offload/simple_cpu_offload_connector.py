@@ -194,13 +194,14 @@ class SimpleCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
         num_computed_tokens: int,
-    ) -> None:
+    ) -> bool:
         if self.scheduler_manager is not None:
-            self.scheduler_manager.update_state_before_preempt(
+            return self.scheduler_manager.update_state_before_preempt(
                 request,
                 block_ids,
                 num_computed_tokens,
             )
+        return False
 
     def build_connector_meta(
         self,
