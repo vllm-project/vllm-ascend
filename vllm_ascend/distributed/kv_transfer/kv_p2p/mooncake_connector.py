@@ -1381,7 +1381,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         keys to match the port-offset-based lookup used by
         ``_get_remote_host_info_by_port`` and ``get_remote_port_send_num``.
         """
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        tp_size = self._vllm_config.parallel_config.tensor_parallel_size
         flat_metadata: dict[int, KVConnectorHandshakeMetadata] = {
             pp_rank * tp_size + tp_rank: meta
             for (pp_rank, tp_rank), meta in metadata.items()
