@@ -333,7 +333,7 @@ class TestManagerClassResolution(unittest.TestCase):
 
     @staticmethod
     def _clear_resolver_cache():
-        for attr in ("_registry", "_spec_manager_map"):
+        for attr in ("_manager_class_cache",):
             if hasattr(_get_manager_class_for_spec, attr):
                 delattr(_get_manager_class_for_spec, attr)
 
