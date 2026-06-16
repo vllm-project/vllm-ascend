@@ -17,6 +17,7 @@ class AscendSuffixDecodingProposer(SuffixDecodingProposer):
         batch_descriptor=None,
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
+        profile_cpp=False,
     ):
         pass
 
