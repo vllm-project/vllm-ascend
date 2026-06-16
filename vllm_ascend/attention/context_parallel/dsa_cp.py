@@ -12,7 +12,6 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
@@ -920,8 +919,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
         self.eps = kwargs["eps"]
 
         self.attn_sink = kwargs["attn_sink"]
-
-        ascend_config = get_ascend_config()
 
         self.vllm_config = get_current_vllm_config()
 
