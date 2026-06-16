@@ -56,6 +56,7 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
 
 RUN echo "export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
+RUN echo 'export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH' >> /root/.bashrc
 
 # Set base environment variables
 ENV LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/lib64:$LD_LIBRARY_PATH
@@ -86,15 +87,13 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
     echo 'if lspci 2>/dev/null | grep -qi "accelerators"; then' >> /usr/local/bin/entrypoint.sh && \
     echo '    :' >> /usr/local/bin/entrypoint.sh && \
     echo 'else' >> /usr/local/bin/entrypoint.sh && \
-    echo '    if ! grep -q "usr/local/Ascend/driver/lib64" /root/.bashrc; then' >> /usr/local/bin/entrypoint.sh && \
-    echo '        echo "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:\\\$LD_LIBRARY_PATH" >> /root/.bashrc' >> /usr/local/bin/entrypoint.sh && \
-    echo '    fi' >> /usr/local/bin/entrypoint.sh && \
-    echo '    export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:\$LD_LIBRARY_PATH' >> /usr/local/bin/entrypoint.sh && \
     echo '    su - HwHiAiUser -c "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/:/usr/lib64 && /lib/ld-linux-aarch64.so.1 /var/slogd -d >/dev/null &"' >> /usr/local/bin/entrypoint.sh && \
     echo '    su - HwDmUser -c "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/:/usr/lib64 && /lib/ld-linux-aarch64.so.1 /var/dmp_daemon -I -M -U 8087 &"' >> /usr/local/bin/entrypoint.sh && \
+    echo '    ' >> /usr/local/bin/entrypoint.sh && \
     echo '    rm -rf /lib64/ld-linux-aarch64.so.1' >> /usr/local/bin/entrypoint.sh && \
     echo '    ln -sf /lib/ld-linux-aarch64.so.1 /lib64/ld-linux-aarch64.so.1' >> /usr/local/bin/entrypoint.sh && \
     echo 'fi' >> /usr/local/bin/entrypoint.sh && \
+    echo '' >> /usr/local/bin/entrypoint.sh && \
     echo 'exec "$@"' >> /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh
 
