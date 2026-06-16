@@ -45,6 +45,16 @@ on:
           - releases/v0.20.2rc
           - releases/v0.18.0
           - none
+      vllm_commit:
+        description: 'vLLM commit hash (must be paired with vllm_ascend_commit; mutually exclusive with tag/branch). Image will be pushed only to QUAY_TEMP_USERNAME.'
+        required: false
+        default: ''
+        type: string
+      vllm_ascend_commit:
+        description: 'vllm-ascend commit hash (must be paired with vllm_commit; mutually exclusive with tag/branch). Image will be pushed only to QUAY_TEMP_USERNAME.'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   packages: write
@@ -53,7 +63,8 @@ permissions:
 jobs:
   image_build:
     name: Image Build and Push
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'image-build')) && github.event_name != 'schedule' }}
+    if: ${{ ((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'image-build')) && github.event_name != 'schedule')
+        && !(github.event_name == 'workflow_dispatch' && inputs.vllm_commit != '' && inputs.vllm_ascend_commit != '') }}
     strategy:
       matrix:
         build_meta:
@@ -86,6 +97,50 @@ jobs:
       branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+      QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
+
+  image_build_by_commit:
+    name: Image Build (commit mode) and Push to QUAY_TEMP
+    if: ${{ github.event_name == 'workflow_dispatch'
+        && inputs.vllm_commit != ''
+        && inputs.vllm_ascend_commit != ''
+        && inputs.tag == 'none'
+        && inputs.branch == 'none' }}
+    strategy:
+      matrix:
+        build_meta:
+          - name: A2 Ubuntu
+            dockerfile: Dockerfile
+            suffix: ''
+          - name: A2 openeuler
+            dockerfile: Dockerfile.openEuler
+            suffix: 'openeuler'
+          - name: A3 Ubuntu
+            dockerfile: Dockerfile.a3
+            suffix: 'a3'
+          - name: A3 openEuler
+            dockerfile: Dockerfile.a3.openEuler
+            suffix: 'a3-openeuler'
+          - name: 310P Ubuntu
+            dockerfile: Dockerfile.310p
+            suffix: '310p'
+          - name: 310P openEuler
+            dockerfile: Dockerfile.310p.openEuler
+            suffix: '310p-openeuler'
+    uses: ./.github/workflows/_schedule_image_build.yaml
+    with:
+      dockerfile: ${{ matrix.build_meta.dockerfile }}
+      suffix: ${{ matrix.build_meta.suffix }}
+      quay_temp_username: ${{ vars.QUAY_TEMP_USERNAME }}
+      # Commit mode always pushes (to QUAY_TEMP_REPO only) and never promotes
+      # the image to QUAY_REPO via merge-image, so quay_username is intentionally omitted.
+      should_push: true
+      temp_only: true
+      vllm_commit: ${{ inputs.vllm_commit }}
+      vllm_ascend_commit: ${{ inputs.vllm_ascend_commit }}
+      workflow_dispatch_tag: ''
+      branch_ref: ''
+    secrets:
       QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
 
   schedule_image_build:
