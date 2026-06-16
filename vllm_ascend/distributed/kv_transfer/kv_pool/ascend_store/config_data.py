@@ -635,9 +635,12 @@ class RequestTracker:
         if self.mamba_group_ids and kv_cache_group_id in self.mamba_group_ids and self.num_speculative_blocks > 0:
             mask_spec_count = min(len(block_ids) - 1, self.num_speculative_blocks)
             group_block_ids = self.allocated_block_ids_by_group[kv_cache_group_id]
-            group_block_ids[-self.num_speculative_blocks : mask_spec_count - self.num_speculative_blocks] = [
-                0
-            ] * mask_spec_count
+            if mask_spec_count >= self.num_speculative_blocks:
+                group_block_ids[-self.num_speculative_blocks:] = [0] * self.num_speculative_blocks
+            else:
+                group_block_ids[-self.num_speculative_blocks : mask_spec_count - self.num_speculative_blocks] = [
+                    0
+                ] * mask_spec_count
 
 
 @dataclass(init=False)
