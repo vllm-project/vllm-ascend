@@ -228,7 +228,7 @@ class _FakeSingleTypeKVCacheManager:
         dcp_world_size=1,
         pcp_world_size=1,
     ):
-        computed = tuple([] for _ in kv_cache_group_ids)
+        computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
         max_blocks = max_length // kv_cache_spec.block_size
         for block_hash in list(block_hashes)[:max_blocks]:
             cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
