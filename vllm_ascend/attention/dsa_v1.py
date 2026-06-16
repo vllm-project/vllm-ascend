@@ -1501,39 +1501,21 @@ class AscendDSAImpl(DSAAttentionImpl):
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
-    def _select_qr_after_dynamic_quant(
+    def _select_indexer_qr_after_dynamic_quant(
         self,
         q_a: torch.Tensor,
         qr_quant: torch.Tensor,
         qr_pertoken_scale: torch.Tensor,
     ) -> torch.Tensor:
-        """Choose whether downstream should see quantized or fp qr.
-        Layers without an active indexer keep the fused
-        npu_rms_norm_dynamic_quant result. Only an active indexer may require
-        fp qr, and only when it cannot consume the quantized qr directly.
-        """
         if self.indexer is None or self.compress_ratio != 4 or self.skip_topk:
             return qr_quant
-
-        indexer_can_reuse_quantized_qr = (
-            _is_w8a8_dynamic(self.wq_b)
-            and _is_w8a8_dynamic(self.inderxer_wq_b)
-            and qr_quant is not None
+        if (
+            _is_w8a8_dynamic(self.inderxer_wq_b)
             and qr_pertoken_scale is not None
             and get_ascend_device_type() not in {AscendDeviceType.A5}
-        )
-        if indexer_can_reuse_quantized_qr:
+        ):
             return qr_quant
-
         return self.q_norm(q_a)
-
-    def _is_quantized_qr_selected(
-        self,
-        qr: torch.Tensor,
-        qr_quant: torch.Tensor | None,
-        qr_pertoken_scale: torch.Tensor | None,
-    ) -> bool:
-        return qr_quant is not None and qr_pertoken_scale is not None and qr is qr_quant
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
@@ -1694,20 +1676,16 @@ class AscendDSAImpl(DSAAttentionImpl):
             torch.npu.current_stream().wait_event(e_part2_start)
             kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
 
-        qr_quant = None
-        qr_quant = None
         if is_prefill:
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
             qr_pertoken_scale = None
         elif is_w8a8:
-            qr_quant, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
-        elif is_w8a8_wq_b:
-            qr_quant, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+            qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 wq_a_result, self.q_norm.weight, epsilon=self.eps
             )
-            q_b_quant, q_b_scale = qr_quant, qr_pertoken_scale
-            qr = self._select_qr_after_dynamic_quant(wq_a_result, qr_quant, qr_pertoken_scale)
+            q_b_quant, q_b_scale = qr, qr_pertoken_scale
+            qr = self._select_indexer_qr_after_dynamic_quant(wq_a_result, qr, qr_pertoken_scale)
         else:
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = qr, None
@@ -1758,7 +1736,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        return q, qr, qr_quant, qr_pertoken_scale
+        return q, qr, qr_pertoken_scale
 
     def _forward_prefill(
         self,
@@ -1794,12 +1772,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         actual_seq_lengths_query = common_prefill_metadata.query_start_loc
         actual_seq_lengths_key = common_prefill_metadata.seq_lens
 
-        qr_quant = None
-        qr_pertoken_scale = None
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
-            q, qr, _, _ = self._mla_prolog_multistream(
-            q, qr, _, _ = self._mla_prolog_multistream(
+            q, qr, _ = self._mla_prolog_multistream(
                 hidden_states, cos, sin, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
             )
         else:
@@ -1823,24 +1798,22 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # q
             if _is_w8a8_dynamic(self.wq_b):
-                qr_quant, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
-            if is_w8a8_wq_b:
-                qr_quant, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                     q_a, self.q_norm.weight, epsilon=self.eps
                 )
                 q = torch_npu.npu_quant_matmul(
-                    qr_quant,
-                    qr_quant,
+                    qr,
                     self.wq_b.weight,
                     self.wq_b.weight_scale,
                     pertoken_scale=qr_pertoken_scale,
                     bias=self.wq_b.bias,
                     output_dtype=hidden_states.dtype,
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
-                qr = self._select_qr_after_dynamic_quant(q_a, qr_quant, qr_pertoken_scale)
+                qr = self._select_indexer_qr_after_dynamic_quant(q_a, qr, qr_pertoken_scale)
             else:
                 qr = self.q_norm(q_a)
                 q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
+                qr_pertoken_scale = None
             q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
 
             torch.ops._C_ascend.inplace_partial_rotary_mul(
@@ -1944,7 +1917,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=True,
                             qr_pertoken_scale=qr_pertoken_scale,
-                            qr_quant=qr_quant,
                         )
 
             coff = 2 if self.compressor_overlap else 1
@@ -2114,8 +2086,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
-            q, qr, qr_quant, qr_pertoken_scale = self._mla_prolog_multistream(
-            q, qr, qr_quant, qr_pertoken_scale = self._mla_prolog_multistream(
+            q, qr, qr_pertoken_scale = self._mla_prolog_multistream(
                 hidden_states, cos, sin, swa_kv_cache, swa_decode_metadata.slot_mapping, is_prefill=False
             )
         else:
@@ -2129,8 +2100,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
 
             # q
-            qr_quant = None
-            if is_w8a8_wq_b:
+            if _is_w8a8_dynamic(self.wq_b):
                 if share_hs_quant:
                     q_a = torch_npu.npu_quant_matmul(
                         hs_int8,
@@ -2142,20 +2112,18 @@ class AscendDSAImpl(DSAAttentionImpl):
                     )
                 else:
                     q_a = self.wq_a(hidden_states)
-                qr_quant, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
-                qr_quant, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                     q_a, self.q_norm.weight, epsilon=self.eps
                 )
                 q = torch_npu.npu_quant_matmul(
-                    qr_quant,
-                    qr_quant,
+                    qr,
                     self.wq_b.weight,
                     self.wq_b.weight_scale,
                     pertoken_scale=qr_pertoken_scale,
                     bias=self.wq_b.bias,
                     output_dtype=hidden_states.dtype,
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
-                qr = self._select_qr_after_dynamic_quant(q_a, qr_quant, qr_pertoken_scale)
+                qr = self._select_indexer_qr_after_dynamic_quant(q_a, qr, qr_pertoken_scale)
             else:
                 if share_hs_quant:
                     q_a = torch_npu.npu_quant_matmul(
@@ -2234,8 +2202,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             with_prefill=False,
                             qr_pertoken_scale=qr_pertoken_scale,
-                            qr_quant=qr_quant,
-                            qr_quant=qr_quant,
                         )
                     else:
                         compress_topk_idxs = self.indexer_select_qli(  # original version
@@ -2251,8 +2217,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=False,
                             qr_pertoken_scale=qr_pertoken_scale,
-                            qr_quant=qr_quant,
-                            qr_quant=qr_quant,
                         )
 
             coff = 2 if self.compressor_overlap else 1
@@ -2410,8 +2374,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
-        qr_quant: torch.Tensor | None = None,
-        qr_quant: torch.Tensor | None = None,
     ):
         (indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
             DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
@@ -2424,11 +2386,13 @@ class AscendDSAImpl(DSAAttentionImpl):
             _,
         ) = attn_metadata
 
-        use_quantized_qr = self._is_quantized_qr_selected(qr, qr_quant, qr_pertoken_scale)
-        if use_quantized_qr:
+        if (
+            _is_w8a8_dynamic(self.inderxer_wq_b)
+            and qr_pertoken_scale is not None
+            and get_ascend_device_type() not in {AscendDeviceType.A5}
+        ):
             q = torch_npu.npu_quant_matmul(
-                qr_quant,
-                qr_quant,
+                qr,
                 self.inderxer_wq_b.weight,
                 self.inderxer_wq_b.weight_scale,
                 pertoken_scale=qr_pertoken_scale,
@@ -2608,8 +2572,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         actual_seq_lengths_key: torch.Tensor | None = None,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
-        qr_quant: torch.Tensor | None = None,
-        qr_quant: torch.Tensor | None = None,
     ):
         q, kv, ik, isc, ifc, indexer_kv_state_meta, isc_meta, wp = self._indexer_qkv_prepare(
             x,
@@ -2623,8 +2585,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             actual_seq_lengths_query,
             with_prefill,
             qr_pertoken_scale,
-            qr_quant,
-            qr_quant,
         )
 
         weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
@@ -2644,8 +2604,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
-        qr_quant: torch.Tensor | None = None,
-        qr_quant: torch.Tensor | None = None,
     ):
         """
         Multistream version: 4-block segmentation, main stream and aux stream
@@ -2668,9 +2626,12 @@ class AscendDSAImpl(DSAAttentionImpl):
         aux_stream = dsv4_dsa_overlap_stream()
 
         # ===== Part0: Pre-compute on main =====
-        use_quantized_qr = self._is_quantized_qr_selected(qr, qr_quant, qr_pertoken_scale)
-        if use_quantized_qr:
-            qr_quant_ready = qr_quant
+        if (
+            _is_w8a8_dynamic(self.inderxer_wq_b)
+            and qr_pertoken_scale is not None
+            and get_ascend_device_type() not in {AscendDeviceType.A5}
+        ):
+            qr_quant_ready = qr
             qr_scale_ready = qr_pertoken_scale
         else:
             qr_quant_ready, qr_scale_ready = self.cv_inderxer_wq_b.quantize(qr)
@@ -2732,8 +2693,11 @@ class AscendDSAImpl(DSAAttentionImpl):
                 )
 
         # Main: matmul q from qr (directly submit, V/C different engines dispatch naturally)
-        if use_quantized_qr:
-        if use_quantized_qr:
+        if (
+            _is_w8a8_dynamic(self.inderxer_wq_b)
+            and qr_pertoken_scale is not None
+            and get_ascend_device_type() not in {AscendDeviceType.A5}
+        ):
             q = torch_npu.npu_quant_matmul(
                 qr_quant_ready,
                 self.inderxer_wq_b.weight,
