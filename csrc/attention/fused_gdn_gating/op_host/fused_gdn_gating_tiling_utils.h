@@ -70,16 +70,18 @@ inline uint32_t ComputeRowsPerIter(uint32_t numHeads, uint64_t ubBudget,
         ubDim = ((numHeads + BF16_PER_BLOCK - 1) / BF16_PER_BLOCK) * BF16_PER_BLOCK;
     }
 
-    // 3 fp32 constant buffers, each 1 row.
-    uint32_t sharedBytes = 3 * ubDim * static_cast<uint32_t>(sizeof(float));
+    // 2 parameter input queues + 2 fp32 constant buffers, each 1 row.
+    // Use fp32 for the parameter queues as a conservative upper bound.
+    uint32_t sharedBytes = 4 * ubDim * static_cast<uint32_t>(sizeof(float));
 
     // Multi-row constant buffers (precomputed once, scaled by R):
     //   dtBiasMultiBuf_ + negExpMultiBuf_: 2 fp32 buffers.
     uint32_t constPerRowBytes = 2 * ubDim * static_cast<uint32_t>(sizeof(float));
 
-    // Per-row (per-chunk): 3 bf16/fp16 buffers + 6 fp32 buffers.
+    // Per-row (per-chunk): 3 bf16/fp16 buffers + 5 fp32 buffers + 1 uint8 mask buffer.
     uint32_t perRowBytes = 3 * ubDim * static_cast<uint32_t>(sizeof(int16_t))   // a, b, betaOut
-                         + 6 * ubDim * static_cast<uint32_t>(sizeof(float));    // g, x, betaX, abs, tmp, betaFp32
+                         + 5 * ubDim * static_cast<uint32_t>(sizeof(float))     // g, x, betaX, tmp, betaFp32
+                         + 1 * ubDim * static_cast<uint32_t>(sizeof(uint8_t));   // threshold mask
 
     if (perRowBytes == 0) {
         return 1;
