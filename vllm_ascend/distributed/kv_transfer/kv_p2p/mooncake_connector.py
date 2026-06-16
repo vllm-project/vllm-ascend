@@ -1199,6 +1199,11 @@ class KVCacheRecvingThread(threading.Thread):
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
             self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
             self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
+        except Exception:
+            if isinstance(sock, zmq.Socket):  # type: ignore
+                sock.close()
+                sock = None
+            raise
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
