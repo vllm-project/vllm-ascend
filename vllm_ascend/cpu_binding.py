@@ -507,7 +507,7 @@ class CpuAlloc:
 
     def bind_npu_irq(self) -> None:
         if not self._reserve_irq_cpus():
-            logger.info("[irq] IRQ binding skipped on A5.")
+            logger.info("[irq] IRQ binding skipped on Ascend 950.")
             return
 
         if not os.access("/proc/irq", os.W_OK):

@@ -452,7 +452,7 @@ class TestCpuAlloc(unittest.TestCase):
             self.cpu_alloc.build_global_slice_cpu_pool()
 
     @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A5)
-    def test_build_global_slice_cpu_pool_allows_a5_without_irq_reservation(self, _mock_get_device_type):
+    def test_build_global_slice_cpu_pool_allows_ascend_950_without_irq_reservation(self, _mock_get_device_type):
         self.cpu_alloc.device_info.running_npu_list = [0, 1]
         self.cpu_alloc.device_info.allowed_cpus = list(range(6))
         self.cpu_alloc.device_info.total_logic_npus = 2
@@ -495,7 +495,7 @@ class TestCpuAlloc(unittest.TestCase):
             self.cpu_alloc.allocate()
 
     @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A5)
-    def test_allocate_a5_uses_unreserved_cpus_for_main(self, _mock_get_device_type):
+    def test_allocate_ascend_950_uses_unreserved_cpus_for_main(self, _mock_get_device_type):
         self.cpu_alloc.device_info.running_npu_list = [0]
         self.cpu_alloc.npu_cpu_pool = {0: [0, 1, 2, 3, 4]}
 
@@ -824,7 +824,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A5)
     @patch("vllm_ascend.cpu_binding.os.access")
     @patch("vllm_ascend.cpu_binding.execute_command")
-    def test_bind_npu_irq_skips_on_a5(self, mock_execute_command, mock_access, _mock_get_device_type):
+    def test_bind_npu_irq_skips_on_ascend_950(self, mock_execute_command, mock_access, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [0]
         cpu_alloc.npu_cpu_pool = {0: [8, 9, 10]}

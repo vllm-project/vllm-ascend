@@ -33,8 +33,8 @@ The allocator derives its plan from runtime host state:
 | Input | Source | Purpose |
 | --- | --- | --- |
 | Allowed CPUs | `/proc/self/status` `Cpus_allowed_list` | The only CPUs eligible for binding. Container cpusets are respected. |
-| Logical NPU map | `npu-smi info -m` | Maps card/chip IDs to global logical NPU IDs and gives `total_logic_npus`. On A5, `Chip Logic ID` is not reported, so `NPU ID` is used as the logical ID. |
-| Running NPUs | `npu-smi info` process table, filtered by `ASCEND_RT_VISIBLE_DEVICES` | Identifies the logical NPUs used by this worker process. A2/A3 process rows use `NPU Chip`; A5 process rows use `NPU ID`. |
+| Logical NPU map | `npu-smi info -m` | Maps card/chip IDs to global logical NPU IDs and gives `total_logic_npus`. On Ascend 950, `Chip Logic ID` is not reported, so `NPU ID` is used as the logical ID. |
+| Running NPUs | `npu-smi info` process table, filtered by `ASCEND_RT_VISIBLE_DEVICES` | Identifies the logical NPUs used by this worker process. A2/A3 process rows use `NPU Chip`; Ascend 950 process rows use `NPU ID`. |
 | Topology affinity | `npu-smi info -t topo` | Provides NPU-to-CPU affinity for `topo_affinity` mode. |
 | CPU NUMA map | `lscpu -e=CPU,NODE` | Used to extend single-NUMA affinity pools to the next NUMA node. |
 
@@ -45,7 +45,7 @@ The binding strategy is selected by Ascend device type:
 | Device type | Strategy | Reason |
 | --- | --- | --- |
 | A3 | `global_slice` | A3 uses HCCS card-to-card interconnect. Each NPU is nearly equidistant from all NUMA nodes, so there is no strong NPU-to-NUMA affinity signal. Global logical NPU ID based slicing gives deterministic, non-overlapping CPU pools and CPU/NUMA isolation between workers. |
-| A5 | `global_slice` | A5 reports NPU-to-NPU/NIC topology but does not report NPU-to-CPU affinity in `npu-smi info -t topo`. It also reports process rows by `NPU ID` instead of `NPU Chip`. Global logical NPU ID based slicing keeps CPU pools deterministic without relying on missing affinity data. |
+| Ascend 950 | `global_slice` | Ascend 950 reports NPU-to-NPU/NIC topology but does not report NPU-to-CPU affinity in `npu-smi info -t topo`. It also reports process rows by `NPU ID` instead of `NPU Chip`. Global logical NPU ID based slicing keeps CPU pools deterministic without relying on missing affinity data. |
 | A2 and Atlas 300 inference products | `topo_affinity` | A2 and Atlas 300 inference products provide NPU-to-CPU affinity information through `npu-smi info -t topo`, so they use this topology signal when available. |
 
 If `topo_affinity` is selected but topo affinity is unavailable, the allocator falls back to `global_slice`.
@@ -55,9 +55,9 @@ If `topo_affinity` is selected but topo affinity is unavailable, the allocator f
 #### global_slice
 
 `global_slice` is designed for devices without a useful NPU-to-CPU affinity
-signal, including A3 and A5. Because A3's **HCCS interconnect makes the distance
+signal, including A3 and Ascend 950. Because A3's **HCCS interconnect makes the distance
 from each NPU to each NUMA node nearly the same**, topology affinity is not a
-useful placement signal. A5 similarly exposes UB/NIC topology but not CPU
+useful placement signal. Ascend 950 similarly exposes UB/NIC topology but not CPU
 affinity. The allocator therefore partitions the sorted `allowed_cpus` list by
 global logical NPU ID.
 
@@ -84,7 +84,7 @@ does not share the same CPU or NUMA slice with another worker.
 - Devices with IRQ binding require `base >= 5`:
   2 CPUs for SQ/CQ IRQ binding, at least 1 CPU for the main worker, 1 CPU for
   ACL thread, and 1 CPU for release thread.
-- A5 skips IRQ binding and does not reserve SQ/CQ IRQ CPUs, so it requires
+- Ascend 950 skips IRQ binding and does not reserve SQ/CQ IRQ CPUs, so it requires
   `base >= 3`: at least 1 CPU for the main worker, 1 CPU for ACL thread, and
   1 CPU for release thread.
 
@@ -122,7 +122,7 @@ For devices with IRQ binding:
 | ACL thread | `pool[-2]` |
 | Release thread | `pool[-1]` |
 
-For A5:
+For Ascend 950:
 
 | Role | CPUs |
 | --- | --- |
@@ -132,7 +132,7 @@ For A5:
 
 If a final pool has fewer CPUs than the selected role split requires, binding
 fails for this rank and the worker logs a warning from the caller. The minimum
-is 5 CPUs per NPU for devices with IRQ binding, and 3 CPUs per NPU for A5.
+is 5 CPUs per NPU for devices with IRQ binding, and 3 CPUs per NPU for Ascend 950.
 
 ## Conditional Host Tuning
 
@@ -144,7 +144,7 @@ steps when the environment supports them:
   reads and reduces remote-NUMA memory read latency.
 - IRQ binding places NPU IRQ handling on the CPUs reserved for the corresponding
   NPU when `/proc/irq` is writable and IRQ files can be resolved.
-  A5 skips this step and gives those CPUs to the main worker instead.
+  Ascend 950 skips this step and gives those CPUs to the main worker instead.
 
 These are conditional parts of CPU binding, not separate feature switches. If a
 host prerequisite is missing, that step is skipped while CPU thread binding
@@ -234,13 +234,13 @@ NPU0: main=[...] acl=[...] release=[...]
 
 - CPU binding runs only on ARM. It is skipped on x86_64.
 - Each final NPU pool must have enough CPUs for its role split: at least 5 CPUs
-  for devices with IRQ binding, and at least 3 CPUs for A5.
+  for devices with IRQ binding, and at least 3 CPUs for Ascend 950.
 - `global_slice` is deterministic and provides CPU/NUMA isolation when the
   cpuset is NUMA-aligned, but it cannot guarantee NUMA-local pools when CPU
   numbering or cpuset layout crosses NUMA boundaries.
 - `topo_affinity` depends on usable output from `npu-smi info -t topo`.
 - IRQ binding requires writable `/proc/irq` and resolvable PCI/IRQ information.
-  A5 skips IRQ binding even when `/proc/irq` is writable, and does not reserve
+  Ascend 950 skips IRQ binding even when `/proc/irq` is writable, and does not reserve
   IRQ CPUs in its role split.
 - Memory migration requires `migratepages`; otherwise only memory migration is
   skipped. CPU affinity still applies, but performance may degrade because
