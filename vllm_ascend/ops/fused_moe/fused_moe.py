@@ -42,6 +42,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     enable_sp,
+    enable_sp_by_pass,
     maybe_trans_nz,
     npu_stream_switch,
     shared_expert_dp_enabled,
@@ -298,18 +299,7 @@ class AscendMoERunner(MoERunner):
         states: torch.Tensor,
         trunc_size: int,
     ) -> torch.Tensor:
-        """Run Ascend's runtime MoE all-reduce decision inside the graph.
-
-        The upstream implementation branches in Python on
-        ``_fused_output_is_reduced``. On Ascend, that value depends on
-        ``_EXTRA_CTX.moe_comm_type`` and may switch between MC2 and ALLGATHER
-        for different token counts. In compiled graph mode the Python branch can
-        be specialized from an earlier MC2 trace, dropping the late all-reduce
-        needed by ALLGATHER. Keep a custom op in the graph and let its runtime
-        implementation decide whether to all-reduce for the current context.
-        """
-        if not enable_sp() and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1):
-            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+        states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
 
     # TODO: Remove this after drop v0.19.1 support
