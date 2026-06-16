@@ -802,6 +802,18 @@ def _init_reorder_batch_threshold(
         ):
             self.reorder_batch_threshold = 1 + speculative_config.num_speculative_tokens
 
+    if (
+        self.reorder_batch_threshold == 1
+        and supports_spec_as_decode
+        and self.vllm_config.parallel_config.decode_context_parallel_size > 1
+    ):
+        # For the Qwen3.5 GDN module, align reorder_batch_threshold with
+        # the Ascend attention CP module when DCP and MTP are enabled.
+        # This avoids incompatibility between different attention backend groups.
+        speculative_config = self.vllm_config.speculative_config
+        if speculative_config is not None and speculative_config.num_speculative_tokens is not None:
+            self.reorder_batch_threshold = 1 + speculative_config.num_speculative_tokens
+
 
 def _patched_build_spec(
     self,
