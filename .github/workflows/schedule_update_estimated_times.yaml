@@ -128,7 +128,7 @@ jobs:
         with:
           token: ${{ secrets.PAT_TOKEN }}
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: timing-data-*
           path: timing-artifacts/
