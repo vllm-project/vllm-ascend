@@ -40,9 +40,7 @@ def _patch_pool_scheduler_importlib():
     which imports the real backend classes and uses ``mock.patch`` (itself
     backed by importlib.import_module), is unaffected.
     """
-    with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"
-    ) as mock_importlib:
+    with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib") as mock_importlib:
         mock_importlib.import_module.return_value = MagicMock()
         yield
 
