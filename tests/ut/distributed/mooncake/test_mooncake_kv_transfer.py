@@ -40,6 +40,9 @@ class _FakeStore:
 
 
 class _FakeTokenDatabase:
+    # KVTransferThread base __init__ reads len(token_database.group_block_len[0]).
+    group_block_len = {0: [16]}
+
     def process_tokens(self, token_len, block_hashes):
         for i, _ in enumerate(block_hashes):
             yield i * 16, (i + 1) * 16, _FakeKey(f"k{i}")

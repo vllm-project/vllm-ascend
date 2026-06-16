@@ -158,6 +158,8 @@ class _FakeDB:
         self._hash_block_size = block_size
         self.group_block_len = {0: [block_size]}
         self.group_kv_caches_base_addr = {0: [1000]}
+        # LayerBatchBuilder reads group_block_stride; mirror group_block_len.
+        self.group_block_stride = {0: [block_size]}
 
     def _make_key_by_hash(self, chunk_hash, **kwargs):
         return _FakePoolKey(chunk_hash)
@@ -594,20 +596,6 @@ class TestLayerBatchBuilderBuildTransferArrays(unittest.TestCase):
         self.assertEqual(gvas[0], 0x50000 + expected_gva_offset)
 
 
-class TestLayerBatchBuilderConcatArrays(unittest.TestCase):
-    def test_first_empty(self):
-        result = LayerBatchBuilder._concat_transfer_arrays(np.array([], dtype=np.int64), np.array([1, 2]))
-        np.testing.assert_array_equal(result, [1, 2])
-
-    def test_second_empty(self):
-        result = LayerBatchBuilder._concat_transfer_arrays(np.array([1, 2]), np.array([], dtype=np.int64))
-        np.testing.assert_array_equal(result, [1, 2])
-
-    def test_both_nonempty(self):
-        result = LayerBatchBuilder._concat_transfer_arrays(np.array([1]), np.array([2]))
-        np.testing.assert_array_equal(result, [1, 2])
-
-
 class TestLayerBatchBuilderDedupe(unittest.TestCase):
     def test_single_element(self):
         ids = np.array([1], dtype=np.int64)
@@ -830,32 +818,31 @@ class TestLayerBatchBuilderRequireRequestArrays(unittest.TestCase):
 
 
 class TestLayerBatchBuilderScratchArray(unittest.TestCase):
-    def test_ensure_creates_new(self):
+    def _make_builder(self):
         db = _FakeTokenDB()
-        builder = LayerBatchBuilder(
+        return LayerBatchBuilder(
             token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
         )
-        arr = builder._ensure_scratch_array("_test_scratch", 10)
-        self.assertEqual(arr.shape[0], 10)
+
+    def test_ensure_creates_new(self):
+        builder = self._make_builder()
+        ids, gvas = builder._ensure_buf(10)
+        self.assertEqual(ids.shape[0], 10)
+        self.assertEqual(gvas.shape[0], 10)
 
     def test_ensure_reuses(self):
-        db = _FakeTokenDB()
-        builder = LayerBatchBuilder(
-            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
-        )
-        arr1 = builder._ensure_scratch_array("_test_scratch2", 10)
-        arr1[0] = 42
-        arr2 = builder._ensure_scratch_array("_test_scratch2", 5)
-        self.assertEqual(arr2[0], 42)
+        builder = self._make_builder()
+        ids1, _ = builder._ensure_buf(10)
+        ids1[0] = 42
+        # Requesting a smaller view reuses the existing buffer.
+        ids2, _ = builder._ensure_buf(5)
+        self.assertEqual(ids2[0], 42)
 
     def test_ensure_grows(self):
-        db = _FakeTokenDB()
-        builder = LayerBatchBuilder(
-            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
-        )
-        builder._ensure_scratch_array("_test_scratch3", 5)
-        arr = builder._ensure_scratch_array("_test_scratch3", 20)
-        self.assertEqual(arr.shape[0], 20)
+        builder = self._make_builder()
+        builder._ensure_buf(5)
+        ids, _ = builder._ensure_buf(20)
+        self.assertEqual(ids.shape[0], 20)
 
 
 # ===========================================================================
@@ -1249,9 +1236,10 @@ class TestKVCacheStoreLayerSendingThreadGVA(unittest.TestCase):
         t.add_stored_request("r1")
         t.request_queue.put([task])
         t._handle_request([task])
-        # On failure, request should NOT be marked as finished
+        # batch_copy failure is logged but the request is still reported as
+        # finished (best-effort transfer) so the pipeline is not stalled.
         finished = t.get_and_clear_finished_requests()
-        self.assertNotIn("r1", finished)
+        self.assertIn("r1", finished)
 
 
 # ===========================================================================
@@ -1306,40 +1294,18 @@ class TestKVCacheStoreLayerRecvingThreadGVA(unittest.TestCase):
 
     def test_stagger_delay_zero(self):
         t, _, _ = self._make_thread(stagger_us=0)
-        delay = t._get_h2d_stagger_delay_us(layer_id=0, num_addrs=10)
+        delay = t._get_h2d_stagger_delay_us(layer_id=0)
         self.assertEqual(delay, 0)
 
     def test_stagger_delay_basic(self):
         t, _, _ = self._make_thread(stagger_us=100)
-        # tp_rank=0, layer_id=0, group_size=tp_size=1 => slot=0 => delay=0
-        delay = t._get_h2d_stagger_delay_us(layer_id=0, num_addrs=10)
+        # tp_rank=0, layer_id=0, tp_size=1 => slot=0 => delay=0
+        delay = t._get_h2d_stagger_delay_us(layer_id=0)
         self.assertEqual(delay, 0)
-        # Non-zero slot: tp_rank=1, layer_id=2 => slot=(1+2)%1=0 still
-        # But with larger tp_size the slot becomes non-zero
+        # tp_rank=0, layer_id=1, tp_size=4 => slot=(0+1)%4=1 => delay=1*100
         t.tp_size = 4
-        t.h2d_stagger_group_size = 4
-        # tp_rank=0, layer_id=1 => slot=(0+1)%4=1 => delay=1*100=100
-        delay = t._get_h2d_stagger_delay_us(layer_id=1, num_addrs=10)
+        delay = t._get_h2d_stagger_delay_us(layer_id=1)
         self.assertEqual(delay, 100)
-
-    def test_stagger_delay_with_max(self):
-        t, _, _ = self._make_thread(stagger_us=100)
-        t.h2d_stagger_max_us = 50
-        t.tp_size = 4
-        t.h2d_stagger_group_size = 4
-        # tp_rank=0, layer_id=1 => slot=1 => min(100, 50)*1 = 50
-        delay = t._get_h2d_stagger_delay_us(layer_id=1, num_addrs=10)
-        self.assertEqual(delay, 50)
-
-    def test_stagger_delay_dynamic(self):
-        t, _, _ = self._make_thread(stagger_us=100)
-        t.h2d_stagger_dynamic_addrs_per_us = 10
-        t.tp_size = 4
-        t.h2d_stagger_group_size = 4
-        # tp_rank=0, layer_id=1 => slot=1
-        # stagger_us = 100 + 10//10 = 101, slot=1 => 101
-        delay = t._get_h2d_stagger_delay_us(layer_id=1, num_addrs=10)
-        self.assertEqual(delay, 101)
 
     def test_gva_recv_with_task(self):
         """Test GVA recv path with a transfer task that has shared_block_data."""
@@ -1430,9 +1396,10 @@ class TestKVCacheStoreLayerRecvingThreadGVA(unittest.TestCase):
         )
         t.request_queue.put(data)
         t._handle_request(data)
-        # On failure, request should NOT be marked as finished
+        # batch_copy failure is logged but the request is still reported as
+        # finished (best-effort transfer) so the pipeline is not stalled.
         finished = t.get_and_clear_finished_requests()
-        self.assertNotIn("r1", finished)
+        self.assertIn("r1", finished)
 
 
 # ===========================================================================
