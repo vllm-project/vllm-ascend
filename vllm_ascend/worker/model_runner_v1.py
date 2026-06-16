@@ -2394,7 +2394,6 @@ class NPUModelRunner(GPUModelRunner):
         # When unsupported sampling params are present and reduce_sample is
         # enabled, force reduce_sample off so that the LogitsProcessor
         # all-gathers the full [B, V_global] logits.
-        _prev_reduce_sample_disabled = get_reduce_sample_force_disabled()
         if reduce_sample_enabled() and _should_disable_reduce_sample(
             self.requests[req_id].sampling_params
             for req_id in self.input_batch.req_ids
@@ -2505,7 +2504,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 self.kv_connector_output = kv_connector_output
         finally:
-            set_reduce_sample_force_disabled(_prev_reduce_sample_disabled)
+            set_reduce_sample_force_disabled(False)
 
         # Now the batch has been launched we can wait for corrections from the
         # previous model forward without breaking async scheduling.
@@ -2754,7 +2753,6 @@ class NPUModelRunner(GPUModelRunner):
         # enabled, force reduce_sample off. The LogitsProcessor has already
         # all-gathered the logits (via the override set in execute_model),
         # so we also need the sampler to use the standard (non-reduce) path.
-        _prev_reduce_sample_disabled = get_reduce_sample_force_disabled()
         if reduce_sample_enabled() and _should_disable_reduce_sample(
             self.requests[req_id].sampling_params
             for req_id in self.input_batch.req_ids

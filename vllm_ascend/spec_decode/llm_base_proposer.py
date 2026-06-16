@@ -1049,7 +1049,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # When unsupported sampling params are present and reduce_sample is
         # enabled, force reduce_sample off so that the draft model's
         # LogitsProcessor all-gathers the full [B, V_global] logits.
-        _prev_reduce_sample_disabled = get_reduce_sample_force_disabled()
         if reduce_sample_enabled() and _should_disable_reduce_sample(
             self.runner.requests[req_id].sampling_params for req_id in self.runner.input_batch.req_ids
         ):
@@ -1092,7 +1091,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
-        set_reduce_sample_force_disabled(_prev_reduce_sample_disabled)
+        set_reduce_sample_force_disabled(False)
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
