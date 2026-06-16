@@ -248,6 +248,8 @@ test_cases:
       HCCL_BUFFSIZE: "400"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
     server_cmd:
+      - "--port"
+      - "$SERVER_PORT"
       - "--tool-call-parser"
       - "kimi_k2"
       - "--reasoning-parser"
