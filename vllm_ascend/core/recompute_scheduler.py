@@ -387,6 +387,9 @@ class RecomputeScheduler(Scheduler):
                             preempted_num_computed_tokens,
                         )
                     self._preempt_request(preempted_req, scheduled_timestamp)
+                    if preempted_req.num_output_placeholders > 0:
+                        preempted_req.num_output_placeholders = 0
+                        preempted_req.discard_latest_async_tokens = True
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
