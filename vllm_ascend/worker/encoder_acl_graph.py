@@ -23,13 +23,11 @@ from typing import Any
 
 import torch
 import torch_npu
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 
 from vllm_ascend.utils import weak_ref_tensors
-
-logger = init_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
