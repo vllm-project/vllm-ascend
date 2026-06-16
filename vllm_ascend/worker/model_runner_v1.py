@@ -4987,7 +4987,16 @@ class NPUModelRunner(GPUModelRunner):
         # Once a batch consumes speculative tokens, the next token-state
         # exchange is part of the decode dependency chain. Keep that PP
         # collective synchronous so every rank observes the same order.
-        return not getattr(self, "_pp_current_batch_has_spec_decode", False)
+        if getattr(self, "_pp_current_batch_has_spec_decode", False):
+            return False
+        # PD prefill nodes: use synchronous PP token state exchange.
+        # The async path can cause the non-last rank to return from
+        # sample_tokens before the broadcast completes, leading to
+        # timing issues where the last rank waits indefinitely for
+        # a broadcast the non-last rank defers to a later step.
+        if self.is_kv_producer:
+            return False
+        return True
 
     def _pp_finish_async_token_comm_after_sample(
         self, comm_state: AsyncPPTokenCommState | None
