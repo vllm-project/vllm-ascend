@@ -43,10 +43,8 @@ from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGrap
 from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
     speculator as vllm_speculator_module,  # type: ignore[import-not-found]
 )
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (  # type: ignore[import-not-found]
-    update_draft_inputs,
-)
-from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator  # type: ignore[import-not-found]
+from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import update_draft_inputs
+from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 update_eagle_draft_inputs = update_draft_inputs
 _BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
