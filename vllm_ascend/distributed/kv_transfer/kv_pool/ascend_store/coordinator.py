@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from importlib import import_module
 from typing import Any, cast
 
 from vllm.logger import logger
@@ -14,12 +15,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-try:
-    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-except ImportError:  # vLLM 0.20.x compatibility.
-    KVCacheSpecRegistry = None  # type: ignore[assignment]
-
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import get_block_hashes
+
+_CACHE_MISSING = object()
+_MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 
 
 class ExternalCachedBlockPool:
@@ -285,14 +284,40 @@ def _copy_spec_with_block_size(spec: KVCacheSpec, block_size: int) -> KVCacheSpe
     return replace(spec, block_size=block_size)
 
 
+def _get_manager_class_cache() -> dict[str, Any]:
+    cache = getattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, cache)
+    return cast(dict[str, Any], cache)
+
+
 def _get_manager_class(spec: KVCacheSpec) -> type[SingleTypeKVCacheManager]:
-    if KVCacheSpecRegistry is not None:
-        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+    cache = _get_manager_class_cache()
+    registry = cache.get("registry", _CACHE_MISSING)
+    if registry is _CACHE_MISSING:
+        try:
+            registry_module = import_module("vllm.v1.kv_cache_spec_registry")
+            registry = getattr(registry_module, "KVCacheSpecRegistry", None)
+        except ImportError:
+            registry = None
+        cache["registry"] = registry
+
+    if registry is not None:
+        manager_cls = registry.get_manager_class(spec)
         if manager_cls is not None:
             return manager_cls
-    try:
-        from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map
 
+    spec_manager_map = cache.get("spec_manager_map", _CACHE_MISSING)
+    if spec_manager_map is _CACHE_MISSING:
+        try:
+            manager_module = import_module("vllm.v1.core.single_type_kv_cache_manager")
+            spec_manager_map = vars(manager_module)["spec_manager_map"]
+        except Exception as exc:
+            raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
+        cache["spec_manager_map"] = spec_manager_map
+
+    try:
         manager_cls = spec_manager_map[type(spec)]
     except Exception as exc:
         raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
