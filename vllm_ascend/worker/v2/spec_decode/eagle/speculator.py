@@ -281,7 +281,7 @@ class AscendEagleSpeculator(EagleSpeculator):
                     self.block_tables.compute_slot_mappings(
                         idx_mapping, query_start_loc, pos, num_tokens_padded
                     )
-        self._increment_decode_attn_metadata(attn_metadata)
+            self._increment_decode_attn_metadata(attn_metadata)
         
     def _multi_step_decode(
         self,
