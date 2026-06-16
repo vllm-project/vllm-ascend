@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import os
+import subprocess
 from importlib import import_module, util
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -48,7 +49,6 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     is_moe_model,
     refresh_block_size,
-    update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
     is_310p,
     enable_sp,
@@ -71,6 +71,34 @@ else:
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
+
+
+def _get_npu_smi_field(lines: list[str], key: str) -> str | None:
+    for line in lines:
+        normalized = " ".join(line.split())
+        if normalized.startswith(f"{key} :"):
+            return normalized.split(":", 1)[1].strip()
+    return None
+
+
+def _get_npu_smi_hbm_capacity_mb(device_id: int) -> int | None:
+    try:
+        output = subprocess.check_output(
+            ["npu-smi", "info", "-t", "memory", "-i", str(device_id)],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    value = _get_npu_smi_field(output.splitlines(), "HBM Capacity(MB)")
+    if value is None:
+        return None
+
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def config_deprecated_logging():
@@ -123,6 +151,14 @@ class NPUPlatform(Platform):
     ]
 
     def is_sleep_mode_available(self) -> bool:
+        return True
+
+    def is_cumem_allocator_available(self) -> bool:
+        # vLLM main gates sleep mode on the platform reporting a
+        # usable cumem allocator. NPU provides its own ``CaMemAllocator``
+        # (vllm_ascend.device_allocator.camem), so report availability here.
+        # ModelConfig validation runs before custom-op init, so avoid importing
+        # the extension and just declare support.
         return True
 
     @property
@@ -242,6 +278,20 @@ class NPUPlatform(Platform):
         return device_props.uuid
 
     @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        """
+        Return total memory of the device in bytes.
+        """
+        hbm_capacity_mb = _get_npu_smi_hbm_capacity_mb(device_id)
+        if hbm_capacity_mb is not None:
+            return hbm_capacity_mb * 1024 * 1024
+
+        device_props = torch.npu.get_device_properties(device_id)
+        total_memory = getattr(device_props, "total_memory", None)
+        if total_memory is not None:
+            return int(total_memory)
+        raise RuntimeError(f"Unable to determine total memory for device {device_id}.")
+
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
         This is the NPU equivalent of CUDA's ``multi_processor_count``
@@ -308,6 +358,18 @@ class NPUPlatform(Platform):
             raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
 
     @classmethod
+    def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.data_parallel_size > 1 and parallel_config.prefill_context_parallel_size > 1:
+            raise ValueError(
+                "PCP (Prefill Context Parallelism) and DP (Data Parallelism) "
+                "cannot be enabled simultaneously in the current version of vLLM Ascend. "
+                f"Got data_parallel_size={parallel_config.data_parallel_size} and "
+                f"prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}. "
+                "Please set either --data-parallel-size 1 or --prefill-context-parallel-size 1."
+            )
+
+    @classmethod
     def _validate_draft_decode_context_parallel_config(
         cls,
         vllm_config: VllmConfig,
@@ -372,16 +434,33 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 
-        if vllm_config.model_config is not None:
-            maybe_auto_detect_quantization(vllm_config)
+        device_config = getattr(vllm_config, "device_config", None)
+        if device_config is not None and getattr(device_config, "device_type", cls.device_type) != cls.device_type:
+            logger.debug(
+                "Skipping Ascend-specific config updates for device type %s.",
+                device_config.device_type,
+            )
+            return
+
+        if vllm_config.model_config is None:
+            logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
+            return
+
+        maybe_auto_detect_quantization(vllm_config)
 
         cls._validate_layer_sharding_config(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
-
+        cls._validate_parallel_config(vllm_config)
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
 
         ascend_config = init_ascend_config(vllm_config)
+
+        from vllm_ascend.logger import configure_ascend_file_logging
+        from vllm_ascend.logger import configure_ascend_logging
+
+        configure_ascend_file_logging()
+        configure_ascend_logging()
 
         if vllm_config.kv_transfer_config is not None:
             check_kv_extra_config(vllm_config)
@@ -413,13 +492,7 @@ class NPUPlatform(Platform):
                 vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict) else ascend_fusion_config
             )
 
-        if model_config is None:
-            logger.info(
-                "Model config is missing. This may indicate that we are running a test case. context: model_config=None"
-            )
-            enforce_eager = False
-        else:
-            enforce_eager = getattr(model_config, "enforce_eager", False)
+        enforce_eager = getattr(model_config, "enforce_eager", False)
 
         from vllm.config.compilation import CUDAGraphMode
 
@@ -525,7 +598,6 @@ class NPUPlatform(Platform):
                     "vllm::dsa_forward",
                 ]
             )
-            update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,

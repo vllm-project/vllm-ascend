@@ -32,7 +32,6 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -41,15 +40,12 @@ def _no_pin_memory():
     # pin_memory=True) triggers aclInit and fails.  Patch
     # is_pin_memory_available so vllm's ExtractHiddenStatesProposer.__init__
     # creates CpuGpuBuffer with pin_memory=False.
-    # is_pin_memory_available was introduced in vllm after v0.21.0;
-    # v0.21.0 and older don't use CpuGpuBuffer, so no patch needed.
-    if not vllm_version_is("0.21.0"):
-        with patch(
-            "vllm.v1.spec_decode.extract_hidden_states.is_pin_memory_available",
-            return_value=False,
-        ):
-            yield
-    else:
+    # is_pin_memory_available was introduced in vllm after v0.22.1;
+    # v0.22.1 and older don't use CpuGpuBuffer, so no patch needed.
+    with patch(
+        "vllm.v1.spec_decode.extract_hidden_states.is_pin_memory_available",
+        return_value=False,
+    ):
         yield
 
 

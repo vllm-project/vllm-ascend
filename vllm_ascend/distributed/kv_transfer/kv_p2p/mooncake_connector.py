@@ -35,8 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -57,7 +55,16 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
+from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    RegisterRegions,
+    collect_storage_merged_register_regions,
+    get_transfer_timeout_value,
+    validate_register_region_count,
+)
+from vllm_ascend.distributed.utils import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
+)
 from vllm_ascend.utils import enable_custom_op
 
 # isort: off
@@ -534,10 +541,10 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
-    def _mark_failed_recv_request(self, request_id: str, local_block_ids: list[int]) -> None:
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            self.invalid_block_ids.update(local_block_ids)
+            self.invalid_block_ids.update(local_block_ids[0])
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -1586,7 +1593,7 @@ class MooncakeConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
-        self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.total_layers = vllm_config.model_config.get_total_num_hidden_layers()
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
@@ -1705,12 +1712,22 @@ class MooncakeConnectorWorker:
         next_mtp_layer_idx = self.total_layers
         for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
             layer_indices = []
+            # For eagle3 method there is no "mtp" in layer names, and upstream model initiation assigns the layer id
+            # that is sliced by Pipeline Parallel. So the eagle layer id will confilt with target model layers.
+            # Here we determine whether the current layer is an eagle layer based on whether the layer id has been
+            # assigned to previous layers. If the layer id has been assigned, we treat the current layer as
+            # an eagle layer and assign a new layer id starting from total_layers.
+            assigned_indices: set[int] = set()
             for layer_name in group_spec.layer_names:
                 if "mtp" in layer_name:
                     layer_idx = next_mtp_layer_idx
                     next_mtp_layer_idx += 1
                 else:
                     layer_idx = extract_layer_index(layer_name, num_attn_module)
+                    if assigned_indices and layer_idx < min(assigned_indices) or layer_idx in assigned_indices:
+                        layer_idx = next_mtp_layer_idx
+                        next_mtp_layer_idx += 1
+                assigned_indices.add(layer_idx)
                 layer_indices.append(layer_idx)
             kv_group2layeridx[group_id] = (self._serialize_kv_group_spec(group_spec), layer_indices)
         return kv_group2layeridx
@@ -1814,10 +1831,16 @@ class MooncakeConnectorWorker:
 
         if has_mamba_group:
             ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
+            register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
         else:
-            ptrs, lengths = self._get_registered_layer_buffers(kv_caches)
+            # For normal attention / sparse-c8 KV cache, keep metadata at the
+            # logical tensor level but merge registration ranges by underlying
+            # storage to avoid exceeding the HCCL per-process region limit.
+            register_regions = collect_storage_merged_register_regions(kv_caches)
 
-        global_te.register_buffer(ptrs, lengths)
+        validate_register_region_count(register_regions)
+        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
             "block_len_per_addr=%s, block_size_scale=%s, ptrs=%s, lengths=%s",
@@ -1825,8 +1848,8 @@ class MooncakeConnectorWorker:
             self.kv_caches_base_addr,
             self.block_len_per_addr,
             self.block_size_scale,
-            ptrs,
-            lengths,
+            register_regions.ptrs,
+            register_regions.lengths,
         )
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(

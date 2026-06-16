@@ -23,8 +23,6 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_dcp_group,
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
     get_pcp_group,
 )
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -57,6 +55,10 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.utils import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
+)
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
@@ -896,6 +898,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         pcp_unpad_mask = attn_metadata.prefill.pcp_metadata.pcp_unpad_mask[attn_metadata.num_decodes * self.pcp_size :]
         qkv_fa_padding_workspace[decode_offset:][pcp_unpad_mask] = actual_qkv[decode_offset:]
+        qkv_fa_padding_workspace[decode_offset:][~pcp_unpad_mask] = 0
 
         q, k, v = qkv_fa_padding_workspace.split(
             [

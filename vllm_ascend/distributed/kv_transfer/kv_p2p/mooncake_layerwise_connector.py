@@ -33,7 +33,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
-    get_decode_context_model_parallel_rank,
     get_tensor_model_parallel_rank,
     get_tp_group,
     get_world_group,
@@ -58,7 +57,9 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    RegisterRegions,
     align_memory,
+    collect_storage_merged_register_regions,
     context_parallel_parameters_check,
     get_cp_group,
     get_local_remote_block_port_mappings,
@@ -66,7 +67,9 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     kv_alltoall_and_rearrange,
     parallel_info,
+    validate_register_region_count,
 )
+from vllm_ascend.distributed.utils import get_decode_context_model_parallel_rank
 from vllm_ascend.utils import npu_stream_switch, trans_nd_to_nz
 
 # isort: off
@@ -1069,6 +1072,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.kv_cache_specs: list[KVCacheSpec] = [spec.kv_cache_spec for spec in self.kv_cache_config.kv_cache_groups]
         self.local_engine_id: str = " "
         self.engine_id = engine_id
+        self.dp_rank: int = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank: int = get_tensor_model_parallel_rank()
         self.tp_size: int = vllm_config.parallel_config.tensor_parallel_size
         self.pcp_size: int = vllm_config.parallel_config.prefill_context_parallel_size
@@ -1090,7 +1094,8 @@ class MooncakeLayerwiseConnectorWorker:
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size
+            + self.dp_rank * self.pcp_size * self.tp_size
+            + self.pcp_rank * self.tp_size
         )
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
@@ -1249,7 +1254,16 @@ class MooncakeLayerwiseConnectorWorker:
                 ptrs.append(min(set(tensor_addrs)))
                 lengths.append(kv_cache_tensor.size)
 
-        global_te.register_buffer(ptrs, lengths)
+        if self.use_attn_mamba_hybrid:
+            register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
+        else:
+            # For normal attention / sparse-c8 KV cache, register merged memory
+            # ranges while keeping layer metadata at logical tensor addresses.
+            register_regions = collect_storage_merged_register_regions(kv_caches)
+
+        validate_register_region_count(register_regions)
+        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+
         if use_kv_buffer:
             self.create_kv_buffer(kv_buffer)
 
