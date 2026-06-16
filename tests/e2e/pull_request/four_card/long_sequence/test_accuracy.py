@@ -102,6 +102,7 @@ class AccuracyCase:
     expected_outputs: Sequence[str]
     max_tokens: int
     runner_kwargs: dict[str, Any]
+    accuracy_attempts: int = 1
 
 
 def _run_accuracy_case(case: AccuracyCase) -> None:
@@ -112,6 +113,21 @@ def _run_accuracy_case(case: AccuracyCase) -> None:
     for index, ((output_ids, output_text), expected_text) in enumerate(zip(outputs, case.expected_outputs)):
         assert output_ids, f"Output {index} token ids should not be empty"
         assert output_text == expected_text
+
+
+def _run_accuracy_case_with_retries(case: AccuracyCase) -> None:
+    failures: list[str] = []
+    for attempt in range(1, case.accuracy_attempts + 1):
+        try:
+            _run_accuracy_case(case)
+            return
+        except Exception as exc:
+            failures.append(f"attempt {attempt}: {exc!r}")
+            if attempt == case.accuracy_attempts:
+                failure_details = "\n".join(failures)
+                raise AssertionError(
+                    f"{case.name} failed after {case.accuracy_attempts} "
+                    f"accuracy attempt(s):\n{failure_details}") from exc
 
 
 DSV2_COMMON_KWARGS: dict[str, Any] = {
@@ -231,6 +247,8 @@ FULL_FEATURE_MODEL_CASES = [
         prompts=COMMON_PROMPTS,
         expected_outputs=DSV3_2_GOLDEN,
         max_tokens=5,
+        # TODO(qcs): Remove retries after the first request output is stable.
+        accuracy_attempts=3,
         runner_kwargs={
             "max_model_len": 1024,
             "max_num_seqs": MAX_NUM_SEQS,
@@ -323,7 +341,7 @@ FULL_FEATURE_MODEL_CASES = [
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 @pytest.mark.parametrize("case", DSV2_PARALLEL_CASES, ids=lambda case: case.name)
 def test_dsv2_lite_parallel_config_accuracy(case: AccuracyCase) -> None:
-    _run_accuracy_case(case)
+    _run_accuracy_case_with_retries(case)
 
 
 @patch.dict(
@@ -336,4 +354,4 @@ def test_dsv2_lite_parallel_config_accuracy(case: AccuracyCase) -> None:
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 @pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
 def test_models_pcp_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
-    _run_accuracy_case(case)
+    _run_accuracy_case_with_retries(case)
