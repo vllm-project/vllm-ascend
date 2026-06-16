@@ -67,14 +67,14 @@ QWEN3_GOLDEN = [
 
 QWEN3_NEXT_GOLDEN = [
     "The capital of France is Paris. The capital of",
-    "Hello, my name is Tom, I am a student of the ",
+    "Hello, my name is Tom, I am a 10th",
     "The president of United States is the head of state and",
 ]
 
 DSV3_2_GOLDEN = [
     "The capital of France isorrionic Tudefe夷",
     "Hello, my name is Tom, I am" + "ERIC slicpacelikeabra",
-    "The president of United States is Tideutyfareleys坞",
+    "The president of United States isoint054 Rund596庄稼",
 ]
 
 DEEPSEEK_MTP3_GOLDEN = [
