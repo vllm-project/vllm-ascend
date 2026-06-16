@@ -56,6 +56,11 @@ from safetensors.torch import save_file
 # fused+stacked as gate_up_proj [E, 2I, H] and down_proj [E, H, I].
 _GATE_UP = "mlp.experts.gate_up_proj"
 _DOWN = "mlp.experts.down_proj"
+# Standard HF/vLLM MoE layout instead stores each routed expert as its own 2D
+# matrix: ``...mlp.experts.{e}.{gate_proj,up_proj,down_proj}[.weight]``. We
+# quantize that layout too (else those checkpoints would silently pass through
+# as bf16 / FLOAT and never hit the W4A4 mega kernel).
+_PROJ_NAMES = ("gate_proj", "up_proj", "down_proj")
 SHARD_BYTES = 4 * 1024**3  # ~4 GiB output shards
 
 
@@ -134,6 +139,36 @@ def quantize_expert_stack(key: str, t: torch.Tensor, h: torch.Tensor | None) -> 
     return out
 
 
+def per_expert_kind(key: str) -> tuple[str | None, str]:
+    """Match an un-stacked per-expert tensor (``...experts.{e}.{name}[.weight]``).
+    Returns ``(name, base)`` where name is ``gate_proj``/``up_proj``/``down_proj``
+    (or ``None``) and base is the key without an optional ``.weight`` tail. Requires
+    the segment before the proj name to be ``...experts.<int>`` so router/attn
+    tensors (e.g. ``mlp.gate.weight``) don't match."""
+    base = key[: -len(".weight")] if key.endswith(".weight") else key
+    for name in _PROJ_NAMES:
+        suffix = "." + name
+        if base.endswith(suffix):
+            head = base[: -len(suffix)]  # ...mlp.experts.{e}
+            parent, sep, idx = head.rpartition(".experts.")
+            if sep and idx.isdigit():
+                return name, base
+    return None, ""
+
+
+def quantize_per_expert_weight(key: str, t: torch.Tensor, h: torch.Tensor | None) -> dict[str, torch.Tensor]:
+    """Quantize one already-un-stacked per-expert tensor. gate_proj/up_proj are
+    ``[I, H]`` (rotated along the input dim H); down_proj is ``[H, I]`` (not
+    rotated). Output keys mirror the stacked path: ``<base>.weight`` (int8),
+    ``.weight_scale`` (fp32 ``[out, 1]``), ``.weight_offset`` (fp32 zeros)."""
+    name, base = per_expert_kind(key)
+    w = t.to(torch.float32)
+    if name in ("gate_proj", "up_proj") and h is not None:
+        w = rotate_last_dim(w, h)
+    q, s = quant_int4_per_channel(w)
+    return {f"{base}.weight": q, f"{base}.weight_scale": s, f"{base}.weight_offset": torch.zeros_like(s)}
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--src", required=True, help="Source bf16 HF model dir")
@@ -194,17 +229,34 @@ def main() -> None:
         description[key] = "W4A4_DYNAMIC" if quant else "FLOAT"
         flush()
 
+    n_expert_src = 0  # source expert tensors quantized (stacked or per-expert)
     for shard in shards:
         with safe_open(str(src / shard), framework="pt", device=args.device) as f:
             handle: Any = f  # safetensors cm; mypy mistypes it as Path
             for key in handle.keys():  # noqa: SIM118 (safetensors handle, not a dict)
                 t = handle.get_tensor(key)
-                if is_stacked_experts(key):
+                if is_stacked_experts(key):  # [E, ...] fused-stacked layout
                     for nk, nt in quantize_expert_stack(key, t, h).items():
                         add(nk, nt, quant=True)
+                    n_expert_src += 1
+                elif per_expert_kind(key)[0] is not None:  # per-expert 2D layout
+                    for nk, nt in quantize_per_expert_weight(key, t, h).items():
+                        add(nk, nt, quant=True)
+                    n_expert_src += 1
                 else:
                     add(key, t, quant=False)  # kept in original dtype
     flush(final=True)
+
+    # Fail fast rather than silently emit an all-FLOAT (bf16) checkpoint: if no
+    # routed-expert tensors matched either layout, the W4A4 mega kernel would have
+    # nothing to run, so the conversion did not do what the user asked.
+    if n_expert_src == 0:
+        raise RuntimeError(
+            f"No routed-expert weights found under {src} (looked for stacked "
+            f"'{_GATE_UP}'/'{_DOWN}' and per-expert '...experts.N.{{gate,up,down}}_proj'). "
+            "This source does not look like a Qwen3.x-MoE checkpoint; refusing to write "
+            "an all-FLOAT (non-W4A4) output."
+        )
 
     # Rewrite shard names with the final -of-NNNNN suffix.
     total = shard_no
