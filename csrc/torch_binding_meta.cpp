@@ -643,38 +643,6 @@ at::Tensor npu_causal_conv1d_custom_meta(
     return output;
 }
 
-at::Tensor npu_fused_sigmoid_gating_delta_rule_update_meta(
-    const at::Tensor& a_log,
-    const at::Tensor& a,
-    const at::Tensor& b,
-    const at::Tensor& dt_bias,
-    const at::Tensor& query,
-    const at::Tensor& key,
-    const at::Tensor& value,
-    at::Tensor& state,
-    const at::Tensor& actual_seq_lengths,
-    const at::Tensor& ssm_state_indices,
-    const c10::optional<at::Tensor>& num_accepted_tokens,
-    double scale_value,
-    double softplus_beta,
-    double softplus_threshold)
-{
-    (void)a_log;
-    (void)a;
-    (void)b;
-    (void)dt_bias;
-    (void)query;
-    (void)key;
-    (void)state;
-    (void)actual_seq_lengths;
-    (void)ssm_state_indices;
-    (void)num_accepted_tokens;
-    (void)scale_value;
-    (void)softplus_beta;
-    (void)softplus_threshold;
-    return at::empty_symint(value.sym_sizes(), value.options());
-}
-
 at::Tensor npu_causal_conv1d_310_meta(
     const at::Tensor& x,
     const at::Tensor& weight,
@@ -746,6 +714,38 @@ std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_meta(
         {1, batch, num_heads}, b.options());
 
     return std::make_tuple(g, beta_output);
+}
+
+at::Tensor npu_fused_sigmoid_gating_delta_rule_update_meta(
+    const at::Tensor& a_log,
+    const at::Tensor& a,
+    const at::Tensor& b,
+    const at::Tensor& dt_bias,
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    at::Tensor& state,
+    const at::Tensor& actual_seq_lengths,
+    const at::Tensor& ssm_state_indices,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    double scale_value,
+    double softplus_beta,
+    double softplus_threshold)
+{
+    (void)a_log;
+    (void)a;
+    (void)b;
+    (void)dt_bias;
+    (void)query;
+    (void)key;
+    (void)state;
+    (void)actual_seq_lengths;
+    (void)ssm_state_indices;
+    (void)num_accepted_tokens;
+    (void)scale_value;
+    (void)softplus_beta;
+    (void)softplus_threshold;
+    return at::empty_symint(value.sym_sizes(), value.options());
 }
 
 std::vector<at::Tensor> moe_grouped_matmul_meta(
@@ -1733,9 +1733,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
-    // fused sigmoid gating delta rule update
-    ops.impl("npu_fused_sigmoid_gating_delta_rule_update",
-             &vllm_ascend::meta::npu_fused_sigmoid_gating_delta_rule_update_meta);
     // moe_grouped_matmul
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
@@ -1774,6 +1771,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
     // npu_fused_gdn_gating
     ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
+    // fused sigmoid gating delta rule update
+    ops.impl("npu_fused_sigmoid_gating_delta_rule_update",
+             &vllm_ascend::meta::npu_fused_sigmoid_gating_delta_rule_update_meta);
 }
 }
 #endif

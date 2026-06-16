@@ -2416,24 +2416,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         int run_mode"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
-    ops.def(
-        "npu_fused_sigmoid_gating_delta_rule_update(Tensor A_log, "
-        "                                           Tensor a, "
-        "                                           Tensor b, "
-        "                                           Tensor dt_bias, "
-        "                                           Tensor query, "
-        "                                           Tensor key, "
-        "                                           Tensor value, "
-        "                                           Tensor! state, "
-        "                                           Tensor actual_seq_lengths, "
-        "                                           Tensor ssm_state_indices, "
-        "                                           Tensor? num_accepted_tokens=None, "
-        "                                           float scale_value=1.0, "
-        "                                           float softplus_beta=1.0, "
-        "                                           float softplus_threshold=20.0"
-        ") -> (Tensor output)");
-    ops.impl("npu_fused_sigmoid_gating_delta_rule_update", torch::kPrivateUse1,
-             &vllm_ascend::npu_fused_sigmoid_gating_delta_rule_update);
+
     ops.def(
         "moe_grouped_matmul("
             "Tensor x,"
@@ -2835,5 +2818,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     Tensor dt_bias, "
         "                     float beta=1.0) -> (Tensor g, Tensor beta_output)");
     ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
+
+    ops.def(
+        "npu_fused_sigmoid_gating_delta_rule_update(Tensor A_log, "
+        "                                           Tensor a, "
+        "                                           Tensor b, "
+        "                                           Tensor dt_bias, "
+        "                                           Tensor query, "
+        "                                           Tensor key, "
+        "                                           Tensor value, "
+        "                                           Tensor! state, "
+        "                                           Tensor actual_seq_lengths, "
+        "                                           Tensor ssm_state_indices, "
+        "                                           Tensor? num_accepted_tokens=None, "
+        "                                           float scale_value=1.0, "
+        "                                           float softplus_beta=1.0, "
+        "                                           float softplus_threshold=20.0"
+        ") -> (Tensor output)");
+    ops.impl("npu_fused_sigmoid_gating_delta_rule_update", torch::kPrivateUse1,
+             &vllm_ascend::npu_fused_sigmoid_gating_delta_rule_update);
 }
 #endif
