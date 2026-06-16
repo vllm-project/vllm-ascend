@@ -105,6 +105,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             actual = seq_lens_cpu.cumsum(0).to(torch.int64).tolist()
         else:
             cu = self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens)
+            if cu.device.type != "cpu":
+                cu = cu.to("cpu")
             actual = cu[1:].to(torch.int64).tolist()
 
         return actual, actual
