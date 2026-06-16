@@ -93,7 +93,12 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
+        moe_comm_type = select_moe_comm_method(
+            max_num_tokens,
+            vllm_config,
+            is_draft_model,
+            in_profile_run=in_profile_run,
+        )
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
@@ -246,7 +251,12 @@ def _is_gemma4_model(vllm_config: VllmConfig) -> bool:
     return any("Gemma4" in architecture for architecture in architectures)
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    is_draft_model=False,
+    in_profile_run: bool = False,
+) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, token count, and quantization.
 
@@ -266,6 +276,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
         is_draft_model (bool): Whether the model runs in MTP mode (disables fused MC2).
+        in_profile_run (bool): Whether this selection is for profile-run dummy forward.
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -328,10 +339,12 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
         )
         world_size = vllm_config.parallel_config.world_size_across_dp
-        if _is_gemma4_model(vllm_config):
+        if _is_gemma4_model(vllm_config) and not in_profile_run:
             # Gemma4 MoE graph decode is sensitive to MC2/ALLTOALL dynamic
             # routing metadata on A5. ALLGATHER keeps the model in graph mode
-            # while avoiding replayed dispatch/combine metadata drift.
+            # while avoiding replayed dispatch/combine metadata drift. Keep
+            # profile-run on the default path to avoid extra ALLGATHER stream
+            # pressure during memory profiling.
             moe_comm_type = MoECommType.ALLGATHER
         elif num_tokens <= mc2_tokens_capacity and world_size > 1:
             moe_comm_type = MoECommType.MC2

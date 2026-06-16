@@ -61,6 +61,18 @@ def test_a5_gemma4_eager_moe_uses_allgather(monkeypatch):
     assert moe_comm_type == MoECommType.ALLGATHER
 
 
+def test_a5_gemma4_profile_moe_keeps_default_mc2_selection(monkeypatch):
+    _patch_a5_moe(monkeypatch)
+
+    moe_comm_type = forward_context.select_moe_comm_method(
+        1,
+        _make_vllm_config(),
+        in_profile_run=True,
+    )
+
+    assert moe_comm_type == MoECommType.MC2
+
+
 def test_a5_non_gemma4_graph_moe_keeps_default_mc2_selection(monkeypatch):
     _patch_a5_moe(monkeypatch)
 
