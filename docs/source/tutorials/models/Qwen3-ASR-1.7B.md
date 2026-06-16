@@ -63,7 +63,6 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
 ### Atlas 300I DUO
 ``` bash
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
-  --host 127.0.0.1 \
   --port 8000 \
   --tensor-parallel-size 1 \
   --gpu_memory_utilization 0.9 \
