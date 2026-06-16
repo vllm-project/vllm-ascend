@@ -583,17 +583,13 @@ class NPUWorker(WorkerBase):
     def re_load_weights(self, model_path=None) -> None:
         self.model_runner.restore_model(path=model_path)
 
-    def clean_up(self) -> None:
+    def parallel_group_clean_up(self) -> None:
         destroy_ascend_model_parallel()
-        logger.info("[snapshot][parallel] rank %s: destroy_ascend_model_parallel done", self.rank)
-        # for snapshot
-        # Imported lazily: cleanup_dist_env_for_snapshot is injected into
-        # vllm.distributed by the container_snapshot runtime patch, which may
-        # be applied after this module is first imported.
+        logger.info("[snapshot] [parallel] rank %s: destroy_ascend_model_parallel done", self.rank)
+        
         from vllm.distributed import cleanup_dist_env_for_snapshot
-
         cleanup_dist_env_for_snapshot()
-        logger.info("[snapshot][parallel] rank %s: cleanup_dist_env_for_snapshot done", self.rank)
+        logger.info("[snapshot] [parallel] rank %s: cleanup_dist_env_for_snapshot done", self.rank)
 
     def rebuild_parallel_group_after_resume(self) -> None:
         """[snapshot] Tear down and re-init HCCL / TP / PP parallel groups after resume."""
@@ -603,24 +599,16 @@ class NPUWorker(WorkerBase):
         dist.set_debug_level(dist.DebugLevel.INFO)
 
         rebuild_time_start = time.time()
-        logger.info(
-            "[snapshot][parallel] rank %s: destroying HCCL and model-parallel groups",
-            self.rank,
-        )
-        self.clean_up()
+        logger.info("[snapshot] [parallel] rank %s: destroying HCCL and model-parallel groups", self.rank,)
+        self.parallel_group_clean_up()
 
-        logger.info(
-            "[snapshot][parallel] rank %s: rebuilding HCCL and model-parallel groups",
-            self.rank,
-        )
+        logger.info("[snapshot] [parallel] rank %s: rebuilding HCCL and model-parallel groups", self.rank,)
         import urllib.parse
-
         # distributed_init_method must point to the Pod where DP rank 0 runs.
         init_method = self.distributed_init_method
         parsed = urllib.parse.urlparse(init_method)
-        master_ip = self.vllm_config.parallel_config.data_parallel_master_ip or os.environ.get(
-            "HCCL_IF_IP", parsed.hostname
-        )
+        master_ip = self.vllm_config.parallel_config.data_parallel_master_ip
+
         if not master_ip:
             raise RuntimeError(f"Unable to resolve master IP for distributed init method: {init_method}")
         port = parsed.port
@@ -629,10 +617,8 @@ class NPUWorker(WorkerBase):
         new_method = urllib.parse.urlunparse(parsed._replace(netloc=f"{master_ip}:{port + 1}"))
 
         logger.info(
-            "[snapshot][parallel] rank %s: distributed_init_method %s -> %s (port+1)",
-            self.rank,
-            init_method,
-            new_method,
+            "[snapshot] [parallel] rank %s: distributed_init_method %s -> %s (port+1)",
+            self.rank, init_method, new_method,
         )
         self.distributed_init_method = new_method
 
@@ -640,9 +626,8 @@ class NPUWorker(WorkerBase):
             self._init_worker_distributed_environment()
 
         logger.info(
-            "[snapshot][parallel] rank %s: rebuild_parallel_group cost %.2fs",
-            self.rank,
-            time.time() - rebuild_time_start,
+            "[snapshot] [parallel] rank %s: rebuild_parallel_group cost %.2fs",
+            self.rank, time.time() - rebuild_time_start,
         )
 
     def update_worker_info_after_resume(self, local_ip: str, data_parallel_master_ip: str) -> None:
@@ -650,10 +635,8 @@ class NPUWorker(WorkerBase):
         os.environ["HCCL_IF_IP"] = local_ip
         self.vllm_config.parallel_config.data_parallel_master_ip = data_parallel_master_ip
         logger.info(
-            "[snapshot][worker] rank %s: HCCL_IF_IP=%s data_parallel_master_ip=%s",
-            self.rank,
-            local_ip,
-            data_parallel_master_ip,
+            "[snapshot] [worker] rank %s: HCCL_IF_IP=%s data_parallel_master_ip=%s",
+            self.rank, local_ip, data_parallel_master_ip,
         )
 
     def rebuild_kv_transfer_engine_after_resume(self, local_ip: str) -> None:
@@ -795,6 +778,7 @@ class NPUWorker(WorkerBase):
 
     def recapture_graph(self) -> None:
         if self.model_config.enforce_eager:
+            logger.info("[snapshot][worker] rank %s: enforce_eager is True, skip recapture graph", self.rank)
             return
 
         from vllm_ascend.compilation.acl_graph import (
@@ -805,7 +789,13 @@ class NPUWorker(WorkerBase):
         clear_all_aclgraph_entries()
         clear_graph_params_for_recapture()
 
+        # re-capture graph and warm up model after snapshot restore
         self.model_runner.capture_model()
+
+        # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
+        # may cause performance degradation at runtime.
+        if get_ascend_device_type() != AscendDeviceType.A5:
+            self._warm_up_atb()
 
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()
