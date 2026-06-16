@@ -500,6 +500,22 @@ class KVPoolWorker:
         self.group_block_stride[group_id] = group_block_strides
         self.group_num_layers[group_id] = len(layer_names)
 
+    def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
+        """
+        In hybrid scenario, where a KVCacheTensor is shared by multiple layers,
+        but sometimes, layers cannot be evenly distributed among multiple groups,
+        the layers sharing the KVCacheTensor may not completely occupy all the space of the KVCacheTensor.
+        This results in the calculated start address not being the previously aligned address.
+        Therefore, we down-align the start address to meet the 2MB alignment requirement.
+        """
+        if not self.use_hybrid:
+            return
+        alignment = 2 * 1024 * 1024
+        for storage_key in registered_regions.keys():
+            start, end = registered_regions[storage_key]
+            new_start = start // alignment * alignment
+            registered_regions[storage_key] = (new_start, end)
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
@@ -553,6 +569,7 @@ class KVPoolWorker:
                 else:
                     registered_regions[storage_key] = (start, end)
 
+        self._align_kv_ptrs(registered_regions)
         ptrs = [start for start, _ in registered_regions.values()]
         lengths = [end - start for start, end in registered_regions.values()]
 
