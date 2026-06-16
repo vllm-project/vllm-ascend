@@ -2523,7 +2523,7 @@ class NPUModelRunner(GPUModelRunner):
                 if torch.is_tensor(self._draft_token_ids):
                     num_reqs = self._draft_token_ids.shape[0]
                     draft_ids_list = self._draft_token_ids[:num_reqs].cpu().tolist()
-                    draft_req_ids = self._draft_token_req_ids
+                    draft_req_ids = self._draft_token_req_ids or self.input_batch.req_ids
                 else:
                     draft_ids_list = self._draft_token_ids
                     draft_req_ids = self.input_batch.req_ids
