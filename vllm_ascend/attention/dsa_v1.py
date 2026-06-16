@@ -1666,8 +1666,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             qr_pertoken_scale = None
         elif is_w8a8:
             qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
-        elif is_w8a8:
-            qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 wq_a_result, self.q_norm.weight, epsilon=self.eps
             )
             q_b_quant, q_b_scale = qr, qr_pertoken_scale
@@ -1779,8 +1777,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 q_a = self.wq_a(hidden_states)
 
             # q
-            if _is_w8a8_dynamic(self.wq_b):
-                qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
             if _is_w8a8_dynamic(self.wq_b):
                 qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                     q_a, self.q_norm.weight, epsilon=self.eps
@@ -2080,7 +2076,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
 
             # q
-            if _is_w8a8_dynamic(self.wq_b):
             if _is_w8a8_dynamic(self.wq_b):
                 if share_hs_quant:
                     q_a = torch_npu.npu_quant_matmul(
