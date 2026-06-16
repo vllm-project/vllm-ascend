@@ -24,8 +24,8 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.logger import init_logger
-from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 from vllm.platforms import current_platform
+from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 
 from vllm_ascend.utils import weak_ref_tensors
 
@@ -65,6 +65,7 @@ def set_encoder_graph_params(token_budgets: list[int]) -> None:
 def get_encoder_graph_params() -> EncoderGraphParams | None:
     return _encoder_graph_params
 
+
 def update_encoder_graph_workspace(token_budget: int, workspace: torch.Tensor) -> None:
     if _encoder_graph_params is None:
         return
@@ -98,6 +99,7 @@ _context = EncoderForwardContext()
 def get_encoder_forward_context() -> EncoderForwardContext:
     return _context
 
+
 def _reset_encoder_forward_context() -> None:
     """Clear replay-time host length fields."""
 
@@ -106,6 +108,7 @@ def _reset_encoder_forward_context() -> None:
     _context.cu_seqlens_ends_cpu = None
     _context.cu_window_seqlens_cpu = None
     _context.sequence_lengths_cpu = None
+
 
 @contextmanager
 def set_encoder_forward_context(
@@ -138,19 +141,13 @@ def set_encoder_forward_context(
 # Replay-time FIA task updates
 # ---------------------------------------------------------------------------
 
+
 def _pad_actual_seq_lengths_for_fia(actual_seq_lengths: list[int], num_tokens: int) -> list[int]:
     """TND FIA requires ``query.shape[0] == actual_seq_lengths[-1]``."""
-    filtered: list[int] = []
-    for end in actual_seq_lengths:
-        if end <= 0:
-            continue
-        if end > num_tokens:
-            break
-        if not filtered or end > filtered[-1]:
-            filtered.append(end)
-    if not filtered or filtered[-1] != num_tokens:
-        filtered.append(num_tokens)
-    return filtered
+    if not actual_seq_lengths or actual_seq_lengths[-1] != num_tokens:
+        actual_seq_lengths.append(num_tokens)
+    return actual_seq_lengths
+
 
 def _maybe_compute_actual_seq_lengths(
     *,
@@ -178,6 +175,7 @@ def _maybe_compute_actual_seq_lengths(
 
     aligned = _pad_actual_seq_lengths_for_fia(actual, num_query_tokens)
     return aligned, aligned
+
 
 def update_encoder_graph_params(
     update_stream: torch.npu.Stream,
@@ -280,8 +278,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
 
     def _capture_budget_graph(self, token_budget: int):
         logger.debug(
-            "Capturing encoder aclgraph for budget=%d, max_batch_size=%d, "
-            "max_frames_per_batch=%d",
+            "Capturing encoder aclgraph for budget=%d, max_batch_size=%d, max_frames_per_batch=%d",
             token_budget,
             self.max_batch_size,
             self.max_frames_per_batch,
@@ -299,12 +296,12 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         buffers = capture_inputs.buffers
 
         with torch.inference_mode():
-            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers) # 这个output是维度
+            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)  # 这个output是维度
             output_buffer = torch.empty_like(output)
 
         graph = torch.npu.NPUGraph()
         with set_encoder_forward_context(token_budget, True):
-            with torch.inference_mode(), torch.npu.graph(graph, self.graph_pool): # 没有设置graph pool
+            with torch.inference_mode(), torch.npu.graph(graph, self.graph_pool):  # 没有设置graph pool
                 output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
                 output_buffer.copy_(output)
 
@@ -367,9 +364,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             cu_window_seqlens_cpu=cu_window_seqlens_cpu,
             sequence_lengths_cpu=seq_lens_cpu,
         ):
-            update_encoder_graph_params(
-                update_stream, token_budget, fullatt_block_indexes=self.fullatt
-            )
+            update_encoder_graph_params(update_stream, token_budget, fullatt_block_indexes=self.fullatt)
 
         self.graph_hits += num_items
         return graph_meta.output_buffer
