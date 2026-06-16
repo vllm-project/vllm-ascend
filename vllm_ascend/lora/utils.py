@@ -95,6 +95,11 @@ def _mcp_apply_npu(x, bias, layer):
 
 
 class AscendColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
+    """NPU-specific ColumnParallelLinearWithLoRA that uses _mcp_apply_npu."""
+    
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        return _mcp_apply_npu(x, bias, self)
+
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
@@ -106,9 +111,12 @@ class AscendColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     ) -> bool:
         if type(source_layer) is AscendColumnParallelLinear:
             return True
-        if type(source_layer) is AscendMergedColumnParallelLinear:
+        if isinstance(source_layer, AscendMergedColumnParallelLinear):
             if len(packed_modules_list) != 1:
                 return False
+            # Exclude layers with 3+ output sizes - those are handled by
+            # MergedColumnParallelLinearVariableSliceWithLoRA since this
+            # class's slice_lora_b assumes exactly 2 slices.
             return not (
                 hasattr(source_layer, "output_sizes")
                 and len(source_layer.output_sizes) >= 3
@@ -117,6 +125,11 @@ class AscendColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
 
 class AscendMergedColumnParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
+    """NPU-specific MergedColumnParallelLinearWithLoRA that uses _mcp_apply_npu."""
+    
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        return _mcp_apply_npu(x, bias, self)
+
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
@@ -126,15 +139,18 @@ class AscendMergedColumnParallelLinearWithLoRA(MergedColumnParallelLinearWithLoR
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
+        # Only support effectively unsharded subclasses here. Sharded
+        # subclasses may have custom communication semantics that the generic
+        # merged-column LoRA path does not know how to preserve.
         return type(source_layer) is AscendMergedColumnParallelLinear and len(packed_modules_list) == 2
-
-    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        if self.lora_config.fully_sharded_loras:
-            return super().apply(x, bias)
-        return self._apply_sync(x, bias)
 
 
 class AscendQKVParallelLinearWithLoRA(QKVParallelLinearWithLoRA):
+    """NPU-specific QKVParallelLinearWithLoRA that uses _mcp_apply_npu."""
+    
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        return _mcp_apply_npu(x, bias, self)
+
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
@@ -148,6 +164,11 @@ class AscendQKVParallelLinearWithLoRA(QKVParallelLinearWithLoRA):
 
 
 class AscendMergedQKVParallelLinearWithLoRA(MergedQKVParallelLinearWithLoRA):
+    """NPU-specific MergedQKVParallelLinearWithLoRA that uses _mcp_apply_npu."""
+    
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        return _mcp_apply_npu(x, bias, self)
+
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
@@ -161,6 +182,11 @@ class AscendMergedQKVParallelLinearWithLoRA(MergedQKVParallelLinearWithLoRA):
 
 
 class AscendMergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithShardedLoRA):
+    """NPU-specific MergedQKVParallelLinearWithShardedLoRA that uses _mcp_apply_npu."""
+    
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        return _mcp_apply_npu(x, bias, self)
+
     @classmethod
     @_fully_sharded_can_replace
     def can_replace_layer(
@@ -174,6 +200,11 @@ class AscendMergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithSh
 
 
 class AscendQKVParallelLinearWithShardedLoRA(QKVParallelLinearWithShardedLoRA):
+    """NPU-specific QKVParallelLinearWithShardedLoRA that uses _mcp_apply_npu."""
+    
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        return _mcp_apply_npu(x, bias, self)
+
     @classmethod
     @_fully_sharded_can_replace
     def can_replace_layer(
@@ -188,16 +219,19 @@ class AscendQKVParallelLinearWithShardedLoRA(QKVParallelLinearWithShardedLoRA):
 
 def refresh_all_lora_classes():
     ascend_classes = (
+        AscendColumnParallelLinearWithLoRA,
+        AscendMergedColumnParallelLinearWithLoRA,
         AscendQKVParallelLinearWithLoRA,
         AscendMergedQKVParallelLinearWithLoRA,
         AscendMergedQKVParallelLinearWithShardedLoRA,
         AscendQKVParallelLinearWithShardedLoRA,
     )
     # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
-    # Append the Ascend classes in a deterministic order.
+    # Insert the Ascend classes at the beginning so they are checked first
+    # before the generic vLLM LoRA classes. This is important because
+    # AscendQKVParallelLinear is a subclass of QKVParallelLinear, and we want
+    # the Ascend-specific LoRA wrappers to be used for Ascend layers.
     vllm.lora.utils._all_lora_classes = (
-        AscendColumnParallelLinearWithLoRA,
-        AscendMergedColumnParallelLinearWithLoRA,
-        *vllm.lora.utils._all_lora_classes,
         *ascend_classes,
+        *vllm.lora.utils._all_lora_classes,
     )
