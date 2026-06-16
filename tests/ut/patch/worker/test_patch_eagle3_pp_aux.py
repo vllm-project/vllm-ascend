@@ -134,6 +134,8 @@ def test_last_pp_rank_returns_complete_aux_states(monkeypatch):
         model,
         None,
         torch.arange(2),
+        kv_caches=[None] * 4,
+        attn_metadata=None,
         intermediate_tensors=intermediate,
     )
 
