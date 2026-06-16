@@ -42,6 +42,21 @@ on:
         required: false
         type: string
         default: 'digests'
+      vllm_commit:
+        description: 'vLLM commit hash to checkout (used when set; mutually exclusive with tag/branch).'
+        required: false
+        type: string
+        default: ''
+      vllm_ascend_commit:
+        description: 'vllm-ascend commit hash to checkout (used when set; mutually exclusive with tag/branch).'
+        required: false
+        type: string
+        default: ''
+      temp_only:
+        description: 'If true, push only to QUAY_TEMP_REPO and skip the merge-image job (no push to QUAY_REPO).'
+        required: false
+        type: boolean
+        default: false
     secrets:
         QUAY_PASSWORD:
             description: 'Quay password for pushing images'
@@ -79,14 +94,46 @@ jobs:
       run: |
         tag="${{ inputs.workflow_dispatch_tag }}"
         branch="${{ inputs.branch_ref }}"
-        if [[ -n "$tag" && -n "$branch" ]]; then
-          echo "Error: 'tag' and 'branch' are mutually exclusive. Please specify only one."
-          exit 1
+        vllm_commit="${{ inputs.vllm_commit }}"
+        vllm_ascend_commit="${{ inputs.vllm_ascend_commit }}"
+
+        commit_mode="false"
+        if [[ -n "$vllm_commit" || -n "$vllm_ascend_commit" ]]; then
+          if [[ -z "$vllm_commit" || -z "$vllm_ascend_commit" ]]; then
+            echo "Error: 'vllm_commit' and 'vllm_ascend_commit' must be specified together."
+            exit 1
+          fi
+          for c in "$vllm_commit" "$vllm_ascend_commit"; do
+            if ! echo "$c" | grep -Eq '^[0-9a-f]{7,40}$'; then
+              echo "Error: invalid commit format: $c (expected 7-40 hex chars)."
+              exit 1
+            fi
+          done
+          commit_mode="true"
         fi
-        if [[ -z "$tag" && -z "$branch" ]]; then
-          echo "Error: Either 'tag' or 'branch' must be specified."
-          exit 1
+
+        if [[ "$commit_mode" == "true" ]]; then
+          if [[ -n "$tag" || -n "$branch" ]]; then
+            echo "Error: commit mode is mutually exclusive with 'tag'/'branch'."
+            exit 1
+          fi
+        else
+          if [[ -n "$tag" && -n "$branch" ]]; then
+            echo "Error: 'tag' and 'branch' are mutually exclusive. Please specify only one."
+            exit 1
+          fi
+          if [[ -z "$tag" && -z "$branch" ]]; then
+            echo "Error: Either 'tag', 'branch', or (vllm_commit + vllm_ascend_commit) must be specified."
+            exit 1
+          fi
         fi
+
+    - uses: actions/checkout@v6
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_commit != '' }}
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+        ref: ${{ inputs.vllm_ascend_commit }}
 
     - uses: actions/checkout@v6
       if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -103,7 +150,7 @@ jobs:
         ref: ${{ inputs.workflow_dispatch_tag }}
 
     - uses: actions/checkout@v6
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }}
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' && inputs.vllm_ascend_commit == '' }}
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -186,6 +233,7 @@ jobs:
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
+          VLLM_COMMIT=${{ inputs.vllm_commit }}
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
@@ -202,7 +250,13 @@ jobs:
         if [ -n "${{ inputs.suffix }}" ]; then
           SUFFIX="-${{ inputs.suffix }}"
         fi
-        TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
+        if [ "${{ inputs.temp_only }}" = "true" ]; then
+          VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
+          ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
+          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.tag }}-temp"
+        else
+          TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
+        fi
         echo "Creating temp tag: ${{ env.QUAY_TEMP_REPO }}:$TAG"
         docker buildx imagetools create \
           -t "${{ env.QUAY_TEMP_REPO }}:$TAG" \
@@ -227,7 +281,7 @@ jobs:
   merge-image:
     runs-on: ubuntu-latest
     needs: build-push-digest
-    if: ${{ inputs.should_push }}
+    if: ${{ inputs.should_push && !inputs.temp_only }}
     steps:
       - name: Checkout branch
         uses: actions/checkout@v6
@@ -326,3 +380,52 @@ jobs:
               -t "$tag" \
               $DIGESTS
           done
+
+  merge-image-temp:
+    name: merge-image-temp
+    runs-on: ubuntu-latest
+    needs: build-push-digest
+    if: ${{ inputs.should_push && inputs.temp_only }}
+    steps:
+      - name: Download arm64 digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-arm64
+          merge-multiple: true
+
+      - name: Download amd64 digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-amd64
+          merge-multiple: true
+
+      - name: Login to Quay Temp
+        uses: docker/login-action@v4
+        with:
+          registry: quay.io
+          username: ${{ inputs.quay_temp_username }}
+          password: ${{ secrets.QUAY_TEMP_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Merge and push multi-arch manifest to QUAY_TEMP_REPO
+        env:
+          IMAGE: ${{ env.QUAY_TEMP_REPO }}
+        run: |
+          set -euo pipefail
+          SUFFIX=""
+          if [ -n "${{ inputs.suffix }}" ]; then
+            SUFFIX="-${{ inputs.suffix }}"
+          fi
+          VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
+          ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
+          TAG="${IMAGE}:vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}"
+          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          echo "Digests: $DIGESTS"
+          echo "Creating multi-arch manifest tag: $TAG"
+          docker buildx imagetools create \
+            -t "$TAG" \
+            $DIGESTS
