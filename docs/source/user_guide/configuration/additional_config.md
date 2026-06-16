@@ -86,6 +86,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
 | `layer_sharding`                    | dict | `{}`    | Configuration options for Layer Sharding Linear. Layer Sharding can only be enabled in PD-disaggregated's P node. |
 | `enable_sparse_c8`                  | bool | `False` | Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and GLM5). Not supported on A5 devices now |
+| `c8_enable_reshape_optim`           | bool | `False` | Whether to enable StoreKVBlock operator achieves acceleration under the C8 feature (this means that enable_sparse_c8 needs to be enabled). In the PD separation scenario, only the P node is enabled. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
 | `profiling_chunk_config`            | dict | `{}`    | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 | `enable_balance_scheduling`         | bool | `False` | Whether to enable balance scheduling. Can also be configured via `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable (deprecated). |
@@ -99,6 +100,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable (deprecated). |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable (deprecated). |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
+| `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 
 The details of each configuration option are as follows:
 
@@ -146,6 +148,7 @@ The details of each configuration option are as follows:
 | `algorithm_execution_interval`   | int | `30`   | The forward iterations when the EPLB worker will finish CPU tasks. |
 | `expert_map_record_path`         | str | `None` | Save the expert load calculation results to a new expert table in the specified directory.|
 | `num_redundant_experts`          | int | `0`    | Specify redundant experts during initialization. |
+| `eplb_policy_type`               | int | `1`    | EPLB balancing policy: `0`=Random, `1`=DefaultEplb (open-source algorithm), `2`=SwiftBalanceEplb (optimized for low-bandwidth), `3`=FlashLB (statistical method with sliding windows). |
 
 **profiling_chunk_config**
 
@@ -155,6 +158,17 @@ The details of each configuration option are as follows:
 | `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more; `0.0` disables dynamic adjustment. |
 | `min_chunk`     | int   | `4096`  | Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`. |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
+
+**rejection_sampler_config**
+
+> **Note**: Both block verify and entropy verify improve speculative decoding performance (higher acceptance rate, lower latency) at the cost of reduced sampling precision. A larger `posterior_alpha` makes the adjustment more aggressive — it further lowers the acceptance threshold for high-entropy tokens, improving throughput but degrading output quality. Users should tune these parameters based on their specific model weights and application scenario to find the right trade-off between performance and precision.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enable_block_verify`   | bool  | `False` | Whether to enable block verify mode. Block verify evaluates all draft tokens as a block using cumulative probability products, which can improve acceptance rate. |
+| `enable_entropy_verify` | bool  | `False` | Whether to enable entropy verify mode. Entropy verify adjusts the acceptance threshold based on the entropy of the target distribution — higher entropy (uncertain) tokens get a lower threshold (easier to accept), while lower entropy (confident) tokens get a stricter threshold. |
+| `posterior_threshold`   | float | `0.95`  | Upper bound for the entropy-adjusted acceptance threshold. Must be in (0, 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), posterior_threshold)`. |
+| `posterior_alpha`       | float | `0.4`   | Scaling factor for entropy in the threshold computation. Must be >= 0. Higher values make the threshold more sensitive to entropy — high-entropy tokens become much easier to accept, improving performance but reducing precision. |
 
 ### Example
 
@@ -186,6 +200,12 @@ An example of additional configuration is as follows:
     },
     "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
+    "rejection_sampler_config": {
+        "enable_block_verify": True,
+        "enable_entropy_verify": True,
+        "posterior_threshold": 0.95,
+        "posterior_alpha": 0.4,
+    },
     "refresh": False
 }
 ```

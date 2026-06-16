@@ -28,6 +28,7 @@ from vllm.distributed.kv_events import KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import logger
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
@@ -46,6 +47,8 @@ from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
+from vllm_ascend.utils import vllm_version_is
+
 
 # `spec_manager_map` in single_type_kv_cache_manager is a module-level dict
 # whose keys are class objects bound at import time.  When the async
@@ -61,14 +64,15 @@ from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 # Fix: whenever this patch is applied, register AscendMLAAttentionSpec as
 # an additional key in spec_manager_map (if the module is already loaded).
 def register_ascend_mla_spec_in_manager():
-    import sys as _sys
-
     from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
 
-    _stm = _sys.modules.get("vllm.v1.core.single_type_kv_cache_manager")
-    if _stm is not None and AscendMLAAttentionSpec not in _stm.spec_manager_map:
-        _stm.spec_manager_map[AscendMLAAttentionSpec] = FullAttentionManager
+    if vllm_version_is("0.22.1"):
+        import sys as _sys
+
+        _stm = _sys.modules.get("vllm.v1.core.single_type_kv_cache_manager")
+        if _stm is not None and AscendMLAAttentionSpec not in _stm.spec_manager_map:
+            _stm.spec_manager_map[AscendMLAAttentionSpec] = FullAttentionManager
 
 
 @dataclass
@@ -476,9 +480,32 @@ class RecomputeScheduler(Scheduler):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                        request
-                    )
+                    if (
+                        self.connector is not None
+                        and self.has_mamba_layers
+                        and isinstance(
+                            self.kv_cache_manager.coordinator,
+                            HybridKVCacheCoordinator,
+                        )
+                    ):
+                        computed_blocks, num_new_local_computed_tokens = (
+                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                                request.block_hashes,
+                                request.num_tokens - 1,
+                            )
+                        )
+                        new_computed_blocks = self.kv_cache_manager.create_kv_cache_blocks(computed_blocks)
+                        if self.kv_cache_manager.log_stats:
+                            assert self.kv_cache_manager.prefix_cache_stats is not None
+                            self.kv_cache_manager.prefix_cache_stats.record(
+                                num_tokens=request.num_tokens,
+                                num_hits=num_new_local_computed_tokens,
+                                preempted=request.num_preemptions > 0,
+                            )
+                    else:
+                        new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
+                            request
+                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -563,7 +590,7 @@ class RecomputeScheduler(Scheduler):
                             # The request cannot be scheduled.
                             break
 
-                if self.need_mamba_block_aligned_split:
+                if self.need_mamba_block_aligned_split and not load_kv_async:
                     num_new_tokens = self._mamba_block_aligned_split(
                         request,
                         num_new_tokens,
@@ -838,6 +865,22 @@ class RecomputeScheduler(Scheduler):
                     )
                 )
 
+        # Persist per-step routed experts into the scheduler-side slot buffer.
+        # MUST precede the per-request routing reads below.
+        routing_data = None
+        routing_offsets: dict[str, int] = {}
+        if getattr(self, "enable_return_routed_experts", False) and model_runner_output.routed_experts is not None:
+            re = model_runner_output.routed_experts
+            self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
+            routing_data = re.routing_data.astype(
+                self.routed_experts_mgr.routed_experts_by_slot.dtype,
+                copy=False,
+            )
+            offset = 0
+            for rid in model_runner_output.req_ids:
+                routing_offsets[rid] = offset
+                offset += num_scheduled_tokens[rid]
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -892,6 +935,7 @@ class RecomputeScheduler(Scheduler):
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             status_before_stop = request.status
+            num_output_tokens_before = len(request._output_token_ids)
 
             # Check for stop and update request status.
             if new_token_ids:
@@ -902,10 +946,31 @@ class RecomputeScheduler(Scheduler):
                 stopped = True
 
             routed_experts = None
+            if getattr(self, "enable_return_routed_experts", False) and routing_data is not None and new_token_ids:
+                req_offset = routing_offsets[req_id]
+                end = req_offset + num_tokens_scheduled
+                block_ids = self._re_block_ids.pop(req_id, [])
+                if num_output_tokens_before == 0:
+                    if (
+                        request.sampling_params is not None
+                        and request.sampling_params.routed_experts_prompt_start is not None
+                    ):
+                        prompt_start = request.sampling_params.routed_experts_prompt_start
+                        assert prompt_start < request.num_prompt_tokens
+                    else:
+                        prompt_start = 0
+                    routed_experts = self.routed_experts_mgr.get(
+                        block_ids,
+                        request.num_prompt_tokens,
+                        token_start=prompt_start,
+                    )
+                elif scheduled_spec_token_ids:
+                    routed_experts = routing_data[req_offset : req_offset + len(new_token_ids)]
+                else:
+                    routed_experts = routing_data[end - len(new_token_ids) : end]
+
             finish_reason = None
             if stopped:
-                routed_experts = self._get_routed_experts(request)
-
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()

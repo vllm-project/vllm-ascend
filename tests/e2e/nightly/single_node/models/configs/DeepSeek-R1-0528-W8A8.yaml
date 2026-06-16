@@ -8,6 +8,7 @@ _envs: &envs
   HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   SERVER_PORT: "DEFAULT_PORT"
+  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
 
 _server_cmd: &server_cmd
   - "--quantization"

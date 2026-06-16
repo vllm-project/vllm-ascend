@@ -8,8 +8,6 @@ from collections.abc import Generator
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
     get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -42,6 +40,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     record_failed_blocks,
+)
+from vllm_ascend.distributed.utils import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
 )
 
 backend_map = {
