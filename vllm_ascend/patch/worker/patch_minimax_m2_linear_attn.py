@@ -28,8 +28,18 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.platforms import current_platform
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.21.0"):
+    from vllm.model_executor.layers.mamba.linear_attn import (  # type: ignore[import-not-found]
+        MiniMaxText01RMSNormTP,
+    )
+else:
+    from vllm.model_executor.layers.minimax_rms_norm import (  # type: ignore[import-not-found]
+        MiniMaxText01RMSNormTP,
+    )
 
 logger = logging.getLogger(__name__)
 

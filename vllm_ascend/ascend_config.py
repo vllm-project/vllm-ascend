@@ -94,6 +94,13 @@ class AscendConfig:
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = self._resolve_dump_config_path(additional_config)
+
+        # Log configuration
+        self.ascend_log_path = additional_config.get(
+            "ascend_log_path",
+            os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend"),
+        )
+
         self.layer_sharding = additional_config.get("layer_sharding", None)
         if self.layer_sharding:
             logger.info_once(
@@ -177,7 +184,11 @@ class AscendConfig:
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
-        if vllm_config.kv_transfer_config is not None and not vllm_config.model_config.is_deepseek_mla:
+        if (
+            vllm_config.kv_transfer_config is not None
+            and vllm_config.model_config is not None
+            and not vllm_config.model_config.is_deepseek_mla
+        ):
             prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {"tp_size": 1})["tp_size"]
             decode_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("decode", {"tp_size": 1})["tp_size"]
             assert prefill_tp_size % decode_tp_size == 0, "Prefill TP size must be divisible by Decode TP size."
@@ -225,12 +236,16 @@ class AscendConfig:
             bool(additional_config.get("enable_async_exponential", False)) and not envs.VLLM_BATCH_INVARIANT
         )
 
-        use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-            vllm_config.model_config.hf_text_config, "index_topk"
+        use_sparse = (
+            vllm_config.model_config is not None
+            and hasattr(vllm_config.model_config, "hf_text_config")
+            and hasattr(vllm_config.model_config.hf_text_config, "index_topk")
         )
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
+            if vllm_config.model_config is None:
+                raise RuntimeError("enable_kv_nz requires a valid model_config.")
             if not vllm_config.model_config.is_deepseek_mla or use_sparse:
                 raise RuntimeError("enable_kv_nz is only supported for mla currently.")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
@@ -239,6 +254,7 @@ class AscendConfig:
                 )
 
         self.enable_sparse_c8 = additional_config.get("enable_sparse_c8", False) and use_sparse
+        self.c8_enable_reshape_optim = self.enable_sparse_c8 and additional_config.get("c8_enable_reshape_optim", False)
         quant_config = getattr(vllm_config, "quant_config", None)
         self._sparse_c8_layer_ids, self._sparse_c8_layer_names = self._parse_sparse_c8_layers_from_quant_config(
             quant_config
@@ -267,6 +283,10 @@ class AscendConfig:
         self.enable_hamming_sparse = self.hamming_sparse["enabled"]
         self.sparse_json = self.hamming_sparse["sparse_json_location"]
         self._check_enable_hamming_sparse()
+
+        # Enable Block Verify and Entropy Verify in Rejection Sampler
+        rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
+        self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
 
     @staticmethod
     def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
@@ -430,7 +450,7 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
             # dummy_run does not run the entire attention module in eager mode,
             # so the o_proj tp split can only be used in graph mode.
-            if vllm_config.model_config.enforce_eager:
+            if vllm_config.model_config and vllm_config.model_config.enforce_eager:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
@@ -440,7 +460,7 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}")
             # dummy_run does not run the entire attention module in eager mode,
             # so the o_lora tp split can only be used in graph mode.
-            if vllm_config.model_config.enforce_eager is True:
+            if vllm_config.model_config and vllm_config.model_config.enforce_eager:
                 raise AssertionError("olora_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
@@ -625,6 +645,74 @@ class ProfilingChunkConfig:
             raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
 
 
+class RejectionSamplerConfig:
+    """Configuration for Block Verify and Entropy Verify in Rejection Sampler.
+
+    Block Verify improves acceptance rate by evaluating all draft tokens
+    as a block using cumulative probability products. Entropy Verify
+    adjusts the acceptance threshold based on the entropy of the target
+    distribution, allowing higher acceptance for high-entropy (uncertain)
+    tokens and stricter rejection for low-entropy (confident) tokens.
+
+    Usage (online)::
+
+        vllm serve <model> --additional-config \
+            '{"rejection_sampler_config": {"enable_block_verify": true, \
+            "enable_entropy_verify": true, "posterior_threshold": 0.95, \
+            "posterior_alpha": 0.4}}'
+
+    Usage (offline)::
+
+        llm = LLM(
+            model,
+            additional_config={
+                "rejection_sampler_config": {
+                    "enable_block_verify": true,
+                    "enable_entropy_verify": true,
+                    "posterior_threshold": 0.95,
+                    "posterior_alpha": 0.4,
+                }
+            },
+        )
+    """
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+        self.enable_block_verify: bool = config.get("enable_block_verify", False)
+        self.enable_entropy_verify: bool = config.get("enable_entropy_verify", False)
+        self.posterior_threshold: float = config.get("posterior_threshold", 0.95)
+        self.posterior_alpha: float = config.get("posterior_alpha", 0.4)
+        self._validate()
+
+    def _validate(self):
+        if not isinstance(self.enable_block_verify, bool):
+            raise ValueError(
+                f"rejection_sampler_config.enable_block_verify must be a bool, "
+                f"got {type(self.enable_block_verify).__name__}"
+            )
+        if not isinstance(self.enable_entropy_verify, bool):
+            raise ValueError(
+                f"rejection_sampler_config.enable_entropy_verify must be a bool, "
+                f"got {type(self.enable_entropy_verify).__name__}"
+            )
+        if not isinstance(self.posterior_threshold, (int, float)):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_threshold must be a float, "
+                f"got {type(self.posterior_threshold).__name__}"
+            )
+        if not isinstance(self.posterior_alpha, (int, float)):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_alpha must be a float, got {type(self.posterior_alpha).__name__}"
+            )
+        if not (0 < self.posterior_threshold <= 1):
+            raise ValueError(
+                f"rejection_sampler_config.posterior_threshold must be in (0, 1], got {self.posterior_threshold}"
+            )
+        if self.posterior_alpha < 0:
+            raise ValueError(f"rejection_sampler_config.posterior_alpha must be >= 0, got {self.posterior_alpha}")
+
+
 class EplbConfig:
     """
     Configuration Object for xlite_graph_config from additional_config
@@ -708,7 +796,12 @@ def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = additional_config.get("refresh", False) if additional_config else False
     global _ASCEND_CONFIG
-    if _ASCEND_CONFIG is not None and not refresh and _is_ascend_config_initialized(_ASCEND_CONFIG):
+    if (
+        _ASCEND_CONFIG is not None
+        and not refresh
+        and _is_ascend_config_initialized(_ASCEND_CONFIG)
+        and getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config
+    ):
         return _ASCEND_CONFIG
     new_config = AscendConfig(vllm_config)
     if _is_ascend_config_initialized(new_config):

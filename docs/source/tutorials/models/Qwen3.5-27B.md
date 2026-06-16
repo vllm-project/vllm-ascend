@@ -116,7 +116,7 @@ vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
 --trust-remote-code \
 --gpu-memory-utilization 0.90 \
 --no-enable-prefix-caching \
---speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_cpu_binding":true}' \
 ```

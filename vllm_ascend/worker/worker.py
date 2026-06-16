@@ -32,6 +32,7 @@ from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
@@ -110,6 +111,9 @@ class NPUWorker(WorkerBase):
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
+        from vllm_ascend.logger import configure_ascend_file_logging
+
+        configure_ascend_file_logging()
         check_ascend_device_type()
 
         super().__init__(
@@ -375,7 +379,18 @@ class NPUWorker(WorkerBase):
             profile_torch_peak = torch.npu.memory_stats(self.device).get("allocated_bytes.all.peak", 0)
 
             npugraph_memory_estimate = 0
-            if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            should_profile_npugraph_memory = self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            if should_profile_npugraph_memory and getattr(self.model_runner, "use_compress", False):
+                hf_config = self.model_config.hf_config
+                if getattr(hf_config, "model_type", None) == "deepseek_v4":
+                    logger.warning_once(
+                        "Skipping ACL graph memory profiling for DeepSeek-V4 "
+                        "DSA compressed attention. Graph mode remains enabled; "
+                        "the normal ACL graph capture still runs after KV cache "
+                        "allocation."
+                    )
+                    should_profile_npugraph_memory = False
+            if should_profile_npugraph_memory:
                 npugraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Override torch_peak_increase with the pre-graph-capture value to
@@ -719,7 +734,9 @@ class NPUWorker(WorkerBase):
 
         return latency_ms
 
-    def get_kv_connector_handshake_metadata(self) -> dict | None:
+    def get_kv_connector_handshake_metadata(
+        self,
+    ) -> dict[int, KVConnectorHandshakeMetadata] | dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
         """Get KV connector metadata from this worker if available."""
         if not has_kv_transfer_group():
             return None
@@ -730,7 +747,12 @@ class NPUWorker(WorkerBase):
         # metadata across workers.
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
-        return {self.rank: metadata}
+        tp_rank = get_tp_group().rank_in_group
+        if vllm_version_is("0.21.0"):
+            return {tp_rank: metadata}
+
+        pp_rank = get_pp_group().rank_in_group
+        return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
