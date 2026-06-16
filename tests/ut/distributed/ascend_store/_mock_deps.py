@@ -232,21 +232,10 @@ if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascen
     _ascend_utils.get_ascend_device_type = MagicMock()
     sys.modules["vllm_ascend.utils"] = _ascend_utils
 
-# Mock additional vllm_ascend modules needed by layerwise tests
-for _mod_name in [
-    "vllm_ascend.memcache_comm_fence",
-    "vllm_ascend.ascend_config",
-    "vllm_ascend.cpu_binding",
-]:
-    if _mod_name not in sys.modules:
-        sys.modules[_mod_name] = MagicMock()
-
-sys.modules["vllm_ascend.ascend_config"].get_ascend_config = MagicMock()  # type: ignore[attr-defined]
-sys.modules["vllm_ascend.memcache_comm_fence"].AttentionComputeStartGate = type(  # type: ignore[attr-defined]
-    "AttentionComputeStartGate", (), {}
-)
-sys.modules["vllm_ascend.memcache_comm_fence"].get_attention_compute_start_gate = MagicMock()  # type: ignore[attr-defined]
-sys.modules["vllm_ascend.memcache_comm_fence"].reset_attention_compute_start_gate = MagicMock()  # type: ignore[attr-defined]
-sys.modules["vllm_ascend.cpu_binding"].get_cpu_binding_rank = MagicMock(return_value=0)  # type: ignore[attr-defined]
-sys.modules["vllm_ascend.cpu_binding"].get_memcache_client_cpus = MagicMock(return_value=[0, 1])  # type: ignore[attr-defined]
-sys.modules["vllm_ascend.cpu_binding"].bind_thread_to_cpus = MagicMock()  # type: ignore[attr-defined]
+# NOTE: vllm_ascend.{ascend_config, cpu_binding, memcache_comm_fence} and their
+# helpers (get_ascend_config, get_cpu_binding_rank, AttentionComputeStartGate,
+# ...) are intentionally NOT mocked here. Doing so by mutating these real
+# modules leaks into every other UT in the same pytest session (breaking
+# test_ascend_config / test_platform / test_cpu_binding, which collect after
+# ascend_store and bind the polluted symbols at import). These helpers are
+# mocked per-test, scoped to the ascend_store tests only, via conftest.py.
