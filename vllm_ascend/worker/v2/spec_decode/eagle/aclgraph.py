@@ -11,9 +11,13 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor, prepare_inputs_to_capture
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+    DecodeSpeculatorCudaGraphManager,
+    PrefillSpeculatorCudaGraphManager,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -24,9 +28,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.utils import communicator_switch
-from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, prepare_inputs_to_capture
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import DecodeSpeculatorCudaGraphManager 
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import PrefillSpeculatorCudaGraphManager 
+
 
 class PrefillEagleAclGraphManager(PrefillSpeculatorCudaGraphManager):
     """AclGraphManager for Eagle speculative decoding."""
@@ -157,13 +159,12 @@ class DecodeEagleAclGraphManager(DecodeSpeculatorCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for Eagle."""
+
         def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
-                torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu")
-                if self.dp_size > 1
-                else None
+                torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu") if self.dp_size > 1 else None
             )
             attn_state = prepare_inputs_to_capture(
                 num_reqs,
