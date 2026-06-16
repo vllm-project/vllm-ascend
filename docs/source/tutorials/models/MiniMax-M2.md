@@ -305,15 +305,221 @@ Remarks:
 
 ### 5.2 Multi-Node PD Separation Deployment
 
-PD (Prefill-Decode) separation splits the Prefill and Decode phases across different nodes, improving throughput and resource utilization for high-concurrency scenarios.
+PD (Prefill-Decode) separation splits the Prefill and Decode phases across different nodes for better throughput. The following 1P1D configuration is validated for 128k input/output scenarios with `MiniMax-M2.7-W8A8`.
 
-:::{note}
-PD separation deployment requires careful tuning of DP/TP ratios between Prefill and Decode nodes. For detailed configuration guidance, refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html).
-:::
+**Hardware**: 2× Atlas 800 A3 (64G × 16), one for Prefill, one for Decode.
 
 **Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
 
-> **TODO (Model Owner):** Please fill in the specific PD separation startup commands, launch scripts, and KV transfer configuration for MiniMax-M2.7.
+First, prepare `launch_online_dp.py` on each node:
+
+```python
+import argparse
+import multiprocessing
+import os
+import subprocess
+import sys
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dp-size", type=int, required=True)
+    parser.add_argument("--tp-size", type=int, default=1)
+    parser.add_argument("--dp-size-local", type=int, default=-1)
+    parser.add_argument("--dp-rank-start", type=int, default=0)
+    parser.add_argument("--dp-address", type=str, required=True)
+    parser.add_argument("--dp-rpc-port", type=str, default=12345)
+    parser.add_argument("--vllm-start-port", type=int, default=9000)
+    return parser.parse_args()
+
+args = parse_args()
+dp_size, tp_size = args.dp_size, args.tp_size
+dp_size_local = args.dp_size_local if args.dp_size_local != -1 else dp_size
+
+def run_command(visible_devices, dp_rank, vllm_engine_port):
+    subprocess.run([
+        "bash", "./run_dp_template.sh",
+        visible_devices, str(vllm_engine_port),
+        str(dp_size), str(dp_rank), args.dp_address,
+        args.dp_rpc_port, str(tp_size),
+    ], check=True)
+
+if __name__ == "__main__":
+    for i in range(dp_size_local):
+        dp_rank = args.dp_rank_start + i
+        vllm_port = args.vllm_start_port + i
+        visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+        p = multiprocessing.Process(target=run_command, args=(visible_devices, dp_rank, vllm_port))
+        p.start()
+        p.join()
+```
+
+Then prepare `run_dp_template.sh` on each node.
+
+**Prefill node** (set `nic_name` and `local_ip` to your own):
+
+```bash
+unset http_proxy https_proxy ftp_proxy
+
+nic_name="enp194s0f0"     # change to your own nic name
+local_ip="90.90.97.36"    # change to your own IP
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=1
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+
+export ASCEND_RT_VISIBLE_DEVICES=$1
+
+vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --enable-expert-parallel \
+    --served-model-name minimax \
+    --max-model-len 131072 \
+    --max-num-batched-tokens 16384 \
+    --max-num-seqs 64 \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.85 \
+    --quantization ascend \
+    --enforce-eager \
+    --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
+    --additional-config '{"recompute_scheduler_enable":true}' \
+    --kv-transfer-config \
+        '{"kv_connector": "MooncakeLayerwiseConnector",
+        "kv_role": "kv_producer",
+        "kv_port": "49810",
+        "engine_id": "0",
+        "kv_connector_extra_config": {
+             "use_ascend_direct": true,
+             "prefill": {"dp_size": 2, "tp_size": 8},
+             "decode":  {"dp_size": 2, "tp_size": 8}
+        }}'
+```
+
+**Decode node** (set `nic_name` and `local_ip` to your own):
+
+```bash
+unset http_proxy https_proxy ftp_proxy
+
+nic_name="enp194s0f0"     # change to your own nic name
+local_ip="90.90.97.40"    # change to your own IP
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+
+export HCCL_BUFFSIZE=2048
+export HCCL_OP_EXPANSION_MODE="AIV"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=1
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+
+export ASCEND_RT_VISIBLE_DEVICES=$1
+
+vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --enable-expert-parallel \
+    --served-model-name minimax \
+    --max-model-len 131072 \
+    --max-num-batched-tokens 16384 \
+    --max-num-seqs 64 \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.9 \
+    --quantization ascend \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
+    --additional-config '{"recompute_scheduler_enable":true}' \
+    --kv-transfer-config \
+        '{"kv_connector": "MooncakeLayerwiseConnector",
+        "kv_role": "kv_consumer",
+        "kv_port": "36900",
+        "engine_id": "2",
+        "kv_connector_extra_config": {
+             "use_ascend_direct": true,
+             "prefill": {"dp_size": 2, "tp_size": 8},
+             "decode":  {"dp_size": 2, "tp_size": 8}
+        }}'
+```
+
+Once the scripts are ready, start the servers on each node.
+
+**Prefill node:**
+
+```bash
+python launch_online_dp.py \
+    --dp-size 2 --tp-size 8 \
+    --dp-size-local 2 --dp-rank-start 0 \
+    --dp-address <prefill_ip> --dp-rpc-port 12321 \
+    --vllm-start-port 7000
+```
+
+**Decode node:**
+
+```bash
+python launch_online_dp.py \
+    --dp-size 2 --tp-size 8 \
+    --dp-size-local 2 --dp-rank-start 0 \
+    --dp-address <decode_ip> --dp-rpc-port 12321 \
+    --vllm-start-port 7100
+```
+
+#### Request Forwarding
+
+Run the proxy on any machine that can reach both nodes. You can get the proxy script from the repository: [load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py).
+
+```bash
+unset http_proxy https_proxy
+
+python load_balance_proxy_layerwise_server_example.py \
+    --port 8009 \
+    --host <prefill_ip> \
+    --prefiller-hosts \
+       <prefill_ip> <prefill_ip> \
+    --prefiller-ports \
+       7000 7001 \
+    --decoder-hosts \
+       <decode_ip> <decode_ip> \
+    --decoder-ports \
+       7100 7101
+```
+
+The service is then accessible at `http://<proxy_ip>:8009`.
 
 ## 6 Functional Verification
 
@@ -437,7 +643,6 @@ vllm bench serve \
   --result-dir ./
 ```
 
-> **TODO (Model Owner):** Please fill in the specific performance metrics (throughput, TPOT, TTFT) for MiniMax-M2.7 under various deployment configurations.
 
 ## 9 Performance Tuning
 
