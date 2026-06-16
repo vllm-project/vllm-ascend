@@ -61,9 +61,6 @@ RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 RUN echo 'export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH' >> /root/.bashrc
 
-# Set base environment variables
-ENV LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/lib64:$LD_LIBRARY_PATH
-
 # Initialize driver directories, users and file groups
 RUN mkdir -m 750 /var/driver -m 750 /var/dmp -m 750 /usr/slog && \
     mkdir -m 755 /home/drv && \
