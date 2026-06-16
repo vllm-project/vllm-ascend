@@ -16,28 +16,23 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+import logging
 from contextlib import contextmanager
 from copy import copy
 from typing import Any, cast
-import logging
+
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair
-from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
-from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager, DecodeEagleAclGraphManager
-
+from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cudagraph_utils import AttentionStatePair, BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
     speculator as vllm_speculator_module,  # type: ignore[import-not-found]
 )
@@ -51,6 +46,7 @@ from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGrap
 
 
 logger = logging.getLogger(__name__)
+
 
 class AscendEagleSpeculator(EagleSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -278,11 +274,9 @@ class AscendEagleSpeculator(EagleSpeculator):
                     self.max_model_len,
                 )
                 if attn_metadata is not None:
-                    self.block_tables.compute_slot_mappings(
-                        idx_mapping, query_start_loc, pos, num_tokens_padded
-                    )
+                    self.block_tables.compute_slot_mappings(idx_mapping, query_start_loc, pos, num_tokens_padded)
             self._increment_decode_attn_metadata(attn_metadata)
-        
+
     def _multi_step_decode(
         self,
         num_reqs: int,
@@ -306,9 +300,7 @@ class AscendEagleSpeculator(EagleSpeculator):
                 self.input_buffers.positions[:num_reqs],
                 batch_desc.num_tokens,
             )
-            slot_mappings_updated = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
-            )
+            slot_mappings_updated = build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config)
             attn_metadata_updated = self._build_draft_attn_metadata(
                 num_reqs=num_reqs,
                 num_reqs_padded=batch_desc.num_reqs or num_reqs,
@@ -319,6 +311,7 @@ class AscendEagleSpeculator(EagleSpeculator):
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
         else:
+            self._ascend_prepare_decode_draft(attn_metadata_updated, num_reqs)
             self._generate_draft(
                 num_reqs,
                 batch_desc.num_tokens,
@@ -327,7 +320,7 @@ class AscendEagleSpeculator(EagleSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
-            
+
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         """Build draft_attn_metadatas for partial-merged draft graph."""
         attn_metadata = self.model_state.attn_metadata
@@ -463,10 +456,21 @@ def torch_gather_wrapper():
 @contextmanager
 def graph_manager_wrapper(speculator):
     """Context manager to override graph manager."""
-    def prefill_factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+
+    def prefill_factory(
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+    ):
         return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
-    def decode_factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+    def decode_factory(
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+    ):
         return DecodeEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
     original_prefill = vllm_speculator_module.PrefillSpeculatorCudaGraphManager
