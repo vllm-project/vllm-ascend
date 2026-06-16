@@ -164,6 +164,14 @@ class SimpleCPUOffloadScheduler:
             return 0, False
 
         state.load_start_tokens = num_computed_tokens
+        logger.info(
+            "Recompute offload cache hit for request %s: load_start=%d, "
+            "load_tokens=%d, stored_tokens=%d.",
+            request.request_id,
+            num_computed_tokens,
+            hit_length,
+            state.num_computed_tokens,
+        )
         return hit_length, True
 
     def update_state_after_alloc(
@@ -323,6 +331,16 @@ class SimpleCPUOffloadScheduler:
             store_transfer_meta=store_transfer,
             ready=not waiting_for_store,
         )
+        logger.info(
+            "Created recompute offload state for request %s: "
+            "computed_tokens=%d, cpu_blocks=%d, store_blocks=%d, "
+            "ready=%s.",
+            req_id,
+            num_computed_tokens,
+            sum(len(ids) for ids in cpu_block_ids_by_group),
+            len(store_cpu_block_ids),
+            not waiting_for_store,
+        )
 
         return True
 
@@ -412,6 +430,14 @@ class SimpleCPUOffloadScheduler:
             [self._gpu_block_pool.blocks[block_id] for block_id in gpu_block_ids]
         )
         state.load_transfer_meta = TransferMeta(gpu_block_ids, cpu_block_ids)
+        logger.info(
+            "Prepared recompute offload H2D load for request %s: "
+            "tokens=[%d, %d), blocks=%d.",
+            request.request_id,
+            load_start_tokens,
+            load_end_tokens,
+            len(gpu_block_ids),
+        )
         return True
 
     def build_connector_meta(

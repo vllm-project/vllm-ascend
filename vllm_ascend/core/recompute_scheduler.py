@@ -409,6 +409,12 @@ class RecomputeScheduler(Scheduler):
                         )
                     if offloaded or not self._fallback_to_recompute_on_preempt():
                         if offloaded:
+                            logger.info(
+                                "Recompute preemption offload enabled for "
+                                "request %s, computed_tokens=%d.",
+                                preempted_req_id,
+                                preempted_num_computed_tokens,
+                            )
                             preempted_req_data.append(
                                 PreemptedRequestData(
                                     req_id=preempted_req_id,
@@ -423,6 +429,12 @@ class RecomputeScheduler(Scheduler):
                         self.kv_cache_manager.free(preempted_req)
                         self.encoder_cache_manager.free(preempted_req)
                         self._clear_async_preempt_state(preempted_req)
+                        logger.info(
+                            "Recompute preemption falls back without offload "
+                            "for request %s, computed_tokens=%d.",
+                            preempted_req_id,
+                            preempted_num_computed_tokens,
+                        )
                         recomputed_reqs.append(
                             RecomputeReqInfo(
                                 preempted_req_id,
