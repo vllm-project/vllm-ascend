@@ -246,13 +246,6 @@ def _is_gemma4_model(vllm_config: VllmConfig) -> bool:
     return any("Gemma4" in architecture for architecture in architectures)
 
 
-def _is_graph_mode_enabled(vllm_config: VllmConfig) -> bool:
-    return (
-        vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        and not getattr(vllm_config.model_config, "enforce_eager", False)
-    )
-
-
 def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, token count, and quantization.
@@ -335,7 +328,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
         )
         world_size = vllm_config.parallel_config.world_size_across_dp
-        if _is_gemma4_model(vllm_config) and _is_graph_mode_enabled(vllm_config):
+        if _is_gemma4_model(vllm_config):
             # Gemma4 MoE graph decode is sensitive to MC2/ALLTOALL dynamic
             # routing metadata on A5. ALLGATHER keeps the model in graph mode
             # while avoiding replayed dispatch/combine metadata drift.
