@@ -29,7 +29,6 @@ from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGra
 
 from vllm_ascend.utils import weak_ref_tensors
 
-
 # ---------------------------------------------------------------------------
 # Per–encoder-budget ACL graph bookkeeping (ViT FIA tasks)
 # ---------------------------------------------------------------------------
@@ -296,14 +295,17 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         buffers = capture_inputs.buffers
 
         with torch.inference_mode():
-            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)  # 这个output是维度
+            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
             output_buffer = torch.empty_like(output)
 
         graph = torch.npu.NPUGraph()
-        with set_encoder_forward_context(token_budget, True):
-            with torch.inference_mode(), torch.npu.graph(graph, self.graph_pool):  # 没有设置graph pool
-                output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
-                output_buffer.copy_(output)
+        with (
+            set_encoder_forward_context(token_budget, True),
+            torch.inference_mode(),
+            torch.npu.graph(graph, self.graph_pool),
+        ):
+            output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
+            output_buffer.copy_(output)
 
         input_key = self.config.input_key_by_modality["image"]
         self.budget_graphs[token_budget] = BudgetGraphMetadata(
