@@ -184,6 +184,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "ngram_spec_decode"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
+        "slot_mapping"
         "store_kv_block"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

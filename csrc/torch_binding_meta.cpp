@@ -1494,6 +1494,7 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+<<<<<<< HEAD
 void npu_scatter_nd_update_v2_meta(
     at::Tensor& var,
     const at::Tensor& indices,
@@ -1599,6 +1600,23 @@ at::Tensor chunk_fwd_o_meta(
     (void)transpose_state_layout;
 
     return o;
+=======
+at::Tensor npu_slot_mapping_meta(
+    const at::Tensor& query_start_loc,
+    const at::Tensor& positions,
+    const at::Tensor& block_table,
+    at::Tensor& slot_mapping,
+    int64_t num_tokens,
+    int64_t max_num_tokens,
+    int64_t block_size,
+    int64_t total_cp_world_size,
+    int64_t total_cp_rank,
+    int64_t cp_kv_cache_interleave_size,
+    int64_t pad_id)
+{
+    // In-place op: caller-provided slot_mapping is mutated and returned.
+    return slot_mapping;
+>>>>>>> c1703487 ([Performance] change slot_mapping to ascend c op)
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> store_kv_block_pre(
@@ -1728,6 +1746,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+<<<<<<< HEAD
     // N-gram spec decode
     ops.impl("npu_ngram_spec_decode", &vllm_ascend::meta::npu_ngram_spec_decode_meta);
     // chunk_gated_delta_rule_fwd_h
@@ -1739,6 +1758,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
     // npu_fused_gdn_gating
     ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
+=======
+    // npu_slot_mapping
+    ops.impl("npu_slot_mapping", &vllm_ascend::meta::npu_slot_mapping_meta);
+>>>>>>> c1703487 ([Performance] change slot_mapping to ascend c op)
 }
 }
 #endif
