@@ -1178,19 +1178,17 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.parallel_config.numa_bind_cpus = None
 
-            if getattr(vllm_config.parallel_config, "enable_dbo", False):
+            # DBO and PCP are not compatible; disable DBO when PCP is enabled.
+            if (
+                getattr(vllm_config.parallel_config, "enable_dbo", False)
+                and getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1) > 1
+            ):
                 logger.warning(
-                    "Parameter is currently ignored on Ascend. parameter=enable_dbo, action: resetting to False. "
+                    "DBO (Dual Batch Overlap) is not compatible with PCP "
+                    "(Prefill Context Parallel). Disabling DBO "
+                    "(enable_dbo=False, ubatch_size=0)."
                 )
                 vllm_config.parallel_config.enable_dbo = False
-
-            ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
-            if ubatch_size != 0:
-                logger.warning(
-                    "Parameter is currently ignored on Ascend. "
-                    "parameter=ubatch_size, value=%d, action: resetting to 0. ",
-                    ubatch_size,
-                )
                 vllm_config.parallel_config.ubatch_size = 0
 
     @classmethod
