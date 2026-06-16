@@ -87,7 +87,7 @@ class EncoderForwardContext:
     token_budget: int | None = None
     capturing: bool = False
     capture_layer_cursor: int = 0
-    cu_seqlens_ends_cpu: torch.Tensor | None = None
+    cu_seqlens_cpu: torch.Tensor | None = None
     cu_window_seqlens_cpu: torch.Tensor | None = None
     sequence_lengths_cpu: torch.Tensor | None = None
 
@@ -103,7 +103,7 @@ def _reset_encoder_forward_context() -> None:
 
     _context.token_budget = None
     _context.capturing = False
-    _context.cu_seqlens_ends_cpu = None
+    _context.cu_seqlens_cpu = None
     _context.cu_window_seqlens_cpu = None
     _context.sequence_lengths_cpu = None
 
