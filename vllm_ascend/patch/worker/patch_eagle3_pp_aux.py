@@ -38,6 +38,7 @@ import torch
 import torch.nn as nn
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,8 @@ def _make_deepseek_v2_forward():
         self,
         input_ids: "torch.Tensor | None",
         positions: torch.Tensor,
+        kv_caches: list[torch.Tensor],
+        attn_metadata: "AttentionMetadata",
         intermediate_tensors: "IntermediateTensors | None" = None,
         inputs_embeds: "torch.Tensor | None" = None,
     ):
@@ -97,7 +100,14 @@ def _make_deepseek_v2_forward():
         ):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual if residual is not None else hidden_states)
-            hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                kv_caches[idx - self.start_layer],
+                attn_metadata,
+                llama_4_scaling,
+            )
 
         if not pp_group.is_last_rank:
             result = IntermediateTensors(
