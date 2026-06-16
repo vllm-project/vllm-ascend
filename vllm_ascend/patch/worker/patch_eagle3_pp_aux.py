@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 _AUX_KEY_PREFIX = "aux_layer_"
 
+
 def _extract_aux_from_intermediate(
     intermediate_tensors: "IntermediateTensors | None",
 ) -> list[torch.Tensor]:
@@ -54,6 +55,7 @@ def _extract_aux_from_intermediate(
         key=lambda k: int(k.split("_")[-1]),
     )
     return [intermediate_tensors.tensors[k] for k in aux_keys]
+
 
 def _make_deepseek_v2_forward():
     def pp_eagle3_forward(
@@ -127,6 +129,7 @@ def _make_deepseek_v2_forward():
 
     return pp_eagle3_forward
 
+
 def _patch_make_empty_intermediate_tensors(inner_model: nn.Module) -> None:
     if getattr(inner_model, "_eagle3_pp_aux_make_empty_patched", False):
         return
@@ -138,9 +141,7 @@ def _patch_make_empty_intermediate_tensors(inner_model: nn.Module) -> None:
         aux_layers = getattr(inner_model, "aux_hidden_state_layers", ())
         # A non-first PP rank only receives aux hidden states produced by
         # earlier pipeline stages. Local aux states are appended during forward.
-        num_incoming_aux_layers = sum(
-            layer_idx < inner_model.start_layer for layer_idx in aux_layers
-        )
+        num_incoming_aux_layers = sum(layer_idx < inner_model.start_layer for layer_idx in aux_layers)
         hidden_size = inner_model.config.hidden_size
         for i in range(num_incoming_aux_layers):
             result.tensors[f"{_AUX_KEY_PREFIX}{i}"] = torch.zeros(
@@ -152,6 +153,7 @@ def _patch_make_empty_intermediate_tensors(inner_model: nn.Module) -> None:
 
     inner_model.make_empty_intermediate_tensors = pp_make_empty_intermediate_tensors
     inner_model._eagle3_pp_aux_make_empty_patched = True
+
 
 def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
