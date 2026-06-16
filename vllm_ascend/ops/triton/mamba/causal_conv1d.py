@@ -653,8 +653,6 @@ def causal_conv1d_update_npu(
 
     # -------- tiling heuristic--------
     # keep program count around ~[80..160]
-    # vector core 40
-    # TODO: use driver to get the vector core num
     CORE_HINT = get_vectorcore_num()
     # channel tile: 512 when dim large (reduce tasks), else 256
     block_n = 512 if dim >= 512 else 256
