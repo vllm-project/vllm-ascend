@@ -542,6 +542,11 @@ class RequestTracker:
 
     last_block_key: str | None = None
 
+    mamba_group_ids: list[int] | None = None
+
+    # spec blocks for mamba cache group
+    num_speculative_blocks: int = 0
+
     def __init__(
         self,
         req_id: str,
@@ -558,9 +563,13 @@ class RequestTracker:
         ends: list[int] | None = None,
         sizes_per_chunk: list[list[int]] | None = None,
         last_block_key: str | None = None,
+        mamba_group_ids: list[int] | None = None,
+        num_speculative_blocks: int = 0,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
+        self.mamba_group_ids = mamba_group_ids
+        self.num_speculative_blocks = num_speculative_blocks
         block_ids = allocated_block_ids_by_group
         if block_ids is None:
             block_ids = normalize_block_ids_by_group(allocated_block_ids or [])
@@ -609,7 +618,26 @@ class RequestTracker:
                 [[] for _ in range(len(normalized) - len(self.allocated_block_ids_by_group))]
             )
         for group_id, ids in enumerate(normalized):
+            self.update_mamba_spec_blocks(ids, group_id)
             self.allocated_block_ids_by_group[group_id].extend(ids)
+
+    def update_mamba_spec_blocks(self, block_ids: list[int], kv_cache_group_id: int = 0):
+        """
+        for mamba align groups, each step will:
+            - Firstly, append some necessary null blocks
+            - Secondly, move the speculative blocks(maybe all or partially) to the last position for reuse
+            - Finally, allocate a new block
+        so, if a speculative block is moved to last position and replaced with null block,
+        we also need to update the previous allocated_block_ids to 0.
+        """
+        if not block_ids:
+            return
+        if self.mamba_group_ids and kv_cache_group_id in self.mamba_group_ids and self.num_speculative_blocks > 0:
+            mask_spec_count = min(len(block_ids) - 1, self.num_speculative_blocks)
+            group_block_ids = self.allocated_block_ids_by_group[kv_cache_group_id]
+            group_block_ids[-self.num_speculative_blocks : mask_spec_count - self.num_speculative_blocks] = [
+                0
+            ] * mask_spec_count
 
 
 @dataclass(init=False)
