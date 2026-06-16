@@ -33,6 +33,7 @@ deployment:
     envs:
       <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+      VLLM_ASCEND_ENABLE_FUSED_MC2: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -77,6 +78,7 @@ deployment:
     envs:
       <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+      VLLM_ASCEND_ENABLE_FUSED_MC2: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -121,6 +123,7 @@ deployment:
       <<: *env_common
       VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
+      VLLM_ASCEND_ENABLE_FUSED_MC2: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -166,6 +169,7 @@ deployment:
       <<: *env_common
       VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
+      VLLM_ASCEND_ENABLE_FUSED_MC2: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
