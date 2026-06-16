@@ -159,7 +159,7 @@ vllm serve /mnt/nfs_hw/weight/DeepSeek-V4-Flash-w8a8-mtp \
   --safetensors-load-strategy 'prefetch' \
   --max-model-len 135168 \
   --max-num-batched-tokens 4096 \
-  --served-model-name ds \
+  --served-model-name deepseek_v4 \
   --gpu-memory-utilization 0.92 \
   --max-num-seqs 16 \
   --data-parallel-size 1 \
@@ -204,7 +204,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
     --enable-prefix-caching \
     --max_model_len 1024000 \
     --max-num-batched-tokens 8192 \
-    --served-model-name dsv4 \
+    --served-model-name deepseek_v4 \
     --gpu-memory-utilization 0.9 \
     --api-server-count 1 \
     --max-num-seqs 16 \
