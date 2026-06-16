@@ -11,18 +11,9 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
-    AttentionStatePair,
-    BatchExecutionDescriptor,
-)
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
-    DecodeSpeculatorCudaGraphManager as DecodeEagleCudaGraphManager,
-)
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-    PrefillSpeculatorCudaGraphManager as PrefillEagleCudaGraphManager,
-)
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
