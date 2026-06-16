@@ -101,32 +101,42 @@ def causal_conv1d_fn(
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    out_ref = []
-    out_ref_b = []
+    dim, width = weight.shape
+    state_len = width - 1
+    if conv_states.shape[-2] != dim and conv_states.shape[-1] == dim:
+        conv_states = conv_states.transpose(-1, -2)
+    if conv_states.shape[-2] != dim:
+        raise RuntimeError(
+            f"causal_conv1d_fn: conv_states dim mismatch, "
+            f"expected dim={dim}, conv_states.shape={tuple(conv_states.shape)}"
+        )
+
     seqlens = query_start_loc[1:] - query_start_loc[:-1]
     seqlens = seqlens.tolist()
     splits = torch.split(x, seqlens, dim=-1)
-    width = weight.shape[1]
 
-    for i in range(len(seqlens)):
-        x_s = splits[i]
-        if cache_indices[i] == PAD_SLOT_ID:
+    out_chunks = []
+    for i, x_s in enumerate(splits):
+        cache_idx = int(cache_indices[i].item())
+        if cache_idx == pad_slot_id:
             continue
-        out_ref_b.append(
-            causal_conv1d_ref(
-                x_s,
-                weight,
-                bias,
-                activation=activation,
-                return_final_states=True,
-                final_states_out=conv_states[cache_indices[i]][..., : (width - 1)].unsqueeze(0),
-                initial_states=conv_states[cache_indices[i]][..., : (width - 1)],
-            )
-        )
 
-    out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
-    out_ref_tensor = torch.cat(out_ref, dim=0)
-    return out_ref_tensor
+        state = conv_states[cache_idx]
+        init_state = state[..., :state_len].unsqueeze(0) if bool(has_initial_state[i].item()) else None
+        out_ref, final_state = causal_conv1d_ref(
+            x_s.unsqueeze(0),
+            weight,
+            bias,
+            activation=activation,
+            return_final_states=True,
+            initial_states=init_state,
+        )
+        state[..., :state_len].copy_(final_state.squeeze(0))
+        out_chunks.append(out_ref.squeeze(0))
+
+    if not out_chunks:
+        return x.new_zeros((dim, 0))
+    return torch.cat(out_chunks, dim=-1)
 
 
 @triton.jit(
