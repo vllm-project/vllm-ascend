@@ -105,34 +105,21 @@ class DeviceInfo:
         npu_map_info: dict[str, dict[str, str]] = {}
         npu_info, _ = execute_command(["npu-smi", "info", "-m"])
         npu_map = [line.strip() for line in npu_info.splitlines() if line.strip()]
-        if not npu_map:
-            return npu_map_info
 
         header = DeviceInfo.split_npu_smi_header(npu_map[0])
-        try:
-            npu_id_idx = header.index("NPU ID")
-        except ValueError:
-            return npu_map_info
+        npu_id_idx = header.index("NPU ID")
         chip_id_idx = header.index("Chip ID") if "Chip ID" in header else None
         chip_logic_id_idx = header.index("Chip Logic ID") if "Chip Logic ID" in header else None
 
         for line in npu_map[1:]:
             parts = line.split()
-            if len(parts) <= npu_id_idx:
-                continue
             npu_id = parts[npu_id_idx]
-            if not npu_id.isdigit():
-                continue
 
             chip_id = "0"
             if chip_id_idx is not None:
-                if len(parts) <= chip_id_idx or not parts[chip_id_idx].isdigit():
-                    continue
                 chip_id = parts[chip_id_idx]
 
             if chip_logic_id_idx is not None:
-                if len(parts) <= chip_logic_id_idx:
-                    continue
                 chip_logic_id = parts[chip_logic_id_idx]
             else:
                 chip_logic_id = npu_id
@@ -167,8 +154,6 @@ class DeviceInfo:
             line = line.strip()
             if line.startswith("| NPU") and "Process id" in line:
                 parts = [p.strip() for p in line.strip("|").split("|")]
-                if not parts:
-                    continue
                 proc_npu_field = " ".join(parts[0].split())
                 in_proc_section = True
                 continue
@@ -179,13 +164,9 @@ class DeviceInfo:
                 if len(parts) < 2:
                     continue
                 npu_chip_parts = parts[0].split()
-                if not npu_chip_parts:
-                    continue
                 npu_id = npu_chip_parts[0]
                 chip_id = None
                 if proc_npu_field == "NPU Chip":
-                    if len(npu_chip_parts) < 2:
-                        continue
                     chip_id = npu_chip_parts[1]
                 if not npu_id.isdigit() or (chip_id is not None and not chip_id.isdigit()):
                     continue
