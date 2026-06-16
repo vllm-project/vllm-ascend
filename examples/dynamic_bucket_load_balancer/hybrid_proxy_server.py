@@ -29,7 +29,7 @@
 # From examples/dynamic_bucket_load_balancer/, point the proxy at each backend
 # with --server-hosts / --server-ports:
 #
-#   python hybrid/hybrid_proxy_server.py \
+#   python hybrid_proxy_server.py \
 #     --host 0.0.0.0 --port 8000 \
 #     --server-hosts 127.0.0.1 127.0.0.1 \
 #     --server-ports 8100 8101
@@ -40,7 +40,7 @@
 # add --enable-dynamic-bucket. The server count must be >= 2 so each bucket has at
 # least one instance:
 #
-#   python hybrid/hybrid_proxy_server.py \
+#   python hybrid_proxy_server.py \
 #     --host 0.0.0.0 --port 8000 \
 #     --server-hosts 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 \
 #     --server-ports 8100 8101 8102 8103 \
@@ -322,7 +322,7 @@ def parse_args():
 async def lifespan(app: FastAPI):
     global proxy_state
     proxy_state = ProxyState(global_args.server_instances)
-    logger.info(f"Initialized {len(proxy_state.infer_servers)} dp server clients.")
+    logger.debug(f"Initialized {len(proxy_state.infer_servers)} dp server clients.")
     yield
     for p in proxy_state.infer_servers:
         await p.client.aclose()

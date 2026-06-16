@@ -37,7 +37,7 @@
 # and decoder with --prefiller-hosts/--prefiller-ports and
 # --decoder-hosts/--decoder-ports:
 #
-#   python disaggregated_prefill/disaggreated_prefill_server.py \
+#   python disaggregated_prefill_server.py \
 #     --host 0.0.0.0 --port 8000 \
 #     --prefiller-hosts 127.0.0.1 127.0.0.1 \
 #     --prefiller-ports 8100 8101 \
@@ -50,7 +50,7 @@
 # short/long groups), add --enable-dynamic-bucket. The prefiller count must be
 # >= 2 so each bucket has at least one instance:
 #
-#   python disaggregated_prefill/disaggreated_prefill_server.py \
+#   python disaggregated_prefill_server.py \
 #     --host 0.0.0.0 --port 8000 \
 #     --prefiller-hosts 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 \
 #     --prefiller-ports 8100 8101 8102 8103 \
