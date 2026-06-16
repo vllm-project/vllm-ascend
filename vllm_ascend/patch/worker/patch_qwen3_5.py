@@ -150,6 +150,7 @@ Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
 _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
+_GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
 
 if is_310p():
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
