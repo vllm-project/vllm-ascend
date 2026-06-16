@@ -113,7 +113,8 @@ docker run -itd -u 0 --ipc=host --privileged \
   -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
   -v /etc/ascend_install.info:/etc/ascend_install.info \
   -v /home/:/home/ \
-  -v /opt/data/verification/:/opt/data/verification/ \   # Map the model weights here
+  # Map the model weights here
+  -v /opt/data/verification/:/opt/data/verification/ \
   -v /root/.cache:/root/.cache \
   -v /mnt/performance/:/mnt/performance/ \
   -it $IMAGE bash
@@ -410,7 +411,7 @@ lm_eval \
   --output_path ./
 ```
 
-## 8 Performance
+## 8 Performance Evaluation
 
 ### 8.1 Using AISBench
 
@@ -454,8 +455,8 @@ vllm bench serve \
 
 #### Detailed Configuration
 
-| Scenario | Configuration | NPUs | TP | DP | BS | Concurrency | Max Context | MTP (EAGLE3) | FUSED_MC2 | FlashComm1 | Async Scheduling |
-|----------|---------------|------|----|----|----|-------------|-------------|--------------|-----------|------------|------------------|
+| Scenario | Configuration | NPUs | TP | DP | Max Num Batched Tokens | Max Num Seqs | Max Model Len | MTP (EAGLE3) | FUSED_MC2 | FlashComm1 | Async Scheduling |
+|----------|---------------|------|----|----|------------------------|--------------|---------------|--------------|-----------|------------|------------------|
 | High Throughput (32K→1K) | A3 Single-node | 16 | 4 | 4 | 32 | 48 | 40k | 3 | On | On | On |
 | Long Context (128K→2K) | A3 Single-node | 16 | 8 | 1 | 8 | 16 | 138k | 1 | On | On | Off |
 | Low Latency (3.5K→1.5K) | A3 Single-node | 16 | 16 | 1 | 8 | 16 | 32k | 3 | On | On | On |
