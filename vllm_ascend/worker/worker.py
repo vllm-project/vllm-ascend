@@ -748,16 +748,15 @@ class NPUWorker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
-        # Use a unique integer key combining pp_rank and tp_rank to avoid
-        # tuple keys that would trigger the upstream vllm's
-        # set_xfer_handshake_metadata_pp_aware assertion for pp_rank > 0.
-        # The upstream method interprets tuple (pp_rank, tp_rank) keys as
-        # "PP-disaggregated transfer" and rejects them for mooncake.
-        # Flat integer keys: pp_rank * tp_size + tp_rank preserves uniqueness.
-        pp_rank = get_pp_group().rank_in_group
+        # The upstream vllm's set_xfer_handshake_metadata_pp_aware expects
+        # (pp_rank, tp_rank) tuple keys and asserts pp_rank == 0 for
+        # mooncake-style connectors (which don't support PP-disaggregated
+        # KV transfer).  Always report pp_rank=0 regardless of the actual
+        # PP rank; the per-worker host/engine_id metadata is identical
+        # across PP ranks on the same node, so the scheduler mapping is
+        # unaffected by the key collision.
         tp_rank = get_tp_group().rank_in_group
-        tp_size = get_tp_group().world_size
-        return {pp_rank * tp_size + tp_rank: metadata}
+        return {(0, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
