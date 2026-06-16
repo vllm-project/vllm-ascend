@@ -36,6 +36,7 @@ from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
+    cleanup_dist_env_for_snapshot,
 )
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
@@ -586,8 +587,6 @@ class NPUWorker(WorkerBase):
     def parallel_group_clean_up(self) -> None:
         destroy_ascend_model_parallel()
         logger.info("[snapshot] [parallel] rank %s: destroy_ascend_model_parallel done", self.rank)
-        
-        from vllm.distributed import cleanup_dist_env_for_snapshot
         cleanup_dist_env_for_snapshot()
         logger.info("[snapshot] [parallel] rank %s: cleanup_dist_env_for_snapshot done", self.rank)
 
