@@ -37,7 +37,7 @@ copyright = "2025, vllm-ascend team"
 author = "the vllm-ascend team"
 
 # The full version, including alpha/beta/rc tags
-release = "0.20.2rc1"
+release = "0.21.0rc1"
 
 # -- General configuration ---------------------------------------------------
 
@@ -74,17 +74,17 @@ myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.20.2",
+    "vllm_version": "v0.21.0",
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    "vllm_ascend_version": "v0.20.2rc1",
+    "vllm_ascend_version": "v0.21.0rc1",
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    "pip_vllm_ascend_version": "0.20.2rc1",
-    "pip_vllm_version": "0.20.2",
+    "pip_vllm_ascend_version": "0.21.0rc1",
+    "pip_vllm_version": "0.21.0",
     # CANN image tag paired with the vllm_ascend_version above
-    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.11",
+    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.12",
     # vLLM commit hash for main branch
     "main_vllm_commit": _VLLM_MAIN_VERIFIED_COMMIT,
     # vLLM tag for main branch
