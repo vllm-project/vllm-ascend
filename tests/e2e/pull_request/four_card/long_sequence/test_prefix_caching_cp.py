@@ -25,6 +25,8 @@ from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
 
+# TODO(qcs): We should use Qwen3.5 for this test when it's fixed and available,
+# so that we can test the hybrid kv cache with both full attention and linear attention.
 MODEL = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 MAX_NUM_SEQS = 2
 THREAD_ENV = {

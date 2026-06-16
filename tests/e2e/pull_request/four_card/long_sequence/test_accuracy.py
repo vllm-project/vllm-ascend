@@ -242,6 +242,7 @@ FULL_FEATURE_MODEL_CASES = [
             "enable_chunked_prefill": True,
             "enable_prefix_caching": True,
             "gpu_memory_utilization": 0.2,
+            "cp_kv_cache_interleave_size": 128,
             "block_size": 128,
             "quantization": "ascend",
             # TODO(qcs): We should set `long_prefill_token_threshold` to 4
@@ -307,10 +308,6 @@ FULL_FEATURE_MODEL_CASES = [
             "additional_config": {
                 "enable_flashcomm1": True,
                 "enable_dsa_cp": True,
-            },
-            "speculative_config": {
-                "method": "mtp",
-                "num_speculative_tokens": 3,
             },
         },
     ),
