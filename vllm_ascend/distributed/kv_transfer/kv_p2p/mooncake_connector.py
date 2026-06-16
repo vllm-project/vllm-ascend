@@ -465,7 +465,6 @@ class KVCacheRecvingThread(threading.Thread):
         ] = defaultdict(  # type: ignore
             deque
         )
-        self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0  # seconds
 
         assert vllm_config is not None
@@ -494,6 +493,7 @@ class KVCacheRecvingThread(threading.Thread):
             for rank in range(self._prefill_pp_size)
         }
         self.proc_not_transfer_request: dict[str, bool] = {}
+        self.proc_not_transfer_request_lock = threading.Lock()
         self.failed_recv_requests: set[str] = set()
         self.invalid_block_ids: set[int] = set()
         self.failed_recv_requests_lock = threading.Lock()
@@ -583,7 +583,7 @@ class KVCacheRecvingThread(threading.Thread):
                     logger.warning("Received a None request. ")
                     self.request_queue.task_done()
                     continue
-                self._handle_request(request_data)
+                self.executor.submit(self._handle_request, request_data)
             except Exception as e:
                 logger.error("Error in KVCacheTransferThread. error=%s. ", e)
 
@@ -612,8 +612,8 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             if all_task_done:
                 self.task_tracker.update_done_task_count(request_id)
-                if request_id in self.proc_not_transfer_request:
-                    del self.proc_not_transfer_request[request_id]
+                with self.proc_not_transfer_request_lock:
+                    self.proc_not_transfer_request.pop(request_id, None)
                 self._clear_failed_recv_request(request_id)
             self.request_queue.task_done()
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
@@ -627,14 +627,17 @@ class KVCacheRecvingThread(threading.Thread):
     ):
         if self.side_channel_port != self.local_handshake_port or not remote_port_send_num:
             return
-        if request_id not in self.proc_not_transfer_request:
-            self.proc_not_transfer_request[request_id] = True
-        if self.proc_not_transfer_request[request_id]:
+        with self.proc_not_transfer_request_lock:
+            if request_id not in self.proc_not_transfer_request:
+                self.proc_not_transfer_request[request_id] = True
+            should_send = self.proc_not_transfer_request[request_id]
+            if should_send:
+                self.proc_not_transfer_request[request_id] = False
+        if should_send:
             for remote_port in remote_port_send_num:
                 if remote_port_send_num[remote_port]["num"] == 0:
                     remote_host_ = remote_port_send_num[remote_port]["host"]
                     self._send_done_recv_signal(request_id, remote_host_, remote_port, remote_port_send_num)
-            self.proc_not_transfer_request[request_id] = False
 
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
@@ -1179,7 +1182,7 @@ class KVCacheRecvingThread(threading.Thread):
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), f"{remote_host}:{remote_handshake_port}")
-            metadata_bytes = ensure_zmq_recv(sock, self.remote_poller, f"{remote_host}:{remote_handshake_port}")
+            metadata_bytes = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
             agent_meta = self.decoder.decode(metadata_bytes)
             engine_id = agent_meta.engine_id
             assert engine_id != self.local_engine_id, (
@@ -1216,9 +1219,7 @@ class KVCacheRecvingThread(threading.Thread):
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             data_bytes = self.encoder.encode((DONE_RECVING_MSG, request_id, remote_port_send_num))
             ensure_zmq_send(sock, data_bytes, f"{remote_host}:{remote_handshake_port}")
-            resp = ensure_zmq_recv(
-                sock, self.remote_poller, f"{remote_host}:{remote_handshake_port}", timeout=self.timeout
-            )
+            resp = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("Received response for request %s: %s", request_id, resp.decode("utf-8"))
             if resp != b"ACK":
@@ -1257,7 +1258,10 @@ class KVCacheRecvingThread(threading.Thread):
                 zmq.SNDTIMEO,  # type: ignore
                 int(self.timeout * 1000),
             )
-            self.remote_poller.register(sock, zmq.POLLIN)  # type: ignore
+            sock.setsockopt(
+                zmq.RCVTIMEO,  # type: ignore
+                int(self.timeout * 1000),
+            )
             return sock
 
     def _return_remote_socket(
@@ -2834,19 +2838,13 @@ def ensure_zmq_send(
 
 def ensure_zmq_recv(
     socket: zmq.Socket,  # type: ignore
-    poller: zmq.Poller,  # type: ignore
     path: str,
-    timeout: float = 1.0,
     max_retries: int = 3,
 ) -> bytes:
     retries_left = max_retries
     while True:
         try:
-            if dict(poller.poll(int(timeout * 1000))):  # milliseconds
-                data = socket.recv()
-                return data
-            else:
-                raise zmq.ZMQError("Receive timeout")  # type: ignore
+            return socket.recv()
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
