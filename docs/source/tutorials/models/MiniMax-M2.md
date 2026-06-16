@@ -313,7 +313,6 @@ PD separation deployment requires careful tuning of DP/TP ratios between Prefill
 
 **Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
 
-> **TODO (Model Owner):** Please fill in the specific PD separation startup commands, launch scripts, and KV transfer configuration for MiniMax-M2.7.
 
 ## 6 Functional Verification
 
@@ -437,7 +436,6 @@ vllm bench serve \
   --result-dir ./
 ```
 
-> **TODO (Model Owner):** Please fill in the specific performance metrics (throughput, TPOT, TTFT) for MiniMax-M2.7 under various deployment configurations.
 
 ## 9 Performance Tuning
 
