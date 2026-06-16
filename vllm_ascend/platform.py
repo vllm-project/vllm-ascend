@@ -358,6 +358,18 @@ class NPUPlatform(Platform):
             raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
 
     @classmethod
+    def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.data_parallel_size > 1 and parallel_config.prefill_context_parallel_size > 1:
+            raise ValueError(
+                "PCP (Prefill Context Parallelism) and DP (Data Parallelism) "
+                "cannot be enabled simultaneously in the current version of vLLM Ascend. "
+                f"Got data_parallel_size={parallel_config.data_parallel_size} and "
+                f"prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}. "
+                "Please set either --data-parallel-size 1 or --prefill-context-parallel-size 1."
+            )
+
+    @classmethod
     def _validate_draft_decode_context_parallel_config(
         cls,
         vllm_config: VllmConfig,
@@ -438,7 +450,7 @@ class NPUPlatform(Platform):
 
         cls._validate_layer_sharding_config(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
-
+        cls._validate_parallel_config(vllm_config)
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
 

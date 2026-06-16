@@ -28,6 +28,12 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.device_config = MagicMock()
         mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
+        mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+        mock_vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_vllm_config.parallel_config.pipeline_parallel_size = 1
+        mock_vllm_config.parallel_config.context_parallel_size = 1
+        mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.scheduler_config.max_num_seqs = None
@@ -695,6 +701,35 @@ class TestNPUPlatform(TestBase):
 
         with pytest.raises(ValueError, match="layer_sharding can only be enabled in PD-disaggregated's P node"):
             self.platform._validate_layer_sharding_config(vllm_config)
+
+    def test_validate_parallel_config_rejects_pcp_plus_dp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+
+        with pytest.raises(ValueError, match="PCP \(Prefill Context Parallelism\) and DP \(Data Parallelism\)"):
+            self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_parallel_config_accepts_dp_only(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+
+        self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_parallel_config_accepts_pcp_only(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+
+        self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_parallel_config_accepts_neither(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+
+        self.platform._validate_parallel_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
