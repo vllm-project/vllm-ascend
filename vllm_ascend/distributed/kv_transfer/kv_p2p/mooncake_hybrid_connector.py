@@ -1070,7 +1070,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         Flattens the ``(pp_rank, tp_rank)`` tuple keys into unique integer
         keys to match the port-offset-based lookup.
         """
-        tp_size = self._vllm_config.parallel_config.tensor_parallel_size
+        tp_size = max(tp_rank for (_, tp_rank) in metadata) + 1
         flat_metadata: dict[int, KVConnectorHandshakeMetadata] = {
             pp_rank * tp_size + tp_rank: meta
             for (pp_rank, tp_rank), meta in metadata.items()
