@@ -24,12 +24,13 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 class XliteModelRunner(NPUModelRunner):
     def get_model(self) -> nn.Module:
+        """See :meth:`NPUModelRunner.get_model` and :meth:`XliteWrapper.unwrap` for details."""
         return self.model.unwrap()
 
     def load_model(self) -> None:
-        super().load_model()
         from vllm_ascend.xlite.xlite import XliteWrapper
 
+        super().load_model()
         self.model = XliteWrapper(self.model, self.vllm_config)
 
     def initialize_kv_cache(
@@ -37,7 +38,7 @@ class XliteModelRunner(NPUModelRunner):
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
     ) -> None:
-        super().initialize_kv_cache(kv_cache_config)
+        super().initialize_kv_cache(kv_cache_config, is_profiling=is_profiling)
         self.model.register_kv_caches(self.kv_caches)
 
     def _should_build_dummy_attn_metadata(

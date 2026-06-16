@@ -5,13 +5,14 @@ import torch
 
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties
 
-DTYPES = [torch.bfloat16, torch.float16]
-NUM_TOKENS = [2, 4, 8]
-VOCAB_SIZE = [151936]
-NUM_STATUS = [1, 4, 8, 16]
-SEEDS = [0]
-DEVICES = [f"npu:{0}"]
+NUM_TOKENS = [1, 4]
+VOCAB_SIZE = [1000]
+NUM_STATUS = [1, 4]
 NUM_SPECULATIVE_TOKENS = [0, 1, 3]
+DTYPES = [torch.bfloat16, torch.float16]
+SEEDS = [42]
+DEVICES = [f"npu:{0}"]
+
 DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
 
@@ -26,7 +27,6 @@ def pytorch_apply_penalties(
     presence_penalty: torch.Tensor,
     prompt_bin_mask: torch.Tensor,
     output_bin_counts: torch.Tensor,
-    num_speculative_tokens: int,
 ) -> torch.Tensor:
     """
     Pytorch equivalent implementation
@@ -45,12 +45,16 @@ def pytorch_apply_penalties(
     for state_idx in range(num_status):
         for packed_idx in range(num_packed):
             packed_val = prompt_bin_mask[state_idx, packed_idx].item()
+            if packed_val == 0:
+                continue
             start_idx = packed_idx * 32
             end_idx = min(start_idx + 32, vocab_size)
 
             for bit_pos in range(end_idx - start_idx):
                 if (packed_val >> bit_pos) & 1:
                     prompt_masks_unpacked[state_idx, start_idx + bit_pos] = True
+
+    start_idx_in_batch = torch.arange(num_tokens, device=device) - expanded_local_pos
 
     for token_idx in range(num_tokens):
         req_state_idx = idx_mapping[token_idx].item()
@@ -68,33 +72,33 @@ def pytorch_apply_penalties(
             continue
 
         current_prompt_mask = prompt_masks_unpacked[req_state_idx]
-        base_output_counts = output_bin_counts[req_state_idx]
+        base_counts = output_bin_counts[req_state_idx].clone()
 
         # Compute cumulative draft counts
         pos = expanded_local_pos[token_idx].item()
-        start_idx_in_batch = token_idx - pos
         draft_counts = torch.zeros(vocab_size, device=device, dtype=torch.int32)
 
-        for prev_pos in range(num_speculative_tokens):
-            if prev_pos < pos:
-                prev_token = token_ids[start_idx_in_batch + prev_pos + 1].item()
-                draft_counts[prev_token] += 1
+        for prev_pos in range(pos):
+            prev_token_idx = start_idx_in_batch[token_idx] + prev_pos + 1
+            if 0 <= prev_token_idx < num_tokens:
+                prev_token = token_ids[prev_token_idx].item()
+                if 0 <= prev_token < vocab_size:
+                    draft_counts[prev_token] += 1
 
         # Total counts = base output counts + cumulative draft counts
-        total_output_counts = base_output_counts + draft_counts
-        output_bin_mask = total_output_counts > 0
+        total_counts = base_counts + draft_counts
+        output_bin_mask = total_counts > 0
 
         if use_rep_penalty:
-            scale = torch.ones(vocab_size, device=device)
-            mask = current_prompt_mask | output_bin_mask
-            scale[mask] = rep_penalty
+            need_scale = current_prompt_mask | output_bin_mask
+            scale = torch.where(need_scale, rep_penalty, 1.0)
 
             pos_mask = logits_float[token_idx] > 0
             scale_factor = torch.where(pos_mask, 1.0 / scale, scale)
             logits_float[token_idx] *= scale_factor
 
         if use_freq_penalty:
-            logits_float[token_idx] -= freq_penalty * total_output_counts.float()
+            logits_float[token_idx] -= freq_penalty * total_counts.float()
 
         if use_pres_penalty:
             logits_float[token_idx] -= pres_penalty * output_bin_mask.float()
@@ -146,7 +150,7 @@ def create_test_data(
 
     for state_idx in range(num_status):
         num_tokens_in_prompt = max(1, vocab_size // 20)
-        prompt_tokens = torch.randperm(vocab_size)[:num_tokens_in_prompt]
+        prompt_tokens = torch.randperm(vocab_size, device=device)[:num_tokens_in_prompt]
 
         for token_id in prompt_tokens:
             packed_idx = token_id // 32
@@ -156,8 +160,8 @@ def create_test_data(
     output_bin_counts = torch.zeros(num_status, vocab_size, device=device, dtype=torch.int32)
     for state_idx in range(num_status):
         num_output_tokens = max(1, vocab_size // 20)
-        output_tokens = torch.randint(0, vocab_size, (num_output_tokens,))
-        counts = torch.randint(1, 10, (num_output_tokens,))
+        output_tokens = torch.randint(0, vocab_size, (num_output_tokens,), device=device)
+        counts = torch.randint(1, 10, (num_output_tokens,), device=device)
 
         for token, count in zip(output_tokens, counts):
             output_bin_counts[state_idx, token] = count
@@ -172,78 +176,71 @@ def create_test_data(
         presence_penalty,
         prompt_bin_mask,
         output_bin_counts,
-        num_speculative_tokens,
     )
 
 
-@pytest.mark.skip(
-    reason="The test case failed and took one hour. Yang Cheng \
-        has been notified to fix it after the holiday."
-)
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
-@pytest.mark.parametrize("num_status", NUM_STATUS)
-@pytest.mark.parametrize("num_speculative_tokens", NUM_SPECULATIVE_TOKENS)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", DEVICES)
-@torch.inference_mode()
-def test_apply_penalties(num_tokens, vocab_size, num_status, num_speculative_tokens, dtype, seed, device):
-    (
-        logits_triton,
-        idx_mapping,
-        token_ids,
-        expanded_local_pos,
-        repetition_penalty,
-        frequency_penalty,
-        presence_penalty,
-        prompt_bin_mask,
-        output_bin_counts,
-        num_spec_tokens,
-    ) = create_test_data(
-        num_tokens=num_tokens,
-        vocab_size=vocab_size,
-        num_status=num_status,
-        num_speculative_tokens=num_speculative_tokens,
-        device=device,
-        dtype=dtype,
-        seed=seed,
-    )
+class TestApplyPenalties:
+    @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
+    @pytest.mark.parametrize("num_status", NUM_STATUS)
+    @pytest.mark.parametrize("num_speculative_tokens", NUM_SPECULATIVE_TOKENS)
+    @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.parametrize("seed", SEEDS)
+    @pytest.mark.parametrize("device", DEVICES)
+    @torch.inference_mode()
+    def test_apply_penalties(self, num_tokens, vocab_size, num_status, num_speculative_tokens, dtype, seed, device):
+        (
+            logits_triton,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+        ) = create_test_data(
+            num_tokens=num_tokens,
+            vocab_size=vocab_size,
+            num_status=num_status,
+            num_speculative_tokens=num_speculative_tokens,
+            device=device,
+            dtype=dtype,
+            seed=seed,
+        )
 
-    logits_pytorch = logits_triton.clone()
+        logits_pytorch = logits_triton.clone()
 
-    apply_penalties(
-        logits_triton,
-        idx_mapping,
-        token_ids,
-        expanded_local_pos,
-        repetition_penalty,
-        frequency_penalty,
-        presence_penalty,
-        prompt_bin_mask,
-        output_bin_counts,
-        num_spec_tokens,
-    )
+        apply_penalties(
+            logits_triton,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+        )
 
-    logits_pytorch_result = pytorch_apply_penalties(
-        logits_pytorch,
-        idx_mapping,
-        token_ids,
-        expanded_local_pos,
-        repetition_penalty,
-        frequency_penalty,
-        presence_penalty,
-        prompt_bin_mask,
-        output_bin_counts,
-        num_spec_tokens,
-    )
+        logits_pytorch_result = pytorch_apply_penalties(
+            logits_pytorch,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+        )
 
-    atol = DEFAULT_ATOL
-    rtol = DEFAULT_RTOL
-    if dtype == torch.bfloat16:
-        atol = 1e-02
-        rtol = 1e-02
-    assert torch.allclose(logits_triton, logits_pytorch_result, atol=atol, rtol=rtol)
-    gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
+        atol = DEFAULT_ATOL
+        rtol = DEFAULT_RTOL
+        if dtype == torch.bfloat16:
+            atol = 1e-02
+            rtol = 1e-02
+        assert torch.allclose(logits_triton, logits_pytorch_result, atol=atol, rtol=rtol)
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()

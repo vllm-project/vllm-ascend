@@ -346,6 +346,7 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/ops/gdn.py
+    - vllm_ascend/ops/gdn_attn_builder.py
     - vllm_ascend/ops/triton/gdn_chunk_meta.py
   tests:
     - tests/ut/ops
