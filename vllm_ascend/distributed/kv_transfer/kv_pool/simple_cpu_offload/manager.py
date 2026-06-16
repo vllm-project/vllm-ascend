@@ -164,7 +164,7 @@ class SimpleCPUOffloadScheduler:
             return 0, False
 
         state.load_start_tokens = num_computed_tokens
-        logger.info(
+        logger.debug(
             "Recompute offload cache hit for request %s: load_start=%d, "
             "load_tokens=%d, stored_tokens=%d.",
             request.request_id,
