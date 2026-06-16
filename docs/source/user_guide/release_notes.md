@@ -7,7 +7,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 ### Highlights
 
 - **DeepSeek V4 Support**: Added end-to-end support for DeepSeek V4, including the model architecture, DSA attention backend, KV cache management, distributed inference, tool-call parser, MTP support, KV Pool adaptation, and custom operator enablement. [#9270](https://github.com/vllm-project/vllm-ascend/pull/9270) [#9385](https://github.com/vllm-project/vllm-ascend/pull/9385) [#9228](https://github.com/vllm-project/vllm-ascend/pull/9228)
-- **Ascend 950 and XLite Quantization Expansion**: Added MXFP4 flatquant with row parallelism for Ascend Ascend 950 and expanded XLite support to GLM-4.7 W8A8 quantization. [#9391](https://github.com/vllm-project/vllm-ascend/pull/9391) [#9415](https://github.com/vllm-project/vllm-ascend/pull/9415)
+- **Ascend 950 and XLite Quantization Expansion**: Added MXFP4 flatquant with row parallelism for Ascend 950 and expanded XLite support to GLM-4.7 W8A8 quantization. [#9391](https://github.com/vllm-project/vllm-ascend/pull/9391) [#9415](https://github.com/vllm-project/vllm-ascend/pull/9415)
 
 ### Features
 
