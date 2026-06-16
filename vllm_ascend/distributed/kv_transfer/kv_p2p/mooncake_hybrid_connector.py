@@ -1062,6 +1062,21 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        """Set handshake metadata keyed by ``(pp_rank, tp_rank)``.
+
+        Flattens the ``(pp_rank, tp_rank)`` tuple keys into unique integer
+        keys to match the port-offset-based lookup.
+        """
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        flat_metadata: dict[int, KVConnectorHandshakeMetadata] = {
+            pp_rank * tp_size + tp_rank: meta
+            for (pp_rank, tp_rank), meta in metadata.items()
+        }
+        self.set_xfer_handshake_metadata(flat_metadata)
+
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""

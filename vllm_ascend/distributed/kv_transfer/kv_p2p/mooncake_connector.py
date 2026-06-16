@@ -1373,9 +1373,20 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
     def set_xfer_handshake_metadata_pp_aware(
-        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        self.set_xfer_handshake_metadata(metadata)
+        """Set handshake metadata keyed by ``(pp_rank, tp_rank)``.
+
+        Flattens the ``(pp_rank, tp_rank)`` tuple keys into unique integer
+        keys to match the port-offset-based lookup used by
+        ``_get_remote_host_info_by_port`` and ``get_remote_port_send_num``.
+        """
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        flat_metadata: dict[int, KVConnectorHandshakeMetadata] = {
+            pp_rank * tp_size + tp_rank: meta
+            for (pp_rank, tp_rank), meta in metadata.items()
+        }
+        self.set_xfer_handshake_metadata(flat_metadata)
 
 
 class MooncakeConnectorScheduler:

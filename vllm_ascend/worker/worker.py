@@ -736,27 +736,22 @@ class NPUWorker(WorkerBase):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> dict[int, KVConnectorHandshakeMetadata] | None:
-        """Get KV connector metadata from this worker if available."""
+    ) -> dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
+        """Get KV connector metadata from this worker if available.
+
+        Returned dict is keyed by ``(pp_rank, tp_rank)``.
+        """
         if not has_kv_transfer_group():
             return None
 
         connector = get_kv_transfer_group()
 
-        # Return None for connectors that don't need to exchange handshake
-        # metadata across workers.
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
-        # The upstream vllm's set_xfer_handshake_metadata_pp_aware expects
-        # (pp_rank, tp_rank) tuple keys and asserts pp_rank == 0 for
-        # mooncake-style connectors (which don't support PP-disaggregated
-        # KV transfer).  Always report pp_rank=0 regardless of the actual
-        # PP rank; the per-worker host/engine_id metadata is identical
-        # across PP ranks on the same node, so the scheduler mapping is
-        # unaffected by the key collision.
+        pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {(0, tp_rank): metadata}
+        return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

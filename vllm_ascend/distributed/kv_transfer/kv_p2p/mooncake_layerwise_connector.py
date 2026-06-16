@@ -28,6 +28,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
     SupportsHMA,
@@ -737,6 +738,14 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished_all_groups(request, block_ids)
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        # Layerwise connector does not use handshake metadata.
+        # Accept all pp_rank values to support PP-disaggregated KV
+        # transfer without triggering the base class assertion.
+        pass
 
     ############################################################
     # Worker Side Methods
