@@ -11,8 +11,6 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from vllm.distributed import get_pcp_group
-from vllm.forward_context import get_forward_context
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
@@ -97,14 +95,6 @@ def causal_conv1d_fn(
             indices 0 and 3
     out: (batch, dim, seqlen)
     """
-    forward_context = get_forward_context()
-    num_decodes = 0
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is not None and isinstance(attn_metadata, dict):
-        attn_metadata = next(iter(attn_metadata.values()), None)
-    if attn_metadata is not None:
-        num_decodes = attn_metadata.num_decodes
-
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
     if x.stride(-1) != 1:
@@ -117,13 +107,6 @@ def causal_conv1d_fn(
     seqlens = seqlens.tolist()
     splits = torch.split(x, seqlens, dim=-1)
     width = weight.shape[1]
-    last_width_prefill_x = extract_last_width(x, query_start_loc[num_decodes:], conv_states.shape[-1])
-
-    if get_pcp_group().world_size > 1:
-        all_last_width_prefill_x = get_pcp_group().all_gather(last_width_prefill_x.unsqueeze(0).contiguous(), 0)
-        pcp_rank = get_pcp_group().rank_in_group
-        if pcp_rank > 0:
-            conv_states[cache_indices[num_decodes:]] = all_last_width_prefill_x[pcp_rank - 1, ...]
 
     for i in range(len(seqlens)):
         x_s = splits[i]
@@ -141,19 +124,9 @@ def causal_conv1d_fn(
             )
         )
 
-    if get_pcp_group().world_size > 1:
-        conv_states[cache_indices[num_decodes:]] = all_last_width_prefill_x[-1, ...]
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
     out_ref_tensor = torch.cat(out_ref, dim=0)
     return out_ref_tensor
-
-
-def extract_last_width(x, start_loc, width):
-    end_loc = start_loc[1:]
-    offsets = torch.arange(width, device=x.device)
-    indices = end_loc.unsqueeze(1) - width + offsets.unsqueeze(0)  # (num_seqs, width)
-
-    return x[:, indices].permute(1, 0, 2)
 
 
 @triton.jit(
@@ -284,8 +257,10 @@ def _causal_conv1d_update_kernel_npu_tiled(
             qs = tl.load(query_start_loc_ptr + b, mask=lane_active, other=0).to(tl.int64)
             qe = tl.load(query_start_loc_ptr + (b + 1), mask=lane_active, other=0).to(tl.int64)
             seqlen_run = (qe - qs).to(tl.int32)
-            # revise effective state_len for shorter sequences (same formula as original)
-            state_len_run = (state_len - (seqlen - seqlen_run)).to(tl.int32)
+            if IS_SPEC_DECODING:
+                state_len_run = (state_len - (seqlen - seqlen_run)).to(tl.int32)
+            else:
+                state_len_run = state_len
             x_offset = (qs * stride_x_token).to(tl.int64)
             o_offset = (qs * stride_o_token).to(tl.int64)
         else:
