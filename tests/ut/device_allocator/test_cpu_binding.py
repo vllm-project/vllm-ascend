@@ -253,7 +253,6 @@ class TestDeviceInfo(unittest.TestCase):
 
         self.assertEqual(device_info.resolve_logic_id("0", "1"), 1)
 
-
     def test_expand_cpu_list(self):
         result = self.device_info.expand_cpu_list("0-2, 4, 6-8")
         self.assertEqual(result, [0, 1, 2, 4, 6, 7, 8])
@@ -293,9 +292,7 @@ class TestCpuAlloc(unittest.TestCase):
         visible_devices_patcher.start()
         self.addCleanup(visible_devices_patcher.stop)
 
-        device_type_patcher = patch(
-            "vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2
-        )
+        device_type_patcher = patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
         device_type_patcher.start()
         self.addCleanup(device_type_patcher.stop)
 
@@ -561,9 +558,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         visible_devices_patcher.start()
         self.addCleanup(visible_devices_patcher.stop)
 
-        device_type_patcher = patch(
-            "vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2
-        )
+        device_type_patcher = patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
         device_type_patcher.start()
         self.addCleanup(device_type_patcher.stop)
 
