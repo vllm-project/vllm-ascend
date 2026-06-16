@@ -213,6 +213,7 @@ class RecomputeScheduler(Scheduler):
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def schedule(self) -> RecomputeSchedulerOutput:
+        self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -266,6 +267,22 @@ class RecomputeScheduler(Scheduler):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
                 # partial draft tokens since this prevents uniform decode optimizations.
+                req_index += 1
+                continue
+
+            if self.current_step < request.next_decode_eligible_step:
+                # V2+PP+async: enforce `pp_size` steps between same-req decodes
+                # to match worker-side sampled-tokens broadcast slot ring cadence.
+                logger.debug(
+                    "[PP_THROTTLE_BLOCK_REC] req=%s current_step=%d "
+                    "next_eligible=%d gap=%d is_prefill=%s pp_size=%d",
+                    request.request_id,
+                    self.current_step,
+                    request.next_decode_eligible_step,
+                    request.next_decode_eligible_step - self.current_step,
+                    request.is_prefill_chunk,
+                    self.parallel_config.pipeline_parallel_size,
+                )
                 req_index += 1
                 continue
 

@@ -126,6 +126,22 @@ class BalanceScheduler(Scheduler):
                 req_index += 1
                 continue
 
+            if self.current_step < request.next_decode_eligible_step:
+                # V2+PP+async: enforce `pp_size` steps between same-req decodes
+                # to match worker-side sampled-tokens broadcast slot ring cadence.
+                logger.debug(
+                    "[PP_THROTTLE_BLOCK_BAL] req=%s current_step=%d "
+                    "next_eligible=%d gap=%d is_prefill=%s pp_size=%d",
+                    request.request_id,
+                    self.current_step,
+                    request.next_decode_eligible_step,
+                    request.next_decode_eligible_step - self.current_step,
+                    request.is_prefill_chunk,
+                    self.parallel_config.pipeline_parallel_size,
+                )
+                req_index += 1
+                continue
+
             num_new_tokens = (
                 request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
             )
