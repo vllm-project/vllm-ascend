@@ -18,6 +18,7 @@ from vllm.v1.core.sched.output import NewRequestData
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 _CACHE_MISSING = object()
+_MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 
 
 # Parameters related to the key
@@ -148,29 +149,38 @@ def _unwrap_spec(kv_cache_spec: Any) -> Any:
     return next(iter(kv_cache_specs.values()))
 
 
+def _get_manager_class_cache() -> dict[str, Any]:
+    cache = getattr(_get_manager_class_for_spec, _MANAGER_CLASS_CACHE_ATTR, None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(_get_manager_class_for_spec, _MANAGER_CLASS_CACHE_ATTR, cache)
+    return cast(dict[str, Any], cache)
+
+
 def _get_manager_class_for_spec(spec: Any) -> Any | None:
     """Resolve the vLLM manager class across 0.20.x and 0.21.x APIs."""
-    registry = getattr(_get_manager_class_for_spec, "_registry", _CACHE_MISSING)
+    cache = _get_manager_class_cache()
+    registry = cache.get("registry", _CACHE_MISSING)
     if registry is _CACHE_MISSING:
         try:
             registry_module = importlib.import_module("vllm.v1.kv_cache_spec_registry")
             registry = getattr(registry_module, "KVCacheSpecRegistry", None)
         except ImportError:
             registry = None
-        _get_manager_class_for_spec._registry = registry
+        cache["registry"] = registry
     if registry is not None:
         manager_cls = registry.get_manager_class(spec)
         if manager_cls is not None:
             return manager_cls
 
-    spec_manager_map = getattr(_get_manager_class_for_spec, "_spec_manager_map", _CACHE_MISSING)
+    spec_manager_map = cache.get("spec_manager_map", _CACHE_MISSING)
     if spec_manager_map is _CACHE_MISSING:
         try:
             manager_module = importlib.import_module("vllm.v1.core.single_type_kv_cache_manager")
             spec_manager_map = getattr(manager_module, "spec_manager_map", {})
         except ImportError:
             spec_manager_map = None
-        _get_manager_class_for_spec._spec_manager_map = spec_manager_map
+        cache["spec_manager_map"] = spec_manager_map
     if not spec_manager_map:
         return None
     manager_cls = spec_manager_map.get(type(spec))
