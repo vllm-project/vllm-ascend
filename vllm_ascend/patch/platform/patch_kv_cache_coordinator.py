@@ -118,9 +118,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
-        # v0.21.0 managers don't accept `scheduler_block_size`.
+        # v0.22.1 managers don't accept `scheduler_block_size`.
         extra_mgr_kwargs: dict = {}
-        if not vllm_version_is("0.21.0"):
+        if not vllm_version_is("0.22.1"):
             extra_mgr_kwargs["scheduler_block_size"] = scheduler_block_size
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
@@ -275,7 +275,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 # vLLM B renamed the ``use_eagle`` kwarg to ``drop_eagle_block``.
-                if vllm_version_is("0.21.0"):
+                if vllm_version_is("0.22.1"):
                     eagle_kwarg = {"use_eagle": use_eagle}
                 else:
                     eagle_kwarg = {"drop_eagle_block": use_eagle}
@@ -371,7 +371,7 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
-        if not vllm_version_is("0.21.0"):
+        if not vllm_version_is("0.22.1"):
             orig_kwargs["scheduler_block_size"] = scheduler_block_size
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
     return AscendHybridKVCacheCoordinator(

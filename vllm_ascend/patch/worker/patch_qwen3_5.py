@@ -19,19 +19,13 @@
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.utils import is_310p, vllm_version_is
-
-if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
-        GatedDeltaNetAttention as _GDNBaseCls,
-    )
-else:
-    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
+from vllm_ascend.utils import is_310p
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 

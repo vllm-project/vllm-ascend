@@ -53,7 +53,7 @@ from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kerne
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
 
-if vllm_version_is("0.21.0"):
+if vllm_version_is("0.22.1"):
     from vllm.distributed.parallel_state import patch_tensor_parallel_group  # type: ignore[import-not-found]
 else:
     import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]

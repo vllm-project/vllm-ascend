@@ -29,6 +29,11 @@ MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 MAIN_MODELS = ["LLM-Research/Meta-Llama-3.1-8B-Instruct"]
 EGALE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
 
+pytestmark = pytest.mark.skipif(
+    vllm_version_is("0.22.1"),
+    reason="v2 model runner patches not supported on v0.22.1",
+)
+
 
 @pytest.mark.skipif(True, reason="Fix me, it's broken after CANN and trition-ascend are upgraded.")
 @pytest.mark.parametrize("model", MODELS)
@@ -79,7 +84,6 @@ def test_qwen3_dense_eager_mode(
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
-@pytest.mark.skipif(vllm_version_is("0.21.0"), reason="v2 model runner patches not supported on v0.21.0")
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_egale_spec_decoding(
     model: str,
@@ -121,7 +125,6 @@ def test_egale_spec_decoding(
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
-@pytest.mark.skipif(vllm_version_is("0.21.0"), reason="v2 model runner patches not supported on v0.21.0")
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_qwen3_dense_graph_mode(
     model: str,

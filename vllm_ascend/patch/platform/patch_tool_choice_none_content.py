@@ -134,7 +134,7 @@ def _patched_delegating_parse_tool_calls(
 
 DelegatingParser._parse_tool_calls = _patched_delegating_parse_tool_calls
 
-if vllm_version_is("0.21.0"):
+if vllm_version_is("0.22.1"):
     from vllm.entrypoints.openai.engine.serving import OpenAIServing  # type: ignore[import-not-found]
 
     _original_parse_tool_calls_from_content = OpenAIServing._parse_tool_calls_from_content

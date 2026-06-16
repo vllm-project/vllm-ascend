@@ -53,5 +53,5 @@ class AscendMambaManager(MambaManager):
 
 
 single_type_kv_cache_manager.MambaManager = AscendMambaManager
-if vllm_version_is("0.21.0"):
+if vllm_version_is("0.22.1"):
     single_type_kv_cache_manager.spec_manager_map[MambaSpec] = AscendMambaManager

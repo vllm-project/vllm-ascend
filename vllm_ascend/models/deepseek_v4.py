@@ -64,6 +64,8 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache  # type: ignore[import-not-found,no-redef]
+from vllm.models.deepseek_v4.compressor import CompressorStateCache  # type: ignore[import-not-found,no-redef]
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
@@ -80,19 +82,7 @@ from vllm_ascend.utils import (
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
-    vllm_version_is,
 )
-
-if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.deepseek_compressor import (  # type: ignore[import-not-found,no-redef]
-        CompressorStateCache,
-    )
-    from vllm.model_executor.layers.deepseek_v4_attention import (  # type: ignore[import-not-found,no-redef]
-        DeepseekV4IndexerCache,
-    )
-else:
-    from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache  # type: ignore[import-not-found,no-redef]
-    from vllm.models.deepseek_v4.compressor import CompressorStateCache  # type: ignore[import-not-found,no-redef]
 
 
 def _get_ascend_dsa_backend():

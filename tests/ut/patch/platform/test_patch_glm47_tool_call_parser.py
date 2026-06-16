@@ -13,7 +13,7 @@ from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.21.0"):
+if vllm_version_is("0.22.1"):
     from vllm.parser.abstract_parser import _WrappedParser  # type: ignore[import-not-found]
 else:
     # vLLM main removed the ``_WrappedParser`` helper; the base ``Parser``
@@ -65,8 +65,8 @@ def _collect_tool_args(tool_calls):
 
 def _parse_delta(parser, *args, finished=False, **kwargs):
     # vLLM main added a required keyword-only ``finished`` arg to
-    # ``parse_delta``; v0.21.0 has no such parameter.
-    if vllm_version_is("0.21.0"):
+    # ``parse_delta``; v0.22.1 has no such parameter.
+    if vllm_version_is("0.22.1"):
         return parser.parse_delta(*args, **kwargs)
     return parser.parse_delta(*args, finished=finished, **kwargs)
 

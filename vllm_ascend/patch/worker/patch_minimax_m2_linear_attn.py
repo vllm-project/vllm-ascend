@@ -32,7 +32,7 @@ from vllm.platforms import current_platform
 
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.21.0"):
+if vllm_version_is("0.22.1"):
     from vllm.model_executor.layers.mamba.linear_attn import (  # type: ignore[import-not-found]
         MiniMaxText01RMSNormTP,
     )

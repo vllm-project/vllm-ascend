@@ -38,7 +38,7 @@ GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
 @pytest.fixture(params=[False, True], ids=["v1", "v2"])
 def model_runner_env(request):
     use_v2_model_runner = request.param
-    if use_v2_model_runner and vllm_version_is("0.21.0"):
+    if use_v2_model_runner and vllm_version_is("0.22.1"):
         pytest.skip("No need to support v2 model runner for vLLM tag version.")
 
     with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}):

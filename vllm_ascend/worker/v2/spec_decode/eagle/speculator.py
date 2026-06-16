@@ -30,42 +30,21 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
+    speculator as vllm_speculator_module,  # type: ignore[import-not-found]
+)
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
+    PrefillSpeculatorCudaGraphManager,
+)
+from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator  # type: ignore[import-not-found]
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
 
-if vllm_version_is("0.21.0"):
-    from vllm.v1.worker.gpu.spec_decode.eagle import (  # type: ignore[import-not-found]
-        speculator as vllm_speculator_module,  # type: ignore[import-not-found]
-    )
-    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (  # type: ignore[import-not-found]
-        PrefillEagleCudaGraphManager,
-    )
-    from vllm.v1.worker.gpu.spec_decode.eagle.speculator import (  # type: ignore[import-not-found]
-        EagleSpeculator,
-        update_eagle_draft_inputs,
-    )
-
-    _BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.eagle.speculator
-    _PREFILL_CUDAGRAPH_MANAGER_CLS = PrefillEagleCudaGraphManager
-else:
-    from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
-        speculator as vllm_speculator_module,  # type: ignore[import-not-found]
-    )
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
-        PrefillSpeculatorCudaGraphManager,
-    )
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (  # type: ignore[import-not-found]
-        update_draft_inputs,
-    )
-    from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator  # type: ignore[import-not-found]
-
-    update_eagle_draft_inputs = update_draft_inputs
-    _BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
-    _PREFILL_CUDAGRAPH_MANAGER_CLS = PrefillSpeculatorCudaGraphManager
+_BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
+_PREFILL_CUDAGRAPH_MANAGER_CLS = PrefillSpeculatorCudaGraphManager
 
 
 class AscendEagleSpeculator(EagleSpeculator):
@@ -187,118 +166,48 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         self.attn_backends = attn_backends
 
-    if vllm_version_is("0.21.0"):
+    def _generate_draft(
+        self,
+        num_reqs: int,
+        num_tokens_padded: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> None:
+        """Override AutoRegressiveSpeculator._generate_draft for Ascend NPUs."""
+        self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
+        super()._generate_draft(
+            num_reqs,
+            num_tokens_padded,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+        )
+        self._increment_decode_attn_metadata(attn_metadata)
 
-        def generate_draft(
-            self,
-            num_reqs: int,
-            num_tokens_padded: int,
-            attn_metadata: dict[str, Any],
-            slot_mappings: dict[str, torch.Tensor],
-            num_tokens_across_dp: torch.Tensor | None,
-            cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        ):
-            """Override GPU EagleSpeculator.generate_draft for Ascend NPUs."""
-            self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
-            idx_mapping = self.idx_mapping[:num_reqs]
-            positions = self.input_buffers.positions[:num_reqs]
-            last_hidden_states, hidden_states = self.run_model(
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-            )
-            last_hidden_states = last_hidden_states[:num_reqs]
-
-            logits = self.model.compute_logits(last_hidden_states)
-            draft_tokens = self._sample_draft(
-                logits,
-                idx_mapping,
-                positions,
-                self.current_draft_step,
-                self.draft_logits,
-            )
-
-            update_eagle_draft_inputs(
-                draft_tokens,
-                self.current_draft_step,
-                hidden_states,
-                self.draft_tokens,
-                self.hidden_states,
-                self.input_buffers,
-                num_reqs,
-                self.max_model_len,
-                self.num_speculative_steps,
-            )
-            self._increment_decode_attn_metadata(attn_metadata)
-
-        @torch.inference_mode()
-        def run_model(
-            self,
-            num_tokens: int,
-            attn_metadata: dict[str, Any],
-            slot_mappings: dict[str, torch.Tensor] | None,
-            num_tokens_across_dp: torch.Tensor | None,
-            cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            """Override GPU EagleSpeculator.run_model for Ascend NPUs."""
-            last_hidden_states, hidden_states = super().run_model(
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                mm_inputs,
-            )
-            self._ascend_update_seq_lens(attn_metadata)
-            return last_hidden_states, hidden_states
-
-    else:
-
-        def _generate_draft(
-            self,
-            num_reqs: int,
-            num_tokens_padded: int,
-            attn_metadata: dict[str, Any] | None,
-            slot_mappings: dict[str, torch.Tensor] | None,
-            num_tokens_across_dp: torch.Tensor | None,
-            cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        ) -> None:
-            """Override AutoRegressiveSpeculator._generate_draft for Ascend NPUs."""
-            self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
-            super()._generate_draft(
-                num_reqs,
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-            )
-            self._increment_decode_attn_metadata(attn_metadata)
-
-        @torch.inference_mode()
-        def _run_model(
-            self,
-            num_tokens: int,
-            attn_metadata: dict[str, Any] | None,
-            slot_mappings: dict[str, torch.Tensor] | None,
-            num_tokens_across_dp: torch.Tensor | None,
-            cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            """Override AutoRegressiveSpeculator._run_model for Ascend NPUs."""
-            last_hidden_states, hidden_states = super()._run_model(
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                mm_inputs,
-            )
-            self._ascend_update_seq_lens(attn_metadata)
-            return last_hidden_states, hidden_states
+    @torch.inference_mode()
+    def _run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Override AutoRegressiveSpeculator._run_model for Ascend NPUs."""
+        last_hidden_states, hidden_states = super()._run_model(
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            mm_inputs,
+        )
+        self._ascend_update_seq_lens(attn_metadata)
+        return last_hidden_states, hidden_states
 
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         """Build draft_attn_metadatas for partial-merged draft graph."""
@@ -451,10 +360,7 @@ def graph_manager_wrapper(speculator):
     def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
         return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
-    if vllm_version_is("0.21.0"):
-        manager_attr = "PrefillEagleCudaGraphManager"
-    else:
-        manager_attr = "PrefillSpeculatorCudaGraphManager"
+    manager_attr = "PrefillSpeculatorCudaGraphManager"
 
     try:
         setattr(vllm_speculator_module, manager_attr, factory)

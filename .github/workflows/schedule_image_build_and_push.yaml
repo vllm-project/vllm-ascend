@@ -32,7 +32,7 @@ on:
         type: choice
         options:
           - main
-          - v0.21.0rc1
+          - v0.22.1rc1
           - v0.20.2rc1
           - none
       branch:

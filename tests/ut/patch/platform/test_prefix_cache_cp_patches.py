@@ -341,8 +341,8 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         pcp_world_size=2,
     )
     # vLLM main added a required ``scheduler_block_size`` arg to
-    # ``SingleTypeKVCacheManager.__init__``; v0.21.0 has no such parameter.
-    if not vllm_version_is("0.21.0"):
+    # ``SingleTypeKVCacheManager.__init__``; v0.22.1 has no such parameter.
+    if not vllm_version_is("0.22.1"):
         manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
     manager = AscendMambaManager(**manager_kwargs)
 
