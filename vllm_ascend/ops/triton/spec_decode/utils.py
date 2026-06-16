@@ -70,6 +70,7 @@ def copy_and_expand_dflash_inputs_kernel_single_grid(
     # Inputs
     next_token_ids_ptr,  # [num_reqs]
     target_positions_ptr,  # [num_context]
+    context_slot_mapping_ptr,  # [num_context]
     # Outputs
     out_input_ids_ptr,  # [num_query_total] (output)
     out_context_positions_ptr,  # [num_context] (output)
@@ -82,6 +83,7 @@ def copy_and_expand_dflash_inputs_kernel_single_grid(
     block_table_stride,  # stride of block_table dim 0 (in elements)
     # Metadata
     query_start_loc_ptr,  # [num_reqs + 1]
+    seq_lens_ptr,  # [num_reqs]
     num_rejected_tokens_ptr,  # [num_reqs] or null (0) when not padded
     # Scalars
     parallel_drafting_token_id,  # tl.int32
@@ -102,17 +104,18 @@ def copy_and_expand_dflash_inputs_kernel_single_grid(
             pos = tl.load(target_positions_ptr + ctx_pos_idx)
             tl.store(out_context_positions_ptr + ctx_pos_idx, pos)
 
-            block_num = pos // block_size
-            block_id = tl.load(block_table_ptr + req_idx * block_table_stride + block_num).to(tl.int64)
-            slot = block_id * block_size + (pos % block_size)
+            slot = tl.load(context_slot_mapping_ptr + ctx_pos_idx)
             tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, slot)
 
         if HAS_NUM_REJECTED:
             num_rejected = tl.load(num_rejected_tokens_ptr + req_idx)
             valid_ctx_end = ctx_end - num_rejected
         else:
+            num_rejected = 0
             valid_ctx_end = ctx_end
 
+        seq_len = tl.load(seq_lens_ptr + req_idx)
+        effective_seq_len = seq_len - num_rejected
         last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
 
         for q_idx in range(0, num_query_per_req):
@@ -121,9 +124,10 @@ def copy_and_expand_dflash_inputs_kernel_single_grid(
 
             tl.store(out_query_positions_ptr + query_out_idx, query_pos)
 
-            block_num_q = query_pos // block_size
+            query_cache_pos = effective_seq_len + q_idx
+            block_num_q = query_cache_pos // block_size
             block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
-            slot_q = block_id_q * block_size + (query_pos % block_size)
+            slot_q = block_id_q * block_size + (query_cache_pos % block_size)
             tl.store(out_query_slot_mapping_ptr + query_out_idx, slot_q)
 
             if q_idx == 0:
