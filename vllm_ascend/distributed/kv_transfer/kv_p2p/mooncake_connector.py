@@ -698,9 +698,8 @@ class KVCacheRecvingThread(threading.Thread):
                     )
                 )
             else:
-                # For MambaSpec num block should equal on P node and D node
-                if len(local_group_block_ids) != len(remote_group_block_ids):
-                    raise RuntimeError("For MambaSpec num block should equal on P node and D node.")
+                # When Prefix Caching is enabled on both P and D nodes, num_block should not be forced to match,
+                # as the D-node requires dynamic allocation based on its specific cache hit rate.
                 transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
                 grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
