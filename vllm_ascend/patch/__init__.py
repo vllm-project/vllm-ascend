@@ -465,27 +465,28 @@
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
 #
-# ** 7. File: worker/patch_gdn_attn.py**
+## ** 6. File: worker/patch_module.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.attention.backends.gdn_attn.GDNAttentionMetadataBuilder.build`
+#   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
-#       Qwen3.5/Qwen3Next GDN prefill on NPU needs prebuilt varlen chunk metadata
-#       to avoid forward-time host round-trips that break async scheduling.
+#       1. 'torch.argsort' func of npu does not support bool.
+#       2. Without `stable=True`, the output will have a lot of redundant tokens.
 #    How：
-#       Monkey-patch the upstream builder in-place, keep upstream code untouched,
-#       and attach prebuilt device metadata bundle onto the returned attention
-#       metadata object for Ascend-specific consumers.
+#       Replace with a new torch.argsort that will cast the input to torch.int32
+#       and do stable sort.
+#    Related PR (if no, explain why):
+#       1. It depends on torch_npu.
+#       2. https://github.com/vllm-project/vllm/pull/30632
 #    Future Plan:
-#       Remove this patch when upstream exposes a backend hook for extending GDN
-#       metadata or when the optimization is accepted upstream directly.
-#   2. `vllm.v1.attention.backends.gdn_attn.GDNAttentionMetadataBuilde.build`
+#       Remove this patch when bool is supported in 'torch.argsort' func of npu.
+#       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
+#   2. `vllm_ascend.ops.gdn_attn_builder.AscendGDNAttentionMetadataBuilder.build`
 #    Why:
 #       Qwen3.5/Qwen3Next GDN Decode/Specific Decode on NPU needs prebuilt varlen chunk metadata
 #       to avoid forward-time host round-trips that break async scheduling.
 #    How：
-#       Monkey-patch the upstream builder in-place, keep upstream code untouched,
-#       and attach prebuilt device metadata bundle onto the returned attention
-#       metadata object for Ascend-specific consumers.
+#       Override the GDN attention metadata builder for Ascend backend and attach
+#       prebuilt device metadata bundle onto the returned attention metadata object.
 #    Future Plan:
 #       Remove this patch when upstream exposes a backend hook for extending GDN
 #       metadata or when the optimization is accepted upstream directly.
