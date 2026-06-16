@@ -48,6 +48,11 @@ class BlockTable:
         self.pin_memory = pin_memory
         self.device = device
         self.physical_block_size = block_size
+        self.is_mamba_group = (
+            kv_cache_group is not None
+            and hasattr(kv_cache_group, "kv_cache_spec")
+            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
+        )
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:
@@ -389,6 +394,8 @@ class MultiGroupBlockTable:
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
         for i, block_table in enumerate(self.block_tables):
+            if block_table.is_mamba_group:
+                continue
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
@@ -402,6 +409,8 @@ class MultiGroupBlockTable:
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
         for i, block_table in enumerate(self.block_tables):
+            if block_table.is_mamba_group:
+                continue
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
