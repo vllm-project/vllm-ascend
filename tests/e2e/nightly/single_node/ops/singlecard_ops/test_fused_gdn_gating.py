@@ -25,11 +25,7 @@ NUM_HEADS_VALUES = [4, 6, 8, 12, 16, 24, 32, 48, 64, 128]
 BATCH_SIZES = [1, 7, 37, 128, 512, 4096, 16384]
 DTYPES = [torch.bfloat16, torch.float16]
 PARAM_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
-DTYPE_COMBINATIONS = [
-    (dtype, param_dtype)
-    for dtype in DTYPES
-    for param_dtype in PARAM_DTYPES
-]
+DTYPE_COMBINATIONS = [(dtype, param_dtype) for dtype in DTYPES for param_dtype in PARAM_DTYPES]
 
 
 # ---------------------------------------------------------------------------
@@ -115,9 +111,9 @@ def _force_softplus_threshold_cases(
 
     dt_bias[:4] = 0
     boundary = threshold / beta
-    a[0, 0] = boundary + 2.0   # linear branch
-    a[1, 1] = boundary         # softplus branch at equality
-    a[2, 2] = boundary - 0.5   # softplus branch below threshold
+    a[0, 0] = boundary + 2.0  # linear branch
+    a[1, 1] = boundary  # softplus branch at equality
+    a[2, 2] = boundary - 0.5  # softplus branch below threshold
     a[3, 3] = -boundary - 2.0  # negative softplus input
 
 
