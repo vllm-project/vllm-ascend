@@ -59,7 +59,6 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import (
     _should_disable_reduce_sample,
     enable_sp,
-    get_reduce_sample_force_disabled,
     lmhead_tp_enable,
     reduce_sample_enabled,
     set_reduce_sample_force_disabled,
