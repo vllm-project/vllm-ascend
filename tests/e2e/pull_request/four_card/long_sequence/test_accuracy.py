@@ -67,20 +67,30 @@ QWEN3_GOLDEN = [
 
 QWEN3_NEXT_GOLDEN = [
     "The capital of France is Paris. The capital of",
-    "Hello, my name is Tom, I am a 10th",
+    "Hello, my name is Tom, I am 12 years old",
     "The president of United States is the head of state and",
 ]
 
 DSV3_2_GOLDEN = [
-    "The capital of France isorrionic Tudefe夷",
-    "Hello, my name is Tom, I am" + "ERIC slicpacelikeabra",
-    "The president of United States isoint054 Rund596庄稼",
+    "The capital of France isbearerdenomorthal",
+    "Hello, my name is Tom, I am" + "ERIC slicpacelike Chop",
+    "The president of United States is平行astra unbehetroni",
 ]
 
 DEEPSEEK_MTP3_GOLDEN = [
     "The capital of France is Salmonella团团 elsewhereッγκ",
     "Hello, my name is Tom, I amEiSlowukt Analysis sprouts",
     "The president of United States is Salmonella团团 elsewhereッγκ",
+]
+
+DEEPSEEK_V4_PROMPTS = [
+    "Hello, my name is",
+    "What is the meaning of life?",
+]
+
+DEEPSEEK_V4_GOLDEN = [
+    "Hello, my name is {name} and I",
+    'What is the meaning of life?",\n    "What is'
 ]
 
 
@@ -206,7 +216,9 @@ FULL_FEATURE_MODEL_CASES = [
             "decode_context_parallel_size": 1,
             "max_num_batched_tokens": 1024,
             "enable_expert_parallel": True,
-            "long_prefill_token_threshold": 4,
+            # TODO(qcs): We should set `long_prefill_token_threshold` to 4
+            # when chunked prefill with PCP is stable.
+            "long_prefill_token_threshold": 128,
             "gpu_memory_utilization": 0.8,
             "block_size": 128,
             # FlashComm1 is disabled for qwen3_next until the PCP decode path is fixed.
@@ -232,7 +244,9 @@ FULL_FEATURE_MODEL_CASES = [
             "gpu_memory_utilization": 0.2,
             "block_size": 128,
             "quantization": "ascend",
-            "long_prefill_token_threshold": 4,
+            # TODO(qcs): We should set `long_prefill_token_threshold` to 4
+            # when chunked prefill with PCP is stable.
+            "long_prefill_token_threshold": 128,
             "compilation_config": FULL_DECODE_GRAPH,
             "additional_config": {"enable_flashcomm1": True},
             # graph_mode is disabled for dsv32 until the PCP gatherv3 out of index issue is fixed.
@@ -268,6 +282,38 @@ FULL_FEATURE_MODEL_CASES = [
         ),
         marks=pytest.mark.skip(reason="Temporarily skip MTP with PCP/DCP until the token layout issue is fixed."),
     ),
+    AccuracyCase(
+        name="deepseek_v4_w4a8_dsa_cp_full_features",
+        model="gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+        prompts=DEEPSEEK_V4_PROMPTS,
+        expected_outputs=DEEPSEEK_V4_GOLDEN,
+        max_tokens=5,
+        runner_kwargs={
+            "max_model_len": 8192,
+            "max_num_seqs": 16,
+            "max_num_batched_tokens": 4096,
+            "dtype": "auto",
+            "tensor_parallel_size": 4,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 1,
+            "enable_expert_parallel": True,
+            "gpu_memory_utilization": 0.9,
+            "quantization": "ascend",
+            "tokenizer_mode": "deepseek_v4",
+            "block_size": 128,
+            "compilation_config": {
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+            },
+            "additional_config": {
+                "enable_flashcomm1": True,
+                "enable_dsa_cp": True,
+            },
+            "speculative_config": {
+                "method": "mtp",
+                "num_speculative_tokens": 3,
+            },
+        },
+    ),
 ]
 
 
@@ -287,55 +333,10 @@ def test_dsv2_lite_parallel_config_accuracy(case: AccuracyCase) -> None:
     os.environ,
     {
         "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 @pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
 def test_models_pcp_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
     _run_accuracy_case(case)
-
-# TODO(qcs): We should move this test to accuracy tests after the output of DSv4 is stable.
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-    },
-)
-@wait_until_npu_memory_free()
-def test_deepseek_v4_w4a8_dsa_cp_basic_greedy():
-    prompts = [
-        "Hello, my name is",
-        "The capital of France is",
-        "What is the meaning of life?",
-    ]
-    max_tokens = 5
-
-    with VllmRunner(
-        "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
-        max_model_len=8192,
-        max_num_seqs=16,
-        max_num_batched_tokens=4096,
-        dtype="auto",
-        tensor_parallel_size=4,
-        prefill_context_parallel_size=1,
-        decode_context_parallel_size=1,
-        enable_expert_parallel=True,
-        gpu_memory_utilization=0.9,
-        quantization="ascend",
-        tokenizer_mode="deepseek_v4",
-        block_size=128,
-        compilation_config={
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
-        additional_config={
-            "enable_flashcomm1": True,
-            "enable_dsa_cp": True,
-        },
-    ) as runner:
-        outputs = runner.generate_greedy(prompts, max_tokens)
-
-    assert len(outputs) == len(prompts)
-    for output_ids, output_str in outputs:
-        assert len(output_str) > 0
-        assert len(output_ids) > 0
