@@ -510,7 +510,6 @@ class NPUModelRunner310(NPUModelRunner):
             # of seq_lens and the event.synchronize() in attention metadata.
             assert self.valid_sampled_token_count_event is not None
             assert self.valid_sampled_token_count_cpu is not None
-            self.valid_sampled_token_count_event.synchronize()
             correct_optimistic_seq_lens_cpu(
                 self.optimistic_seq_lens_cpu.numpy(),
                 self.prev_positions.np,

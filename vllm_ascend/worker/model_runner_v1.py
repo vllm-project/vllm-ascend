@@ -1207,10 +1207,6 @@ class NPUModelRunner(GPUModelRunner):
         if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
             assert self.valid_sampled_token_count_event is not None
             assert self.valid_sampled_token_count_cpu is not None
-            # Wait for the D2H copy launched on a side stream after sampling.
-            # By this point the copy started at the end of the previous step,
-            # so synchronize() is usually a no-op in steady state.
-            self.valid_sampled_token_count_event.synchronize()
             correct_optimistic_seq_lens_cpu(
                 self.optimistic_seq_lens_cpu.numpy(),
                 self.prev_positions.np,
