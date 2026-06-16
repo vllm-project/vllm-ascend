@@ -7,7 +7,7 @@ Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language) ser
 ## EPLB Effects
 
 - Reduced Latency: Dynamically balances expert loads to minimize TTFT and TPOT by distributing workloads evenly across experts.
-- Enhanced Throughput: Optimizes GPU utilization, increasing token generation speed under high-concurrency scenarios.
+- Enhanced Throughput: Optimizes NPU utilization, increasing token generation speed under high-concurrency scenarios.
 - Zero-Overhead Movement: Expert redistribution occurs asynchronously without interrupting ongoing inference requests.
 - Adaptive Scaling: Automatically adjusts to workload fluctuations while maintaining stable performance.
 - Fault Tolerance: Redundant expert placement ensures system resilience during hardware failures.
@@ -20,10 +20,25 @@ DeepSeekV3/V3.1/R1, Qwen3-MoE
 
 ### MOE QuantType
 
-W8A8-Dynamic
-W4A8 (with fused MC2 enabled)
+| QuantType                       | Supported Hardware |
+| ------------------------------- | ------------------ |
+| W8A8 / W8A8-Dynamic             | A2, A3, A5         |
+| W4A8 (with fused MC2 enabled)   | A2, A3, A5         |
+| MXFP4                           | A5                 |
+| MXFP8                           | A5                 |
 
 ## How to Use EPLB
+
+EPLB has three usage modes:
+
+| Mode | Config in `eplb_config` | Env Variable |
+| ---- | ----------------------- | ------------ |
+| **Dynamic EPLB** | `dynamic_eplb: true` | `DYNAMIC_EPLB=true` |
+| **Recording** (generate expert map) | `expert_map_record_path` | `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true` |
+| **Static EPLB** (load pre-recorded map) | `expert_map_path` | none required |
+
+> [!IMPORTANT]
+> For Dynamic EPLB and Recording modes, the env variable acts as a safety guard: setting `dynamic_eplb: true` in config alone is not enough — the assertion requires `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true`. Static EPLB (loading a pre-recorded map via `expert_map_path`) does **not** require an env variable.
 
 ### Dynamic EPLB
 
@@ -41,6 +56,17 @@ vllm serve Qwen/Qwen3-235B-A22 \
     "num_redundant_experts": {ep_size},
     }}'
 ```
+
+#### EPLB Policy Types
+
+The `eplb_policy_type` parameter selects the balancing algorithm used during dynamic expert redistribution:
+
+| Value | Policy | Description |
+|-------|--------|-------------|
+| `0` | Random | Randomly swaps experts between ranks. Suitable for basic testing only. |
+| `1` | DefaultEplb | Open-source EPLB algorithm. Adds redundant experts to the hottest, packs via balanced assignment with local constraint exchange. |
+| `2` | SwiftBalanceEplb | Optimized for low-bandwidth environments. Supports intra-node and inter-node expert redundancy, joint optimization of expert placement. **(Recommended)** |
+| `3` | FlashLB | Statistical method using sliding-window mean/variance/covariance of expert loads. Uses FlashTree layered search for optimal replica allocation and `minimize_redeploy` for incremental adjustment. Best for high-frequency load fluctuations. |
 
 ### Static EPLB
 
@@ -78,10 +104,10 @@ vllm serve Qwen/Qwen3-235B-A22 \
 1. Parameter Tuning:
    - expert_heat_collection_interval: Higher values (e.g., 400+) for stable workloads; lower values (e.g., 100-200) for fluctuating traffic.
    - algorithm_execution_interval: Should be ≥ 30 to avoid premature balancing during startup.
-   - num_redundant_experts: Must match tensor-parallel size (e.g., 16 for 16 GPUs) to ensure sufficient redundancy.
+   - num_redundant_experts: Must match tensor-parallel size (e.g., 16 for 16 NPUs) to ensure sufficient redundancy.
 
 2. Hardware Requirements:
-   - Ensure that all GPUs have identical memory capacity and compute capabilities.
+   - Ensure that all NPUs have identical memory capacity and compute capabilities.
    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
 
 3. Model Compatibility:
@@ -89,7 +115,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
    - Verify model architecture supports dynamic expert routing through `--enable-expert-parallel`.
 
 4. Monitoring & Validation:
-   - Track metrics: expert_load_balance_ratio, ttft_p99, tpot_avg, and gpu_utilization.
+   - Track metrics: expert_load_balance_ratio, ttft_p99, tpot_avg, and npu_utilization.
    - Use vLLM monitor to detect imbalances during runtime.
    - Always verify expert map JSON structure before loading (validate with jq or similar tools).
 
@@ -98,6 +124,6 @@ vllm serve Qwen/Qwen3-235B-A22 \
    - Avoid sudden traffic spikes during the warm-up phase.
 
 6. Common Pitfalls:
-   - Incorrect tensor-parallel-size vs. actual GPU count → causes resource underutilization.
+   - Incorrect tensor-parallel-size vs. actual NPU count → causes resource underutilization.
    - Using expert_map_path without generating the map first → runtime errors.
-   - Setting num_redundant_experts > available GPUs → system failure.
+   - Setting num_redundant_experts > available NPUs → system failure.

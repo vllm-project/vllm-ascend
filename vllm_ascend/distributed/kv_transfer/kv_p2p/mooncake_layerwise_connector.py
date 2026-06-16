@@ -33,7 +33,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
-    get_decode_context_model_parallel_rank,
     get_tensor_model_parallel_rank,
     get_tp_group,
     get_world_group,
@@ -70,6 +69,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     parallel_info,
     validate_register_region_count,
 )
+from vllm_ascend.distributed.utils import get_decode_context_model_parallel_rank
 from vllm_ascend.utils import npu_stream_switch, trans_nd_to_nz
 
 # isort: off
@@ -313,8 +313,8 @@ class KVCacheSendingLayerThread(threading.Thread):
                 )
                 dst_list.extend(
                     [
-                        remote_conv_addr + remote_block_ids[0] * local_conv_len,
-                        remote_ssm_addr + remote_block_ids[0] * local_ssm_len,
+                        remote_conv_addr + remote_block_ids[-1] * local_conv_len,
+                        remote_ssm_addr + remote_block_ids[-1] * local_ssm_len,
                     ]
                 )
                 length_list.extend([local_conv_len, local_ssm_len])
@@ -349,12 +349,12 @@ class KVCacheSendingLayerThread(threading.Thread):
                         src_list.append(
                             local_conv_addr + local_block_ids[transfer_block_idx] * local_conv_len + local_addr_offset
                         )
-                        dst_list.append(remote_conv_addr + remote_block_ids[0] * remote_conv_len + remote_addr_offset)
+                        dst_list.append(remote_conv_addr + remote_block_ids[-1] * remote_conv_len + remote_addr_offset)
                         length_list.append(local_conv_size * get_dtype_size(conv_dtype))
                 # ssm
                 remote_addr_offset = (self.tp_rank % tp_ratio) * math.prod(ssm_shape) * get_dtype_size(ssm_dtype)
                 src_list.append(local_ssm_addr + local_block_ids[transfer_block_idx] * local_ssm_len)
-                dst_list.append(remote_ssm_addr + remote_block_ids[0] * remote_ssm_len + remote_addr_offset)
+                dst_list.append(remote_ssm_addr + remote_block_ids[-1] * remote_ssm_len + remote_addr_offset)
                 length_list.append(local_ssm_len)
         else:
             if self.pd_head_ratio == 1:

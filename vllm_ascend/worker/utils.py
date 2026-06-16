@@ -58,6 +58,14 @@ class AscendKVBlockZeroer(KVBlockZeroer):
     newly-allocated blocks.
     """
 
+    def __init__(self, device: torch.device, pin_memory: bool) -> None:
+        self.device = device
+        self.pin_memory = pin_memory
+        self._meta: tuple[torch.Tensor, int, int, int] | None = None
+        self._id_cap: int = 0
+        self._ids_pinned: torch.Tensor | None = None
+        self._ids_gpu: torch.Tensor | None = None
+
     def init_meta(
         self,
         attn_groups_iter: Iterable["AttentionGroup"],

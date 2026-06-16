@@ -61,7 +61,6 @@ def test_AscendQuickGELU_forward_oot(mock_gelu, dummy_tensor, default_vllm_confi
     mock_gelu.assert_called_once_with(dummy_tensor)
 
 
-@pytest.mark.skipif(is_310p_hw(), reason="non_310P device unittest case.")
 @patch("vllm_ascend.ops.activation.get_weight_prefetch_method", return_value=MagicMock())
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
 def test_SiluAndMul_forward(
@@ -84,7 +83,6 @@ def test_SiluAndMul_forward(
     assert torch.allclose(out, expected_out)
 
 
-@pytest.mark.skipif(is_310p_hw(), reason="non_310P device unittest case.")
 @patch("vllm_ascend.ops.activation.get_weight_prefetch_method")
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
 def test_AscendSiluAndMul_forward_oot_prefetch(
@@ -210,7 +208,6 @@ class TestActivationNPUPrecision:
 
         assert torch.allclose(result.float(), expected, atol=atol, rtol=rtol)
 
-    @pytest.mark.skipif(is_310p_hw(), reason="non_310P device unittest case.")
     @pytest.mark.parametrize(
         "dtype,atol,rtol",
         [

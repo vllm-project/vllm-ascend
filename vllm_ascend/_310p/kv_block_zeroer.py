@@ -30,7 +30,8 @@ class AscendKVBlockZeroer310(KVBlockZeroer):
     """
 
     def __init__(self, device: torch.device, pin_memory: bool) -> None:
-        super().__init__(device, pin_memory)
+        self.device = device
+        self.pin_memory = pin_memory
         self._kv_tensors: list[torch.Tensor] = []
         self._logical_page_ratio: int = 1
 
