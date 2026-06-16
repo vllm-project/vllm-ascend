@@ -520,8 +520,8 @@ class KVCacheRecvingThread(threading.Thread):
             if all_task_done:
                 if len(req_meta["local_block_ids"]) > 0:
                     self.task_tracker.update_done_task_count(request_id)
-                if request_id in self.proc_not_transfer_request:
-                    del self.proc_not_transfer_request[request_id]
+                if remote_request_id in self.proc_not_transfer_request:
+                    del self.proc_not_transfer_request[remote_request_id]
             self.request_queue.task_done()
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
