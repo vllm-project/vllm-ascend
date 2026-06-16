@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import re
 import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -12,6 +13,7 @@ from unittest.mock import patch
 import torch
 import torch_npu
 import vllm.envs as envs
+from packaging.version import Version
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
@@ -29,6 +31,8 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
     "stream resources are insufficient",
 )
+_HDK_VERSION_FILE = "/usr/local/Ascend/driver/version.info"
+_MIN_HDK_VERSION = "25.5.1"
 _STREAM_RESOURCE_GUIDANCE = (
     "ACL graph capture failed with a known stream-resource exhaustion "
     "signature. Consider upgrading to a newer HDK/CANN stack, reducing "
@@ -46,7 +50,28 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
     return has_stream_resource_marker or (has_error_code and "stream resource" in lowered_message)
 
 
+def _is_old_hdk_version() -> bool:
+    try:
+        with open(_HDK_VERSION_FILE, encoding="utf-8", errors="ignore") as f:
+            version_info = f.read()
+    except OSError:
+        return False
+
+    match = re.search(r"Version=([0-9.]+)", version_info)
+    if match is None:
+        return False
+
+    return Version(match.group(1)) < Version(_MIN_HDK_VERSION)
+
+
 def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
+    if _is_old_hdk_version():
+        raise RuntimeError(
+            "ACL graph capture failed with a known stream-resource exhaustion "
+            "signature on an older Ascend HDK stack. Please upgrade Ascend "
+            f"HDK to >= {_MIN_HDK_VERSION} and use the matching CANN stack.\n"
+            f"Original error:\n{exc}"
+        ) from exc
     raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}\nOriginal error:\n{exc}") from exc
 
 
