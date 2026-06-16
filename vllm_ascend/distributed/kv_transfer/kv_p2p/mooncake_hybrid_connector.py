@@ -74,7 +74,7 @@ class RemotePortInfo(TypedDict):
     host: str
 
 
-class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):  # type: ignore[call-arg]
+class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     engine_id: str
     te_rpc_port: int
     block_size: int
