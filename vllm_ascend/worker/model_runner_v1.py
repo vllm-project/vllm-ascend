@@ -145,7 +145,10 @@ from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
+from vllm_ascend.spec_decode.utils import (
+    correct_optimistic_seq_lens_cpu,
+    update_num_computed_tokens_for_batch_change,
+)
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
@@ -463,17 +466,13 @@ class NPUModelRunner(GPUModelRunner):
 
         self._set_up_drafter()
 
-        # Event for async GPU→CPU copy of corrected seq_lens in async
-        # spec decode mode. Recorded in _prepare_inputs, synchronized
-        # in _build_attention_metadata. Created once, reused each iteration.
-        # Only backends that consume CPU seq_lens (AscendAttentionBackend,
-        # AscendMLABackend, and DSV4 compressed attention metadata) need this;
-        # others (SFA, GDN, etc.) do not.
+        # Backends that consume CPU seq_lens (AscendAttentionBackend,
+        # AscendMLABackend, and DSV4 compressed attention metadata) need
+        # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
+        # in async spec decode mode; others (SFA, GDN, etc.) do not.
         self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
             self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
         )
-        self._seq_lens_cpu_event: torch.npu.Event | None = None
-        self._seq_lens_cpu_event_pending = False
 
         # kv role
         self.is_kv_producer = False
@@ -1198,59 +1197,37 @@ class NPUModelRunner(GPUModelRunner):
         # on CPU using the valid-sampled-token counts that are already copied
         # asynchronously for scheduler bookkeeping. This avoids an extra
         # NPU->CPU seq_lens copy and the synchronize() in attention metadata.
-        corrected_seq_lens_cpu = False
+        # Mirrors update_num_computed_tokens_for_batch_change on the GPU side.
+        async_spec_decode_active = (
+            self.use_async_spec_decode
+            and self.valid_sampled_token_count_gpu is not None  # type: ignore[has-type]
+            and prev_req_id_to_index
+        )
 
-        def _correct_optimistic_seq_lens_cpu() -> None:
+        if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
             assert self.valid_sampled_token_count_event is not None
             assert self.valid_sampled_token_count_cpu is not None
+            # Wait for the D2H copy launched on a side stream after sampling.
+            # By this point the copy started at the end of the previous step,
+            # so synchronize() is usually a no-op in steady state.
             self.valid_sampled_token_count_event.synchronize()
-
-            prev_positions = self.prev_positions.np[:num_reqs]
-            gather_indices = np.maximum(prev_positions, 0)
-            prev_accepted_counts = self.prev_num_draft_tokens.np[
-                gather_indices
-            ]
-            valid_counts = self.valid_sampled_token_count_cpu.numpy()[
-                gather_indices
-            ]
-            participating = (prev_positions >= 0) & (prev_accepted_counts > 0)
-            correction = np.where(
-                participating,
-                prev_accepted_counts - valid_counts,
-                0,
+            correct_optimistic_seq_lens_cpu(
+                self.optimistic_seq_lens_cpu.numpy(),
+                self.prev_positions.np,
+                self.prev_num_draft_tokens.np,
+                self.valid_sampled_token_count_cpu.numpy(),
+                num_reqs,
             )
-            optimistic_seq_lens_np = self.optimistic_seq_lens_cpu.numpy()
-            optimistic_seq_lens_np[:num_reqs] -= correction.astype(
-                optimistic_seq_lens_np.dtype, copy=False
-            )
-
-        if (
-            self._needs_seq_lens_cpu_sync
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
-            and prev_req_id_to_index
-        ):
-            _correct_optimistic_seq_lens_cpu()
-            corrected_seq_lens_cpu = True
-        self._seq_lens_cpu_event_pending = False
 
         num_computed_tokens_for_compress = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs]
         )
-        if (
-            self.use_compress
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
-            and prev_req_id_to_index
-        ):
-            # Async spec decode keeps the CPU counter optimistic until after
-            # target forward is launched. DSV4 compressed KV slot mapping is
-            # CPU-built today, so derive the corrected counter from the
-            # already-corrected seq_lens_cpu and avoid another NPU->CPU sync.
-            if not corrected_seq_lens_cpu:
-                _correct_optimistic_seq_lens_cpu()
-                corrected_seq_lens_cpu = True
-
+        if self.use_compress and async_spec_decode_active:
+            # ``self.use_compress`` implies ``_needs_seq_lens_cpu_sync``, so
+            # ``optimistic_seq_lens_cpu`` was corrected just above. DSV4
+            # compressed KV slot mapping is CPU-built today; derive the
+            # corrected num_computed_tokens from the corrected seq_lens to
+            # avoid another NPU->CPU sync.
             num_computed_tokens_for_compress = (
                 self.optimistic_seq_lens_cpu[:num_reqs].numpy()
                 - num_scheduled_tokens[:num_reqs]
@@ -2978,12 +2955,6 @@ class NPUModelRunner(GPUModelRunner):
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
-
-        # Ensure the async GPU→CPU copy of corrected seq_lens (launched in
-        # _prepare_inputs) has completed before we read optimistic_seq_lens_cpu.
-        if self._seq_lens_cpu_event_pending and self._seq_lens_cpu_event is not None:
-            self._seq_lens_cpu_event.synchronize()
-            self._seq_lens_cpu_event_pending = False
 
         if for_cudagraph_capture:
             # For some attention backends (e.g. FA) with sliding window models we need
