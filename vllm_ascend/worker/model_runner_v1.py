@@ -1598,23 +1598,36 @@ class NPUModelRunner(GPUModelRunner):
         # while pcp > 1, decode results may contain padding (from pcp all-gather),
         # update logits_indices after getting draft_token_ids from ori logits_indices
         if self.pcp_size > 1:
-            cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
-            if self.pcp_manager.pcp_use_hybrid_attn and self.pcp_manager.num_prefill_reqs > 0:
-                num_scheduled_tokens = cu_num_scheduled_tokens[1:] - cu_num_scheduled_tokens[:-1]
-                prefill_num_scheduled_tokens = num_scheduled_tokens[-self.pcp_manager.num_prefill_reqs: ]
-                prefill_num_scheduled_tokens = [math.ceil(num / (self.pcp_size * 2)) * 2 * self.pcp_size 
-                                                for num in prefill_num_scheduled_tokens]
-                prefill_num_scheduled_tokens = list(accumulate(prefill_num_scheduled_tokens))
-                prefill_num_scheduled_tokens = [cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs - 1] + num 
-                                                for num in prefill_num_scheduled_tokens]
-                cu_num_scheduled_tokens[-self.pcp_manager.num_prefill_reqs:] = prefill_num_scheduled_tokens
-                cu_num_scheduled_tokens = cu_num_scheduled_tokens.copy()
-                cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] = (
-                    cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] * self.pcp_size 
-                    - num_pcp_pads[self.pcp_manager.num_decode_reqs:]) # type: ignore
+            if self.pcp_manager.pcp_use_hybrid_attn: 
+                if self.pcp_manager.num_prefill_reqs > 0:
+                    num_scheduled_tokens = cu_num_scheduled_tokens[1:] - cu_num_scheduled_tokens[:-1]
+                    prefill_num_scheduled_tokens = num_scheduled_tokens[-self.pcp_manager.num_prefill_reqs: ]
+                    prefill_num_scheduled_tokens = [math.ceil(num / (self.pcp_size * 2)) * 2 * self.pcp_size 
+                                                    for num in prefill_num_scheduled_tokens]
+                    prefill_num_scheduled_tokens = list(accumulate(prefill_num_scheduled_tokens))
+                    prefill_num_scheduled_tokens = [cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs - 1] + num 
+                                                    for num in prefill_num_scheduled_tokens]
+                    cu_num_scheduled_tokens[-self.pcp_manager.num_prefill_reqs:] = prefill_num_scheduled_tokens
+                    cu_num_scheduled_tokens = cu_num_scheduled_tokens.copy()
+                    cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] = (
+                        cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] * self.pcp_size 
+                        - num_pcp_pads[self.pcp_manager.num_decode_reqs:]) # type: ignore
+                    
+                ndec = self.pcp_manager.num_decode_reqs
+                if ndec < len(cu_num_scheduled_tokens):
+                    cu_num_scheduled_tokens = cu_num_scheduled_tokens.copy()
+                    cu_num_scheduled_tokens[:ndec] = (
+                        cu_num_scheduled_tokens[:ndec] * self.pcp_size 
+                        - num_pcp_pads[:ndec]
+                    )
+
+            else:
+                cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
             logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
             logits_indices_pcp += self._arange_scratch[: cu_num_sampled_tokens[-1]]
             logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(self.device, non_blocking=True)
+
+
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
