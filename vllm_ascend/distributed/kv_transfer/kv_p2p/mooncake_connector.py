@@ -1369,14 +1369,13 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.xfer_handshake_metadata
 
     def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
-        """
-        Set the KV connector handshake metadata for this connector.
-
-        Args:
-            metadata (dict): the handshake metadata to set.
-        """
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        self.set_xfer_handshake_metadata(metadata)
 
 
 class MooncakeConnectorScheduler:
