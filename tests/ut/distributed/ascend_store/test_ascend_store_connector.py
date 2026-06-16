@@ -90,7 +90,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         _connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         mock_scheduler_cls.assert_called_once()
 
@@ -116,7 +116,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         mock_sched = mock_scheduler_cls.return_value
 
@@ -146,7 +146,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         output = MagicMock()
         output.kv_cache_events = None
@@ -161,7 +161,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         events = AscendStoreKVEvents(num_workers=1)
         mock_kv_events = [MagicMock()]
@@ -181,7 +181,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         # First update
         events1 = AscendStoreKVEvents(num_workers=1)
@@ -208,7 +208,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=None,
+            kv_cache_config=MagicMock(),
         )
         # No events
         result = list(connector.take_events())

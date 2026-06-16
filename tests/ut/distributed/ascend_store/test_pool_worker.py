@@ -452,6 +452,12 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         fake_cache.element_size.return_value = 2
         fake_cache.data_ptr.return_value = 10000
         kv_caches = {"layer.0": (fake_cache, fake_cache)}
+        # register_buffer is now triggered lazily through init_backend() (the
+        # connector calls it before register_kv_caches). Drive that lifecycle
+        # and mark transfer threads as already started so we only exercise the
+        # buffer-registration path without spawning real threads.
+        worker._transfer_threads_started = True
+        worker.init_backend()
         worker.register_kv_caches(kv_caches)
         self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 2)
         worker.m_store.register_buffer.assert_called_once()
@@ -524,12 +530,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def test_get_finished_producer(self):
         worker = self._make_worker(kv_role="kv_producer")
-        from collections import defaultdict
 
         send_thread = MagicMock()
-        stored = defaultdict(int)
-        stored["r1"] = 0
-        send_thread.stored_requests = stored
+        send_thread.get_and_clear_finished_requests.return_value = {"r1"}
         worker.kv_send_thread = send_thread
 
         meta = AscendConnectorMetadata(set(), set())

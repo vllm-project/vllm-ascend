@@ -206,10 +206,24 @@ _backend_pkg = _make_pkg(
     os.path.join(os.path.abspath(_ascend_store_real_path), "backend"),
 )
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] = _backend_pkg
+
+# Mirror the real backend/__init__.py entry points. The scheduler/worker resolve
+# the backend class dynamically via ``importlib.import_module(path)``; tests that
+# exercise those paths patch ``<module>.importlib`` locally (see
+# test_pool_scheduler.py / test_pool_worker.py) so the backend resolves to a
+# MagicMock. Do NOT register the backends in sys.modules or globally wrap
+# import_module here: test_backend.py imports the real backend classes and also
+# relies on ``mock.patch`` (which itself calls importlib.import_module) resolving
+# those real modules.
+_backend_module_paths = {
+    "mooncake": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
+    "memcache": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
+    "yuanrong": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend",
+}
 _backend_pkg.backend_map = {  # type: ignore[attr-defined]
-    "mooncake": {"name": "MooncakeBackend", "path": "..."},
-    "memcache": {"name": "MemcacheBackend", "path": "..."},
-    "yuanrong": {"name": "YuanrongBackend", "path": "..."},
+    "mooncake": {"name": "MooncakeBackend", "path": _backend_module_paths["mooncake"]},
+    "memcache": {"name": "MemcacheBackend", "path": _backend_module_paths["memcache"]},
+    "yuanrong": {"name": "YuanrongBackend", "path": _backend_module_paths["yuanrong"]},
 }
 
 if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascend.utils"], "AscendDeviceType"):
