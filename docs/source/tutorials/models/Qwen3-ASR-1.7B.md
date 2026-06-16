@@ -52,7 +52,6 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 ### Atlas 300I A2 2UP
 ``` bash
-
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --tensor-parallel-size 1 \
   --max-model-len 4096 \
@@ -60,9 +59,9 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --enforce-eager \
   --port 8000 
 ```
+
 ### Atlas 300I DUO
 ``` bash
-
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --host 127.0.0.1 \
   --port 8000 \
