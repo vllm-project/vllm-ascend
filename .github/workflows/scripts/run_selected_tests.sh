@@ -64,6 +64,7 @@ setup_coverage() {
   local target="$1"
   local test_basename="${target%.py}"
   test_basename="${test_basename//\//__}"
+  test_basename="${test_basename//::/--}"
   local covdata_dir="${project_root}/tests/outputs/${test_basename}/covdata"
   mkdir -p "${covdata_dir}"
   export COVERAGE_FILE="${covdata_dir}/coverage"
