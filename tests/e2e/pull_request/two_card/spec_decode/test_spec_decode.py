@@ -327,3 +327,68 @@ def test_p_eagle_acceptance(
         print(f"golden: {golden}")
 
     assert match
+
+
+def test_glm_hang():
+    """
+    Test hang.
+    """
+    main_model_name = "GLM-5-w4a8"
+
+    tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_path,
+        trust_remote_code=True,
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        ignore_eos=True,
+    )
+    # make it to reach max_model_len
+
+    prompts = [
+        {
+            "role": "user",
+            "content": "Hello, your name is:",
+        },
+        {
+            "role": "user",
+            "content": "Hello, your name is?",
+        },
+    ]
+    prompts = [
+        tokenizer.apply_chat_template(
+            [prompt],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        for prompt in prompts
+    ]
+
+    speculative_config = {
+        "method": "deepseek_mtp",
+        "num_speculative_tokens": 3,
+    }
+
+    compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
+
+    with VllmRunner(
+        main_model_name,
+        max_model_len=1024,
+        disable_log_stats=False,
+        tensor_parallel_size=8,
+        max_num_seqs=2,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.8,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        enable_prefix_caching=False,
+    ) as llm:
+        outputs = llm.model.generate(prompts, sampling_params)
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        output_tokens = output.outputs[0].token_ids
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Output tokens: {output_tokens}")
