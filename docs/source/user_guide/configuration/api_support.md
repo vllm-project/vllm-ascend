@@ -2,8 +2,8 @@
 
 vLLM Ascend is fully compatible with the upstream vLLM API. The vast majority of `vllm serve` CLI parameters work on Ascend NPU out of the box, with no additional configuration required. For general usage instructions, please refer to the vLLM community documentation:
 
-- [vLLM Serving Documentation](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html)
-- [vLLM Engine Arguments](https://docs.vllm.ai/en/latest/serving/engine_args.html)
+- [vLLM Serving Documentation](https://docs.vllm.ai/en/latest/serving/online_serving.html)
+- [vLLM CLI Reference](https://docs.vllm.ai/en/latest/cli/.html)
 - [vLLM API Reference](https://docs.vllm.ai/en/latest/api/index.html)
 
 This page **only** documents the parameters that are **not supported**, **silently reset**, or **partially limited** on Ascend NPU due to hardware differences or missing backend support. For any parameters not listed below, they are supported by default — please refer to the vLLM documentation above for usage instructions.
@@ -12,7 +12,7 @@ Some GPU-specific parameters have Ascend-native equivalents exposed via `--addit
 
 ## Parameters Silently Reset by Ascend
 
-When any of the following parameters are set, vLLM Ascend will log a warning and automatically reset them to a safe default. The service will still start normally. The reset logic is implemented in [`vllm_ascend/platform.py` → `_fix_incompatible_config`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/platform.py).
+When any of the following parameters are set, vLLM Ascend will log a warning and automatically reset them to a safe default. The service will still start normally. The reset logic is implemented in [`vllm_ascend/platform.py` → `_fix_incompatible_config`](https://github.com/vllm-project/vllm-ascend/tree/main/vllm_ascend/platform.py).
 
 ### ModelConfig
 
