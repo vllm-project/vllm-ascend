@@ -203,7 +203,6 @@ class ServerState:
         self.active_kv_cache = 0  # Only for prefiller
         self.active_requests = 0  # Number of active requests
         self.aborted_requests = set()  # Track aborted requests
-        # Removed individual server lock - will use global locks instead
 
     def __eq__(self, other):
         self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
@@ -238,7 +237,6 @@ class ProxyState:
         # Background tasks closing httpx clients of removed instances; kept so they
         # are not garbage-collected before completion.
         self._pending_closes: set = set()
-        # Removed selection locks - no longer needed for synchronous methods
 
         # 动态分桶负载均衡器
         self.bucket_load_balancer: Optional[DynamicBucketLoadBalancer] = None
@@ -394,7 +392,6 @@ class ProxyState:
         Mark a request as aborted. This will helps to release kv cache in
         prefiller node.
         """
-        # No lock needed - atomic operation
         if server_idx >= len(self.prefillers):
             return
         self.prefillers[server_idx].aborted_requests.add(request_id)
@@ -404,7 +401,6 @@ class ProxyState:
         Get the set of aborted requests and clear it.
         This is used to release kv cache in prefiller node.
         """
-        # No lock needed - atomic operation
         if server_idx >= len(self.prefillers):
             return set()
         aborted_requests = self.prefillers[server_idx].aborted_requests.copy()
@@ -415,8 +411,7 @@ class ProxyState:
         async with self.req_id_lock:
             return str(uuid.uuid4())
 
-    def select_prefiller(self, token_count, group_idx):  # Changed to synchronous
-        # No lock needed - entire function is atomic
+    def select_prefiller(self, token_count, group_idx):
         if not self.prefillers:
             raise RuntimeError("No prefiller servers available")
         # Defensive: removal is refused if it would empty a bucket, but guard
@@ -438,8 +433,7 @@ class ProxyState:
 
         return chosen_server_idx
 
-    def release_prefiller(self, idx, token_count, task):  # Changed to synchronous
-        # No lock needed - atomic operation
+    def release_prefiller(self, idx, token_count, task):
         if idx >= len(self.prefillers):
             raise ValueError(f'No prefiller servers with idx = {idx}')
         self.prefillers[idx].active_tokens -= token_count
@@ -450,8 +444,7 @@ class ProxyState:
         # Update priority queue after releasing
         self._update_prefiller_priority(idx)
 
-    def release_prefiller_kv(self, idx, token_count):  # Changed to synchronous
-        # No lock needed - atomic operation
+    def release_prefiller_kv(self, idx, token_count):
         if idx >= len(self.prefillers):
             return
         if self.prefillers[idx].active_kv_cache > 0:
@@ -459,8 +452,7 @@ class ProxyState:
         # Update priority queue after releasing
         self._update_prefiller_priority(idx)
 
-    def select_decoder(self, token_count):  # Changed to synchronous
-        # No lock needed - entire function is atomic
+    def select_decoder(self, token_count):
         if not self.decoder_heap:
             raise RuntimeError("No decoder servers available")
 
@@ -475,8 +467,7 @@ class ProxyState:
 
         return chosen_server_idx
 
-    def release_decoder(self, idx, token_count):  # Changed to synchronous
-        # No lock needed - atomic operation
+    def release_decoder(self, idx, token_count):
         if idx >= len(self.decoders):
             return
         self.decoders[idx].active_tokens -= token_count
@@ -603,7 +594,7 @@ class ProxyState:
 
         instances_to_remove = set(instances)
 
-        # [A2] Each prefiller must stay in its assigned bucket: a bucket reflects
+        # Each prefiller must stay in its assigned bucket: a bucket reflects
         # the request-length class its servers are meant to serve, so we must not
         # rebalance servers across buckets on removal. Instead, refuse any removal
         # that would empty a bucket (a request routed to an empty bucket would
@@ -613,7 +604,7 @@ class ProxyState:
                 logger.warning(
                     f"Refusing removal: prefill bucket group {group_idx} would be "
                     f"left empty")
-                # [A1] un-taint so the servers stay usable and are not stranded at
+                # un-taint so the servers stay usable and are not stranded at
                 # TAINT_PRIORITY after the caller clears the list.
                 self._restore_prefiller_priorities(instances_to_remove)
                 return False
@@ -627,7 +618,7 @@ class ProxyState:
             else:
                 if server.active_tokens!=0 or server.active_kv_cache!=0 or server.active_requests!=0:
                     logger.warning("Prefill server is not empty, please wait for all requests to be completed")
-                    # [A1] same as above: un-taint before refusing.
+                    # same as above: un-taint before refusing.
                     self._restore_prefiller_priorities(instances_to_remove)
                     return False
 
@@ -659,7 +650,7 @@ class ProxyState:
             for server_item in heap:
                 self.prefill_group_load[group_idx] += server_item.server.active_tokens
 
-        # [D2] Close httpx clients of the removed instances to avoid leaks.
+        # Close httpx clients of the removed instances to avoid leaks.
         for server in removed_servers:
             self._schedule_close(server)
 
@@ -677,20 +668,20 @@ class ProxyState:
 
         instances_to_remove = set(instances)
 
-        # [D3] Keep at least one decoder: select_decoder raises if the pool is empty.
+        # Keep at least one decoder: select_decoder raises if the pool is empty.
         if all(server in instances_to_remove for server in self.decoders):
             logger.warning("Refusing removal: no decoder would be left after removal")
             # [A1] un-taint so the decoders stay selectable instead of being stranded.
             self._restore_decoder_priorities(instances_to_remove)
             return False
 
-        # [fix #2] refuse to remove a decoder that still has in-flight requests, mirroring
+        # refuse to remove a decoder that still has in-flight requests, mirroring
         # remove_prefillers; otherwise the rebuild + reindex below invalidates in-flight
         # decoder_idx held by active streams (release_decoder would hit the wrong decoder).
         for server in self.decoders:
             if server in instances_to_remove and server.active_tokens != 0:
                 logger.warning("Decode server is not empty, please wait for all requests to be completed")
-                # [A1] un-taint so the decoder stays selectable instead of being
+                # un-taint so the decoder stays selectable instead of being
                 # stranded at TAINT_PRIORITY after the caller clears the list.
                 self._restore_decoder_priorities(instances_to_remove)
                 return False
@@ -707,7 +698,7 @@ class ProxyState:
 
         self.decoder_heap = decoder_heap
         heapq.heapify(self.decoder_heap)
-        # [D2] Close httpx clients of the removed instances to avoid leaks.
+        # Close httpx clients of the removed instances to avoid leaks.
         for server in removed_servers:
             self._schedule_close(server)
 
@@ -1027,7 +1018,7 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
             base_delay=global_args.retry_delay,
         )
     except Exception:
-        # [fix #4] prefill failed: roll back what select_prefiller acquired (active_tokens,
+        # prefill failed: roll back what select_prefiller acquired (active_tokens,
         # active_kv_cache, prefill_group_load and the bucket task) before re-raising
         proxy_state.release_prefiller(prefiller_idx, prefiller_score,task)
         proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
@@ -1067,7 +1058,7 @@ class InstanceInfo:
 
 
 async def _handle_completions(api: str, request: Request):
-    # [fix #1] request_num must cover the whole streaming lifetime, not just instance
+    # request_num must cover the whole streaming lifetime, not just instance
     # selection. streaming_started distinguishes the "selection failed, stream never
     # ran" path from the "stream ran and releases via its own finally" path.
     streaming_started = False
@@ -1101,7 +1092,7 @@ async def _handle_completions(api: str, request: Request):
             try:
                 while retry:
                     retry = False
-                    # [fix #3] reset per (prefiller, decoder) attempt so the KV of the
+                    # reset per (prefiller, decoder) attempt so the KV of the
                     # newly selected prefiller gets released on its first decode chunk
                     released_kv = False
                     async for chunk in stream_service_response_with_retry(
@@ -1159,7 +1150,7 @@ async def _handle_completions(api: str, request: Request):
                                 req_data["prompt"] = origin_prompt + generated_token
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                            # [fix #3] release the decoder we are abandoning before picking a
+                            # release the decoder we are abandoning before picking a
                             # new one, otherwise its active_tokens leak (the finally below
                             # only releases the final instance_info.decoder)
                             proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
@@ -1180,14 +1171,14 @@ async def _handle_completions(api: str, request: Request):
                 )
                 proxy_state.abort_prefiller_request(instance_info.prefiller_idx, instance_info.request_id)
             finally:
-                # [fix #9] KV release moved here so it also covers early client disconnect
+                # KV release moved here so it also covers early client disconnect
                 # (CancelledError is a BaseException and is not caught by `except Exception`).
                 # released_kv is True once the first decode chunk already triggered release.
                 if not released_kv:
                     proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
                 # After streaming done, release tokens
                 proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
-                # [fix #1] the request is only truly done once its stream finishes; decrement
+                # the request is only truly done once its stream finishes; decrement
                 # here so request_num reflects in-flight streams (used as a scaling guard rail)
                 proxy_state.request_num -= 1
 
@@ -1204,7 +1195,7 @@ async def _handle_completions(api: str, request: Request):
         print("".join(traceback.format_exception(*exc_info)))
         raise
     finally:
-        # [fix #1] only decrement here when the stream never started (e.g. instance
+        # only decrement here when the stream never started (e.g. instance
         # selection failed); the successful path is handled by generate_stream's finally
         if not streaming_started:
             proxy_state.request_num -= 1
@@ -1262,7 +1253,7 @@ async def _handle_adjust_instances(adjust_mode: str, request: Request):
             if need_waiting:
                 all_msg = f"Instances {instances} are isolated and waiting to be removed."
             else:
-                # [A3] Distinguish actually-removed from refused (empty-bucket / busy
+                # Distinguish actually-removed from refused (empty-bucket / busy
                 # guards): refused instances are still in the pool after the call.
                 refused = [s for s in instances if s in current_pool]
                 if refused:

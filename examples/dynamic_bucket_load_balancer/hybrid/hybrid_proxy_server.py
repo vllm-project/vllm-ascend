@@ -365,7 +365,7 @@ async def stream_service_response_with_retry(
 ):
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
     for attempt in range(1, max_retries + 1):
-        # [fix #4] reset per attempt so a stale True from a previous iteration
+        # reset per attempt so a stale True from a previous iteration
         # cannot leak across retries
         first_chunk_sent = False
         try:
@@ -376,7 +376,7 @@ async def stream_service_response_with_retry(
                     yield chunk
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            # [fix #4] once any chunk has been forwarded to the client we must not
+            # once any chunk has been forwarded to the client we must not
             # retry, otherwise the client receives a duplicated/corrupted stream.
             if first_chunk_sent:
                 logger.error(f"Streaming to client interrupted after response started: {str(e)}")
@@ -388,7 +388,7 @@ async def stream_service_response_with_retry(
                 logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
                 raise e
         except Exception as e:
-            # [fix #4] same guard as above for non-HTTP exceptions
+            # same guard as above for non-HTTP exceptions
             if first_chunk_sent:
                 logger.error(f"Streaming to client interrupted after response started: {str(e)}")
                 return
@@ -415,7 +415,7 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
         f"ignore_eos: {ignore_eos}, Priority score: {priority_score}"
     )
     request_id = await proxy_state.next_req_id()
-    # Select dp server based on priority score
+    # Select server based on priority score
     request_tokens = proxy_state.calculate_request_tokens(request_length)
     group_idx, task = proxy_state.select_server_group(request_id, request_tokens, priority_score)
 
@@ -440,7 +440,7 @@ class InstanceInfo:
 
 
 async def _handle_completions(api: str, request: Request):
-    # [fix #3] track ownership so release_server runs exactly once: either in
+    # track ownership so release_server runs exactly once: either in
     # generate_stream's finally (normal path) or here (stream never started).
     instance_info = None
     streaming_started = False
@@ -483,7 +483,7 @@ async def _handle_completions(api: str, request: Request):
         print("".join(traceback.format_exception(*exc_info)))
         raise
     finally:
-        # [fix #3] the stream never started (e.g. client disconnect / error during
+        # the stream never started (e.g. client disconnect / error during
         # instance selection): release here so active_tokens and the bucket task
         # do not leak. Skipped on the normal path where generate_stream released.
         if instance_info is not None and not streaming_started:
