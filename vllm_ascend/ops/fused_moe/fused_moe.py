@@ -42,7 +42,6 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     enable_sp,
-    enable_sp_by_pass,
     maybe_trans_nz,
     npu_stream_switch,
     shared_expert_dp_enabled,
