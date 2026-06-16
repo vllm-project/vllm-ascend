@@ -1502,46 +1502,39 @@ class AscendDSAImpl(DSAAttentionImpl):
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
-    def _indexer_should_prepare_fp_qr(self) -> bool:
-        return self.indexer is not None and self.compress_ratio == 4 and not self.skip_topk
+    def _select_qr_after_dynamic_quant(
+        self,
+        q_a: torch.Tensor,
+        qr_quant: torch.Tensor,
+        qr_pertoken_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        """Choose whether downstream should see quantized or fp qr.
+        Layers without an active indexer keep the fused
+        npu_rms_norm_dynamic_quant result. Only an active indexer may require
+        fp qr, and only when it cannot consume the quantized qr directly.
+        """
+        if self.indexer is None or self.compress_ratio != 4 or self.skip_topk:
+            return qr_quant
 
-    def _indexer_can_use_quantized_qr(
-        self, qr_quant: torch.Tensor | None, qr_pertoken_scale: torch.Tensor | None
-    ) -> bool:
-        return (
-            _is_w8a8_dynamic(self.inderxer_wq_b)
+        indexer_can_reuse_quantized_qr = (
+            _is_w8a8_dynamic(self.wq_b)
+            and _is_w8a8_dynamic(self.inderxer_wq_b)
             and qr_quant is not None
             and qr_pertoken_scale is not None
             and get_ascend_device_type() not in {AscendDeviceType.A5}
         )
+        if indexer_can_reuse_quantized_qr:
+            return qr_quant
 
-    def _indexer_should_prepare_fp_qr(self) -> bool:
-        return self.indexer is not None and self.compress_ratio == 4 and not self.skip_topk
+        return self.q_norm(q_a)
 
-    def _indexer_can_use_quantized_qr(
-        self, qr_quant: torch.Tensor | None, qr_pertoken_scale: torch.Tensor | None
+    def _is_quantized_qr_selected(
+        self,
+        qr: torch.Tensor,
+        qr_quant: torch.Tensor | None,
+        qr_pertoken_scale: torch.Tensor | None,
     ) -> bool:
-        is_w8a8_indexer_wq_b = _is_w8a8_dynamic(self.inderxer_wq_b)
-        return (
-            is_w8a8_indexer_wq_b
-            and qr_quant is not None
-            and qr_pertoken_scale is not None
-            and get_ascend_device_type() not in {AscendDeviceType.A5}
-        )
-
-    def _indexer_should_prepare_fp_qr(self) -> bool:
-        return self.indexer is not None and self.compress_ratio == 4 and not self.skip_topk
-
-    def _indexer_can_use_quantized_qr(
-        self, qr_quant: torch.Tensor | None, qr_pertoken_scale: torch.Tensor | None
-    ) -> bool:
-        is_w8a8_indexer_wq_b = _is_w8a8_dynamic(self.inderxer_wq_b)
-        return (
-            is_w8a8_indexer_wq_b
-            and qr_quant is not None
-            and qr_pertoken_scale is not None
-            and get_ascend_device_type() not in {AscendDeviceType.A5}
-        )
+        return qr_quant is not None and qr_pertoken_scale is not None and qr is qr_quant
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
@@ -1715,23 +1708,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 wq_a_result, self.q_norm.weight, epsilon=self.eps
             )
             q_b_quant, q_b_scale = qr_quant, qr_pertoken_scale
-            qr = (
-                self.q_norm(wq_a_result)
-                if (
-                    self._indexer_should_prepare_fp_qr()
-                    and not self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale)
-                )
-                else qr_quant
-            )
-            q_b_quant, q_b_scale = qr_quant, qr_pertoken_scale
-            qr = (
-                self.q_norm(wq_a_result)
-                if (
-                    self._indexer_should_prepare_fp_qr()
-                    and not self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale)
-                )
-                else qr_quant
-            )
+            qr = self._select_qr_after_dynamic_quant(wq_a_result, qr_quant, qr_pertoken_scale)
         else:
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = qr, None
@@ -1861,14 +1838,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     bias=self.wq_b.bias,
                     output_dtype=hidden_states.dtype,
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
-                qr = (
-                    self.q_norm(q_a)
-                    if (
-                        self._indexer_should_prepare_fp_qr()
-                        and not self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale)
-                    )
-                    else qr_quant
-                )
+                qr = self._select_qr_after_dynamic_quant(q_a, qr_quant, qr_pertoken_scale)
             else:
                 qr = self.q_norm(q_a)
                 q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
@@ -2150,7 +2120,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 hidden_states, cos, sin, swa_kv_cache, swa_decode_metadata.slot_mapping, is_prefill=False
             )
         else:
-            # Do nothing, because self.multistream_dsv4_dsa_overlap be true
             # Share one dynamic-quant of hidden_states between wq_a (main stream)
             # and wkv (attention stream) when both sides are W8A8 dynamic.
             is_w8a8_wq_a = _is_w8a8_dynamic(self.wq_a)
@@ -2187,22 +2156,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     bias=self.wq_b.bias,
                     output_dtype=hidden_states.dtype,
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
-                qr = (
-                    self.q_norm(q_a)
-                    if (
-                        self._indexer_should_prepare_fp_qr()
-                        and not self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale)
-                    )
-                    else qr_quant
-                )
-                qr = (
-                    self.q_norm(q_a)
-                    if (
-                        self._indexer_should_prepare_fp_qr()
-                        and not self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale)
-                    )
-                    else qr_quant
-                )
+                qr = self._select_qr_after_dynamic_quant(q_a, qr_quant, qr_pertoken_scale)
             else:
                 if share_hs_quant:
                     q_a = torch_npu.npu_quant_matmul(
@@ -2471,8 +2425,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             _,
         ) = attn_metadata
 
-        if self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale):
-        if self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale):
+        use_quantized_qr = self._is_quantized_qr_selected(qr, qr_quant, qr_pertoken_scale)
+        if use_quantized_qr:
             q = torch_npu.npu_quant_matmul(
                 qr_quant,
                 qr_quant,
@@ -2715,10 +2669,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         aux_stream = dsv4_dsa_overlap_stream()
 
         # ===== Part0: Pre-compute on main =====
-        use_quantized_qr = self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale)
-        if use_quantized_qr:
-            qr_quant_ready = qr_quant
-        use_quantized_qr = self._indexer_can_use_quantized_qr(qr_quant, qr_pertoken_scale)
+        use_quantized_qr = self._is_quantized_qr_selected(qr, qr_quant, qr_pertoken_scale)
         if use_quantized_qr:
             qr_quant_ready = qr_quant
             qr_scale_ready = qr_pertoken_scale
