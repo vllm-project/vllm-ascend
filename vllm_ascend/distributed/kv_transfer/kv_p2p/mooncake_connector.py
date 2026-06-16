@@ -2003,6 +2003,8 @@ class MooncakeConnectorWorker:
         # [layer_idx][cache_idx] -> stride(0) * element_size.
         self.block_stride_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
 
+        # TODO: For DSV4 use_compress, metadata/transfer can be optimized by
+        # aggregating layer views that share the same raw KVCacheTensor.
         for layer_name, kv_cache_tuple in kv_caches.items():
             layer_idx = layer_name_to_idx[layer_name]
             for single_kv_cache in self._as_kv_cache_tuple(kv_cache_tuple):
