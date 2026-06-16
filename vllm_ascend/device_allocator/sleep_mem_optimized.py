@@ -18,7 +18,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
+from dataclasses import fields
 from typing import Any
 
 import torch
@@ -85,19 +86,13 @@ class AclGraphSleepWakeupManager:
     def reset_graph_params(params) -> None:
         if params is None:
             return
-        for attr_name in (
-            "events",
-            "handles",
-            "attn_params",
-            "conv1d_params",
-            "conv1d_handles",
-            "conv1d_events",
-        ):
-            attr_dict = getattr(params, attr_name, None)
-            if attr_dict is None:
+        for graph_field in fields(params):
+            attr_dict = getattr(params, graph_field.name, None)
+            if not isinstance(attr_dict, MutableMapping):
                 continue
-            for num_tokens in attr_dict:
-                attr_dict[num_tokens] = []
+            for num_tokens, value in attr_dict.items():
+                if isinstance(value, list):
+                    attr_dict[num_tokens] = []
 
     @classmethod
     def reset_all_graph_params(cls) -> None:

@@ -16,6 +16,7 @@
 #
 
 from contextlib import nullcontext
+from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 from vllm_ascend.device_allocator.sleep_mem_optimized import (
@@ -23,6 +24,31 @@ from vllm_ascend.device_allocator.sleep_mem_optimized import (
     HcclSleepWakeupManager,
     SleepWakeupManager,
 )
+
+
+@dataclass
+class DummyGraphParams:
+    events: dict[int, list]
+    workspaces: dict[int, object]
+    extra_handles: dict[int, list]
+    metadata: dict[int, tuple]
+
+
+def test_acl_graph_reset_graph_params_clears_list_values_only():
+    workspace = object()
+    params = DummyGraphParams(
+        events={1: ["event"]},
+        workspaces={1: workspace},
+        extra_handles={1: ["handle"]},
+        metadata={1: ("keep",)},
+    )
+
+    AclGraphSleepWakeupManager.reset_graph_params(params)
+
+    assert params.events == {1: []}
+    assert params.extra_handles == {1: []}
+    assert params.workspaces == {1: workspace}
+    assert params.metadata == {1: ("keep",)}
 
 
 def test_acl_graph_wakeup_waits_for_kv_cache_tag():
