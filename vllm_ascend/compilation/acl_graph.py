@@ -32,7 +32,7 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
 _OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
 _STREAM_RESOURCE_GUIDANCE = (
     "ACL graph capture failed with a known stream-resource exhaustion "
-    "signature. Consider upgrading to a newer HDK/CANN stack, reducing "
+    "signature. Consider, reducing "
     "cudagraph_capture_sizes, lowering max_cudagraph_capture_size, preferring "
     "FULL or FULL_DECODE_ONLY for mostly uniform decode workloads, or "
     "temporarily disabling graph mode to confirm the failure is capture-related."
