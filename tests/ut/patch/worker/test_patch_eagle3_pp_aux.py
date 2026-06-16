@@ -33,8 +33,8 @@ class _FakeLayer(nn.Module):
         super().__init__()
         self.delta = delta
 
-    def forward(self, positions, hidden_states, residual, llama_4_scaling):
-        del positions, llama_4_scaling
+    def forward(self, positions, hidden_states, residual, kv_cache, attn_metadata, llama_4_scaling):
+        del positions, kv_cache, attn_metadata, llama_4_scaling
         next_hidden_states = hidden_states + self.delta
         next_residual = torch.zeros_like(hidden_states) if residual is None else residual + self.delta
         return next_hidden_states, next_residual
