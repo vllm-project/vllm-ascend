@@ -29,6 +29,7 @@ using namespace AscendC;
 constexpr uint32_t BYTES_PER_BLOCK = 32;
 constexpr uint32_t BF16_PER_BLOCK  = BYTES_PER_BLOCK / sizeof(int16_t);  // 16
 constexpr uint32_t FP32_PER_BLOCK  = BYTES_PER_BLOCK / sizeof(float);    // 8
+constexpr uint32_t MASK_ALIGN_ELEMS = 64;
 
 // DMA-friendly alignment: 16 elements = 32 bytes = 1 DMA block.
 // Vector ops use count=numHeads_ with partial-iteration masking,
@@ -64,8 +65,9 @@ public:
         threshold_ = tiling->threshold;
 
         // Aligned dimensions for UB tensors.
-        alignedHeadsHalf_  = AlignUp<uint32_t>(numHeads_, DMA_ALIGN_ELEMS);
-        alignedHeadsFloat_ = AlignUp<uint32_t>(numHeads_, DMA_ALIGN_ELEMS);
+        alignedHeadsHalf_  = AlignUp<uint32_t>(numHeads_, MASK_ALIGN_ELEMS);
+        alignedHeadsFloat_ = AlignUp<uint32_t>(numHeads_, MASK_ALIGN_ELEMS);
+        alignedHeadsMask_ = alignedHeadsFloat_;
         constexpr uint32_t paramAlignElems = BYTES_PER_BLOCK / sizeof(ParamDtype);
         alignedHeadsParam_ = AlignUp<uint32_t>(numHeads_, paramAlignElems);
 
@@ -103,7 +105,7 @@ public:
         pipe_->InitBuffer(xBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
         pipe_->InitBuffer(betaXBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
         pipe_->InitBuffer(softplusTmpBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
-        pipe_->InitBuffer(thresholdMaskBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(uint8_t));
+        pipe_->InitBuffer(thresholdMaskBuf_, rowsPerIter_ * alignedHeadsMask_ * sizeof(uint8_t));
         pipe_->InitBuffer(betaFp32Buf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
     }
 
@@ -240,6 +242,7 @@ private:
         LocalTensor<float> betaFp32    = betaFp32Buf_.Get<float>();
 
         const uint32_t multiCount = validRows * alignedHeadsFloat_;
+        const uint32_t maskCount = validRows * alignedHeadsMask_;
 
         // Batch Cast a→fp32, b→fp32.
         Cast(x,        aLocal, RoundMode::CAST_NONE, multiCount);
@@ -264,7 +267,7 @@ private:
             PipeBarrier<PIPE_V>();
             Muls(softplusTmp, softplusTmp, 1.0f / beta_, multiCount);
             PipeBarrier<PIPE_V>();
-            CompareScalar(thresholdMask, betaX, threshold_, CMPMODE::LE, multiCount);
+            CompareScalar(thresholdMask, betaX, threshold_, CMPMODE::LE, maskCount);
             PipeBarrier<PIPE_V>();
             Select(gLocal, thresholdMask, softplusTmp, x, SELMODE::VSEL_TENSOR_TENSOR_MODE, multiCount);
             PipeBarrier<PIPE_V>();
@@ -286,7 +289,7 @@ private:
             PipeBarrier<PIPE_V>();
             Muls(softplusTmp, softplusTmp, 1.0f / beta_, multiCount);
             PipeBarrier<PIPE_V>();
-            CompareScalar(thresholdMask, betaX, threshold_, CMPMODE::LE, multiCount);
+            CompareScalar(thresholdMask, betaX, threshold_, CMPMODE::LE, maskCount);
             PipeBarrier<PIPE_V>();
             Select(gLocal, thresholdMask, softplusTmp, x, SELMODE::VSEL_TENSOR_TENSOR_MODE, multiCount);
             PipeBarrier<PIPE_V>();
@@ -382,6 +385,7 @@ private:
     bool     useBulkDma_{false};
     uint32_t alignedHeadsHalf_{0};
     uint32_t alignedHeadsFloat_{0};
+    uint32_t alignedHeadsMask_{0};
     uint32_t alignedHeadsParam_{0};
     float    beta_{1.0f};
     float    threshold_{20.0f};
