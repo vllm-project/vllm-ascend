@@ -90,6 +90,7 @@ class TestAscendUnquantizedLinearMethod(TestBase):
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):
+    @patch("vllm_ascend.ops.linear_op.enable_dsa_cp_with_pcp_shard", return_value=False)
     @patch("vllm_ascend.ops.linear_op.get_weight_prefetch_method", return_value=MagicMock())
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
     @patch("vllm_ascend.ops.linear.enable_sp", return_value=False)
@@ -97,7 +98,13 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
         new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
     )
-    def test_mlp_optimize(self, mock_enable_sp, mock_get_current_vllm_config, mock_get_weight_prefetch_method):
+    def test_mlp_optimize(
+        self,
+        mock_enable_sp,
+        mock_get_current_vllm_config,
+        mock_get_weight_prefetch_method,
+        mock_enable_dsa_cp_with_pcp_shard,
+    ):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
@@ -113,6 +120,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         input_tensor = torch.randn(16, 8)
         linear(input_tensor)
 
+    @patch("vllm_ascend.ops.linear_op.enable_dsa_cp_with_pcp_shard", return_value=False)
     @patch("vllm_ascend.ops.linear_op.get_weight_prefetch_method", return_value=MagicMock())
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
     @patch("vllm_ascend.ops.linear.enable_sp", return_value=False)
@@ -120,7 +128,13 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
         new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
     )
-    def test_oproj_tp(self, mock_enable_sp, mock_get_current_vllm_config, mock_get_weight_prefetch_method):
+    def test_oproj_tp(
+        self,
+        mock_enable_sp,
+        mock_get_current_vllm_config,
+        mock_get_weight_prefetch_method,
+        mock_enable_dsa_cp_with_pcp_shard,
+    ):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.oproj_tensor_parallel_size = 2
@@ -138,7 +152,8 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 
 
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
-    def test_merged_mlp_tp_init(self):
+    @patch("vllm_ascend.ops.linear_op.enable_dsa_cp_with_pcp_shard", return_value=False)
+    def test_merged_mlp_tp_init(self, mock_enable_dsa_cp_with_pcp_shard):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2

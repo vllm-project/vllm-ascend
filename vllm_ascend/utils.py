@@ -1413,10 +1413,17 @@ def enable_dsa_cp_with_pcp_shard() -> bool:
     """
     if enable_dsa_cp_with_layer_shard() or enable_dsa_cp_with_o_proj_tp():
         return False
+
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
     kv_transfer_config = vllm_config.kv_transfer_config
+
+    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+        vllm_config.model_config.hf_text_config, "index_topk"
+    )
+    if not has_indexer:
+        return False
 
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
