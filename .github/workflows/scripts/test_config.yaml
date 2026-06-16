@@ -117,6 +117,7 @@
   source_file_dependencies:
     - vllm_ascend/attention/context_parallel
   tests:
+    - tests/ut/attention/a2/test_sfa_cp.py
     - tests/e2e/pull_request/four_card/long_sequence/
 
 # Compilation
@@ -752,6 +753,7 @@ estimated_times:
   tests/ut/attention/a2/test_mla_cp_precision.py: 30
   tests/ut/attention/a2/test_mla_precision.py: 190
   tests/ut/attention/a2/test_mla_v1.py: 30
+  tests/ut/attention/a2/test_sfa_cp.py: 40
   tests/ut/attention/a2/test_sfa_cp_precision.py: 160
   tests/ut/attention/a2/test_sfa_v1.py: 30
   tests/ut/attention/a2/test_sfa_v1_precision.py: 140
