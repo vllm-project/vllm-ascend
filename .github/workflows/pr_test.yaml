@@ -50,6 +50,8 @@ jobs:
       has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
       test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
       matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+      main_commit: ${{ steps.vllm.outputs.main_commit }}
+      release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -83,6 +85,24 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Read verified vLLM refs
+        id: vllm
+        run: |
+          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+            exit 1
+          }
+          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+            exit 1
+          }
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: cp problem matchers
         run: |
           cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
@@ -98,7 +118,7 @@ jobs:
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
-          ref: 9090368b650896bf5fc990c921df7eb4c20355a5
+          ref: ${{ steps.vllm.outputs.main_commit }}
 
       - uses: dorny/paths-filter@v4
         id: filter
@@ -185,7 +205,9 @@ jobs:
     if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       matrix:
-        vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.20.2]
+        vllm_version:
+          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
+          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}

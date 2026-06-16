@@ -200,6 +200,24 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM47 inline zero-argument streaming parser fix.
 #
+# ** 7c. File: platform/patch_anthropic_system_message.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.anthropic.protocol.AnthropicMessage`
+#      `vllm.entrypoints.anthropic.serving.AnthropicServingMessages`
+#    Why:
+#       Recent Claude Code clients can send `role: system` entries inside the
+#       Anthropic Messages API `messages` array. The pinned vLLM rejects those
+#       requests before inference starts.
+#    How：
+#       Monkey-patch Anthropic message role validation to accept `system`, merge
+#       inline system messages with the top-level system prompt, and skip inline
+#       system entries when converting the remaining chat history.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/44000
+#       https://github.com/vllm-project/vllm/pull/44283
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #44283.
+#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
@@ -310,7 +328,7 @@
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionRequest`
 #      `vllm.tokenizers.deepseek_v4`
 #    Why:
-#       Supported vLLM v0.20.2 predates newer DeepSeek V4 reasoning-effort
+#       Supported vLLM v0.21.0 predates newer DeepSeek V4 reasoning-effort
 #       handling: `minimal`, `xhigh`, and `max` are rejected at request
 #       validation time, reasoning effort does not automatically enable
 #       thinking, and `reasoning_effort="none"` does not force chat mode in
@@ -320,7 +338,7 @@
 #       backport the newer `build_chat_params` enable_thinking behavior, and
 #       monkey-patch the DeepSeek V4 tokenizer reasoning-effort mapping.
 #    Related PR (if no, explain why):
-#       Upstream vLLM main behavior after v0.20.2.
+#       Upstream vLLM main behavior after v0.21.0.
 #    Future Plan:
 #       Remove this patch once vllm-ascend upgrades to a vLLM version with the
 #       same DeepSeek V4 thinking behavior.
@@ -329,7 +347,7 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tool_parsers.minimax_m2_tool_parser.MinimaxM2ToolParser`
 #    Why:
-#       vLLM 0.20.2 only emits MiniMax-M2 tool-call arguments after a complete
+#       vLLM 0.21.0 only emits MiniMax-M2 tool-call arguments after a complete
 #       `<invoke>...</invoke>` block, so long arguments are buffered instead of
 #       streamed incrementally.
 #    How:
@@ -412,9 +430,7 @@
 #    How：
 #       Import `triton` from vllm.triton_utils (which handles both
 #       real Triton and TritonPlaceholder) and inject `next_power_of_2`
-#       onto the module. For vLLM versions that have
-#       `vllm.utils.math_utils.next_power_of_2`, reuse that implementation;
-#       for v0.20.2 (which lacks it), skip the patch.
+#       onto the module, reusing `vllm.utils.math_utils.next_power_of_2`.
 #    Related PR (if no, explain why):
 #       No, torch_npu Triton compatibility issue.
 #    Future Plan:
@@ -449,27 +465,28 @@
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
 #
-# ** 7. File: worker/patch_gdn_attn.py**
+## ** 6. File: worker/patch_module.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.attention.backends.gdn_attn.GDNAttentionMetadataBuilder.build`
+#   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
-#       Qwen3.5/Qwen3Next GDN prefill on NPU needs prebuilt varlen chunk metadata
-#       to avoid forward-time host round-trips that break async scheduling.
+#       1. 'torch.argsort' func of npu does not support bool.
+#       2. Without `stable=True`, the output will have a lot of redundant tokens.
 #    How：
-#       Monkey-patch the upstream builder in-place, keep upstream code untouched,
-#       and attach prebuilt device metadata bundle onto the returned attention
-#       metadata object for Ascend-specific consumers.
+#       Replace with a new torch.argsort that will cast the input to torch.int32
+#       and do stable sort.
+#    Related PR (if no, explain why):
+#       1. It depends on torch_npu.
+#       2. https://github.com/vllm-project/vllm/pull/30632
 #    Future Plan:
-#       Remove this patch when upstream exposes a backend hook for extending GDN
-#       metadata or when the optimization is accepted upstream directly.
-#   2. `vllm.v1.attention.backends.gdn_attn.GDNAttentionMetadataBuilde.build`
+#       Remove this patch when bool is supported in 'torch.argsort' func of npu.
+#       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
+#   2. `vllm_ascend.ops.gdn_attn_builder.AscendGDNAttentionMetadataBuilder.build`
 #    Why:
 #       Qwen3.5/Qwen3Next GDN Decode/Specific Decode on NPU needs prebuilt varlen chunk metadata
 #       to avoid forward-time host round-trips that break async scheduling.
 #    How：
-#       Monkey-patch the upstream builder in-place, keep upstream code untouched,
-#       and attach prebuilt device metadata bundle onto the returned attention
-#       metadata object for Ascend-specific consumers.
+#       Override the GDN attention metadata builder for Ascend backend and attach
+#       prebuilt device metadata bundle onto the returned attention metadata object.
 #    Future Plan:
 #       Remove this patch when upstream exposes a backend hook for extending GDN
 #       metadata or when the optimization is accepted upstream directly.
@@ -722,6 +739,16 @@
 #       If the weight name is `rot`, rename it to `model.layers.{spec_layer}.rot.weight`.
 #    Related PR (if no, explain why):
 #       Rotary quant is a unique feature of vllm-ascend.
+#    Future Plan:
+#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+#   4. `vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM.load_weights`
+#    Why:
+#       After vllm PR #41706, GlmMoeDsaForCausalLM.load_weights uses `AutoWeightsLoader` which
+#       does not skip `rot.weight`, and will cause ValueError while loading weights.
+#    How：
+#       Use the `skip_prefixes` parameter to skip certain weight tensors.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/41706
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
 # ** 20. File: worker/patch_mamba_utils.py**

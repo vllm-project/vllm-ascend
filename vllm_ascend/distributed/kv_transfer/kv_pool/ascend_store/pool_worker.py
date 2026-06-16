@@ -8,8 +8,6 @@ from collections.abc import Generator
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
     get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -42,6 +40,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     record_failed_blocks,
+)
+from vllm_ascend.distributed.utils import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
 )
 
 backend_map = {
@@ -696,7 +698,9 @@ class KVPoolWorker:
                 if not first_flag:
                     is_finish = self.get_event.wait(timeout=3)  # try---cache
                     if not is_finish:
-                        logger.info("Layerwise get failed")
+                        logger.info(
+                            "Layerwise get failed. Timeout waiting for get_event. Check receiver thread status."
+                        )
                 self.get_event.clear()
                 req_meta = LayerMultiBlockReqMeta(
                     request.req_id, keys_multi_chunk, starts, ends, request.block_ids_by_group, layer_id
@@ -908,7 +912,12 @@ class KVPoolWorker:
                             break
                 hits.append(hit_end)
         except Exception as e:
-            logger.error("Remote connection failed in contains: %s", e)
+            logger.error(
+                "Remote connection failed in get_common_prefix_length. type=%s, error=%s. "
+                "Check network and remote store.",
+                type(e).__name__,
+                e,
+            )
             return 0
         return min(hits) if hits else 0
 
@@ -1063,7 +1072,11 @@ class KVPoolWorker:
                     token_len,
                 )
         except Exception as e:
-            logger.error("Remote connection failed in contains: %s", e)
+            logger.error(
+                "Remote connection failed in lookup. type=%s, error=%s. Check network and remote store.",
+                type(e).__name__,
+                e,
+            )
             return 0
         logger.debug(
             "KV pool scheduler lookup final token_len=%d groups=%s hits=%s result=%d",
