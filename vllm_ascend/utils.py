@@ -1804,7 +1804,7 @@ def _should_disable_reduce_sample(sampling_params_list) -> bool:
     Returns True if any other SamplingParams field deviates from its default.
     """
     check_fields = _get_reduce_sample_check_fields()
-    
+
     for params in sampling_params_list:
         for name, default_val in check_fields:
             if params is None:
