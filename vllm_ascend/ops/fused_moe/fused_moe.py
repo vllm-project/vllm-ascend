@@ -46,20 +46,16 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
-    vllm_version_is,
 )
 
-if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map
-else:
 
-    def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
-        global_indices = torch.where(expert_map != -1)[0]
-        local_indices = expert_map[global_indices]
-        return ", ".join(
-            f"{local_index.item()}->{global_index.item()}"
-            for local_index, global_index in zip(local_indices, global_indices)
-        )
+def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
+    global_indices = torch.where(expert_map != -1)[0]
+    local_indices = expert_map[global_indices]
+    return ", ".join(
+        f"{local_index.item()}->{global_index.item()}"
+        for local_index, global_index in zip(local_indices, global_indices)
+    )
 
 
 @dataclass
@@ -179,13 +175,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             input_ids=input_ids,
         )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.21.0"):
-                # In 0.21.0, capturer is a process-wide singleton.
-                from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_global_experts_capturer
-
-                capturer = get_global_experts_capturer()
-            else:
-                capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
+            capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
             if capturer is not None:
                 capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
 
@@ -421,9 +411,8 @@ class AscendFusedMoE(FusedMoE):
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
         self.local_num_experts = self.global_num_experts // self.ep_size
-        if not vllm_version_is("0.21.0"):
-            self.expert_map_manager._local_num_experts = self.local_num_experts
-            self.expert_map_manager._expert_map = self._expert_map
+        self.expert_map_manager._local_num_experts = self.local_num_experts
+        self.expert_map_manager._expert_map = self._expert_map
         if self._expert_map is not None:
             logger.info_once(
                 "[fused_moe/layer] Expert parallelism is enabled."
