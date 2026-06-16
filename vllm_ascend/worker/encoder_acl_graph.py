@@ -161,20 +161,22 @@ def _maybe_compute_actual_seq_lengths(
 ) -> tuple[list[int], list[int]]:
     context = get_encoder_forward_context()
     if uses_seq_len_host:
+        if context.sequence_lengths_cpu is None:
+            raise RuntimeError("context.sequence_lengths_cpu is None during encoder replay.")
         actual = context.sequence_lengths_cpu.cumsum(0).to(torch.int64).tolist()
     elif fullatt_block_indexes is not None:
         if vit_layer_idx in fullatt_block_indexes:
+            if context.cu_seqlens_cpu is None:
+                raise RuntimeError("context.cu_seqlens_cpu is None during encoder replay.")
             actual = context.cu_seqlens_cpu[1:].to(torch.int64).tolist()
         else:
+            if context.cu_window_seqlens_cpu is None:
+                raise RuntimeError("context.cu_window_seqlens_cpu is None during encoder replay.")
             actual = context.cu_window_seqlens_cpu[1:].to(torch.int64).tolist()
     else:
+        if context.cu_seqlens_cpu is None:
+            raise RuntimeError("context.cu_seqlens_cpu is None during encoder replay.")
         actual = context.cu_seqlens_cpu[1:].to(torch.int64).tolist()
-
-    if actual is None:
-        raise RuntimeError(
-            f"Encoder replay error for uses_sequence_lengths_host-{uses_seq_len_host}, vit_layer_idx={vit_layer_idx}, context={context}"
-            "EncoderAclGraphManager must populate encoder_graph_replay_scope()."
-        )
 
     aligned = _pad_actual_seq_lengths_for_fia(actual, num_query_tokens)
     return aligned, aligned
