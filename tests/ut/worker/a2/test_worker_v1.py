@@ -46,6 +46,7 @@ class TestNPUWorker(TestBase):
         self.vllm_config_mock.quant_config = MagicMock()
         self.vllm_config_mock.speculative_config = None
         self.vllm_config_mock.observability_config = None
+        self.vllm_config_mock.weight_transfer_config = None
 
         self.local_rank = 0
         self.rank = 0
@@ -973,6 +974,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
+            worker.vllm_config.weight_transfer_config = None
 
             # Setup allocator mock
             mock_allocator = MagicMock()
@@ -1001,6 +1003,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = False
+            worker.vllm_config.weight_transfer_config = None
 
             # Test load_model
             worker.load_model()
@@ -1266,3 +1269,188 @@ class TestNPUWorker(TestBase):
 
             # When both flags are False, return EMPTY_MODEL_RUNNER_OUTPUT directly.
             self.assertEqual(result, mock_empty_output)
+
+
+class TestNPUWorkerWeightUpdate(TestBase):
+    def _make_worker(self, engine=None):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        worker.weight_transfer_engine = engine
+        worker._weight_update_active = False
+        worker._is_checkpoint_format = True
+        worker.device = torch.device("cpu")
+        worker.model_runner = MagicMock()
+        worker.model_runner.model = MagicMock()
+        worker.model_config = MagicMock()
+        return worker
+
+    def test_check_engine_raises_when_unconfigured(self):
+        worker = self._make_worker(engine=None)
+        with self.assertRaises(RuntimeError):
+            worker.init_weight_transfer_engine({})
+        with self.assertRaises(RuntimeError):
+            worker.start_weight_update()
+        with self.assertRaises(RuntimeError):
+            worker.update_weights({})
+        with self.assertRaises(RuntimeError):
+            worker.finish_weight_update()
+
+    def test_init_weight_transfer_engine_dispatches_to_engine(self):
+        engine = MagicMock()
+        engine.parse_init_info.return_value = "typed_init"
+        worker = self._make_worker(engine=engine)
+
+        init_info = {"master_address": "127.0.0.1", "master_port": 12345}
+        worker.init_weight_transfer_engine(init_info)
+
+        engine.parse_init_info.assert_called_once_with(init_info)
+        engine.init_transfer_engine.assert_called_once_with("typed_init")
+
+    @patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload")
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_start_weight_update_checkpoint_format(self, mock_init_reload):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        worker.start_weight_update(is_checkpoint_format=True)
+
+        mock_init_reload.assert_called_once_with(worker.model_runner.model)
+        self.assertTrue(worker._weight_update_active)
+        self.assertTrue(worker._is_checkpoint_format)
+
+    @patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload")
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_start_weight_update_kernel_format(self, mock_init_reload):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        worker.start_weight_update(is_checkpoint_format=False)
+
+        mock_init_reload.assert_not_called()
+        self.assertTrue(worker._weight_update_active)
+        self.assertFalse(worker._is_checkpoint_format)
+
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_start_weight_update_rejects_reentry(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+
+        with self.assertRaises(RuntimeError):
+            worker.start_weight_update()
+
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "1"})
+    def test_start_weight_update_rejects_nz(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        with self.assertRaises(ValueError):
+            worker.start_weight_update()
+
+    def test_update_weights_requires_start(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        with self.assertRaises(RuntimeError):
+            worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
+
+    @patch("torch.npu.synchronize", create=True)
+    @patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload")
+    @patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload")
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_update_weights_checkpoint_format(self, mock_init_reload, mock_finalize_reload, mock_sync):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        engine.parse_update_info.return_value = "typed_update"
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = True
+
+        worker.update_weights({"foo": "bar"})
+
+        engine.parse_update_info.assert_called_once_with({"foo": "bar"})
+        engine.receive_weights.assert_called_once()
+        _, kwargs = engine.receive_weights.call_args
+        self.assertIs(kwargs["load_weights"], worker.model_runner.model.load_weights)
+        mock_sync.assert_called_once()
+
+        # reload lifecycle is split across start_weight_update / finish_weight_update
+        mock_init_reload.assert_not_called()
+        mock_finalize_reload.assert_not_called()
+
+    @patch("torch.npu.synchronize", create=True)
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_update_weights_kernel_format(self, mock_sync):
+        engine = MagicMock()
+
+        def fake_receive(update_info, load_weights):
+            load_weights([("layer.weight", torch.zeros(2))])
+
+        engine.receive_weights.side_effect = fake_receive
+        worker = self._make_worker(engine=engine)
+        param = torch.nn.Parameter(torch.ones(2), requires_grad=True)
+        worker.model_runner.model.get_parameter.return_value = param
+
+        engine.parse_update_info.return_value = "typed_update"
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = False
+
+        worker.update_weights({"foo": "bar"})
+
+        worker.model_runner.model.get_parameter.assert_called_once_with("layer.weight")
+        torch.testing.assert_close(param.detach(), torch.zeros(2))
+        self.assertTrue(param.requires_grad)
+
+    @patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload")
+    def test_finish_weight_update_resets_state(self, mock_finalize_reload):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = True
+
+        worker.finish_weight_update()
+
+        mock_finalize_reload.assert_called_once_with(worker.model_runner.model, worker.model_config)
+        self.assertFalse(worker._weight_update_active)
+        self.assertTrue(worker._is_checkpoint_format)
+
+    def test_finish_without_start_raises(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        with self.assertRaises(RuntimeError):
+            worker.finish_weight_update()
+
+    def test_double_finish_raises(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = False
+
+        worker.finish_weight_update()
+
+        with self.assertRaises(RuntimeError):
+            worker.finish_weight_update()
+
+    @patch("torch.npu.synchronize", create=True)
+    def test_update_after_finish_requires_restart(self, _mock_sync):
+        engine = MagicMock()
+        engine.parse_update_info.return_value = "typed"
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = False
+        worker.finish_weight_update()
+
+        with self.assertRaises(RuntimeError):
+            worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
+
+    @patch("vllm.distributed.kv_transfer.ensure_kv_transfer_shutdown", create=True)
+    def test_shutdown_releases_engine(self, _mock_kv_shutdown):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker.profiler = None
+
+        worker.shutdown()
+
+        engine.shutdown.assert_called_once()

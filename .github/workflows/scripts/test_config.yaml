@@ -229,6 +229,14 @@
     - tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
 
+# weight transfer
+- name: weight_transfer
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/distributed/weight_transfer
+  tests:
+    - tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py
+
 # KV Offload
 - name: kv_offload
   optional: false
@@ -714,6 +722,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py: 50
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 350
   tests/e2e/pull_request/two_card/test_sp_pass.py: 230
+  tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 200
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 460
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 1100
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 370
