@@ -146,8 +146,8 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
-        if self.use_v2_model_runner and vllm_version_is("0.21.0"):
-            logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.21.0; falling back to v1 model runner.")
+        if self.use_v2_model_runner and vllm_version_is("0.22.1"):
+            logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.22.1; falling back to v1 model runner.")
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
 
@@ -440,7 +440,7 @@ class NPUWorker(WorkerBase):
                 equiv_util = round(current_util - ng_util_delta, 4)
                 logger.info(
                     "ACL graph memory profiling is enabled (default since "
-                    "v0.21.0). The current --gpu-memory-utilization=%.4f is "
+                    "v0.22.1). The current --gpu-memory-utilization=%.4f is "
                     "equivalent to --gpu-memory-utilization=%.4f without "
                     "ACL graph memory profiling. To maintain the same "
                     "effective KV cache size as before, increase "
@@ -457,7 +457,7 @@ class NPUWorker(WorkerBase):
                     "Without it, ACL graph memory is not accounted for "
                     "during KV cache allocation, which may require lowering "
                     "--gpu-memory-utilization to avoid OOM. Consider "
-                    "re-enabling it (the default as of v0.21.0) and increasing "
+                    "re-enabling it (the default as of v0.22.1) and increasing "
                     "--gpu-memory-utilization from %.4f to %.4f.",
                     current_util,
                     suggested_util,
@@ -748,7 +748,7 @@ class NPUWorker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
         tp_rank = get_tp_group().rank_in_group
-        if vllm_version_is("0.21.0"):
+        if vllm_version_is("0.22.1"):
             return {tp_rank: metadata}
 
         pp_rank = get_pp_group().rank_in_group

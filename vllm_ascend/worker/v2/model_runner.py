@@ -45,7 +45,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import set_weight_prefetch_method, vllm_version_is
+from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -318,20 +318,11 @@ class NPUModelRunner(GPUModelRunner):
             out=seq_lens_cpu_upper_bound_np[:num_reqs],
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
-
-        version_b_fields: dict = {}
-        if not vllm_version_is("0.21.0"):
-            num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
-            max_seq_len_np = None
-            if getattr(self, "use_pp", False):
-                # max_seq_len is only consumed by the PP `compute_need_sampled_mask`.
-                max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
-            version_b_fields = dict(
-                num_computed_tokens_np=num_computed_tokens_np,
-                prefill_len_np=prefill_len_np,
-                num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
-                max_seq_len_np=max_seq_len_np,
-            )
+        num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
+        max_seq_len_np = None
+        if getattr(self, "use_pp", False):
+            # max_seq_len is only consumed by the PP `compute_need_sampled_mask`.
+            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
         self.input_batch = AscendInputBatch(
             req_ids=req_ids,
@@ -352,7 +343,10 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
             is_prefilling_np=is_prefilling_np,
-            **version_b_fields,
+            num_computed_tokens_np=num_computed_tokens_np,
+            prefill_len_np=prefill_len_np,
+            num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
+            max_seq_len_np=max_seq_len_np,
             input_ids=input_ids,
             positions=positions,
             logits_indices=logits_indices,

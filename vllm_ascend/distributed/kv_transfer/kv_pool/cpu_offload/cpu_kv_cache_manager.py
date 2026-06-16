@@ -77,7 +77,7 @@ class CPUKVCacheManager:
             max_num_batched_tokens=max_model_len,
             max_model_len=max_model_len,
         )
-        if not vllm_version_is("0.21.0"):
+        if not vllm_version_is("0.22.1"):
             manager_kwargs["scheduler_block_size"] = kv_cache_spec.block_size
         self.single_type_manager = get_manager_for_kv_cache_spec(**manager_kwargs)
         # Record kv block hashes, avoid redundant computation.
@@ -103,7 +103,7 @@ class CPUKVCacheManager:
             block_hashes = request.block_hashes
             self.req_to_block_hashes[request_id] = block_hashes
         max_cache_hit_length = request.num_tokens - 1
-        if vllm_version_is("0.21.0"):
+        if vllm_version_is("0.22.1"):
             eagle_kwarg = {"use_eagle": self.use_eagle}
         else:
             eagle_kwarg = {"drop_eagle_block": self.use_eagle}
