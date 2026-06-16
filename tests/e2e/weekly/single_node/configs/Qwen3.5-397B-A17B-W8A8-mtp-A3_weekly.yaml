@@ -11,8 +11,7 @@ _envs: &envs
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       SERVER_PORT: "DEFAULT_PORT"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "0"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
       VLLM_RPC_TIMEOUT: "600"
 _server_cmd: &server_cmd
@@ -57,7 +56,7 @@ _benchmarks: &benchmarks
 _benchmarks_bs144: &benchmarks_bs144
     perf:
       case_type: performance
-      dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen3
+      dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 144
@@ -70,7 +69,7 @@ _benchmarks_bs144: &benchmarks_bs144
 _benchmarks_bs36: &benchmarks_bs36
     perf:
       case_type: performance
-      dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs100_qwen3_5
+      dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_qwen
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 36
@@ -83,7 +82,7 @@ _benchmarks_bs36: &benchmarks_bs36
 _benchmarks_bs48: &benchmarks_bs48
     perf:
       case_type: performance
-      dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs100_qwen3
+      dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs100_qwen
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 48
@@ -96,7 +95,7 @@ _benchmarks_bs48: &benchmarks_bs48
 _benchmarks_bs16: &benchmarks_bs16
     perf:
       case_type: performance
-      dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs100_qwen3
+      dataset_path: vllm-ascend/GSM8K_prefix0_in32768_bs100_qwen
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 16
@@ -136,7 +135,7 @@ _benchmarks_bs32: &benchmarks_bs32
 _benchmarks_bs8: &benchmarks_bs8
     perf:
       case_type: performance
-      dataset_path: vllm-ascend/GSM8K_prefix0_in65536_bs200_qwen3_5
+      dataset_path: vllm-ascend/GSM8K_prefix0_in65536_bs100_qwen
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 8
@@ -149,7 +148,7 @@ _benchmarks_bs8: &benchmarks_bs8
 _benchmarks_bs32_in65536: &benchmarks_bs32_in65536
     perf:
       case_type: performance
-      dataset_path: vllm-ascend/GSM8K_prefix0_in65536_bs200_qwen3_5
+      dataset_path: vllm-ascend/GSM8K_prefix0_in65536_bs100_qwen
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 32
