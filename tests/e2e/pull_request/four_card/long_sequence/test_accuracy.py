@@ -88,10 +88,7 @@ DEEPSEEK_V4_PROMPTS = [
     "What is the meaning of life?",
 ]
 
-DEEPSEEK_V4_GOLDEN = [
-    "Hello, my name is {name} and I",
-    'What is the meaning of life?",\n    "What is'
-]
+DEEPSEEK_V4_GOLDEN = ["Hello, my name is {name} and I", 'What is the meaning of life?",\n    "What is']
 
 
 @dataclass(frozen=True)
@@ -126,8 +123,8 @@ def _run_accuracy_case_with_retries(case: AccuracyCase) -> None:
             if attempt == case.accuracy_attempts:
                 failure_details = "\n".join(failures)
                 raise AssertionError(
-                    f"{case.name} failed after {case.accuracy_attempts} "
-                    f"accuracy attempt(s):\n{failure_details}") from exc
+                    f"{case.name} failed after {case.accuracy_attempts} accuracy attempt(s):\n{failure_details}"
+                ) from exc
 
 
 DSV2_COMMON_KWARGS: dict[str, Any] = {
