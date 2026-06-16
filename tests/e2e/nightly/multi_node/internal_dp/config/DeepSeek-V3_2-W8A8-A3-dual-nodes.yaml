@@ -32,7 +32,7 @@ deployment:
       --quantization ascend
       --seed 1024
       --enable-expert-parallel
-      --max-num-seqs 16
+      --max-num-seqs 128
       --max-model-len 90000
       --max-num-batched-tokens 4096
       --no-enable-prefix-caching
@@ -58,7 +58,7 @@ deployment:
       --quantization ascend
       --seed 1024
       --enable-expert-parallel
-      --max-num-seqs 16
+      --max-num-seqs 128
       --max-model-len 90000
       --max-num-batched-tokens 4096
       --no-enable-prefix-caching
