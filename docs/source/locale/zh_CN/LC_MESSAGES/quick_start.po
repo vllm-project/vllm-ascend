@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-06-17 11:03+0000\n"
 "PO-Revision-Date: 2025-07-18 10:09+0800\n"
 "Last-Translator: \n"
 "Language: zh_CN\n"
@@ -24,14 +24,43 @@ msgid "Quickstart"
 msgstr "快速入门"
 
 #: ../../source/quick_start.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/quick_start.md:5
+msgid ""
+"This section guides you through container-based environment setup and "
+"large model inference, using the Qwen3-0.6B offline single-GPU inference "
+"script as an example."
+msgstr ""
+"本节将引导您完成基于容器的环境搭建和大模型推理，以 Qwen3-0.6B 离线单卡推理脚本为例。"
+
+#: ../../source/quick_start.md:7
+msgid ""
+"For details on using different models, see the corresponding model "
+"tutorial in the \"Model Tutorials\" directory, for example, [Qwen3-30B-"
+"A3B](../../docs/source/tutorials/models/Qwen3-30B-A3B.md)."
+msgstr ""
+"有关使用不同模型的详细信息，请参见\"模型教程\"目录中的相应模型教程，例如 [Qwen3-30B-A3B](../../docs/source/tutorials/models/Qwen3-30B-A3B.md)。"
+
+#: ../../source/quick_start.md:8
+msgid ""
+"For details on using different functions, see the corresponding function "
+"tutorial in the \"Function Tutorials\" directory, for example, [Prefill-"
+"Decode Disaggregation "
+"(Deepseek)](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md)."
+msgstr ""
+"有关使用不同功能的详细信息，请参见\"功能教程\"目录中的相应功能教程，例如 [Prefill-Decode Disaggregation (Deepseek)](../../docs/source/tutorials/features/pd_disaggregation_mooncake_multi_node.md)。"
+
+#: ../../source/quick_start.md:10
 msgid "Prerequisites"
 msgstr "先决条件"
 
-#: ../../source/quick_start.md:5
+#: ../../source/quick_start.md:12
 msgid "Supported Devices"
 msgstr "支持的设备"
 
-#: ../../source/quick_start.md:7
+#: ../../source/quick_start.md:14
 msgid ""
 "Atlas A2 training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 "
 "Box16, Atlas 300T A2)"
@@ -39,28 +68,36 @@ msgstr ""
 "Atlas A2 训练系列（Atlas 800T A2、Atlas 900 A2 PoD、Atlas 200T A2 Box16、Atlas "
 "300T A2）"
 
-#: ../../source/quick_start.md:8
+#: ../../source/quick_start.md:15
 msgid "Atlas 800I A2 inference series (Atlas 800I A2)"
 msgstr "Atlas 800I A2 推理系列（Atlas 800I A2）"
 
-#: ../../source/quick_start.md:9
+#: ../../source/quick_start.md:16
 msgid ""
 "Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas "
 "9000 A3 SuperPoD)"
-msgstr ""
-"Atlas A3 训练系列（Atlas 800T A3、Atlas 900 A3 SuperPoD、Atlas 9000 A3 SuperPoD）"
+msgstr "Atlas A3 训练系列（Atlas 800T A3、Atlas 900 A3 SuperPoD、Atlas 9000 A3 SuperPoD）"
 
-#: ../../source/quick_start.md:10
+#: ../../source/quick_start.md:17
 msgid "Atlas 800I A3 inference series (Atlas 800I A3)"
 msgstr "Atlas 800I A3 推理系列（Atlas 800I A3）"
 
-#: ../../source/quick_start.md:11
+#: ../../source/quick_start.md:18
 msgid "[Experimental] Atlas 300I inference series (Atlas 300I Duo)"
 msgstr "[实验性] Atlas 300I 推理系列（Atlas 300I Duo）"
 
-#: ../../source/quick_start.md:13
+#: ../../source/quick_start.md:20
 msgid "Setup environment using container"
 msgstr "使用容器设置环境"
+
+#: ../../source/quick_start.md:22
+msgid ""
+"Before using containers, make sure Docker is installed on your system. If"
+" Docker is not installed, please refer to the [Docker installation "
+"guide](https://docs.docker.com/get-docker/) for installation "
+"instructions."
+msgstr ""
+"在使用容器之前，请确保您的系统已安装 Docker。如果尚未安装 Docker，请参考 [Docker 安装指南](https://docs.docker.com/get-docker/) 进行安装。"
 
 #: ../../source/quick_start.md
 msgid "Ubuntu"
@@ -70,7 +107,7 @@ msgstr "Ubuntu"
 msgid "openEuler"
 msgstr "openEuler"
 
-#: ../../source/quick_start.md:85
+#: ../../source/quick_start.md:94
 msgid ""
 "The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed"
 " in `/vllm-workspace` and installed in [development "
@@ -78,17 +115,19 @@ msgid ""
 " (`pip install -e`) to help developers make changes effective immediately"
 " without requiring a new installation."
 msgstr ""
-"默认工作目录为 `/workspace`，vLLM 和 vLLM Ascend 代码位于 `/vllm-workspace` 目录下，并以[开发模式](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)（`pip install -e`）安装，以便开发者能够即时生效更改，而无需重新安装。"
+"默认工作目录为 `/workspace`，vLLM 和 vLLM Ascend 代码位于 `/vllm-workspace` "
+"目录下，并以[开发模式](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)（`pip"
+" install -e`）安装，以便开发者能够即时生效更改，而无需重新安装。"
 
-#: ../../source/quick_start.md:87
+#: ../../source/quick_start.md:96
 msgid "Usage"
 msgstr "用法"
 
-#: ../../source/quick_start.md:89
+#: ../../source/quick_start.md:98
 msgid "You can use ModelScope mirror to speed up download:"
 msgstr "您可以使用 ModelScope 镜像来加速下载："
 
-#: ../../source/quick_start.md:97
+#: ../../source/quick_start.md:106
 msgid "There are two ways to start vLLM on Ascend NPU:"
 msgstr "在昇腾 NPU 上启动 vLLM 有两种方式："
 
@@ -96,13 +135,13 @@ msgstr "在昇腾 NPU 上启动 vLLM 有两种方式："
 msgid "Offline Batched Inference"
 msgstr "离线批量推理"
 
-#: ../../source/quick_start.md:103
+#: ../../source/quick_start.md:112
 msgid ""
 "With vLLM installed, you can start generating texts for list of input "
 "prompts (i.e. offline batch inference)."
 msgstr "安装 vLLM 后，您可以开始为一系列输入提示生成文本（即离线批量推理）。"
 
-#: ../../source/quick_start.md:105
+#: ../../source/quick_start.md:114
 msgid ""
 "Try to run below Python script directly or use `python3` shell to "
 "generate texts:"
@@ -112,42 +151,44 @@ msgstr "尝试直接运行下面的 Python 脚本，或者使用 `python3` 交�
 msgid "OpenAI Completions API"
 msgstr "OpenAI Completions API"
 
-#: ../../source/quick_start.md:132
+#: ../../source/quick_start.md:141
 msgid ""
 "vLLM can also be deployed as a server that implements the OpenAI API "
 "protocol. Run the following command to start the vLLM server with the "
 "[Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) model:"
 msgstr ""
-"vLLM 也可以部署为实现 OpenAI API 协议的服务器。运行以下命令，使用 [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) 模型启动 vLLM 服务器："
+"vLLM 也可以部署为实现 OpenAI API 协议的服务器。运行以下命令，使用 "
+"[Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) 模型启动 vLLM 服务器："
 
-#: ../../source/quick_start.md:143
+#: ../../source/quick_start.md:152
 msgid "If you see a log as below:"
 msgstr "如果您看到如下日志："
 
-#: ../../source/quick_start.md:152
+#: ../../source/quick_start.md:161
 msgid "Congratulations, you have successfully started the vLLM server!"
 msgstr "恭喜，您已成功启动 vLLM 服务器！"
 
-#: ../../source/quick_start.md:154
+#: ../../source/quick_start.md:163
 msgid "You can query the list of models:"
 msgstr "您可以查询模型列表："
 
-#: ../../source/quick_start.md:162
+#: ../../source/quick_start.md:171
 msgid "You can also query the model with input prompts:"
 msgstr "您也可以通过输入提示来查询模型："
 
-#: ../../source/quick_start.md:177
+#: ../../source/quick_start.md:186
 msgid ""
 "vLLM is serving as a background process, you can use `kill -2 $VLLM_PID` "
 "to stop the background process gracefully, which is similar to `Ctrl-C` "
 "for stopping the foreground vLLM process:"
 msgstr ""
-"vLLM 正作为后台进程运行，您可以使用 `kill -2 $VLLM_PID` 来优雅地停止后台进程，这类似于使用 `Ctrl-C` 停止前台 vLLM 进程："
+"vLLM 正作为后台进程运行，您可以使用 `kill -2 $VLLM_PID` 来优雅地停止后台进程，这类似于使用 `Ctrl-C` 停止前台 "
+"vLLM 进程："
 
-#: ../../source/quick_start.md:186
+#: ../../source/quick_start.md:195
 msgid "The output is as below:"
 msgstr "输出如下："
 
-#: ../../source/quick_start.md:195
+#: ../../source/quick_start.md:204
 msgid "Finally, you can exit the container by using `ctrl-D`."
 msgstr "最后，您可以通过按 `ctrl-D` 退出容器。"

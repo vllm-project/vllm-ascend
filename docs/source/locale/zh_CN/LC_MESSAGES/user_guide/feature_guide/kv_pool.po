@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-22 08:13+0000\n"
+"POT-Creation-Date: 2026-06-17 11:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -284,7 +284,7 @@ msgid "Run Mooncake Master"
 msgstr "运行 Mooncake Master"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:109
-msgid "1.Configure mooncake.json"
+msgid "1. Configure mooncake.json"
 msgstr "1.配置 mooncake.json"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:111
@@ -306,7 +306,7 @@ msgstr ""
 " IP 和端口。   **global_segment_size**: 每张卡注册到 KV Pool 的内存大小。**需要对齐到 1GB。**"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:129
-msgid "2.Start mooncake_master"
+msgid "2. Start mooncake_master"
 msgstr "2.启动 mooncake_master"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:131
@@ -334,7 +334,7 @@ msgstr "PD 解耦场景"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:142
 #: ../../source/user_guide/feature_guide/kv_pool.md:605
-msgid "1.Run `prefill` Node and `decode` Node"
+msgid "1. Run `prefill` Node and `decode` Node"
 msgstr "1.运行 `prefill` 节点和 `decode` 节点"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:144
@@ -383,8 +383,8 @@ msgstr ""
 "`prefill_pp_layer_partition`。示例如下："
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:308
-msgid "2、Start proxy_server"
-msgstr "2、启动 proxy_server"
+msgid "2. Start proxy_server"
+msgstr "2.启动 proxy_server"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:319
 msgid "Change localhost to your actual IP address."
@@ -416,7 +416,7 @@ msgstr "PD混合推理"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:339
 #: ../../source/user_guide/feature_guide/kv_pool.md:916
-msgid "1.Run Mixed Department Script"
+msgid "1. Run Mixed Deployment Script"
 msgstr "1.运行混合部署脚本"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:345
@@ -425,7 +425,7 @@ msgid "Content of pd_mix.sh:"
 msgstr "pd_mix.sh 内容："
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:384
-msgid "2.Run Inference"
+msgid "2. Run Inference"
 msgstr "2.运行推理"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:386
@@ -482,10 +482,10 @@ msgstr ""
 #: ../../source/user_guide/feature_guide/kv_pool.md:412
 msgid ""
 "**memfabric_hybrid**: "
-"<https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>"
+"<https://gitcode.com/Ascend/memfabric_hybrid/blob/master/doc/installation.md>"
 msgstr ""
 "**memfabric_hybrid**: "
-"<https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>"
+"<https://gitcode.com/Ascend/memfabric_hybrid/blob/master/doc/installation.md>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:414
 msgid ""
@@ -499,11 +499,13 @@ msgstr ""
 msgid "Configuring the memcache Config File"
 msgstr "配置 memcache 配置文件"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:419
+#: ../../source/user_guide/feature_guide/kv_pool.md:418
 msgid ""
-"**Config file parameters "
+"config Path：/usr/local/memcache_hybrid/latest/config/ **Config file "
+"parameters "
 "description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
-msgstr "**配置文件参数说明**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
+msgstr ""
+"配置路径：/usr/local/memcache_hybrid/latest/config/ **配置文件参数说明**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:421
 msgid ""
