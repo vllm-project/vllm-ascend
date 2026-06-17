@@ -48,7 +48,7 @@ def _patch_model_config_validation() -> None:
     def _patched_verify_with_parallel_config(self, parallel_config):
         hf_config = getattr(self, "hf_config", None)
         model_type = getattr(hf_config, "model_type", None)
-        is_eagle_drafter = model_type == "eagle" and any(
+        is_eagle_drafter = (model_type == "eagle" or model_type == "speculators") and any(
             arch.startswith("Eagle") or arch.endswith("Eagle3") for arch in getattr(self, "architectures", ())
         )
         is_mtp_drafter = model_type in mtp_model_types
