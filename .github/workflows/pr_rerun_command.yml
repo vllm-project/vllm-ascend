@@ -37,7 +37,7 @@ jobs:
       - name: Check user authorization
         id: auth
         env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
           PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
@@ -47,7 +47,8 @@ jobs:
             echo "User $ACTOR is the PR author, authorized."
             echo "authorized=true" >> "$GITHUB_OUTPUT"
           else
-            ROLE_NAME=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.role_name' 2>/dev/null || true)
+            ROLE_NAME=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/collaborators/$ACTOR/permission" | jq -r '.role_name // empty')
             case "$ROLE_NAME" in
               triage|write|maintain|admin)
                 echo "authorized=true" >> "$GITHUB_OUTPUT"
@@ -64,6 +65,7 @@ jobs:
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
+          edit-mode: replace
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
@@ -77,41 +79,98 @@ jobs:
       - name: Re-run failed jobs
         id: rerun
         env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           PR_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
-          FAILED_RUNS=$(gh api "repos/$REPO/actions/runs?head_sha=$PR_SHA&status=completed&conclusion=failure&per_page=50" \
-            --jq '.workflow_runs[] | "\(.id)|\(.name)"')
-
-          if [ -z "$FAILED_RUNS" ]; then
-            echo "No failed workflow runs found for SHA $PR_SHA."
-            echo "rerun_count=0" >> "$GITHUB_OUTPUT"
+          # Get all workflow runs for this SHA, sorted by newest first.
+          RUNS=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/runs?head_sha=$PR_SHA&per_page=100&sort=created&direction=desc")
+          TOTAL=$(echo "$RUNS" | jq '.total_count // 0')
+          if [ "$TOTAL" = "0" ]; then
+            {
+              echo "rerun_count=0"
+              echo "comment_body<<CMTEOF"
+              echo "[Bot]: rerun completed. No workflow runs found for this commit."
+              echo "CMTEOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          COUNT=0
+          # Dedup: keep only the latest run per workflow name (by run ID)
+          CANDIDATE_RUNS=$(echo "$RUNS" | jq -r '
+            [.workflow_runs[] | {id: .id, name: .name, status: .status, conclusion: .conclusion}] |
+            group_by(.name) |
+            map(max_by(.id)) |
+            .[] | "\(.id)|\(.name)|\(.status)|\(.conclusion // "null")"')
+
+          RERUNNED=""
+          FAILED=""
+          RERUN_COUNT=0
+
           while IFS= read -r RUN; do
+            [ -z "$RUN" ] && continue
             RUN_ID=$(echo "$RUN" | cut -d'|' -f1)
             RUN_NAME=$(echo "$RUN" | cut -d'|' -f2)
-            echo "Re-running failed jobs in $RUN_NAME (ID: $RUN_ID)..."
-            gh api "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs" -X POST --silent
-            COUNT=$((COUNT + 1))
-          done <<< "$FAILED_RUNS"
+            STATUS=$(echo "$RUN" | cut -d'|' -f3)
+            CONCLUSION=$(echo "$RUN" | cut -d'|' -f4)
 
-          echo "Successfully re-ran failed jobs in $COUNT workflow run(s)."
-          echo "rerun_count=$COUNT" >> "$GITHUB_OUTPUT"
+            if [ "$STATUS" != "completed" ]; then
+              echo "Skipping $RUN_NAME (ID: $RUN_ID) - still in progress."
+              FAILED="${FAILED}"$'\n'"- $RUN_NAME: still in progress, retry /rerun after completion"
+              continue
+            fi
+
+            if [ "$CONCLUSION" != "failure" ]; then
+              echo "Skipping $RUN_NAME (ID: $RUN_ID) - conclusion is '$CONCLUSION'."
+              continue
+            fi
+
+            echo "Re-running failed jobs in $RUN_NAME (ID: $RUN_ID)..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs")
+            if [ "$HTTP_CODE" = "201" ]; then
+              echo "  -> Success."
+              RERUNNED="${RERUNNED}"$'\n'"- $RUN_NAME"
+              RERUN_COUNT=$((RERUN_COUNT + 1))
+            else
+              echo "  -> Failed (HTTP $HTTP_CODE)."
+              FAILED="${FAILED}"$'\n'"- $RUN_NAME: API returned HTTP $HTTP_CODE"
+            fi
+          done <<< "$CANDIDATE_RUNS"
+
+          # Build comment body
+          {
+            echo "comment_body<<CMTEOF"
+            if [ -n "$RERUNNED" ]; then
+              echo "[Bot]: rerun completed."
+              echo ""
+              echo "**Re-ran:**$RERUNNED"
+              echo ""
+            fi
+            if [ -n "$FAILED" ]; then
+              if [ -z "$RERUNNED" ]; then
+                echo "[Bot]: rerun completed."
+                echo ""
+              fi
+              echo "**Failed:**$FAILED"
+              echo ""
+            fi
+            if [ -z "$RERUNNED" ] && [ -z "$FAILED" ]; then
+              echo "[Bot]: rerun completed. No failed jobs found."
+            fi
+            echo "CMTEOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "rerun_count=$RERUN_COUNT" >> "$GITHUB_OUTPUT"
 
       - name: Comment result on PR
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
+          edit-mode: replace
           repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
-          body: |
-            [Bot]: rerun completed.
-
-            - **Re-ran failed jobs in**: ${{ steps.rerun.outputs.rerun_count }} workflow run(s)
-            - **Ref**: `${{ github.event.client_payload.pull_request.head.sha }}`
-            - **Workflow run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          body: ${{ steps.rerun.outputs.comment_body }}
           reactions: hooray
