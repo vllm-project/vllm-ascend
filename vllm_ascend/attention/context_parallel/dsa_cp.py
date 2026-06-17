@@ -977,15 +977,18 @@ class AscendDSACPImpl(DSAAttentionImpl):
         if not isinstance(attn_metadata, list):
             attn_metadata = [attn_metadata]
         local_attn_output = self._forward(layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv)
-        o_proj_input = self._restore_tp_head_layout(local_attn_output, layer_name, attn_metadata[0])
+        o_proj_input = self._apply_inv_rope(local_attn_output, layer_name, attn_metadata[0])
         num_tokens = o_proj_input.shape[0]
 
-        # o
-        o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, -1)
+        # wo_a: full-group matmul on local tokens, all groups
+        # o_proj_input: [N/TP, num_heads, head_dim] → [N/TP, n_group, heads_per_group * head_dim]
+        o_proj_input = o_proj_input.view(num_tokens, self.n_group, -1)
         if olora_tp_enable():
+            # TODO: olora tp is not ready yet; `_get_row_parallel_op` does not
+            # currently include the required adaptation.
             o_proj_tmp = self.wo_a(o_proj_input)
         else:
-            # wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
+            # wo_a = self.wo_a.weight.view(self.n_groups, self.o_lora_rank, -1)
             # o = torch.einsum("tgd,grd->tgr", o, wo_a)
             o_proj_tmp = torch_npu.npu_transpose_batchmatmul(
                 o_proj_input,
@@ -996,8 +999,23 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
                 batch_split_factor=1,
-            ).view(num_tokens, -1)
-        output[...] = self.wo_b(o_proj_tmp)
+            )
+        # o_proj_tmp: [N/TP, n_group, o_lora_rank]
+
+        # alltoall: redistribute from local-tokens/all-groups to all-tokens/local-groups
+        if self.tp_size > 1:
+            send = (
+                o_proj_tmp.view(num_tokens, self.tp_size, self.n_local_groups, self.o_lora_rank)
+                .permute(1, 0, 2, 3)
+                .contiguous()
+                .view(-1, self.n_local_groups, self.o_lora_rank)
+            )
+            recv = torch.empty_like(send)
+            dist.all_to_all_single(recv, send, group=self.tp_group.device_group)
+            o_proj_tmp = recv
+        # o_proj_tmp: [N, n_local_groups, o_lora_rank]
+
+        output[...] = self.wo_b(o_proj_tmp.reshape(-1, self.n_local_groups * self.o_lora_rank))
 
         return output
 
@@ -1214,7 +1232,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             )[0]
         return attn_output
 
-    def _restore_tp_head_layout(
+    def _apply_inv_rope(
         self,
         local_attn_output: torch.Tensor,
         layer_name: str,
@@ -1223,7 +1241,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
         assert attn_metadata.req_metadata is not None
         req_metadata = attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
-        num_tokens = local_attn_output.shape[0]
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             local_attn_output.unsqueeze(1),
             cp_metadata.local_cos[layer_name],
@@ -1231,19 +1248,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-
-        if self.tp_size == 1:
-            return local_attn_output
-
-        send = (
-            local_attn_output.view(num_tokens, self.tp_size, self.n_local_heads, self.head_dim)
-            .permute(1, 0, 2, 3)
-            .contiguous()
-            .view(-1, self.n_local_heads, self.head_dim)
-        )
-        recv = torch.empty_like(send)
-        dist.all_to_all_single(recv, send, group=self.tp_group.device_group)
-        return recv
+        return local_attn_output
 
     def _update_indexer_cache(
         self,
