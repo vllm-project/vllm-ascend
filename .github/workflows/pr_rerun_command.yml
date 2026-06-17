@@ -30,10 +30,14 @@ permissions:
 jobs:
   rerun:
     name: Re-run failed CI jobs
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       rerun_count: ${{ steps.rerun.outputs.rerun_count }}
     steps:
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y jq gh
+
       - name: Check user authorization
         id: auth
         env:
@@ -147,7 +151,7 @@ jobs:
             if [ -n "$RERUNNED" ]; then
               echo "[Bot]: rerun completed."
               echo ""
-              echo "**Re-ran:**$RERUNNED"
+              echo "**Rerun:**$RERUNNED"
               echo ""
             fi
             if [ -n "$FAILED" ]; then

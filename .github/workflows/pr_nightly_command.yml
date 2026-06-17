@@ -30,7 +30,7 @@ permissions:
 jobs:
   authorize:
     name: Check user authorization
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       test_cases: ${{ steps.resolve.outputs.test_cases }}
       branch: ${{ steps.resolve.outputs.branch }}
@@ -39,6 +39,10 @@ jobs:
       dispatch_a3: ${{ steps.resolve.outputs.dispatch_a3 }}
       vllm_ascend_ref: ${{ steps.resolve.outputs.vllm_ascend_ref }}
     steps:
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y gh
+
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
@@ -155,7 +159,7 @@ jobs:
     name: Trigger Nightly-A2
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.dispatch_a2 == 'true'
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       a2_run_id: ${{ steps.dispatch_a2.outputs.a2_run_id }}
     steps:
@@ -184,7 +188,7 @@ jobs:
     name: Trigger Nightly-A3
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.dispatch_a3 == 'true'
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       a3_run_id: ${{ steps.dispatch_a3.outputs.a3_run_id }}
     steps:
@@ -213,7 +217,7 @@ jobs:
     name: Post nightly workflow links
     needs: [authorize, dispatch-a2, dispatch-a3]
     if: always() && needs.authorize.outputs.is_authorized == 'true'
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     steps:
       - name: Build comment body
         id: body
