@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
@@ -63,18 +64,25 @@ def group_and_unify_kv_cache_specs(
 ) -> list[UniformTypeKVCacheSpecs] | None:
     """
     Group the KV cache specs and unify each group into one UniformTypeKVCacheSpecs.
-    Currently, this is only used for DeepseekV4.
+    Used for DeepseekV4 (MLA + SWA-MLA) and KimiLinear (MLA + MambaSpec/KDA).
     """
-    if not any(isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()):
+    has_swa_mla = any(isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values())
+    has_mamba = any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.values())
+    has_mla = any(isinstance(spec, MLAAttentionSpec) for spec in kv_cache_spec.values())
+
+    if not has_swa_mla and not (has_mla and has_mamba):
         return None
 
     ratio_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
     grouped_swa_mla_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
+    mamba_specs: dict[str, KVCacheSpec] = {}
     for name, spec in kv_cache_spec.items():
         if isinstance(spec, SlidingWindowMLASpec):
             grouped_swa_mla_specs[spec.block_size][name] = spec
         elif isinstance(spec, MLAAttentionSpec):
             ratio_specs[spec.compress_ratio][name] = spec
+        elif isinstance(spec, MambaSpec):
+            mamba_specs[name] = spec
 
     mla_uniform_specs = []
     for ratio in sorted(ratio_specs, key=lambda r: (r != 4, r)):
@@ -89,7 +97,13 @@ def group_and_unify_kv_cache_specs(
         assert uniform_spec is not None
         swa_uniform_specs.append(uniform_spec)
 
-    return [*mla_uniform_specs, *swa_uniform_specs]
+    mamba_uniform_specs: list[UniformTypeKVCacheSpecs] = []
+    if mamba_specs:
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs(mamba_specs)
+        assert uniform_spec is not None
+        mamba_uniform_specs.append(uniform_spec)
+
+    return [*mla_uniform_specs, *swa_uniform_specs, *mamba_uniform_specs]
 
 
 def _get_kv_cache_groups_uniform_groups(
@@ -102,13 +116,27 @@ def _get_kv_cache_groups_uniform_groups(
     # For now, we restrict the first grouped_spec to be UniformTypeKVCacheSpecs
     # containing only MLAAttentionSpec.
     full_mla_spec = grouped_specs[0]
-    full_mla_c128_spec = grouped_specs[1]
 
     assert all(isinstance(spec, MLAAttentionSpec) for spec in full_mla_spec.kv_cache_specs.values())
     full_mla_group = KVCacheGroupSpec(
         layer_names=list(full_mla_spec.kv_cache_specs.keys()),
         kv_cache_spec=full_mla_spec,
     )
+
+    # KimiLinear: single MLA group + MambaSpec groups (no C128 MLA, no SWA-MLA)
+    has_mamba = any(isinstance(spec, MambaSpec) for g in grouped_specs[1:] for spec in g.kv_cache_specs.values())
+    if has_mamba:
+        mamba_groups = []
+        for g_spec in grouped_specs[1:]:
+            mamba_groups.append(
+                KVCacheGroupSpec(
+                    layer_names=list(g_spec.kv_cache_specs.keys()),
+                    kv_cache_spec=g_spec,
+                )
+            )
+        return [full_mla_group, *mamba_groups]
+
+    full_mla_c128_spec = grouped_specs[1]
     full_mla_c128_group = KVCacheGroupSpec(
         layer_names=list(full_mla_c128_spec.kv_cache_specs.keys()),
         kv_cache_spec=full_mla_c128_spec,
