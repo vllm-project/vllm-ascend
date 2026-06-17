@@ -731,6 +731,48 @@ class TestNPUPlatform(TestBase):
 
         self.platform._validate_parallel_config(vllm_config)
 
+    def test_validate_pd_pp_mtp_config_accepts_prefill_producer(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=True, kv_role="kv_producer")
+
+        self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_accepts_decode_dp_mtp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=False, kv_role="kv_consumer")
+
+        self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_rejects_decode_pp_mtp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=False, kv_role="kv_consumer")
+
+        with pytest.raises(ValueError, match=r"PP\+MTP.*P nodes.*D nodes.*pipeline_parallel_size=1"):
+            self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_rejects_non_pd_pp_mtp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = None
+
+        with pytest.raises(ValueError, match=r"PP\+MTP.*PD-disaggregated P nodes"):
+            self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_allows_non_mtp_spec_decode(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="eagle")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = None
+
+        self.platform._validate_pd_pp_mtp_config(vllm_config)
+
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
