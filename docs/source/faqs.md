@@ -270,7 +270,7 @@ export SOC_VERSION="ascend910_9391"
 # Atlas 300I
 export SOC_VERSION="ascend310p1"
 
-# Ascend 950 series
+# Ascend 950 Products
 export SOC_VERSION="<value starting with ascend950>"
 ```
 

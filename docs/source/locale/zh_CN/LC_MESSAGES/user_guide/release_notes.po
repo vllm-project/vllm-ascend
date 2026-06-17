@@ -2334,10 +2334,10 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:333
 msgid ""
-"DeepSeek models are now supported on Ascend 950 through new MLA operators. "
+"DeepSeek models are now supported on Ascend 950 Products through new MLA operators. "
 "[#7232](https://github.com/vllm-project/vllm-ascend/pull/7232)"
 msgstr ""
-"通过新的 MLA 算子，DeepSeek 模型现已在 Ascend 950 上得到支持。[#7232](https://github.com/vllm-"
+"通过新的 MLA 算子，DeepSeek 模型现已在 Ascend 950 系列产品上得到支持。[#7232](https://github.com/vllm-"
 "project/vllm-ascend/pull/7232)"
 
 #: ../../source/user_guide/release_notes.md:338
