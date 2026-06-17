@@ -50,7 +50,15 @@ MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 
 # key: model_type
 # value: dict of fused module name -> list of original module names
+_MINIMAX_M3_PACKED_MODULES = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+    "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+}
+
 packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
+    "minimax_m3": _MINIMAX_M3_PACKED_MODULES,
+    "minimax_m3_vl": _MINIMAX_M3_PACKED_MODULES,
     "qwen3_moe": {
         "qkv_proj": [
             "q_proj",
@@ -270,7 +278,7 @@ QUANT_MODEL_PREFIX_MAPPINGS = {
 
 QUANT_MODEL_SUBSTR_MAPPINGS = {
     "deepseek_v4": {
-        ".attn.": ".sefl_attn.",
+        ".attn.": ".self_attn.",
         ".w1.": ".gate_proj.",
         ".w2.": ".down_proj.",
         ".w3.": ".up_proj.",
@@ -571,7 +579,10 @@ class AscendModelSlimConfig(QuantizationConfig):
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
-            if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
+            if (
+                self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping)
+                or f"{prefix}.weight" not in self.quant_description
+            ):
                 logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
                 return UnquantizedEmbeddingMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
