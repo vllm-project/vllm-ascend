@@ -147,7 +147,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 ### Highlights
 
 - **DeepSeek V4 Support**: Added end-to-end support for DeepSeek V4, including the model architecture, DSA attention backend, KV cache management, distributed inference, tool-call parser, MTP support, KV Pool adaptation, and custom operator enablement. [#9270](https://github.com/vllm-project/vllm-ascend/pull/9270) [#9385](https://github.com/vllm-project/vllm-ascend/pull/9385) [#9228](https://github.com/vllm-project/vllm-ascend/pull/9228)
-- **A5 and XLite Quantization Expansion**: Added MXFP4 flatquant with row parallelism for Ascend A5 and expanded XLite support to GLM-4.7 W8A8 quantization. [#9391](https://github.com/vllm-project/vllm-ascend/pull/9391) [#9415](https://github.com/vllm-project/vllm-ascend/pull/9415)
+- **Ascend 950 Products and XLite Quantization Expansion**: Added MXFP4 flatquant with row parallelism for Ascend 950 Products and expanded XLite support to GLM-4.7 W8A8 quantization. [#9391](https://github.com/vllm-project/vllm-ascend/pull/9391) [#9415](https://github.com/vllm-project/vllm-ascend/pull/9415)
 
 ### Features
 
@@ -161,8 +161,8 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 ### Hardware and Operator Support
 
 - Added DeepSeek V4 custom operators required for the new model path, registered the operators for Ascend 910B, and switched the DeepSeek V4 `hc_pre` path to a fused operator. [#9228](https://github.com/vllm-project/vllm-ascend/pull/9228) [#9339](https://github.com/vllm-project/vllm-ascend/pull/9339) [#9396](https://github.com/vllm-project/vllm-ascend/pull/9396)
-- Enabled MXFP4 flatquant and row parallel support on Ascend A5. [#9391](https://github.com/vllm-project/vllm-ascend/pull/9391)
-- Enabled MC2 dispatch and combine support for MXFP4/MXFP8 quantization on Ascend A5. [#9365](https://github.com/vllm-project/vllm-ascend/pull/9365) [#9328](https://github.com/vllm-project/vllm-ascend/pull/9328)
+- Enabled MXFP4 flatquant and row parallel support on Ascend 950 Products. [#9391](https://github.com/vllm-project/vllm-ascend/pull/9391)
+- Enabled MC2 dispatch and combine support for MXFP4/MXFP8 quantization on Ascend 950 Products. [#9365](https://github.com/vllm-project/vllm-ascend/pull/9365) [#9328](https://github.com/vllm-project/vllm-ascend/pull/9328)
 - Improved 310P support by optimizing fused operators for Qwen3.5 Dense ACLGraph and simplifying the 310P RMSNormGated path. [#9104](https://github.com/vllm-project/vllm-ascend/pull/9104) [#9489](https://github.com/vllm-project/vllm-ascend/pull/9489)
 
 ### Performance
@@ -534,7 +534,7 @@ This is the first release candidate of v0.18.0 for vLLM Ascend. Please follow th
 ### Highlights
 
 - C8(INT8 KV cache) is now supported for GQA attention models, and also supported on DeepSeek-V3.1 with PD disaggregation scenario. [#7474](https://github.com/vllm-project/vllm-ascend/pull/7474), [#7222](https://github.com/vllm-project/vllm-ascend/pull/7222)
-- DeepSeek models are now supported on A5 through new MLA operators. [#7232](https://github.com/vllm-project/vllm-ascend/pull/7232)
+- DeepSeek models are now supported on Ascend 950 Products through new MLA operators. [#7232](https://github.com/vllm-project/vllm-ascend/pull/7232)
 
 ### Features
 

@@ -238,7 +238,7 @@ If you are building in a CPU-only environment where `npu-smi` is unavailable, yo
 - Atlas A2: `export SOC_VERSION=ascend910b1`
 - Atlas A3: `export SOC_VERSION=ascend910_9391`
 - Atlas 300I: `export SOC_VERSION=ascend310p1`
-- Atlas A5: `export SOC_VERSION=<value starting with "ascend950">`
+- Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
 ```
 
 ```{note}

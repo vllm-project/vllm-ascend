@@ -91,13 +91,13 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:10
 msgid ""
-"**A5 and XLite Quantization Expansion**: Added MXFP4 flatquant with row "
-"parallelism for Ascend A5 and expanded XLite support to GLM-4.7 W8A8 "
+"**Ascend 950 Products and XLite Quantization Expansion**: Added MXFP4 flatquant with row "
+"parallelism for Ascend 950 Products and expanded XLite support to GLM-4.7 W8A8 "
 "quantization. [#9391](https://github.com/vllm-project/vllm-"
 "ascend/pull/9391) [#9415](https://github.com/vllm-project/vllm-"
 "ascend/pull/9415)"
 msgstr ""
-"**A5 与 XLite 量化扩展**：为 Ascend A5 添加了支持行并行的 MXFP4 flatquant，并将 XLite 支持扩展到 "
+"**Ascend 950 系列产品 与 XLite 量化扩展**：为 Ascend 950 系列产品添加了支持行并行的 MXFP4 flatquant，并将 XLite 支持扩展到 "
 "GLM-4.7 W8A8 量化。[#9391](https://github.com/vllm-project/vllm-"
 "ascend/pull/9391) [#9415](https://github.com/vllm-project/vllm-"
 "ascend/pull/9415)"
@@ -199,19 +199,19 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:24
 msgid ""
-"Enabled MXFP4 flatquant and row parallel support on Ascend A5. "
+"Enabled MXFP4 flatquant and row parallel support on Ascend 950 Products. "
 "[#9391](https://github.com/vllm-project/vllm-ascend/pull/9391)"
 msgstr ""
-"在 Ascend A5 上启用了 MXFP4 flatquant 和行并行支持。[#9391](https://github.com/vllm-"
+"在 Ascend 950 系列产品上启用了 MXFP4 flatquant 和行并行支持。[#9391](https://github.com/vllm-"
 "project/vllm-ascend/pull/9391)"
 
 #: ../../source/user_guide/release_notes.md:25
 msgid ""
 "Enabled MC2 dispatch and combine support for MXFP4/MXFP8 quantization on "
-"Ascend A5. [#9365](https://github.com/vllm-project/vllm-ascend/pull/9365)"
+"Ascend 950 Products. [#9365](https://github.com/vllm-project/vllm-ascend/pull/9365)"
 " [#9328](https://github.com/vllm-project/vllm-ascend/pull/9328)"
 msgstr ""
-"在 Ascend A5 上启用了 MXFP4/MXFP8 量化的 MC2 分发与合并支持。[#9365](https://github.com"
+"在 Ascend 950 系列产品上启用了 MXFP4/MXFP8 量化的 MC2 分发与合并支持。[#9365](https://github.com"
 "/vllm-project/vllm-ascend/pull/9365) [#9328](https://github.com/vllm-"
 "project/vllm-ascend/pull/9328)"
 
@@ -2840,10 +2840,10 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:397
 msgid ""
-"DeepSeek models are now supported on A5 through new MLA operators. "
+"DeepSeek models are now supported on Ascend 950 Products through new MLA operators. "
 "[#7232](https://github.com/vllm-project/vllm-ascend/pull/7232)"
 msgstr ""
-"通过新的 MLA 算子，DeepSeek 模型现已在 A5 上得到支持。[#7232](https://github.com/vllm-"
+"通过新的 MLA 算子，DeepSeek 模型现已在 Ascend 950 系列产品上得到支持。[#7232](https://github.com/vllm-"
 "project/vllm-ascend/pull/7232)"
 
 #: ../../source/user_guide/release_notes.md:402

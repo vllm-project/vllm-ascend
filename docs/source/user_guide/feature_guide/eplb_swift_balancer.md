@@ -20,12 +20,12 @@ DeepSeekV3/V3.1/R1, Qwen3-MoE
 
 ### MOE QuantType
 
-| QuantType                       | Supported Hardware |
-| ------------------------------- | ------------------ |
-| W8A8 / W8A8-Dynamic             | A2, A3, A5         |
-| W4A8 (with fused MC2 enabled)   | A2, A3, A5         |
-| MXFP4                           | A5                 |
-| MXFP8                           | A5                 |
+| QuantType                       | Supported Hardware          |
+| ------------------------------- | --------------------------- |
+| W8A8 / W8A8-Dynamic             | A2, A3, Ascend 950 Products |
+| W4A8 (with fused MC2 enabled)   | A2, A3, Ascend 950 Products |
+| MXFP4                           | Ascend 950 Products         |
+| MXFP8                           | Ascend 950 Products         |
 
 ## How to Use EPLB
 
