@@ -169,6 +169,7 @@ def test_dummy_run_basic():
         proposer.model = MagicMock()
         proposer.dp_rank = 0
         proposer.hidden_states = torch.zeros(1024, 4096, dtype=torch.float16)
+        runner._sync_metadata_across_dp.return_value = (16, None, CUDAGraphMode.NONE)
 
         with patch("vllm_ascend.spec_decode.extract_hidden_states_proposer.set_forward_context") as mock_context:
             mock_context.return_value.__enter__ = MagicMock(return_value=None)
@@ -176,6 +177,49 @@ def test_dummy_run_basic():
 
             proposer.dummy_run(num_tokens=16)
             proposer.model.assert_called_once()
+
+
+def test_dummy_run_syncs_metadata_across_dp_as_draft_model():
+    """dummy_run must issue the same drafter DP sync as propose() does on
+    busy ranks (via _determine_batch_execution_and_padding), mirroring
+    llm_base_proposer.dummy_run.
+
+    Regression guard for the multi-DP deadlock: if idle DP ranks running the
+    dummy path skip the drafter sync while busy ranks perform it, the DP
+    cpu_group collectives desynchronize and all ranks hang.
+    """
+    from unittest.mock import MagicMock, patch
+
+    vllm_config = _create_vllm_config()
+    device = torch.device("cpu")
+    runner = MagicMock()
+    runner.pin_memory = False
+    runner.pcp_size = 1
+    runner.dcp_size = 1
+
+    with set_current_vllm_config(vllm_config):
+        proposer = AscendExtractHiddenStatesProposer(vllm_config=vllm_config, device=device, runner=runner)
+
+        proposer.model = MagicMock()
+        proposer.dp_rank = 0
+        proposer.hidden_states = torch.zeros(1024, 4096, dtype=torch.float16)
+
+        synced_tensor = torch.tensor([16, 16], dtype=torch.int32)
+        runner._sync_metadata_across_dp.return_value = (16, synced_tensor, CUDAGraphMode.NONE)
+
+        with patch("vllm_ascend.spec_decode.extract_hidden_states_proposer.set_forward_context") as mock_context:
+            mock_context.return_value.__enter__ = MagicMock(return_value=None)
+            mock_context.return_value.__exit__ = MagicMock(return_value=None)
+
+            proposer.dummy_run(num_tokens=16)
+
+        runner._sync_metadata_across_dp.assert_called_once()
+        args, kwargs = runner._sync_metadata_across_dp.call_args
+        assert (args and args[0] == 16) or kwargs.get("num_tokens") == 16
+        assert kwargs.get("is_draft_model") is True
+        # The synced tensor must be the one forwarded to set_forward_context.
+        _, ctx_kwargs = mock_context.call_args
+        assert ctx_kwargs["num_tokens_across_dp"] is synced_tensor
 
 
 def test_prepare_next_token_ids_padded():

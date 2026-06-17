@@ -47,20 +47,20 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
         """Determine cudagraph mode and padded token count for this proposer step.
 
-        Same contract as upstream ``ExtractHiddenStatesProposer``, but follows
-        the Ascend model runner path: SP-pad ``num_tokens`` before dispatch,
-        and use ``runner._sync_metadata_across_dp`` for DP coordination when
-        data parallel size > 1.
+        Same contract as upstream ``ExtractHiddenStatesProposer`` but on the
+        Ascend runner path: SP-pad ``num_tokens`` before dispatch and reuse
+        ``runner._sync_metadata_across_dp`` for DP coordination. Upstream's
+        ``coordinate_batch_across_dp`` posts a differently shaped tensor to the
+        same DP cpu_group as the main runner and breaks the gloo collective.
         """
         assert self.runner is not None, (
             "AscendExtractHiddenStatesProposer requires a runner reference "
             "for _pad_for_sequence_parallelism / _sync_metadata_across_dp"
         )
 
-        # SP padding must happen BEFORE DP sync (matches the main runner).
-        # The v2 NPUModelRunner does not implement
-        # _pad_for_sequence_parallelism; fail with a clear error instead of a
-        # confusing AttributeError if this proposer is paired with it.
+        # SP-pad before DP sync, mirroring the main runner. The v2
+        # NPUModelRunner lacks this hook; raise a clear error instead of an
+        # opaque AttributeError.
         if not hasattr(self.runner, "_pad_for_sequence_parallelism"):
             raise NotImplementedError(
                 "The current model runner does not support sequence "
@@ -77,19 +77,18 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
 
         num_tokens_across_dp = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            # The v2 NPUModelRunner does not implement
-            # _sync_metadata_across_dp; fail with a clear error instead of a
-            # confusing AttributeError when data parallel size > 1.
+            # The v2 NPUModelRunner lacks this hook; raise a clear error here
+            # too.
             if not hasattr(self.runner, "_sync_metadata_across_dp"):
                 raise NotImplementedError(
                     "The current model runner does not support DP metadata "
                     "synchronization (_sync_metadata_across_dp) required for "
                     "data parallel size > 1."
                 )
-            # Reuse the runner's DP sync so the shape matches the main model
-            # forward. ``is_draft_model=True`` short-circuits the all_reduce
-            # (cache_only draft is not MoE); the SP-pad above keeps the value
-            # TP-aligned.
+            # Reuse the runner's DP sync so the collective shape matches the
+            # main forward. ``is_draft_model=True`` short-circuits the
+            # all_reduce (cache-only drafter is not MoE); ``dummy_run`` issues
+            # the identical call to keep busy and idle DP ranks balanced.
             (
                 _max_tokens_across_dp,
                 num_tokens_across_dp,
@@ -130,9 +129,19 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
         Same functional logic as GPU version but with Ascend's parameter signature.
         """
         assert self.model is not None, "Model must be initialized before dummy_run"
+        assert self.runner is not None, (
+            "AscendExtractHiddenStatesProposer requires a runner reference for _sync_metadata_across_dp"
+        )
 
-        if num_tokens_across_dp is not None:
-            num_tokens_across_dp[self.dp_rank] = num_tokens
+        # Idle DP ranks must issue the same drafter DP sync that busy ranks
+        # issue in _determine_batch_execution_and_padding (mirrors
+        # llm_base_proposer.dummy_run); otherwise the DP cpu_group collectives
+        # desynchronize and the group deadlocks.
+        (
+            num_tokens,
+            num_tokens_across_dp,
+            _,
+        ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
 
         with set_forward_context(
             None,
