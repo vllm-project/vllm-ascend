@@ -21,9 +21,6 @@
 name: Nightly-A3
 
 on:
-  schedule:
-      # Run test at 23:45 Beijing time (UTC+8)
-      - cron: "45 15 * * *"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
@@ -78,7 +75,6 @@ jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
     if: >-
-      github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch'
     runs-on: linux-aarch64-a2b3-0
     outputs:
@@ -92,23 +88,17 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            const testCases = '${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}'.trim();
+            const testCases = '${{ inputs.test_cases }}'.trim();
 
             core.setOutput('ref', context.sha || 'unknown');
 
-            if (eventName === 'workflow_dispatch' && testCases) {
+            if (testCases) {
               core.setOutput('run', 'true');
               if (testCases === 'all') {
                 core.setOutput('filter', 'all');
               } else {
                 core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
               }
-              return;
-            }
-
-            if (eventName === 'schedule') {
-              core.setOutput('run', 'true');
-              core.setOutput('filter', 'all');
               return;
             }
 
@@ -127,27 +117,19 @@ jobs:
         run: |
           {
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              input_branch="${{ inputs.vllm_ascend_branch }}"
-              # Normalize branch name for image tag (replace '/' with '-')
-              normalized=$(echo "$input_branch" | tr '/' '-')
-              echo "vllm_ascend_branches=[\"${normalized}\"]"
-            else
-              echo 'vllm_ascend_branches=["main"]'
-            fi
+            input_branch="${{ inputs.vllm_ascend_branch }}"
+            normalized=$(echo "$input_branch" | tr '/' '-')
+            echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
 
   build-image:
     name: Build nightly-a3 image
     if: >-
-      github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
     strategy:
       matrix:
         vllm_ascend_branch: >-
-          ${{ github.event_name == 'workflow_dispatch' 
-              && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
-              || fromJSON('["main"]') }}
+          ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
@@ -396,7 +378,7 @@ jobs:
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0
     needs: [multi-node-tests, double-node-tests]
-    if: github.event_name == 'schedule' && (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
+    if: (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
     steps:
       - name: Clear pre-logs on pvc
         run: |
@@ -408,7 +390,7 @@ jobs:
     needs: [parse-trigger, single-node-tests, multi-node-tests, double-node-tests, multi-card-tests]
     if: >-
       always() &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      github.event_name == 'workflow_dispatch' &&
       needs.parse-trigger.result == 'success'
     runs-on: ubuntu-latest
     steps:
