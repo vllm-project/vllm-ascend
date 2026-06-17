@@ -127,9 +127,28 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         query = query.view(bsz * q_len, self.num_heads, self.head_size)
         key = key.view(bsz * kv_len, self.num_kv_heads, self.head_size)
         value = value.view(bsz * kv_len, self.num_kv_heads, self.head_size)
-        # FIA expects K/V in (tokens, num_kv_heads, head_dim); GQA broadcast is
-        # handled inside the kernel. Do not repeat_interleave (unlike legacy FA unpad).
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        if (num_repeat := self.num_queries_per_kv) > 1:
+            # Handle MQA and GQA
+            key = torch.repeat_interleave(key, num_repeat, dim=1)
+            value = torch.repeat_interleave(value, num_repeat, dim=1)
+
         return query, key, value
+
+    def _maybe_compute_cu_seqlens(
+        self,
+        bsz: int,
+        q_len: int,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if cu_seqlens is not None:
+            return cu_seqlens
+
+        # If cu_seqlens is not provided, we create a default one assuming all sequences have the same length.
+        # This is used by models such as Hunyuan-OCR, which always pass None as cu_seqlens and rely on the operator to
+        # compute it internally.
+        cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
+        return cu_seqlens
 
     def _maybe_pad_qkv(
         self,
