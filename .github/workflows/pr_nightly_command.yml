@@ -41,7 +41,13 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          sudo apt-get update -y && sudo apt-get install -y gh
+          (type -p wget >/dev/null || sudo apt-get install wget -y) \
+            && sudo mkdir -p -m 755 /etc/apt/keyrings \
+            && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+            && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+            && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+            && sudo apt-get update -y \
+            && sudo apt-get install gh -y
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -168,6 +174,16 @@ jobs:
     outputs:
       a2_run_id: ${{ steps.dispatch_a2.outputs.a2_run_id }}
     steps:
+      - name: Install system dependencies
+        run: |
+          (type -p wget >/dev/null || sudo apt-get install wget -y) \
+            && sudo mkdir -p -m 755 /etc/apt/keyrings \
+            && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+            && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+            && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+            && sudo apt-get update -y \
+            && sudo apt-get install gh -y
+
       - name: Dispatch nightly-a2 workflow
         id: dispatch_a2
         env:
@@ -197,6 +213,16 @@ jobs:
     outputs:
       a3_run_id: ${{ steps.dispatch_a3.outputs.a3_run_id }}
     steps:
+      - name: Install system dependencies
+        run: |
+          (type -p wget >/dev/null || sudo apt-get install wget -y) \
+            && sudo mkdir -p -m 755 /etc/apt/keyrings \
+            && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+            && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+            && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+            && sudo apt-get update -y \
+            && sudo apt-get install gh -y
+
       - name: Dispatch nightly-a3 workflow
         id: dispatch_a3
         env:
