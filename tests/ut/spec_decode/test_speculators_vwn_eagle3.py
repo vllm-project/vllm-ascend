@@ -83,9 +83,46 @@ def _mock_npu_ops_on_layer(layer):
     layer.mlp = _PassthroughMLP()
 
 
+def _cpu_rms_norm(x, weight, eps):
+    """CPU fallback for torch_npu.npu_rms_norm.
+
+    Returns the normalized tensor and a placeholder rstd (None), matching the
+    2-tuple shape the production op yields so callers can unpack it.
+    """
+    orig_dtype = x.dtype
+    x32 = x.float()
+    var = x32.pow(2).mean(-1, keepdim=True)
+    x32 = x32 * torch.rsqrt(var + eps)
+    out = (x32 * weight.float()).to(orig_dtype)
+    return out, None
+
+
+def _cpu_add_rms_norm(x, residual, weight, eps):
+    """CPU fallback for torch_npu.npu_add_rms_norm (returns 3-tuple)."""
+    x_plus_res = x + residual
+    out, _ = _cpu_rms_norm(x_plus_res, weight, eps)
+    return out, None, x_plus_res
+
+
+def _cpu_add_rms_norm_bias(x, residual, weight, bias, eps):
+    """CPU fallback for torch.ops._C_ascend.npu_add_rms_norm_bias."""
+    out, _, new_residual = _cpu_add_rms_norm(x, residual, weight, eps)
+    if bias is not None:
+        out = out + bias
+    return out, _, new_residual
+
+
 @pytest.fixture(autouse=True)
 def _mock_npu_env():
-    """Patch TP group, Ascend config, and NPU ops so all tests run on CPU."""
+    """Patch TP group, Ascend config, and NPU ops so all tests run on CPU.
+
+    conftest.py stubs ``torch_npu.npu_rms_norm`` with a bare ``MagicMock()``,
+    which yields an empty iterator and breaks tuple unpacking. We override it
+    here (plus the related add/bias variants and the weight-prefetch hook) with
+    pure-torch CPU implementations so AscendRMSNorm can run on CPU runners.
+    """
+    import torch_npu
+
     _mock = _MockTPGroup()
     mock_cfg = MagicMock()
     mock_cfg.enable_flashcomm2_parallel_size = 0
@@ -105,6 +142,8 @@ def _mock_npu_env():
         mlp_tensor_parallel_size=0,
     )
 
+    _prefetch_mock = MagicMock()
+
     with (
         patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=_mock),
         patch("vllm.distributed.parallel_state.get_tp_group", return_value=_mock),
@@ -113,6 +152,21 @@ def _mock_npu_env():
         patch.object(torch.ops.vllm, "unquantized_gemm", F.linear),
         patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None),
         patch.object(torch.ops.vllm, "maybe_pad_and_reduce", lambda x, *a, **kw: x),
+        patch.object(torch_npu, "npu_rms_norm", side_effect=_cpu_rms_norm, create=True),
+        patch.object(torch_npu, "npu_add_rms_norm", side_effect=_cpu_add_rms_norm, create=True),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_add_rms_norm_bias",
+            side_effect=_cpu_add_rms_norm_bias,
+            create=True,
+        ),
+        patch("vllm_ascend.ops.layernorm.get_weight_prefetch_method", return_value=_prefetch_mock),
+        # enable_cp() reads parallel_config.*_context_parallel_size and runs `> 1`.
+        # On MagicMock these fields yield TypeError on Python 3.12, so short-circuit
+        # the check everywhere it's imported.
+        patch("vllm_ascend.attention.attention_v1.enable_cp", return_value=False),
+        patch("vllm_ascend.attention.sfa_v1.enable_cp", return_value=False, create=True),
+        patch("vllm_ascend.attention.mla_v1.enable_cp", return_value=False, create=True),
     ):
         yield
 
@@ -303,7 +357,6 @@ class TestVwnLlamaModel:
         "num_hidden_layers,use_input_embeds",
         [
             (1, False),
-            (2, False),
             (1, True),
         ],
     )

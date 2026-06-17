@@ -396,7 +396,7 @@ def test_qwen3_vwn_eagle3_tp2():
         enforce_eager=True,
         max_model_len=2048,
         disable_log_stats=False,
-        tensor_parallel_size=4,
+        tensor_parallel_size=2,
         max_num_seqs=16,
         distributed_executor_backend="mp",
         gpu_memory_utilization=0.92,
