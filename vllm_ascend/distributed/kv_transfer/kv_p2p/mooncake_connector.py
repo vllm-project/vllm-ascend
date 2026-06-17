@@ -1424,6 +1424,15 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        """PP-aware handshake: pass all PP shard metadata to the scheduler."""
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.set_xfer_handshake_metadata({
+            tp_rank: meta for (pp_rank, tp_rank), meta in metadata.items()
+        })
+
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
