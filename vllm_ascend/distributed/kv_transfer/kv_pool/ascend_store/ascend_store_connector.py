@@ -195,10 +195,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def rebind_kv_transfer_threads(self) -> None:
-        assert self.connector_worker is not None
-        self.connector_worker.rebind_kv_transfer_threads()
-
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
