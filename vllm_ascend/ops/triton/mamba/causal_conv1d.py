@@ -16,6 +16,8 @@ from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
 if not HAS_TRITON:
     from vllm_ascend._310p.ops.causal_conv1d import (
         causal_conv1d_update as _pytorch_update,
@@ -42,7 +44,7 @@ def causal_conv1d_ref(
     out: (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
-        raise NotImplementedError("activation must be None, silu, or swish")
+        raise NotImplementedError(f"causal_conv1d_ref activation must be None, silu, or swish, got {activation}")
     dtype_in = x.dtype
     x = x.to(weight.dtype)
     seqlen = x.shape[-1]
@@ -113,7 +115,7 @@ def causal_conv1d_fn(
         num_decodes = attn_metadata.num_decodes
 
     if activation not in [None, "silu", "swish"]:
-        raise NotImplementedError("activation must be None, silu, or swish")
+        raise NotImplementedError(f"causal_conv1d_fn: activation must be None, silu, or swish, got {activation}")
     if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
@@ -651,9 +653,7 @@ def causal_conv1d_update_npu(
 
     # -------- tiling heuristic--------
     # keep program count around ~[80..160]
-    # vector core 40
-    # TODO: use driver to get the vector core num
-    CORE_HINT = 40
+    CORE_HINT = get_vectorcore_num()
     # channel tile: 512 when dim large (reduce tasks), else 256
     block_n = 512 if dim >= 512 else 256
     g = triton.cdiv(dim, block_n)

@@ -42,7 +42,7 @@ def triton_q_rms(
     q = q.view(total_batch, dim)
 
     if dim > 2048:
-        raise NotImplementedError("dim > 2048 not supported")
+        raise NotImplementedError(f"triton_q_rms: dim > 2048 not supported, got {dim}")
 
     device_properties = triton.runtime.driver.active.utils.get_device_properties(q.device)
     num_vectorcore = device_properties.get("num_vectorcore", -1)

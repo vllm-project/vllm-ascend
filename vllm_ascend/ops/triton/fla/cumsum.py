@@ -138,7 +138,7 @@ def chunk_local_cumsum(
         )
     else:
         raise ValueError(
-            f"Unsupported input shape {g.shape}, "
+            f"chunk_local_cumsum: Unsupported input shape {g.shape}, "
             f"which should be (B, T, H, D) if `head_first=False` "
             f"or (B, H, T, D) otherwise"
         )

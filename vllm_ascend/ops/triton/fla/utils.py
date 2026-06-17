@@ -115,8 +115,9 @@ def clear_ssm_states(ssm_states: torch.Tensor, has_initial_state: torch.Tensor) 
     if num_rows == 0:
         return
     if has_initial_state.numel() != num_rows:
-        raise ValueError(f"has_initial_state size mismatch: expected {num_rows}, got {has_initial_state.numel()}")
-
+        raise ValueError(
+            f"clear_ssm_states: has_initial_state size mismatch: expected {num_rows}, got {has_initial_state.numel()}"
+        )
     inner_size = ssm_states.numel() // num_rows
     if inner_size == 0:
         return
