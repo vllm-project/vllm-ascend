@@ -121,7 +121,7 @@ In the current evaluation, **Qwen3-ASR-1.7B** processed **100 samples** in appro
 |Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Total Samples | 100 |
 |Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Total Runtime | 57 s |
 |Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Average Throughput | 1.73 samples/s |
-|Atlas 300I DUO| Performance | aishell wav/test (7176 samples) | Total Runtime | 3182 s |
+|Atlas 300I DUO| Performance | ai-shell1       wav/ test (7176 samples) | Total Runtime | 3182 s |
 
 ### Remarks
 
