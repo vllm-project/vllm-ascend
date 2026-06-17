@@ -391,6 +391,48 @@
 #       https://github.com/vllm-project/vllm/pull/43935
 #    Future Plan:
 #       Remove this patch if upstream streaming behavior is updated to support mamba external KV connector
+# ** 15. File: platform/patch_weight_transfer_engine.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["nccl"]`
+#    Why:
+#       Upstream vLLM's WeightTransferConfig.backend is a pydantic Literal["nccl", "ipc"]
+#       which does not accept "hccl".  On Ascend NPU, NCCL is unavailable and HCCL must
+#       be used for trainer-to-worker weight broadcasting.
+#    How：
+#       Replace the "nccl" factory entry with a lambda that returns
+#       HCCLWeightTransferEngine.  Users pass the already-accepted "nccl" string
+#       (e.g. --weight-transfer-config '{"backend": "nccl"}') and the factory
+#       resolves it to the HCCL engine at runtime.
+#    Related PR (if no, explain why):
+#       No.  Adding "hccl" to the Literal requires modifying pydantic core schemas,
+#       which is fragile across pydantic versions.
+#    Future Plan:
+#       Remove this patch when upstream vLLM relaxes the Literal type to str or
+#       provides an extension point for out-of-tree weight transfer backends.
+#
+# ** 15. File: platform/patch_kv_cache_coordinator.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
+#    Why:
+#       In PD disaggregation with hybrid Mamba models, the D side receives
+#       FullAttention KV blocks from the P side but has no local prefix-cache
+#       hit for Mamba groups. Upstream's min-reduction across all KV groups
+#       collapses the FullAttention hit length to 0, preventing partial
+#       FullAttention-only prefix cache reuse on the D side.
+#    How:
+#       For Mamba hybrid models,
+#       num_new_local_computed_tokens should be the FA hit
+#       length. This value is passed to the connector's
+#       get_num_new_matched_tokens which computes:
+#       external = total - local_computed.
+#       Using the FA hit skips re-transferring FA blocks
+#       already cached on D-side.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/42524
+#       https://github.com/vllm-project/vllm/pull/44243
+#    Future Plan:
+#       Remove this patch when vLLM PR #42524 and #44243 is included in the supported
+#       upstream vLLM version.
 #
 # * Worker Patch:
 # ===============
