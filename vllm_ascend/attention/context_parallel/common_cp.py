@@ -53,6 +53,7 @@ class AscendPCPMetadata:
     prefill_kli_cache_event: torch.npu.Event = None
     prefill_kv_cache_event: torch.npu.Event = None
 
+
 @dataclass
 class CPChunkedContextMetadata:
     """

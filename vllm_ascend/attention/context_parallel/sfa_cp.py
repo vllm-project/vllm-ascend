@@ -814,8 +814,8 @@ class AscendSFACPImpl(AscendSFAImpl):
             AscendAttentionState.DecodeOnly,
             AscendAttentionState.SpecDecoding,
         }
+        assert attn_metadata.sfa_cp_metadata is not None
         if attn_metadata.num_prefills > 0:
-            assert attn_metadata.sfa_cp_metadata is not None
             attn_metadata.sfa_cp_metadata.prefill_allgather_kli_event = torch.npu.Event()
             attn_metadata.sfa_cp_metadata.prefill_allgather_kv_event = torch.npu.Event()
             attn_metadata.sfa_cp_metadata.prefill_kv_cache_event = torch.npu.Event()
