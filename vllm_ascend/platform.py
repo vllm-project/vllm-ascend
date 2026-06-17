@@ -1205,7 +1205,7 @@ class NPUPlatform(Platform):
             if getattr(vllm_config.compilation_config, "use_inductor_graph_partition", False) is not None:
                 logger.warning(
                     "Parameter is not supported on Ascend NPU (use_inductor is False). "
-                    "parameter=use_inductor_graph_partition, action: resetting to None."
+                    "parameter=use_inductor_graph_partition, action: resetting to False."
                 )
                 vllm_config.compilation_config.use_inductor_graph_partition = False
 
