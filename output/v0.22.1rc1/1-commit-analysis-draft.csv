@@ -1,0 +1,11 @@
+title,pr number,user facing impact/summary,category,decision,reason
+"[Feature] Mooncake connectot support dsv4","10342","Mooncake connector now works for DeepSeek V4 and hybrid KV cache disaggregated prefill scenarios.","Highlights","include","Core user-facing feature for PD and hybrid KV cache deployments."
+"[Feature] WeightTransfer: Add HCCLWeightTransferEngine backend for Ascend NPU","9152","Adds an Ascend-native HCCL weight-transfer backend for RL and training-inference synchronization.","Highlights","include","Major capability addition with direct workload impact."
+"[Ascend950][Feature] Add support for W8A8FP8 dynamic quantization on Ascend950","10236","Expands Ascend 950 quantization support for production deployments.","Highlights","include","Important hardware capability expansion."
+"[Feature] Support Ascend 950 CPU binding","10483","Adds CPU binding support tailored for Ascend 950 / A5 server topology.","Features","include","Useful operational feature for a new hardware platform."
+"[Feature] SSD support multiple DP in each machine","10477","Fixes SSD offload directory conflicts when multiple DP ranks share one machine.","Features","include","User-visible improvement in Mooncake/SSD deployments."
+"[Performance] Optimize split_qkv_tp_rmsnorm_rope with grid stride andh loading","9830","Reports about a 5x kernel speedup on the tested prefill workload.","Performance","include","Clear performance gain with benchmark data."
+"[Attention] [BugFix]Enable multistream_dsv4_dsa_overlap and remove redundant code","10518","Improves DSA overlap behavior and removes redundant code paths in DSA v1.","Performance","include","Relevant for DeepSeek V4 performance and stability."
+"[Doc] add GLM5.2 documents","10544","Adds GLM5.2 documentation for users adopting the new release.","Documentation","include","User-facing documentation update."
+"[CI] Add vllm-ascend tag for image and wheel build","10578","Allows release workflows to publish v0.22.1rc1 artifacts.","Dependencies","include","Important for release execution, though not a runtime feature."
+"[CI] Fix /e2e command","10576","Improves CI and release workflow reliability.","Others","include","Operational improvement worth a brief mention."
