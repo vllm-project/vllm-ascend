@@ -1613,14 +1613,6 @@ class NPUModelRunner(GPUModelRunner):
                     cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] = (
                         cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] * self.pcp_size 
                         - num_pcp_pads[self.pcp_manager.num_decode_reqs:]) # type: ignore
-                    
-                ndec = self.pcp_manager.num_decode_reqs
-                if ndec < len(cu_num_scheduled_tokens):
-                    cu_num_scheduled_tokens = cu_num_scheduled_tokens.copy()
-                    cu_num_scheduled_tokens[:ndec] = (
-                        cu_num_scheduled_tokens[:ndec] * self.pcp_size 
-                        - num_pcp_pads[:ndec]
-                    )
 
             else:
                 cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
