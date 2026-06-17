@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import inspect
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +29,9 @@ from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 
 from vllm_ascend.utils import weak_ref_tensors
+
+_ENCODER_CAPTURE_SUPPORTS_GRAPH_POOL = "graph_pool" in inspect.signature(EncoderCudaGraphManager.capture).parameters
+
 
 # ---------------------------------------------------------------------------
 # Per–encoder-budget ACL graph bookkeeping (ViT FIA tasks)
@@ -270,9 +274,17 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         fa_raw = getattr(visual, "fullatt_block_indexes", None) if visual is not None else None
         self.fullatt = frozenset(fa_raw) if fa_raw is not None else None
 
-    def capture(self):
+    def capture(self, graph_pool: Any | None = None):
+        encoder_graph_pool = graph_pool if graph_pool is not None else self.graph_pool
+        self.graph_pool = encoder_graph_pool
+
         set_encoder_graph_params(self.token_budgets)
-        super().capture()
+
+        if _ENCODER_CAPTURE_SUPPORTS_GRAPH_POOL:
+            super().capture(graph_pool=encoder_graph_pool)
+        else:
+            super().capture()
+
         weak_ref_encoder_graph_workspaces()
 
     def _capture_budget_graph(self, token_budget: int):
