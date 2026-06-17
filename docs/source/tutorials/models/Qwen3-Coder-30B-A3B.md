@@ -6,7 +6,7 @@ Qwen3-Coder-30B-A3B is a Mixture-of-Experts (MoE) model in the Qwen3 Coder serie
 
 This document will demonstrate the main validation steps for Qwen3-Coder-30B-A3B in the vLLM-Ascend environment, including supported features, environment preparation, single-node deployment, as well as accuracy and performance evaluation.
 
-The Qwen3-Coder-30B-A3B model is first supported in **v0.10.0rc1**. This document is validated and written based on **vLLM-Ascend v0.20.2**. All **v0.20.2 and later versions** can run stably. To use the latest features, it is recommended to use v0.20.2 or a later version.
+The Qwen3-Coder-30B-A3B model is first supported in **v0.10.0rc1**. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use v0.21.0 or a later version.
 
 ## 2 Supported Features
 
@@ -22,8 +22,8 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-Coder-30B-A3B-Instruct (BF16) | Atlas 800I A3 (64G, 1~2 cards)<br>Atlas 800I A2 (64G, 2~4 cards) | [Download](https://modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct) |
-| Qwen3-Coder-30B-A3B-Instruct-W8A8 | Atlas 800I A3 (64G, 1~2 cards)<br>Atlas 800I A2 (64G, 2~4 cards) | [Download](https://modelscope.cn/models/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8) |
+| Qwen3-Coder-30B-A3B-Instruct (BF16) | Atlas 800I A3 (64G, 1~2 cards)<br>Atlas 800I A2 (64G, 2~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct) |
+| Qwen3-Coder-30B-A3B-Instruct-W8A8 | Atlas 800I A3 (64G, 1~2 cards)<br>Atlas 800I A2 (64G, 2~4 cards) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -59,7 +59,7 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7], Atlas A3: /dev/davinci[0-15]).
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
-docker run --rm \
+docker run \
     --name vllm-ascend-env \
     --shm-size=1g \
     --net=host \
@@ -81,7 +81,43 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
+    -it -d $IMAGE bash
+```
+
+**Docker Run (Atlas 800I A5):**
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
+docker run --runtime=runc -u root -it -d --name vllm-ascend-env \
+    --net=host --privileged=true --shm-size=2g \
+    --device=/dev/davinci_manager --device=/dev/hisi_hdc \
+    --device=/dev/ummu --device=/dev/uburma \
+    --device=/dev/davinci0 \
+    --device=/dev/davinci1 \
+    --device=/dev/davinci2 \
+    --device=/dev/davinci3 \
+    --device=/dev/davinci4 \
+    --device=/dev/davinci5 \
+    --device=/dev/davinci6 \
+    --device=/dev/davinci7 \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /var/log/npu/:/usr/slog \
+    -v /root/host:/root/host \
+    -v /mnt:/mnt \
+    -v /data:/data \
+    -v /home/:/home/ \
+    -v /etc/hixlep:/etc/hixlep \
+    $IMAGE bash
 ```
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
@@ -171,6 +207,10 @@ vllm serve your_model_path \
     --port 8000
 ```
 
+:::{note}
+This startup command is compatible with Atlas 800I A2, A3, and A5. For A2 and A5, remove the `export HCCL_OP_EXPANSION_MODE="AIV"` line.
+:::
+
 **Service Verification:**
 
 After the service is started, verify it is running by sending a prompt. Refer to Section 6 for a usage example.
@@ -202,7 +242,13 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ### Using AISBench
 
-For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
+For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md). AISBench is not available on PyPI — install from source:
+
+```bash
+git clone https://github.com/AISBench/benchmark.git
+cd benchmark
+pip install -e .
+```
 
 The following is an example configuration for the accuracy evaluation config file:
 
@@ -221,7 +267,7 @@ models = [
         retry=2,
         host_ip="localhost",
         host_port=8000,
-        max_out_len=2048,
+        max_out_len=8192,
         batch_size=32,
         trust_remote_code=True,
         generation_kwargs=dict(
@@ -239,7 +285,16 @@ Run the accuracy evaluation using the `gsm8k` dataset as an example:
 ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_4_shot_cot_str --mode all --dump-eval-details
 ```
 
-> The `--models` parameter value corresponds to the `abbr` field in the configuration file above. Adjust `max_out_len`, `batch_size`, and dataset tasks based on your scenario.
+> The `--models` parameter value corresponds to the `abbr` field in the configuration file above. Adjust `max_out_len`, `batch_size`, and dataset tasks based on your scenario. Since Qwen3 is a thinking model, `max_out_len` should be at least 8192 to avoid truncation during reasoning.
+
+Before running the evaluation, download the GSM8K dataset and place it under the `ais_bench/datasets/gsm8k/` directory:
+
+```bash
+mkdir -p ais_bench/datasets/gsm8k
+cd ais_bench/datasets/gsm8k
+wget https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl
+wget https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl
+```
 
 <!-- TODO: Add accuracy evaluation results when available -->
 
@@ -299,7 +354,7 @@ Take the `serve` subcommand as an example. The `--random-output-len` parameter c
 
 ```shell
 vllm bench serve \
-    --model Qwen/Qwen3-Coder-30B-A3B-Instruct \
+    --model Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8 \
     --served-model-name qwen3-coder \
     --port 8000 \
     --dataset-name random \
