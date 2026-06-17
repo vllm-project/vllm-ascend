@@ -60,7 +60,7 @@ class ChunkSizePredictor:
         self.min_chunk = min_chunk
         self.history_fitted = False
 
-    def clamp_quadratic_and_linear_if_negative(self, fitted_a: float, fitted_b: float) -> tuple[float, float]:
+    def clamp_quadratic_and_linear_if_negative(self, fitted_a: float, fitted_b: float) -> float:
         """In theory, for the Transfomur structure of LLM, the fitted quadratic and linear
         terms should not be negative. Can perform zero clamping for inaccurate fitting
         """
@@ -225,13 +225,32 @@ class ChunkSizePredictor:
         page_size: int,
         target_time: float = 0,
     ) -> int | None:
-        """Predict next chunk size x such that f(L+x) - f(L) = target_latency."""
+        """Predict next chunk size x such that f(L+x) - f(L) = target_latency.
+
+        Args:
+            num_computed_tokens: Number of tokens already computed (L),
+                representing the current position in the sequence.
+            base_chunk_size: The default/fallback chunk size used as a
+                baseline for smoothing the predicted value.
+            page_size: The memory page size, used together with 64 to
+                determine the alignment granularity of the final chunk size.
+            target_time: Override target latency in seconds. If > 0, this
+                value is used instead of self.target_latency for the
+                prediction equation.
+
+        Returns:
+            The predicted and aligned chunk size as an int, or None if
+            the model is not ready, the discriminant is negative, or the
+            prediction yields an invalid result.
+        """
         if not self.is_ready or self.target_latency is None:
             return None
 
         if self.quadratic_coeff_a <= 0:
             return None
 
+        # f(L+x)-f(L) = a*x^2 + (2a*L+b)*x = target_latency
+        # Standard form: A*x^2 + B*x + C = 0
         A = self.quadratic_coeff_a
         B = 2 * self.quadratic_coeff_a * num_computed_tokens + self.linear_coeff_b
 
@@ -269,7 +288,24 @@ class ChunkSizePredictor:
         target_time: float = 0,
     ) -> int | None:
         """Predict next chunk size x using the history-aware model
-        f(C,H) = a*C(C+H) + b*C + c*H."""
+        f(C,H) = a*C(C+H) + b*C + c*H.
+
+        Args:
+            num_computed_tokens: Number of tokens already computed (C),
+                representing the current computed position in the sequence.
+            base_chunk_size: The default/fallback chunk size used as a
+                baseline for smoothing the predicted value.
+            page_size: The memory page size, used together with 64 to
+                determine the alignment granularity of the final chunk size.
+            target_time: Override target latency in seconds. If > 0, this
+                value is used instead of self.target_latency for the
+                prediction equation.
+
+        Returns:
+            The predicted and aligned chunk size as an int, or None if
+            the model is not ready, the discriminant is negative, or the
+            prediction yields an invalid result.
+        """
         if not self.is_ready or self.target_latency is None:
             return None
 
@@ -279,7 +315,9 @@ class ChunkSizePredictor:
         if self.quadratic_chunk_a <= 0:
             return None
 
-        # a*C^2 + (a*H + b)*C + b*H + c - T = 0
+        # f(x,H) = a*x*(x+H) + b*x + c*H, solving f(x,H)=T gives:
+        # a*x^2 + (a*H + b)*x + (b*H + c - T) = 0
+        # Standard form: A*x^2 + B*x + C = 0, where H=num_computed_tokens, T=target_latency
         A = self.quadratic_chunk_a
         B = self.quadratic_chunk_a * num_computed_tokens + self.linear_chunk_b
         if target_time > 0:
