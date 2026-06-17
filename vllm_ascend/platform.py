@@ -1200,25 +1200,6 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.parallel_config.ubatch_size = 0
 
-            if getattr(vllm_config.parallel_config, "enable_eplb", False):
-                logger.warning(
-                    "'--enable-eplb' is not supported on Ascend NPU. "
-                    "Please use '--additional-config "
-                    '\'{"eplb_config": {"expert_map_path": "...", '
-                    '"num_redundant_experts": N}}\' instead. '
-                    "action: resetting to False."
-                )
-                vllm_config.parallel_config.enable_eplb = False
-
-            if getattr(vllm_config.parallel_config, "enable_elastic_ep", False):
-                logger.warning(
-                    "'--enable-elastic-ep' is not supported on Ascend NPU. "
-                    "Please use '--additional-config "
-                    "'{\"eplb_config\": {...}}' instead. "
-                    "action: resetting to False."
-                )
-                vllm_config.parallel_config.enable_elastic_ep = False
-
         # ==================== 10. Compilation Config ====================
         if vllm_config.compilation_config:
             if getattr(vllm_config.compilation_config, "use_inductor_graph_partition", False) is not None:
