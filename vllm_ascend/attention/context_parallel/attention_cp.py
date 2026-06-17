@@ -878,6 +878,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             [query.reshape(num_tokens, -1), key.reshape(num_tokens, -1), value.reshape(num_tokens, -1)],
             dim=-1,
         )
+        # The gdn linear partitioning may result in different data on two cards, so padding is required here.
         real_num_tokens = attn_metadata.prefill.pcp_metadata.total_num_scheduled_tokens
         qkv_fla = qkv_fla[:real_num_tokens]
         if pcp_padded_tokens_fla > 0:
