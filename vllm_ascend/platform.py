@@ -132,9 +132,9 @@ def config_deprecated_logging():
 
     warnings_logger.propagate = False
 
+
 def update_aclgraph_sizes(vllm_config):
-    """Reduce the number of stages captured by cudagraph
-    """
+    """Reduce the number of stages captured by cudagraph"""
     original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
     if not original_sizes:
         return
@@ -145,6 +145,7 @@ def update_aclgraph_sizes(vllm_config):
     indices[0], indices[-1] = 0, len(original_sizes) - 1
     sampled_sizes = [original_sizes[i] for i in indices]
     update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
+
 
 class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
