@@ -222,4 +222,3 @@ csrc/third_party/
 .codegraph/
 
 .vllm_ascend/
-.codemate/mcp/mcp_settings.json

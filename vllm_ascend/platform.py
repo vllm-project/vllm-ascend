@@ -71,6 +71,8 @@ else:
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
+# Delete after the driver is released; temporarily hard-coded to 4
+MAX_NUM_BATCH_SIZES = 4
 
 
 def _get_npu_smi_field(lines: list[str], key: str) -> str | None:
@@ -134,9 +136,12 @@ def update_aclgraph_sizes(vllm_config):
     """Reduce the number of stages captured by cudagraph
     """
     original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
-    max_num_batch_sizes = 4
-    step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
-    indices = [round(i * step) for i in range(max_num_batch_sizes)]
+    if not original_sizes:
+        return
+    if len(original_sizes) <= MAX_NUM_BATCH_SIZES:
+        return
+    step = (len(original_sizes) - 1) / (MAX_NUM_BATCH_SIZES - 1)
+    indices = [round(i * step) for i in range(MAX_NUM_BATCH_SIZES)]
     indices[0], indices[-1] = 0, len(original_sizes) - 1
     sampled_sizes = [original_sizes[i] for i in indices]
     update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
