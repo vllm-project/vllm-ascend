@@ -28,8 +28,8 @@ constexpr int32_t RING_SLOTS = 5;
 template <uint32_t N>
 __aicore__ inline constexpr int32_t UnsignedMod(int32_t num) {
     const uint32_t uNum = static_cast<uint32_t>(num);
-    const int32_t ans = static_cast<int32_t>(uNum % N);
-    return ans;
+    const int32_t retVal = static_cast<int32_t>(uNum % N);
+    return retVal;
 }
 
 __aicore__ inline constexpr int32_t SlotCurr(int32_t t)
