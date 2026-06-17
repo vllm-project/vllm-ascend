@@ -151,7 +151,7 @@ class ProxyState:
         self.req_id_lock = asyncio.Lock()
 
         # 动态分桶负载均衡器
-        self.bucket_load_balancer: DynamicBucketLoadBalancer | None = None
+        self.bucket_load_balancer = None
 
         if global_args.enable_dynamic_bucket:
             self.num_buckets = 2  # 启用动态分桶时的分长短两个桶
@@ -177,10 +177,12 @@ class ProxyState:
 
         # 记录动态分桶状态、分组数量及各分组完整实例信息
         logger.info(
-            f"Dynamic bucket enabled: {global_args.enable_dynamic_bucket}, number of groups: {len(self.server_heaps)}"
+            "Dynamic bucket enabled: %s, number of groups: %s",
+            global_args.enable_dynamic_bucket,
+            len(self.server_heaps),
         )
         for group_idx, cur_heap in enumerate(self.server_heaps):
-            logger.info(f"Group {group_idx}: {cur_heap}")
+            logger.info("Group %s: %s", group_idx, cur_heap)
 
     @staticmethod
     def _group_servers(servers: list[ServerHeapItem], num_groups: int):
@@ -258,7 +260,7 @@ class ProxyState:
 
     def release_server(self, idx: int, token_count, req_id):
         self.infer_servers[idx].active_tokens -= token_count
-        if global_args.enable_dynamic_bucket and req_id is not None:
+        if global_args.enable_dynamic_bucket and req_id is not None and self.bucket_load_balancer is not None:
             self.bucket_load_balancer.release_task(req_id)
         # 释放后更新优先级队列
         self._update_server_priority(idx)
@@ -276,14 +278,14 @@ class ProxyState:
 
     def select_server_group(self, req_id: str, request_tokens, priority_score) -> tuple[int, Task | None]:
         """根据请求长度与各分组当前负载，选择最优分组。"""
-        if global_args.enable_dynamic_bucket:
+        if global_args.enable_dynamic_bucket and self.bucket_load_balancer is not None:
             group_idx, task = self.bucket_load_balancer.dispatch_single_task(req_id, request_tokens, priority_score)
             return group_idx, task
         else:
             return 0, None
 
 
-proxy_state: ProxyState | None = None
+proxy_state = None
 
 
 def parse_args():
@@ -314,7 +316,7 @@ def parse_args():
 async def lifespan(app: FastAPI):
     global proxy_state
     proxy_state = ProxyState(global_args.server_instances)
-    logger.debug(f"Initialized {len(proxy_state.infer_servers)} dp server clients.")
+    logger.debug("Initialized %s dp server clients.", len(proxy_state.infer_servers))
     yield
     for p in proxy_state.infer_servers:
         await p.client.aclose()
@@ -369,24 +371,24 @@ async def stream_service_response_with_retry(
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             # 一旦已经向客户端转发过任何 chunk，就不能再重试，否则客户端会收到重复/损坏的流。
             if first_chunk_sent:
-                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
+                logger.error("Streaming to client interrupted after response started: %s", str(e))
                 return
             if attempt < max_retries:
-                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
+                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, str(e))
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
+                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                 raise e
         except Exception as e:
             # 对非 HTTP 异常沿用与上相同的防护
             if first_chunk_sent:
-                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
+                logger.error("Streaming to client interrupted after response started: %s", str(e))
                 return
             if attempt < max_retries:
-                logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
+                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, str(e))
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error(f"All {max_retries} attempts failed for streaming {endpoint}.")
+                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                 raise e
 
 
@@ -394,7 +396,7 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     # refer to vLLM sampling_params: max_token default value
     max_tokens = req_data.get("max_tokens", 16)
     ignore_eos = req_data.get("ignore_eos", False)
-    priority_score = 0
+    priority_score = 0.0
     if global_args.enable_dynamic_bucket:
         priority_score = proxy_state.calculate_request_tokens(request_length)
     else:
@@ -403,8 +405,11 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
         )
 
     logger.debug(
-        f"Request length: {request_length}, max tokens: {max_tokens}, "
-        f"ignore_eos: {ignore_eos}, Priority score: {priority_score}"
+        "Request length: %s, max tokens: %s, ignore_eos: %s, Priority score: %s",
+        request_length,
+        max_tokens,
+        ignore_eos,
+        priority_score,
     )
     request_id = await proxy_state.next_req_id()
     # Select server based on priority score
@@ -414,7 +419,7 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     try:
         server_idx = proxy_state.select_server(priority_score, group_idx)
     except Exception:
-        if global_args.enable_dynamic_bucket and task is not None:
+        if global_args.enable_dynamic_bucket and task is not None and proxy_state.bucket_load_balancer is not None:
             proxy_state.bucket_load_balancer.release_task(task.id)
         raise
 
@@ -423,7 +428,11 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
 
     chosen_server = proxy_state.infer_servers[server_idx]
     logger.debug(
-        f"[group_idx={group_idx}, server_idx={server_idx}] Choose server {chosen_server.url} to process request {request_id}"
+        "[group_idx=%s, server_idx=%s] Choose server %s to process request %s",
+        group_idx,
+        server_idx,
+        chosen_server.url,
+        request_id,
     )
     return InstanceInfo(
         request_id=request_id, server_idx=server_idx, priority_score=priority_score, server_state=chosen_server
@@ -453,23 +462,27 @@ async def _handle_completions(api: str, request: Request):
             nonlocal instance_info
             try:
                 async for chunk in stream_service_response_with_retry(
-                    instance_info.server_state.client,
+                    instance_info.server_state.client,  # type: ignore
                     api,
                     req_data,
-                    request_id=instance_info.request_id,
+                    request_id=instance_info.request_id,  # type: ignore
                     max_retries=global_args.max_retries,
                     base_delay=global_args.retry_delay,
                 ):
                     yield chunk
             except Exception as e:
                 logger.error(
-                    f"Error during streaming from server {instance_info.server_state.url}: {str(e)}, "
-                    f"the aborted request is: {instance_info.request_id}."
+                    "Error during streaming from server %s: %s, the aborted request is: %s.",
+                    instance_info.server_state.url,  # type: ignore
+                    str(e),
+                    instance_info.request_id,  # type: ignore
                 )
             finally:
                 # 流式结束后，释放负载
-                proxy_state.release_server(
-                    instance_info.server_idx, instance_info.priority_score, instance_info.request_id
+                proxy_state.release_server(  # type: ignore
+                    instance_info.server_idx,  # type: ignore
+                    instance_info.priority_score,  # type: ignore
+                    instance_info.request_id,  # type: ignore
                 )
 
         streaming_started = True

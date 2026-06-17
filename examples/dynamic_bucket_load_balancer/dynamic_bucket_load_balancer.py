@@ -8,7 +8,7 @@ ServerInfo = namedtuple("ServerInfo", ["instance_type", "instance_idx"])
 class Task:
     """请求任务(包含请求长度信息)"""
 
-    def __init__(self, task_id: AnyStr, task_length: int, task_load: float):
+    def __init__(self, task_id, task_length, task_load):
         self.id = task_id
         self.length = task_length
         self.bucket_idx = -1
@@ -16,7 +16,10 @@ class Task:
         self.server_info: ServerInfo = ServerInfo("Unknown", -1)
 
     def __repr__(self):
-        return f"Task(id={self.id}, length={self.length}, load={self.load},instance_type={self.server_info.instance_type}, instance_idx={self.server_info.instance_idx})"
+        return (
+            f"Task(id={self.id}, length={self.length}, load={self.load}, "
+            f"instance_type={self.server_info.instance_type}, instance_idx={self.server_info.instance_idx})"
+        )
 
 
 class Bucket:
@@ -207,7 +210,7 @@ class DynamicBucketLoadBalancer:
 
         return final_bucket_idx, cur_task
 
-    def release_task(self, task_id: AnyStr):
+    def release_task(self, task_id):
         """释放请求负载"""
         if task_id in self.tasks:
             found_task = self.tasks.pop(task_id)
