@@ -1,0 +1,19 @@
+name: workflow_dispatch
+on:
+  workflow_dispatch:
+env:
+  ASCEND_VISIBLE_DEVICES: 0,1
+jobs:
+  job_1:
+    runs-on: linux-aarch64-a3-test-2
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
+
+    steps:
+      - name: Show NPU info
+        run: |
+          npu-smi info
+          sleep 600
+
+      - name: Checkout code
+        uses: actions/checkout@v4
