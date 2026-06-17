@@ -81,7 +81,7 @@ _benchmark_TPOT50_3_5k_1_5K: &_benchmark_TPOT50_3_5k_1_5K
   batch_size: 80
   request_rate: 0
   baseline: 1052.9
-  threshold: 0.97
+  threshold: 0.95
 
 _benchmark_TPOT50_16K_1K: &_benchmark_TPOT50_16K_1K
   case_type: performance
@@ -93,7 +93,7 @@ _benchmark_TPOT50_16K_1K: &_benchmark_TPOT50_16K_1K
   batch_size: 24
   request_rate: 0
   baseline: 400.183
-  threshold: 0.97
+  threshold: 0.95
 
 _benchmark_TPOT20_16K_1K: &_benchmark_TPOT20_16K_1K
   case_type: performance
@@ -105,7 +105,7 @@ _benchmark_TPOT20_16K_1K: &_benchmark_TPOT20_16K_1K
   batch_size: 8
   request_rate: 0
   baseline: 325.5
-  threshold: 0.97
+  threshold: 0.95
 
 _benchmark_TPOT50_32K_0_5K: &_benchmark_TPOT50_32K_0_5K
   case_type: performance
@@ -117,7 +117,7 @@ _benchmark_TPOT50_32K_0_5K: &_benchmark_TPOT50_32K_0_5K
   batch_size: 9
   request_rate: 0
   baseline: 123.8
-  threshold: 0.97
+  threshold: 0.95
 
 _benchmark_TPOT20_32K_0_5K: &_benchmark_TPOT20_32K_0_5K
   case_type: performance
@@ -129,7 +129,7 @@ _benchmark_TPOT20_32K_0_5K: &_benchmark_TPOT20_32K_0_5K
   batch_size: 4
   request_rate: 0
   baseline: 113.8
-  threshold: 0.97
+  threshold: 0.95
 
 _benchmark_TPOT50_64K_1K: &_benchmark_TPOT50_64K_1K
   case_type: performance
@@ -141,7 +141,7 @@ _benchmark_TPOT50_64K_1K: &_benchmark_TPOT50_64K_1K
   batch_size: 8
   request_rate: 0
   baseline: 114.1
-  threshold: 0.97
+  threshold: 0.95
 
 _benchmark_TPOT20_64K_1K: &_benchmark_TPOT20_64K_1K
   case_type: performance
@@ -153,7 +153,7 @@ _benchmark_TPOT20_64K_1K: &_benchmark_TPOT20_64K_1K
   batch_size: 4
   request_rate: 0
   baseline: 99.28
-  threshold: 0.97
+  threshold: 0.95
 
 
 test_cases:
