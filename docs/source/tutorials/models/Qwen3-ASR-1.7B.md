@@ -51,6 +51,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 ## Deployment
 
 ### Atlas 300I A2 2UP
+
 ```shell
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --tensor-parallel-size 1 \
@@ -61,6 +62,7 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
 ```
 
 ### Atlas 300I DUO
+
 ```shell
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --tensor-parallel-size 1 \
@@ -71,6 +73,7 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
   --port 8000
 ```
+
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
