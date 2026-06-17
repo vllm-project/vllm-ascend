@@ -58,7 +58,7 @@ vllm serve ${MODEL_PATH} \
     --port 8000 \
     --served-model-name NVLM-D-72B \
     --tensor-parallel-size 4 \
-    --max-model-len 4096 \
+    --max-model-len 16384 \
     --gpu-memory-utilization 0.90 \
     --dtype bfloat16
 ```
