@@ -331,7 +331,7 @@ FlashComm_v1 significantly improves performance in large-batch scenarios by deco
 
 It is important to note that the decomposition of the allreduce communication into reduce-scatter and all-gather operations only provides benefits in high-concurrency scenarios, where there is no significant communication degradation. In other cases, this decomposition may result in noticeable performance degradation. To mitigate this, the current implementation uses a threshold-based approach, where FlashComm_v1 is only enabled if the actual token count for each inference schedule exceeds the threshold. This ensures that the feature is only activated in scenarios where it improves performance, avoiding potential degradation in lower-concurrency situations.
 
-This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_FLASHCOMM1 = 1` to be enabled.
+This optimization requires setting the environment variable `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` to be enabled.
 
 ### 4. Matmul and ReduceScatter Fusion
 
