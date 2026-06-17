@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
 import sys
+from collections.abc import Mapping
 from math import lcm
 
 import vllm
+import vllm.envs as envs_vllm
+import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
@@ -17,11 +20,39 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+)
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
+
+_orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
+
+
+def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    if getattr(kv_cache_spec, "model_version", None) == "deepseek_v4":
+        return True
+
+    nested_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
+    if nested_specs is None:
+        return False
+
+    if isinstance(nested_specs, Mapping):
+        nested_specs = nested_specs.values()
+    elif not isinstance(nested_specs, (list, tuple, set)):
+        return False
+
+    return any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in nested_specs)
+
+
+def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
+    return any(_is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -46,7 +77,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_num_batched_tokens: int | None = None,
+        scheduler_block_size: int | None = None,
     ):
+        self.dcp_world_size = dcp_world_size
+        self.pcp_world_size = pcp_world_size
+        self.scheduler_block_size = scheduler_block_size
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
@@ -56,6 +91,18 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if max_num_batched_tokens is None:
             max_num_batched_tokens = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        validate_retention_interval = getattr(
+            vllm_kv_cache_coordinator,
+            "_validate_prefix_cache_retention_interval",
+            None,
+        )
+        if self.retention_interval is not None and validate_retention_interval is not None:
+            validate_retention_interval(
+                self.retention_interval,
+                self.scheduler_block_size,
+                kv_cache_config,
+            )
 
         self.block_pool = BlockPool(
             kv_cache_config.num_blocks,
@@ -71,6 +118,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
+        # v0.22.1 managers don't accept `scheduler_block_size`.
+        extra_mgr_kwargs: dict = {}
+        if not vllm_version_is("0.22.1"):
+            extra_mgr_kwargs["scheduler_block_size"] = scheduler_block_size
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
@@ -81,6 +132,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 pcp_world_size=pcp_world_size,
                 max_num_batched_tokens=max_num_batched_tokens,
                 max_model_len=max_model_len,
+                **extra_mgr_kwargs,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -91,14 +143,25 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # can be a multiple of hash_block_size.
         self.hash_block_size = hash_block_size
         if enable_caching:
-            assert all(g.kv_cache_spec.block_size % hash_block_size == 0 for g in kv_cache_config.kv_cache_groups), (
-                "block_size must be divisible by hash_block_size"
-            )
-        assert dcp_world_size == 1, "DCP not support hybrid attn now."
-        assert pcp_world_size == 1, "PCP not support hybrid attn now."
+            assert all(
+                self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
+                for g in kv_cache_config.kv_cache_groups
+            ), "block_size must be divisible by hash_block_size"
         self.verify_and_split_kv_cache_groups()
 
         self.use_eagle = use_eagle
+
+    def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
+        block_size = kv_cache_spec.block_size
+        if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
+            return block_size
+        if self.dcp_world_size * self.pcp_world_size > 1:
+            block_size *= self.dcp_world_size * self.pcp_world_size
+        if hasattr(kv_cache_spec, "compress_ratio"):
+            compress_ratio = kv_cache_spec.compress_ratio or 1
+            compress_ratio = compress_ratio if compress_ratio >= 1 else 1
+            block_size *= compress_ratio
+        return block_size
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -143,7 +206,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # each attention type. Requiring this because we don't support partial
         # block cache hit yet.
         # NOTE: use 16k as the alignment tokens for model with compress ratio
-        block_sizes = [spec.block_size * getattr(spec, "compress_ratio", 1) for spec, _, _ in self.attention_groups]
+        block_sizes = [self._get_effective_block_size(spec) for spec, _, _ in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
     def find_longest_cache_hit(
@@ -170,9 +233,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
 
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
-            if kv_cache_spec.block_size == self.hash_block_size:
+            target_block_size = kv_cache_spec.block_size
+            if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
+                target_block_size *= self.dcp_world_size * self.pcp_world_size
+            if target_block_size == self.hash_block_size:
                 return block_hashes
-            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, kv_cache_spec.block_size)
+            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, target_block_size)
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
@@ -191,14 +257,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         while True:
             curr_hit_length = hit_length
-
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
+                effective_block_size = self._get_effective_block_size(spec)
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
                     # Full attention is downward-closed: we only need to look
                     # up cached blocks once; on subsequent iterations just trim
                     # to the (reduced) current hit length.
-                    curr_hit_length = curr_hit_length // spec.block_size * spec.block_size
+                    num_blocks = curr_hit_length // effective_block_size
+                    curr_hit_length = num_blocks * effective_block_size
                     continue
 
                 use_eagle = idx in self.eagle_attn_group_indices and idx not in eagle_verified
@@ -207,24 +274,30 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 if use_eagle:
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
+                # vLLM B renamed the ``use_eagle`` kwarg to ``drop_eagle_block``.
+                if vllm_version_is("0.22.1"):
+                    eagle_kwarg = {"use_eagle": use_eagle}
+                else:
+                    eagle_kwarg = {"drop_eagle_block": use_eagle}
                 hit_blocks = manager_cls.find_longest_cache_hit(
                     block_hashes=_get_block_hashes(spec),
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
-                    use_eagle=use_eagle,
+                    **eagle_kwarg,
                     alignment_tokens=self.lcm_block_size,
+                    dcp_world_size=self.dcp_world_size,
+                    pcp_world_size=self.pcp_world_size,
                 )
-                _new_hit_length = len(hit_blocks[0]) * spec.block_size
+                _new_hit_length = len(hit_blocks[0]) * effective_block_size
                 if use_eagle:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
                     # length shrunk; invalidate previous eagle verifications
                     eagle_verified.clear()
                 curr_hit_length = _new_hit_length
-                compress_ratio = getattr(spec, "compress_ratio", 1)
-                curr_hit_length = len(hit_blocks[0]) * spec.block_size * max(compress_ratio, 1)
+                curr_hit_length = len(hit_blocks[0]) * effective_block_size
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks
 
@@ -235,9 +308,121 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 break
 
         # Truncate full attention blocks to final hit_length (if present)
+        # NOTE(zxr): for deepseek-v4, there is two fullattn groups, but
+        # in this function, only the first fullattn group is truncate by
+        # the belowing codes(c4), c128 layer does not truncate, which may
+        # have prefix cache block hit.
+        # Due to slidingwindow attn, deepseek-v4 decode node can't have
+        # any prefix cache hit, because `hit_length` of SWA is 0.
         spec, group_ids, _ = self.attention_groups[0]
         if isinstance(spec, FullAttentionSpec):
-            num_blocks = hit_length // spec.block_size
+            num_blocks = hit_length // self._get_effective_block_size(spec)
+            for group_id in group_ids:
+                if (blks := hit_blocks_by_group[group_id]) is not None:
+                    del blks[num_blocks:]
+
+        return tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group), hit_length
+
+    def find_longest_cache_hit_per_group(
+        self,
+        block_hashes: list[BlockHash],
+        max_cache_hit_length: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
+            target_block_size = kv_cache_spec.block_size
+            if not isinstance(kv_cache_spec, MambaSpec) and self.dcp_world_size * self.pcp_world_size > 1:
+                target_block_size *= self.dcp_world_size * self.pcp_world_size
+            if target_block_size == self.hash_block_size:
+                return block_hashes
+            return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, target_block_size)
+
+        num_groups = len(self.kv_cache_config.kv_cache_groups)
+        hit_length = max_cache_hit_length
+        hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
+
+        # Simple hybrid (1 full attn + 1 other): one iteration suffices.
+        # Full attn is always first if it exists.
+        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
+            self.attention_groups[0][0], FullAttentionSpec
+        )
+
+        # Attention-group indices whose EAGLE drop is verified at the current
+        # ``curr_hit_length``. Each eagle group applies the drop at most once
+        # per candidate length (see issue #32802).
+        eagle_verified: set[int] = set()
+        while True:
+            curr_hit_length = hit_length
+            for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
+                # In PD disaggregation, Mamba running/temporal state is transferred
+                # via the KV connector, but the D side has no local Mamba prefix
+                # cache hit. If we let Mamba groups participate in the min-reduction,
+                # their zero hit collapses the FullAttention hit length to 0 and
+                # defeats prefix caching on the D side. Skip them instead.
+                if isinstance(spec, MambaSpec):
+                    if hit_blocks_by_group[group_ids[0]] is None:
+                        for gid in group_ids:
+                            hit_blocks_by_group[gid] = []
+                    continue
+
+                effective_block_size = self._get_effective_block_size(spec)
+                cached_blocks = hit_blocks_by_group[group_ids[0]]
+                if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
+                    # Full attention is downward-closed: we only need to look
+                    # up cached blocks once; on subsequent iterations just trim
+                    # to the (reduced) current hit length.
+                    num_blocks = curr_hit_length // effective_block_size
+                    curr_hit_length = num_blocks * effective_block_size
+                    continue
+
+                use_eagle = idx in self.eagle_attn_group_indices and idx not in eagle_verified
+
+                _max_length = curr_hit_length
+                if use_eagle:
+                    # Eagle needs to match one more block and then pop the last.
+                    _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
+                # vLLM B renamed the ``use_eagle`` kwarg to ``drop_eagle_block``.
+                if vllm_version_is("0.21.0"):
+                    eagle_kwarg = {"use_eagle": use_eagle}
+                else:
+                    eagle_kwarg = {"drop_eagle_block": use_eagle}
+                hit_blocks = manager_cls.find_longest_cache_hit(
+                    block_hashes=_get_block_hashes(spec),
+                    max_length=_max_length,
+                    kv_cache_group_ids=group_ids,
+                    block_pool=self.block_pool,
+                    kv_cache_spec=spec,
+                    **eagle_kwarg,
+                    alignment_tokens=self.lcm_block_size,
+                    dcp_world_size=self.dcp_world_size,
+                    pcp_world_size=self.pcp_world_size,
+                )
+                _new_hit_length = len(hit_blocks[0]) * effective_block_size
+                if use_eagle:
+                    eagle_verified.add(idx)
+                elif _new_hit_length < curr_hit_length:
+                    # length shrunk; invalidate previous eagle verifications
+                    eagle_verified.clear()
+                curr_hit_length = _new_hit_length
+                curr_hit_length = len(hit_blocks[0]) * effective_block_size
+                for group_id, blocks in zip(group_ids, hit_blocks):
+                    hit_blocks_by_group[group_id] = blocks
+
+            if curr_hit_length >= hit_length:
+                break
+            hit_length = curr_hit_length
+            if is_simple_hybrid:
+                break
+
+        # Truncate full attention blocks to final hit_length (if present)
+        # NOTE(zxr): for deepseek-v4, there is two fullattn groups, but
+        # in this function, only the first fullattn group is truncate by
+        # the belowing codes(c4), c128 layer does not truncate, which may
+        # have prefix cache block hit.
+        # Due to slidingwindow attn, deepseek-v4 decode node can't have
+        # any prefix cache hit, because `hit_length` of SWA is 0.
+        spec, group_ids, _ = self.attention_groups[0]
+        if isinstance(spec, FullAttentionSpec):
+            num_blocks = hit_length // self._get_effective_block_size(spec)
             for group_id in group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
@@ -255,9 +440,43 @@ def get_kv_cache_coordinator(
     dcp_world_size: int,
     pcp_world_size: int,
     hash_block_size: int,
+    scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
+    if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+        return AscendHybridKVCacheCoordinator(
+            kv_cache_config,
+            max_model_len,
+            use_eagle,
+            enable_caching,
+            enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            hash_block_size=hash_block_size,
+            eagle_attn_layer_names=eagle_attn_layer_names,
+            metrics_collector=metrics_collector,
+            max_num_batched_tokens=max_num_batched_tokens,
+            scheduler_block_size=scheduler_block_size,
+        )
+
+    if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
+        orig_kwargs = dict(
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
+            use_eagle=use_eagle,
+            enable_caching=enable_caching,
+            enable_kv_cache_events=enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
+        )
+        if not vllm_version_is("0.22.1"):
+            orig_kwargs["scheduler_block_size"] = scheduler_block_size
+        return _orig_get_kv_cache_coordinator(**orig_kwargs)
+
     return AscendHybridKVCacheCoordinator(
         kv_cache_config,
         max_model_len,
@@ -270,6 +489,7 @@ def get_kv_cache_coordinator(
         eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
         max_num_batched_tokens=max_num_batched_tokens,
+        scheduler_block_size=scheduler_block_size,
     )
 
 

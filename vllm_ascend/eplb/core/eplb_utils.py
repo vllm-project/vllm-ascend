@@ -21,13 +21,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 from vllm.logger import logger
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.20.2"):
-    from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
-else:
-    from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
+from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 
 
 def expert_file_to_tensor(expert_map_path, layer_id):
@@ -38,7 +32,7 @@ def expert_file_to_tensor(expert_map_path, layer_id):
     if layer_id > data["moe_layer_count"]:
         raise ValueError("Invalid EPLB Table")
     if layer_id == data["moe_layer_count"]:
-        logger.warning("Init expert map of mtp/eagle when using sample.")
+        logger.warning("[eplb/utils] Init expert map of mtp/eagle when using sample.")
         for device in data["layer_list"][0]["device_list"]:
             physical_count += len(device["device_expert"])
         return None, physical_count

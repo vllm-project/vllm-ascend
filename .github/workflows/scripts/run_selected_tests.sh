@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 4 ]; then
-  echo "Usage: $0 <npu_type> <num_npus> <with-device|without-device> <test> [test ...]"
+  echo "Usage: $0 <npu_type> <num_npus> <with-device|without-device> [--timing] <test> [test ...]"
   exit 1
 fi
 
@@ -10,6 +10,13 @@ npu_type="$1"
 num_npus="$2"
 mode="$3"
 shift 3
+
+record_timing=false
+if [ "$1" = "--timing" ]; then
+  record_timing=true
+  shift
+fi
+
 targets=("$@")
 
 if [ "${mode}" != "with-device" ] && [ "${mode}" != "without-device" ]; then
@@ -19,6 +26,7 @@ fi
 
 test_results=()
 failed_logs=()
+timing_entries=()
 test_index=0
 pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
 
@@ -58,28 +66,98 @@ print_summary() {
 run_pytest_target() {
   local target="$1"
   test_index=$((test_index + 1))
-  local log_file="${pytest_log_dir}/pytest-${test_index}.log"
+  local log_name="${target}"
+  log_name="${log_name#tests/}"
+  log_name="${log_name%.py}"
+  log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
+  local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
+  local start_time=0
+  if [ "${record_timing}" = true ]; then
+    start_time=$(date +%s%N)
+  fi
   set +e
   pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
   local status=${PIPESTATUS[0]}
   set -e
+  if [ "${record_timing}" = true ]; then
+    local elapsed_ns=$(( $(date +%s%N) - start_time ))
+    local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
+    timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
+  fi
   echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
     test_results+=("${target}|PASSED|${log_file}")
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    print_summary
-    exit "${status}"
+    if [ "${record_timing}" != true ]; then
+      print_summary
+      exit "${status}"
+    fi
   fi
+}
+
+run_pytest_batch() {
+  local target="$1"
+  shift
+  local batch_targets=("$@")
+  test_index=$((test_index + 1))
+  local log_file="${pytest_log_dir}/${test_index}-cpu-ut.log"
+
+  echo "::group::${target}"
+  echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
+  local start_time=0
+  if [ "${record_timing}" = true ]; then
+    start_time=$(date +%s%N)
+  fi
+  set +e
+  pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+  local status=${PIPESTATUS[0]}
+  set -e
+  if [ "${record_timing}" = true ]; then
+    local elapsed_ns=$(( $(date +%s%N) - start_time ))
+    local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
+    timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
+  fi
+  echo "::endgroup::"
+  if [ "${status}" -eq 0 ]; then
+    test_results+=("${target}|PASSED|${log_file}")
+  else
+    test_results+=("${target}|FAILED|${log_file}")
+    failed_logs+=("${target}|${log_file}")
+    if [ "${record_timing}" != true ]; then
+      print_summary
+      exit "${status}"
+    fi
+  fi
+}
+
+print_timing_json() {
+  if [ "${#timing_entries[@]}" -eq 0 ]; then
+    return
+  fi
+  local json="["
+  local i=0
+  for entry in "${timing_entries[@]}"; do
+    if [ "${i}" -gt 0 ]; then
+      json+=","
+    fi
+    json+="${entry}"
+    i=$((i + 1))
+  done
+  json+="]"
+  echo "${json}" > "${pytest_log_dir}/test_timing_data.json"
+  echo -e "\033[1;34m=== Timing data written to ${pytest_log_dir}/test_timing_data.json ===\033[0m"
 }
 
 print_test_info
 
-if [ "${mode}" = "with-device" ]; then
-  aclgraph_capture_replay="tests/e2e/pull_request/full/two_cards/test_aclgraph_capture_replay.py"
+if [ "${npu_type}" = "cpu" ]; then
+  run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
+elif [ "${mode}" = "with-device" ]; then
+  aclgraph_capture_replay="tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py"
   run_aclgraph_capture_replay=0
   for target in "${targets[@]}"; do
     if [ "${target}" = "${aclgraph_capture_replay}" ]; then
@@ -98,4 +176,5 @@ else
   done
 fi
 
+print_timing_json
 print_summary

@@ -165,7 +165,7 @@ The parameters are explained as follows:
 
 ### Multi-node Deployment
 
-Although the former tutorial said "Not recommended to deploy multi-node on Atlas 800 A2 (64G × 8)", but if you insist to deploy GLM-4.x model on multi-node like 2 × Atlas 800 A2 (64G × 8), run the following scripts on two nodes respectively.
+While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64G × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
 
 **Node 0**
 
@@ -424,7 +424,6 @@ Before you start, please
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
@@ -487,7 +486,6 @@ Before you start, please
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30100",
-            "engine_id": "1",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
@@ -556,7 +554,6 @@ Before you start, please
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
-            "engine_id": "2",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
@@ -625,7 +622,6 @@ Before you start, please
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
-            "engine_id": "2",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,

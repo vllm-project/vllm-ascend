@@ -231,13 +231,13 @@ You can't run the E2E test on CPUs.
 ```bash
 cd /vllm-workspace/vllm-ascend/
 # Run all single-card tests
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/full/one_card/
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/
 
 # Run a certain test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/full/one_card/test_camem.py
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_camem.py
 
 # Run a certain case in test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/full/one_card/test_camem.py::test_end_to_end
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_camem.py::test_end_to_end
 ```
 
 ::::
@@ -248,13 +248,13 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/full/one_card/test_ca
 ```bash
 cd /vllm-workspace/vllm-ascend/
 # Run all multi-card tests
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/full/two_cards/
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/
 
 # Run a certain test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/full/two_cards/test_qwen3_moe.py
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
 
 # Run a certain case in test script
-VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/full/two_cards/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
+VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py::test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb
 ```
 
 ::::
@@ -315,9 +315,9 @@ For running nightly multi-node model test cases locally, refer to the `Running L
 
 #### E2E test examples
 
-- Offline test example: [`tests/e2e/pull_request/full/one_card/test_camem.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/full/one_card/test_camem.py)
-- Online test example: [`tests/e2e/pull_request/full/two_cards/test_single_request_aclgraph.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/full/two_cards/test_single_request_aclgraph.py)
-- Correctness test example: [`tests/e2e/pull_request/full/one_card/test_aclgraph_accuracy.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/full/one_card/test_aclgraph_accuracy.py)
+- Offline test example: [`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)
+- Online test example: [`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)
+- Correctness test example: [`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)
 
 The CI resource is limited, and you might need to reduce the number of layers of a model. Below is an example of how to generate a reduced layer model:
 

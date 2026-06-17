@@ -6,6 +6,7 @@ from vllm.distributed.parallel_state import GroupCoordinator
 
 from tests.ut.attention.utils import patch_distributed_groups
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 if "torch_npu._inductor" not in sys.modules:
@@ -16,6 +17,20 @@ from vllm_ascend.utils import enable_dsa_cp
 
 
 class TestAscendSFABackend(TestBase):
+    def setUp(self):
+        self.mock_config = MagicMock()
+        mock_parallel_config = MagicMock()
+        mock_parallel_config.prefill_context_parallel_size = 1
+        mock_parallel_config.decode_context_parallel_size = 1
+        self.mock_config.parallel_config = mock_parallel_config
+
+        self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
+        self.utils_patcher.start()
+
+        from vllm_ascend.attention.utils import enable_cp
+
+        enable_cp.cache_clear()
+
     def test_get_name(self):
         self.assertEqual(AscendSFABackend.get_name(), "ASCEND_SFA")
 
@@ -29,6 +44,18 @@ class TestAscendSFABackend(TestBase):
     def test_get_impl_cls(self):
         result = AscendSFABackend.get_impl_cls()
         self.assertEqual(result, AscendSFAImpl)
+
+    @patch("vllm_ascend.attention.sfa_v1.enable_cp")
+    def test_get_builder_cls_with_cp(self, mock_enable_cp):
+        mock_enable_cp.return_value = True
+        builder_cls = AscendSFABackend.get_builder_cls()
+        self.assertIsNotNone(builder_cls)
+
+    @patch("vllm_ascend.attention.sfa_v1.enable_cp")
+    def test_get_impl_cls_with_cp(self, mock_enable_cp):
+        mock_enable_cp.return_value = True
+        impl_cls = AscendSFABackend.get_impl_cls()
+        self.assertIsNotNone(impl_cls)
 
 
 class TestAscendSFAMetadata(TestBase):
@@ -97,8 +124,22 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         self.mock_cfg.speculative_config.num_speculative_tokens = 0
 
+        self.mock_cfg.additional_config = {"refresh": True}
+        init_ascend_config(self.mock_cfg)
+
         self.patcher = patch("vllm.config.get_current_vllm_config", return_value=self.mock_cfg)
         self.patcher.start()
+
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.c8_enable_reshape_optim = False
+        mock_ascend_config.enable_mlapo = True
+        mock_ascend_config.enable_shared_expert_dp = False
+        mock_ascend_config.layer_sharding = None
+        self.ascend_config_patcher = patch(
+            "vllm_ascend.attention.sfa_v1.get_ascend_config",
+            return_value=mock_ascend_config,
+        )
+        self.ascend_config_patcher.start()
 
         # Mock parent class __init__ to avoid complex initialization,
         # but still set the essential attributes that child class needs
@@ -127,6 +168,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     def tearDown(self):
         self.patcher.stop()
+        self.ascend_config_patcher.stop()
         self.parent_init_patcher.stop()
 
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)

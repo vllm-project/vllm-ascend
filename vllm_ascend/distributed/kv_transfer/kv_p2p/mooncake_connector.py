@@ -35,8 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
-    get_decode_context_model_parallel_rank,
-    get_decode_context_model_parallel_world_size,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -57,8 +55,17 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import enable_custom_op, is_vl_model
+from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    RegisterRegions,
+    collect_storage_merged_register_regions,
+    get_transfer_timeout_value,
+    validate_register_region_count,
+)
+from vllm_ascend.distributed.utils import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
+)
+from vllm_ascend.utils import enable_custom_op
 
 # isort: off
 if TYPE_CHECKING:
@@ -164,8 +171,10 @@ class KVCacheTaskTracker:
                 self.delayed_free_requests.pop(request_id, None)
             else:
                 logger.warning(
-                    "MooncakeConnector finish req %s not in reqs to process."
-                    "If it is a P node, this request may have been force freed.",
+                    "MooncakeConnector finish req not in reqs to process. "
+                    "request_id=%s. "
+                    "Possible cause: Request was already completed or not properly tracked. "
+                    "Check: Verify request lifecycle and tracking logic.",
                     request_id,
                 )
 
@@ -200,7 +209,13 @@ class KVCacheTaskTracker:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
-                logger.info("Force freed request: %s", request_id)
+                logger.info(
+                    "Force freed expired request: %s. "
+                    "Reason: Request exceeded timeout threshold (%s seconds). "
+                    "Action: Resources have been forcibly released to prevent memory leak.",
+                    request_id,
+                    envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                )
             else:
                 break
         return expired_requests
@@ -261,12 +276,26 @@ class KVCacheSendingThread(threading.Thread):
             device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
             handshake_port = self.side_channel_port + device_index
             path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
-            logger.info("Starting listening on path: %s", path)
+            logger.info(
+                "KVCacheSendingThread started listening on path: %s. Thread: tp_rank=%d, pp_rank=%d, pcp_rank=%d",
+                path,
+                self.tp_rank,
+                self.pp_rank,
+                self.pcp_rank,
+            )
             with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
                 self.ready_event.set()
                 self.run_busy_loop(sock)
         except Exception as e:
-            logger.exception("Mooncake KVCacheSendingThread exception: %s", e)
+            logger.exception(
+                "Mooncake KVCacheSendingThread encountered exception. "
+                "Thread: tp_rank=%d, pp_rank=%d, listening_path=%s. "
+                "Error: %s",
+                self.tp_rank,
+                self.pp_rank,
+                path,
+                e,
+            )
 
     def run_busy_loop(self, sock: zmq.Socket):  # type: ignore
         encoder = msgspec.msgpack.Encoder()
@@ -280,13 +309,29 @@ class KVCacheSendingThread(threading.Thread):
             try:
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
-                    logger.error("Invalid message format: %s", frames)
+                    logger.error(
+                        "Invalid message format in KVCacheSendingThread. "
+                        "Expected: at least 2 frames (identity + payload). "
+                        "Actual: %d frames. "
+                        "Frames: %s. "
+                        "Check: Verify message sender implementation.",
+                        len(frames),
+                        frames,
+                    )
                     continue
 
                 identity = frames[0]
                 payload = [f for f in frames[1:] if f != b""]
                 if len(payload) != 1:
-                    logger.error("Invalid message format: %s", frames)
+                    logger.error(
+                        "Invalid message format in KVCacheSendingThread. "
+                        "Expected: exactly 1 payload frame. "
+                        "Actual: %d payload frames. "
+                        "Frames: %s. "
+                        "Check: Verify message sender removes empty frames correctly.",
+                        len(payload),
+                        frames,
+                    )
                     continue
 
                 msg = decoder.decode(payload[0])
@@ -318,9 +363,25 @@ class KVCacheSendingThread(threading.Thread):
                             logger.debug("Socket not ready, retrying to send ACK for request %s", msg[1])
                             time.sleep(0.01)
                 else:
-                    logger.error("Connection listener got unexpected message %s", msg)
+                    logger.error(
+                        "Connection listener received unexpected message type. "
+                        "Expected: GET_META_MSG or DONE_RECVING_MSG. "
+                        "Actual: %s. "
+                        "Full message: %s. "
+                        "Check: Verify message protocol implementation.",
+                        msg[0] if msg else "empty",
+                        msg,
+                    )
             except Exception as e:
-                logger.error("Connection listener got exception %s: %s", type(e), e)
+                logger.error(
+                    "Connection listener encountered exception during message processing. "
+                    "Exception type: %s. "
+                    "Error: %s. "
+                    "Context: Processing frames from socket. "
+                    "Check: Review message handling logic and socket state.",
+                    type(e).__name__,
+                    e,
+                )
 
 
 class KVCacheRecvingThread(threading.Thread):
@@ -409,19 +470,6 @@ class KVCacheRecvingThread(threading.Thread):
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
             for rank in range(self._prefill_pp_size)
         }
-        if not is_vl_model(self.vllm_config):
-            if self.use_mla:
-                self.k_head_dim = hf_text_config.kv_lora_rank
-                self.v_head_dim = hf_text_config.qk_rope_head_dim
-                self.num_kv_heads = 1
-            else:
-                self.k_head_dim = hf_text_config.head_dim
-                self.v_head_dim = hf_text_config.head_dim
-                self.num_kv_heads = max(hf_text_config.num_key_value_heads // self.tp_size, 1)
-        else:
-            self.k_head_dim = hf_text_config.head_dim
-            self.v_head_dim = hf_text_config.head_dim
-            self.num_kv_heads = max(hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
         self.failed_recv_requests: set[str] = set()
         self.invalid_block_ids: set[int] = set()
@@ -493,10 +541,10 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
-    def _mark_failed_recv_request(self, request_id: str, local_block_ids: list[int]) -> None:
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            self.invalid_block_ids.update(local_block_ids)
+            self.invalid_block_ids.update(local_block_ids[0])
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -509,12 +557,12 @@ class KVCacheRecvingThread(threading.Thread):
             try:
                 request_data = self.request_queue.get()
                 if request_data is None:
-                    logger.warning("Received a None request!")
+                    logger.warning("Received a None request. ")
                     self.request_queue.task_done()
                     continue
                 self._handle_request(request_data)
             except Exception as e:
-                logger.error("Error in KVCacheTransferThread: %s", e)
+                logger.error("Error in KVCacheTransferThread. error=%s. ", e)
 
     def _handle_request(self, req_meta: dict[str, Any]):
         request_id = req_meta["request_id"]
@@ -528,10 +576,7 @@ class KVCacheRecvingThread(threading.Thread):
         try:
             if transfer_failed:
                 self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
-                logger.warning(
-                    "Skipping KV cache transfer for request %s because a previous transfer failed.",
-                    remote_request_id,
-                )
+                logger.warning("Skipping KV cache transfer for request. remote_request_id=%s. ", remote_request_id)
             else:
                 try:
                     logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
@@ -653,9 +698,8 @@ class KVCacheRecvingThread(threading.Thread):
                     )
                 )
             else:
-                # For MambaSpec num block should equal on P node and D node
-                if len(local_group_block_ids) != len(remote_group_block_ids):
-                    raise RuntimeError("For MambaSpec num block should equal on P node and D node.")
+                # When Prefix Caching is enabled on both P and D nodes, num_block should not be forced to match,
+                # as the D-node requires dynamic allocation based on its specific cache hit rate.
                 transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
                 grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
@@ -733,7 +777,11 @@ class KVCacheRecvingThread(threading.Thread):
         )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
-            logger.error("Mooncake transfer failed for request %s", req_meta["remote_request_id"])
+            logger.error(
+                "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
+                req_meta["remote_request_id"],
+                ret,
+            )
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
         req_end_time = time.perf_counter()
@@ -930,6 +978,12 @@ class KVCacheRecvingThread(threading.Thread):
             layer_name: layer_cache for layer_name, layer_cache in self.kv_caches.items() if layer_in_group(layer_name)
         }
 
+    @staticmethod
+    def _get_kv_cache_dims_from_tensors(kv_caches: dict[str, Any]) -> tuple[int, int, int]:
+        """Return (num_kv_heads, k_head_dim, v_head_dim) from registered KV cache tensors."""
+        k_cache, v_cache = next(iter(kv_caches.values()))
+        return int(k_cache.shape[-2]), int(k_cache.shape[-1]), int(v_cache.shape[-1])
+
     def reformat_kv_cache_with_fused_op(
         self,
         block_ids: list[list[int]],
@@ -938,12 +992,10 @@ class KVCacheRecvingThread(threading.Thread):
     ):
         if kv_caches is None:
             kv_caches = self.kv_caches
-        # Get necessary parameters
         k_cache = list(kv_caches.values())[0][0]
         device = k_cache.device
-        head_dim = self.model_config.hf_text_config.head_dim
+        num_kv_head, head_dim, _ = self._get_kv_cache_dims_from_tensors(kv_caches)
         block_size = self.vllm_config.cache_config.block_size
-        num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         layers = len(kv_caches)
         flat_block_ids = [item for sublist in block_ids for item in sublist]
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)
@@ -968,10 +1020,10 @@ class KVCacheRecvingThread(threading.Thread):
     ):
         if kv_caches is None:
             kv_caches = self.kv_caches
-        # Get necessary parameters
         k_cache = list(kv_caches.values())[0][0]
         dtype = k_cache.dtype
         device = k_cache.device
+        num_kv_heads, k_head_dim, v_head_dim = self._get_kv_cache_dims_from_tensors(kv_caches)
 
         flat_block_ids = [item for sublist in block_ids for item in sublist]
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
@@ -983,9 +1035,8 @@ class KVCacheRecvingThread(threading.Thread):
         block_len_tensor = torch.tensor([num_tokens], dtype=torch.int32, device=device)
         seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
 
-        # Initialize buffers
-        k_buffer = torch.empty((num_tokens, self.num_kv_heads, self.k_head_dim), dtype=dtype, device=device)
-        v_buffer = torch.empty((num_tokens, self.num_kv_heads, self.v_head_dim), dtype=dtype, device=device)
+        k_buffer = torch.empty((num_tokens, num_kv_heads, k_head_dim), dtype=dtype, device=device)
+        v_buffer = torch.empty((num_tokens, num_kv_heads, v_head_dim), dtype=dtype, device=device)
 
         # Create slot mapping for reshape operations
         block_offsets = torch.arange(0, self.block_size, dtype=torch.int32, device=device)
@@ -1020,19 +1071,38 @@ class KVCacheRecvingThread(threading.Thread):
                     num_blocks,
                     num_tokens,
                     slot_mapping,
+                    num_kv_heads,
                 )
             if need_nz_cache:
-                self._nz_kv_cache(k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping)
+                self._nz_kv_cache(
+                    k_cache_layer,
+                    v_cache_layer,
+                    k_buffer,
+                    v_buffer,
+                    slot_mapping,
+                    num_kv_heads,
+                    k_head_dim,
+                    v_head_dim,
+                )
         # Clean up buffers
         del k_buffer, v_buffer
 
     def _cat_kv_cache(
-        self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, tp_num_need_pulls, num_blocks, num_tokens, slot_mapping
+        self,
+        k_cache_layer,
+        v_cache_layer,
+        k_buffer,
+        v_buffer,
+        tp_num_need_pulls,
+        num_blocks,
+        num_tokens,
+        slot_mapping,
+        num_kv_heads: int,
     ):
         def _transpose_kv_cache_between_head(buffer: torch.Tensor) -> torch.Tensor:
             buffer = buffer.view(num_blocks, tp_num_need_pulls, self.block_size, -1)
             buffer.transpose_(1, 2)
-            return buffer.contiguous().view(num_tokens, self.num_kv_heads, -1)
+            return buffer.contiguous().view(num_tokens, num_kv_heads, -1)
 
         # Transpose KV cache
         k_buffer = _transpose_kv_cache_between_head(k_buffer)
@@ -1043,13 +1113,23 @@ class KVCacheRecvingThread(threading.Thread):
             key=k_buffer, value=v_buffer, key_cache=k_cache_layer, value_cache=v_cache_layer, slot_indices=slot_mapping
         )
 
-    def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping):
+    def _nz_kv_cache(
+        self,
+        k_cache_layer,
+        v_cache_layer,
+        k_buffer,
+        v_buffer,
+        slot_mapping,
+        num_kv_heads: int,
+        k_head_dim: int,
+        v_head_dim: int,
+    ):
         nz_fmt_last_dim = 16
         k_cache_layer = k_cache_layer.view(
-            -1, self.k_head_dim * self.num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
+            -1, k_head_dim * num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
         )
         v_cache_layer = v_cache_layer.view(
-            -1, self.v_head_dim * self.num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
+            -1, v_head_dim * num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
         )
         torch_npu.npu_scatter_pa_kv_cache(k_buffer, v_buffer, k_cache_layer, v_cache_layer, slot_mapping)
 
@@ -1067,7 +1147,7 @@ class KVCacheRecvingThread(threading.Thread):
             )
             if agent_meta.kv_group2layeridx != self.kv_group2layeridx:
                 logger.warning(
-                    "Remote kv_group2layeridx is inconsistent with local kv_group2layeridx. remote=%s, local=%s",
+                    "Remote kv_group2layeridx is inconsistent with local. remote=%s, local=%s. ",
                     agent_meta.kv_group2layeridx,
                     self.kv_group2layeridx,
                 )
@@ -1102,14 +1182,17 @@ class KVCacheRecvingThread(threading.Thread):
                 logger.debug("Received response for request %s: %s", request_id, resp.decode("utf-8"))
             if resp != b"ACK":
                 logger.error(
-                    "Failed to receive ACK for request %s from %s:%d", request_id, remote_host, remote_handshake_port
+                    "Failed to receive ACK for request. request_id=%s, source=%s:%d. ",
+                    request_id,
+                    remote_host,
+                    remote_handshake_port,
                 )
                 raise RuntimeError(f"Failed to receive ACK, resp: {resp.decode('utf-8')}")
         except RuntimeError as e:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
                 sock = None
-                logger.warning("Unexpected error occurred in socket, %s, closing the original channel", e)
+                logger.warning("Unexpected error occurred in socket. error=%s. ", e)
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -1382,7 +1465,7 @@ class MooncakeConnectorScheduler:
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (request, local_block_ids, num_external_tokens)
                 else:
-                    logger.warning("Got invalid KVTransferParams: %s. This request will not utilize KVTransfer", params)
+                    logger.warning("Got invalid KVTransferParams. params=%s. ", params)
             else:
                 assert num_external_tokens == 0
             # Only trigger 1 KV transfer per request.
@@ -1509,7 +1592,7 @@ class MooncakeConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
-        self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.total_layers = vllm_config.model_config.get_total_num_hidden_layers()
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
@@ -1628,12 +1711,22 @@ class MooncakeConnectorWorker:
         next_mtp_layer_idx = self.total_layers
         for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
             layer_indices = []
+            # For eagle3 method there is no "mtp" in layer names, and upstream model initiation assigns the layer id
+            # that is sliced by Pipeline Parallel. So the eagle layer id will confilt with target model layers.
+            # Here we determine whether the current layer is an eagle layer based on whether the layer id has been
+            # assigned to previous layers. If the layer id has been assigned, we treat the current layer as
+            # an eagle layer and assign a new layer id starting from total_layers.
+            assigned_indices: set[int] = set()
             for layer_name in group_spec.layer_names:
                 if "mtp" in layer_name:
                     layer_idx = next_mtp_layer_idx
                     next_mtp_layer_idx += 1
                 else:
                     layer_idx = extract_layer_index(layer_name, num_attn_module)
+                    if assigned_indices and layer_idx < min(assigned_indices) or layer_idx in assigned_indices:
+                        layer_idx = next_mtp_layer_idx
+                        next_mtp_layer_idx += 1
+                assigned_indices.add(layer_idx)
                 layer_indices.append(layer_idx)
             kv_group2layeridx[group_id] = (self._serialize_kv_group_spec(group_spec), layer_indices)
         return kv_group2layeridx
@@ -1737,10 +1830,16 @@ class MooncakeConnectorWorker:
 
         if has_mamba_group:
             ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
+            register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
         else:
-            ptrs, lengths = self._get_registered_layer_buffers(kv_caches)
+            # For normal attention / sparse-c8 KV cache, keep metadata at the
+            # logical tensor level but merge registration ranges by underlying
+            # storage to avoid exceeding the HCCL per-process region limit.
+            register_regions = collect_storage_merged_register_regions(kv_caches)
 
-        global_te.register_buffer(ptrs, lengths)
+        validate_register_region_count(register_regions)
+        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
             "block_len_per_addr=%s, block_size_scale=%s, ptrs=%s, lengths=%s",
@@ -1748,8 +1847,8 @@ class MooncakeConnectorWorker:
             self.kv_caches_base_addr,
             self.block_len_per_addr,
             self.block_size_scale,
-            ptrs,
-            lengths,
+            register_regions.ptrs,
+            register_regions.lengths,
         )
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
@@ -2490,10 +2589,10 @@ def ensure_zmq_send(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning("Send failed: %s, retrying... (%s attempts left)", e, retries_left)
+                logger.warning("Send failed. error=%s, attempts_left=%d. ", e, retries_left)
                 time.sleep(0.1)
             else:
-                logger.error("Send failed after all retries: %s", e)
+                logger.error("Send failed after all retries. error=%s. ", e)
                 raise RuntimeError(f"Failed to send data to {path} after {max_retries} retries: {e}")
 
 
@@ -2515,10 +2614,10 @@ def ensure_zmq_recv(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning("Receive failed: %s, retrying... (%s attempts left)", e, retries_left)
+                logger.warning("Receive failed. error=%s, attempts_left=%d. ", e, retries_left)
                 time.sleep(0.1)
             else:
-                logger.error("Receive failed from %s after all retries: %s", path, e)
+                logger.error("Receive failed after all retries. source=%s, error=%s. ", path, e)
                 raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
 
 

@@ -59,7 +59,7 @@ def create_scheme_for_layer(
     Returns:
         An instance of the appropriate quantization scheme class.
     """
-    logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
+    logger.info_once("Using vLLM Ascend ModelSlim quantization.")
     quant_type = get_quant_type_for_layer(quant_description, prefix, layer_type, packed_modules_mapping)
 
     if quant_type is None:
@@ -72,7 +72,7 @@ def create_scheme_for_layer(
     if scheme_cls is not None:
         return scheme_cls()
 
-    err_msg = f"Currently, vLLM Ascend doesn't support quant_type={quant_type} for layer_type={layer_type}."
+    err_msg = f"Unsupported quant_type={quant_type} for layer_type={layer_type}."
     logger.error(err_msg)
     raise NotImplementedError(err_msg)
 
