@@ -148,10 +148,6 @@ class BlockTable:
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        # NOTE: In some runtime combinations, upstream Triton-decorated kernels
-        # may be exposed as plain Python callables instead of launcher objects.
-        # Fall back to a torch implementation to keep model execution functional.
-        if hasattr(_compute_slot_mapping_kernel, "__getitem__"):
         if self.dcp_world_size * self.pcp_world_size > 1:
             req_indices = torch.repeat_interleave(
                 torch.arange(num_reqs, dtype=torch.int32, device=query_start_loc.device),
@@ -159,31 +155,34 @@ class BlockTable:
             )
             self._compute_pcp_dcp_slot_mapping(req_indices, positions)
         else:
-            _compute_slot_mapping_kernel[(num_reqs + 1,)](
-                num_tokens,
-                self.max_num_batched_tokens,
-                query_start_loc,
-                positions,
-                self.block_table.gpu,
-                self.block_table.gpu.stride(0),
-                self.block_size,
-                self.slot_mapping.gpu,
-                TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-                TOTAL_CP_RANK=total_cp_rank,
-                CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
-                PAD_ID=PAD_SLOT_ID,
-                BLOCK_SIZE=1024,
-            )
-            return
-
-        self._compute_slot_mapping_fallback(
-            num_reqs=num_reqs,
-            num_tokens=num_tokens,
-            query_start_loc=query_start_loc,
-            positions=positions,
-            total_cp_world_size=total_cp_world_size,
-            total_cp_rank=total_cp_rank,
-        )
+            # NOTE: In some runtime combinations, upstream Triton-decorated kernels
+            # may be exposed as plain Python callables instead of launcher objects.
+            # Fall back to a torch implementation to keep model execution functional.
+            if hasattr(_compute_slot_mapping_kernel, "__getitem__"):
+                _compute_slot_mapping_kernel[(num_reqs + 1,)](
+                    num_tokens,
+                    self.max_num_batched_tokens,
+                    query_start_loc,
+                    positions,
+                    self.block_table.gpu,
+                    self.block_table.gpu.stride(0),
+                    self.block_size,
+                    self.slot_mapping.gpu,
+                    TOTAL_CP_WORLD_SIZE=total_cp_world_size,
+                    TOTAL_CP_RANK=total_cp_rank,
+                    CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
+                    PAD_ID=PAD_SLOT_ID,
+                    BLOCK_SIZE=1024,
+                )
+            else:
+                self._compute_slot_mapping_fallback(
+                    num_reqs=num_reqs,
+                    num_tokens=num_tokens,
+                    query_start_loc=query_start_loc,
+                    positions=positions,
+                    total_cp_world_size=total_cp_world_size,
+                    total_cp_rank=total_cp_rank,
+                )
 
     def _compute_slot_mapping_fallback(
         self,
@@ -224,6 +223,48 @@ class BlockTable:
             slot_ids = block_numbers.to(req_positions.dtype) * self.block_size + local_block_offsets
             slot_ids = torch.where(is_local, slot_ids, PAD_SLOT_ID)
             slot_mapping_gpu[start_idx:end_idx] = slot_ids.to(slot_mapping_gpu.dtype)
+
+    def _compute_pcp_dcp_slot_mapping(
+        self,
+        req_indices: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        # Note(hc): The DCP implement store kvcache with an interleave
+        # style, the kvcache for the token whose token_idx is i is
+        # always stored on the GPU whose dcp_rank equals i % pcp_world_size:
+
+        # Use a "virtual block" which equals to world_size * block_size
+        # for block_table_indices calculation.
+
+        total_cp_world_size = self.dcp_world_size * self.pcp_world_size
+        virtual_physical_block_size = self.physical_block_size * total_cp_world_size
+        physical_block_idx = positions // virtual_physical_block_size
+        virtual_block_offsets = positions % virtual_physical_block_size
+
+        self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
+        mask = virtual_block_offsets // self.cp_kv_cache_interleave_size % total_cp_world_size == self.current_rank
+        local_physical_offsets = (
+            virtual_block_offsets
+            // (total_cp_world_size * self.cp_kv_cache_interleave_size)
+            * self.cp_kv_cache_interleave_size
+            + virtual_block_offsets % self.cp_kv_cache_interleave_size
+        )
+        logical_block_idx = physical_block_idx * self.blocks_per_phys_block + (
+            local_physical_offsets // self.block_size
+        )
+
+        block_table_indices = req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
+
+        block_offsets = local_physical_offsets % self.block_size
+
+        if block_table_indices.device.type != "cpu":
+            block_numbers = self.block_table.gpu.flatten()[block_table_indices]
+            slot_mapping = block_numbers * self.block_size + block_offsets
+            self.slot_mapping.gpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
+        else:
+            block_numbers = self.block_table.cpu.flatten()[block_table_indices]
+            slot_mapping = block_numbers * self.block_size + block_offsets
+            self.slot_mapping.cpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
 
     def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
