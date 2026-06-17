@@ -2,32 +2,12 @@ model_name: "AI-ModelScope/NVLM-D-72B"
 hardware: "Atlas A2 Series"
 model_type: "vllm-vlm"
 
-test_cases:
-  - model: "AI-ModelScope/NVLM-D-72B"
-    server_cmd:
-      - --served-model-name
-      - NVLM-D-72B
-      - --tensor-parallel-size
-      - "4"
-      - --max-model-len
-      - "4096"
-      - --dtype
-      - bfloat16
-      - --trust-remote-code
-      - --enforce-eager
-      - --gpu-memory-utilization
-      - "0.90"
-
 serve:
   tensor_parallel_size: 4
   dtype: bfloat16
   max_model_len: 16384
   gpu_memory_utilization: 0.90
   trust_remote_code: true
-
-envs:
-  OMP_NUM_THREADS: "4"
-  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
 
 tasks:
 - name: "mmmu_val"
