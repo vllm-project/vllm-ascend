@@ -32,6 +32,8 @@ VERBOSE="false"
 OOM="false"
 THREAD_NUM=$(grep -c ^processor /proc/cpuinfo)
 MAX_JOBS=${MAX_JOBS:-}
+USE_NINJA=${USE_NINJA:-${VLLM_ASCEND_USE_NINJA:-auto}}
+CMAKE_GENERATOR_ARGS=()
 ENABLE_VALGRIND=FALSE
 ENABLE_CREATE_LIB=FALSE
 ENABLE_OPKERNEL=FALSE
@@ -340,12 +342,22 @@ function set_env()
         exit 1
     fi
 }
-
 function clean()
 {
     if [ -n "${BUILD_DIR}" ];then
         rm -rf ${BUILD_DIR}
     fi
+
+    if [ -z "${TEST}" ] && [ -z "${EXAMPLE}" ];then
+        if [ -n "${OUTPUT_DIR}" ];then
+            rm -rf ${OUTPUT_DIR}
+        fi
+    fi
+
+    mkdir -p ${BUILD_DIR} ${OUTPUT_DIR}
+}
+function clean_output()
+{
 
     if [ -z "${TEST}" ] && [ -z "${EXAMPLE}" ];then
         if [ -n "${OUTPUT_DIR}" ];then
@@ -377,8 +389,8 @@ function clean_third_party()
 function cmake_config()
 {
     local extra_option="$1"
-    log "Info: cmake config ${CUSTOM_OPTION} ${extra_option} ."
-    cmake ..  ${CUSTOM_OPTION} ${extra_option}
+    log "Info: cmake config generator=${CMAKE_GENERATOR_ARGS[*]:-<default>} ${CUSTOM_OPTION} ${extra_option} ."
+    cmake "${CMAKE_GENERATOR_ARGS[@]}" .. ${CUSTOM_OPTION} ${extra_option}
 }
 
 function build()
@@ -907,6 +919,14 @@ while [[ $# -gt 0 ]]; do
         CCACHE_PROGRAM="$2"
         shift 2
         ;;
+     --ninja)
+        USE_NINJA="true"
+        shift
+        ;;
+    --no-ninja)
+        USE_NINJA="false"
+        shift
+        ;;
     -p|--package-path)
         ascend_package_path="$2"
         shift 2
@@ -1383,7 +1403,21 @@ CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_
 
 set_env
 
-clean
+use_ninja_lower=$(echo "${USE_NINJA:-auto}" | tr '[:upper:]' '[:lower:]')
+if [[ "${use_ninja_lower}" == "0" || "${use_ninja_lower}" == "false" || "${use_ninja_lower}" == "off" || "${use_ninja_lower}" == "no" ]]; then
+    log "Info: use default CMake generator because USE_NINJA=${USE_NINJA}"
+elif command -v ninja >/dev/null 2>&1; then
+    CMAKE_GENERATOR_ARGS=(-G Ninja)
+    log "Info: use CMake generator Ninja"
+elif [[ "${use_ninja_lower}" == "1" || "${use_ninja_lower}" == "true" || "${use_ninja_lower}" == "on" || "${use_ninja_lower}" == "yes" ]]; then
+    log "Error: USE_NINJA=${USE_NINJA}, but ninja is not found."
+    exit 1
+else
+    log "Info: ninja is not found; use default CMake generator"
+fi
+
+clean_build_out
+clean_output
 
 if [ -n "${CCACHE_PROGRAM}" ]; then
     if [ "${CCACHE_PROGRAM}" == "false" ] || [ "${CCACHE_PROGRAM}" == "off" ]; then

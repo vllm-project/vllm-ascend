@@ -9,12 +9,14 @@
  * \brief AscendC kernel for fused GDN gating.
  *
  * Per-row math:
- *   g = -exp(A_log) * softplus(cast(a,fp32) + dt_bias)
+ *   g = -exp(A_log) * softplus(cast(a,fp32) + dt_bias, beta, threshold)
  *   beta_output = sigmoid(cast(b, fp32)) -> cast back to InDtype
  */
 
 #ifndef FUSED_GDN_GATING_KERNEL_H
 #define FUSED_GDN_GATING_KERNEL_H
+
+#include <type_traits>
 
 #include "kernel_operator.h"
 #include "fused_gdn_gating_tiling_data.h"
@@ -27,6 +29,7 @@ using namespace AscendC;
 constexpr uint32_t BYTES_PER_BLOCK = 32;
 constexpr uint32_t BF16_PER_BLOCK  = BYTES_PER_BLOCK / sizeof(int16_t);  // 16
 constexpr uint32_t FP32_PER_BLOCK  = BYTES_PER_BLOCK / sizeof(float);    // 8
+constexpr uint32_t MASK_ALIGN_ELEMS = 64;
 
 // DMA-friendly alignment: 16 elements = 32 bytes = 1 DMA block.
 // Vector ops use count=numHeads_ with partial-iteration masking,
@@ -39,7 +42,7 @@ __aicore__ inline T CeilDiv(T a, T b) { return (a + b - 1) / b; }
 template <typename T>
 __aicore__ inline T AlignUp(T a, T b) { return CeilDiv(a, b) * b; }
 
-template <typename InDtype>
+template <typename InDtype, typename ParamDtype>
 class KernelFusedGdnGating {
 public:
     __aicore__ inline KernelFusedGdnGating() {}
@@ -59,13 +62,17 @@ public:
         rowsPerIter_ = tiling->rowsPerIter;
         useBulkDma_ = (tiling->useBulkDma != 0);
         beta_ = tiling->beta;
+        threshold_ = tiling->threshold;
 
         // Aligned dimensions for UB tensors.
-        alignedHeadsHalf_  = AlignUp<uint32_t>(numHeads_, DMA_ALIGN_ELEMS);
-        alignedHeadsFloat_ = AlignUp<uint32_t>(numHeads_, DMA_ALIGN_ELEMS);
+        alignedHeadsHalf_  = AlignUp<uint32_t>(numHeads_, MASK_ALIGN_ELEMS);
+        alignedHeadsFloat_ = AlignUp<uint32_t>(numHeads_, MASK_ALIGN_ELEMS);
+        alignedHeadsMask_ = alignedHeadsFloat_;
+        constexpr uint32_t paramAlignElems = BYTES_PER_BLOCK / sizeof(ParamDtype);
+        alignedHeadsParam_ = AlignUp<uint32_t>(numHeads_, paramAlignElems);
 
-        aLogGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(aLogGm), numHeads_);
-        dtBiasGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(dtBiasGm), numHeads_);
+        aLogGm_.SetGlobalBuffer(reinterpret_cast<__gm__ ParamDtype *>(aLogGm), numHeads_);
+        dtBiasGm_.SetGlobalBuffer(reinterpret_cast<__gm__ ParamDtype *>(dtBiasGm), numHeads_);
         aGm_.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(aGm),
                              static_cast<uint64_t>(numBatches_) * numHeads_);
         bGm_.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(bGm),
@@ -82,8 +89,9 @@ public:
         pipe_->InitBuffer(betaOutQue_, 1, rowsPerIter_ * alignedHeadsHalf_ * sizeof(InDtype));
 
         // Constant queues (single-row).
-        pipe_->InitBuffer(aLogInQue_, 1, 1 * alignedHeadsFloat_ * sizeof(float));
-        pipe_->InitBuffer(dtBiasInQue_, 1, 1 * alignedHeadsFloat_ * sizeof(float));
+        pipe_->InitBuffer(aLogInQue_, 1, 1 * alignedHeadsParam_ * sizeof(ParamDtype));
+        pipe_->InitBuffer(dtBiasInQue_, 1, 1 * alignedHeadsParam_ * sizeof(ParamDtype));
+        pipe_->InitBuffer(negExpInQue_, 1, 1 * alignedHeadsFloat_ * sizeof(float));
         pipe_->InitBuffer(dtBiasPreloadQue_, 1, 1 * alignedHeadsFloat_ * sizeof(float));
 
         // Multi-row constants: dt_bias and neg_exp(A_log) replicated R times.
@@ -96,8 +104,8 @@ public:
         // Scratch buffers (V-only access).
         pipe_->InitBuffer(xBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
         pipe_->InitBuffer(betaXBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
-        pipe_->InitBuffer(softplusAbsBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
         pipe_->InitBuffer(softplusTmpBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
+        pipe_->InitBuffer(thresholdMaskBuf_, rowsPerIter_ * alignedHeadsMask_ * sizeof(uint8_t));
         pipe_->InitBuffer(betaFp32Buf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
     }
 
@@ -127,34 +135,49 @@ private:
      */
     __aicore__ inline void PreloadConstants()
     {
-        LocalTensor<float> tmpALog = aLogInQue_.template AllocTensor<float>();
-        dtBiasTensor_ = dtBiasInQue_.template AllocTensor<float>();
+        LocalTensor<ParamDtype> tmpALog = aLogInQue_.template AllocTensor<ParamDtype>();
+        dtBiasTensor_ = negExpInQue_.template AllocTensor<float>();
 
-        DataCopyExtParams fp32CopyParams{1, static_cast<uint32_t>(numHeads_ * sizeof(float)),
+        DataCopyExtParams paramCopyParams{1, static_cast<uint32_t>(numHeads_ * sizeof(ParamDtype)),
                                          0, 0, 0};
-        DataCopyPadExtParams<float> fp32PadParams{false, 0, 0, 0.0f};
+        DataCopyPadExtParams<ParamDtype> paramPadParams{false, 0, 0, static_cast<ParamDtype>(0)};
 
         // Load A_log.
-        DataCopyPad(tmpALog, aLogGm_, fp32CopyParams, fp32PadParams);
-        aLogInQue_.template EnQue<float>(tmpALog);
-        tmpALog = aLogInQue_.template DeQue<float>();
+        DataCopyPad(tmpALog, aLogGm_, paramCopyParams, paramPadParams);
+        aLogInQue_.template EnQue<ParamDtype>(tmpALog);
+        tmpALog = aLogInQue_.template DeQue<ParamDtype>();
+
+        if constexpr (std::is_same<ParamDtype, float>()) {
+            Adds(dtBiasTensor_, tmpALog, 0.0f, numHeads_);
+        } else {
+            Cast(dtBiasTensor_, tmpALog, RoundMode::CAST_NONE, numHeads_);
+        }
+        PipeBarrier<PIPE_V>();
 
         // neg_exp(A_log).
-        Exp(dtBiasTensor_, tmpALog, numHeads_);
+        Exp(dtBiasTensor_, dtBiasTensor_, numHeads_);
         PipeBarrier<PIPE_V>();
         Muls(dtBiasTensor_, dtBiasTensor_, -1.0f, numHeads_);
         PipeBarrier<PIPE_V>();
 
         aLogInQue_.FreeTensor(tmpALog);
 
-        dtBiasInQue_.template EnQue<float>(dtBiasTensor_);
-        dtBiasTensor_ = dtBiasInQue_.template DeQue<float>();
+        negExpInQue_.template EnQue<float>(dtBiasTensor_);
+        dtBiasTensor_ = negExpInQue_.template DeQue<float>();
 
         // Load dt_bias.
+        LocalTensor<ParamDtype> tmpDtBias = dtBiasInQue_.template AllocTensor<ParamDtype>();
         dtBiasPreloaded_ = dtBiasPreloadQue_.template AllocTensor<float>();
-        DataCopyExtParams dtBiasCopyParams{1, static_cast<uint32_t>(numHeads_ * sizeof(float)), 0, 0, 0};
-        DataCopyPadExtParams<float> dtBiasPadParams{false, 0, 0, 0.0f};
-        DataCopyPad(dtBiasPreloaded_, dtBiasGm_, dtBiasCopyParams, dtBiasPadParams);
+        DataCopyPad(tmpDtBias, dtBiasGm_, paramCopyParams, paramPadParams);
+        dtBiasInQue_.template EnQue<ParamDtype>(tmpDtBias);
+        tmpDtBias = dtBiasInQue_.template DeQue<ParamDtype>();
+        if constexpr (std::is_same<ParamDtype, float>()) {
+            Adds(dtBiasPreloaded_, tmpDtBias, 0.0f, numHeads_);
+        } else {
+            Cast(dtBiasPreloaded_, tmpDtBias, RoundMode::CAST_NONE, numHeads_);
+        }
+        PipeBarrier<PIPE_V>();
+        dtBiasInQue_.FreeTensor(tmpDtBias);
         dtBiasPreloadQue_.template EnQue<float>(dtBiasPreloaded_);
         dtBiasPreloaded_ = dtBiasPreloadQue_.template DeQue<float>();
 
@@ -214,11 +237,12 @@ private:
 
         LocalTensor<float> x           = xBuf_.Get<float>();
         LocalTensor<float> betaX       = betaXBuf_.Get<float>();
-        LocalTensor<float> softplusAbs = softplusAbsBuf_.Get<float>();
         LocalTensor<float> softplusTmp = softplusTmpBuf_.Get<float>();
+        LocalTensor<uint8_t> thresholdMask = thresholdMaskBuf_.Get<uint8_t>();
         LocalTensor<float> betaFp32    = betaFp32Buf_.Get<float>();
 
         const uint32_t multiCount = validRows * alignedHeadsFloat_;
+        const uint32_t maskCount = validRows * alignedHeadsMask_;
 
         // Batch Cast a→fp32, b→fp32.
         Cast(x,        aLocal, RoundMode::CAST_NONE, multiCount);
@@ -233,9 +257,7 @@ private:
             PipeBarrier<PIPE_V>();
             Muls(betaX, x, beta_, multiCount);
             PipeBarrier<PIPE_V>();
-            Abs(softplusAbs, betaX, multiCount);
-            PipeBarrier<PIPE_V>();
-            Muls(softplusTmp, softplusAbs, -1.0f, multiCount);
+            Mins(softplusTmp, betaX, threshold_, multiCount);
             PipeBarrier<PIPE_V>();
             Exp(softplusTmp, softplusTmp, multiCount);
             PipeBarrier<PIPE_V>();
@@ -245,9 +267,9 @@ private:
             PipeBarrier<PIPE_V>();
             Muls(softplusTmp, softplusTmp, 1.0f / beta_, multiCount);
             PipeBarrier<PIPE_V>();
-            Maxs(gLocal, x, 0.0f, multiCount);
+            CompareScalar(thresholdMask, betaX, threshold_, CMPMODE::LE, maskCount);
             PipeBarrier<PIPE_V>();
-            Add(gLocal, gLocal, softplusTmp, multiCount);
+            Select(gLocal, thresholdMask, softplusTmp, x, SELMODE::VSEL_TENSOR_TENSOR_MODE, multiCount);
             PipeBarrier<PIPE_V>();
             Mul(gLocal, gLocal, negExpMulti, multiCount);
             PipeBarrier<PIPE_V>();
@@ -257,11 +279,7 @@ private:
             PipeBarrier<PIPE_V>();
             Muls(betaX, x, beta_, multiCount);
             PipeBarrier<PIPE_V>();
-            Abs(softplusAbs, betaX, multiCount);
-            PipeBarrier<PIPE_V>();
-            Adds(betaX, dtBiasTensor_, 0.0f, numHeads_);
-            PipeBarrier<PIPE_V>();
-            Muls(softplusTmp, softplusAbs, -1.0f, multiCount);
+            Mins(softplusTmp, betaX, threshold_, multiCount);
             PipeBarrier<PIPE_V>();
             Exp(softplusTmp, softplusTmp, multiCount);
             PipeBarrier<PIPE_V>();
@@ -271,11 +289,11 @@ private:
             PipeBarrier<PIPE_V>();
             Muls(softplusTmp, softplusTmp, 1.0f / beta_, multiCount);
             PipeBarrier<PIPE_V>();
-            Maxs(gLocal, x, 0.0f, multiCount);
+            CompareScalar(thresholdMask, betaX, threshold_, CMPMODE::LE, maskCount);
             PipeBarrier<PIPE_V>();
-            Add(gLocal, gLocal, softplusTmp, multiCount);
+            Select(gLocal, thresholdMask, softplusTmp, x, SELMODE::VSEL_TENSOR_TENSOR_MODE, multiCount);
             PipeBarrier<PIPE_V>();
-            Mul(gLocal, gLocal, betaX, multiCount);
+            Mul(gLocal, gLocal, dtBiasTensor_, multiCount);
             PipeBarrier<PIPE_V>();
         }
 
@@ -334,8 +352,8 @@ private:
 private:
     TPipe *pipe_{nullptr};
 
-    GlobalTensor<float>   aLogGm_;
-    GlobalTensor<float>   dtBiasGm_;
+    GlobalTensor<ParamDtype> aLogGm_;
+    GlobalTensor<ParamDtype> dtBiasGm_;
     GlobalTensor<InDtype> aGm_;
     GlobalTensor<InDtype> bGm_;
     GlobalTensor<float>   gGm_;
@@ -345,6 +363,7 @@ private:
     TQue<QuePosition::VECIN,  1> bInQue_;
     TQue<QuePosition::VECIN,  1> aLogInQue_;
     TQue<QuePosition::VECIN,  1> dtBiasInQue_;
+    TQue<QuePosition::VECIN,  1> negExpInQue_;
     TQue<QuePosition::VECIN,  1> dtBiasPreloadQue_;
     TQue<QuePosition::VECOUT, 1> gOutQue_;
     TQue<QuePosition::VECOUT, 1> betaOutQue_;
@@ -353,8 +372,8 @@ private:
     TBuf<TPosition::VECCALC> negExpMultiBuf_;
     TBuf<TPosition::VECCALC> xBuf_;
     TBuf<TPosition::VECCALC> betaXBuf_;
-    TBuf<TPosition::VECCALC> softplusAbsBuf_;
     TBuf<TPosition::VECCALC> softplusTmpBuf_;
+    TBuf<TPosition::VECCALC> thresholdMaskBuf_;
     TBuf<TPosition::VECCALC> betaFp32Buf_;
 
     LocalTensor<float> dtBiasTensor_;     // neg_exp(A_log), 1 row
@@ -366,7 +385,10 @@ private:
     bool     useBulkDma_{false};
     uint32_t alignedHeadsHalf_{0};
     uint32_t alignedHeadsFloat_{0};
+    uint32_t alignedHeadsMask_{0};
+    uint32_t alignedHeadsParam_{0};
     float    beta_{1.0f};
+    float    threshold_{20.0f};
 };
 
 } // namespace FusedGdnGating

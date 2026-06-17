@@ -19,21 +19,23 @@
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_pp_group
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+
+try:
+    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
+    from vllm.sequence import IntermediateTensors
+except ImportError:
+    Qwen3_5MultiTokenPredictor = None
+    IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import is_310p
 
-if vllm_version_is("0.20.2"):
-    from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention as _GDNBaseCls
-
-    _GDN_PATCH_TARGET = _GDNBaseCls
-else:
-    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
-
-    _GDN_PATCH_TARGET = _GDNBaseCls
+_GDN_PATCH_TARGET = _GDNBaseCls
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
@@ -146,10 +148,55 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         return hidden_states, residual
 
 
+if Qwen3_5MultiTokenPredictor is not None:
+
+    def qwen3_5_mtp_forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        # Backport upstream Qwen3.5 MTP behavior: the local drafter runs on the
+        # last PP stage and should always combine token embeddings with the
+        # target hidden states instead of consuming PP intermediate tensors.
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_input_ids(input_ids)
+        assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
+        inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+        hidden_states = self.pre_fc_norm_hidden(hidden_states)
+        hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+        hidden_states = self.fc(hidden_states)
+        residual = None
+
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        hidden_states, residual = self.layers[current_step_idx](
+            positions=positions,
+            hidden_states=hidden_states,
+            residual=residual,
+        )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                }
+            )
+
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+    Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
+
+
 Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
 _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
+_GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
 
 if is_310p():
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -159,7 +206,4 @@ if is_310p():
 else:
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
-    if vllm_version_is("0.20.2"):
-        _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels_v0202
-    else:
-        _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
+    _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels

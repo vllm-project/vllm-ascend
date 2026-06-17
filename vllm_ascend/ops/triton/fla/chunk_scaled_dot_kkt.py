@@ -12,6 +12,8 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.triton_utils import get_aicore_num
+
 from .utils import prepare_chunk_indices, safe_exp
 
 
@@ -38,11 +40,16 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    bh_step: tl.constexpr,
+    task_num: tl.constexpr,
+    num_core: tl.constexpr,
 ):
     bt_stride = B * T
-    i_t_i, _ = tl.program_id(0), tl.program_id(1)
+    core_id = tl.program_id(0)
 
-    for i_bh in range(B * H):
+    for task_id in tl.range(core_id, task_num, num_core):
+        i_t_i = task_id // bh_step
+        i_bh = task_id % bh_step
         i_b, i_h = i_bh // H, i_bh % H
         if IS_VARLEN:
             i_n, i_t = (
@@ -121,10 +128,16 @@ def chunk_scaled_dot_kkt_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
 
+    num_core = get_aicore_num()
+    bh_step = B * H
+    task_num = NT * bh_step
+
     from vllm_ascend.device.device_op import DeviceOperator
 
     A = DeviceOperator.chunk_scaled_dot_kkt_fwd(
-        NT=NT,
+        num_core=num_core,
+        bh_step=bh_step,
+        task_num=task_num,
         k=k,
         beta=torch.permute(beta, (2, 0, 1)).contiguous(),
         g_cumsum=torch.permute(g_cumsum, (2, 0, 1)).contiguous(),

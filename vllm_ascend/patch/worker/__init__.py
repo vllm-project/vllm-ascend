@@ -19,8 +19,13 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
 
-# v2 model runner is only supported on vllm > 0.20.2.
-_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.20.2")
+# The v2 model runner is intentionally NOT made compatible with the v0.22.1
+# release. vLLM v0.22.1 and the verified main commit are diverged, and the v2
+# worker patches target main-only APIs; rather than maintain a separate v0.22.1
+# compatibility path we keep v2 main-only. With v0.22.1 installed this flag is
+# False, so none of the patch_v2.* / routed-experts-capture patches below are
+# imported and the v2 worker stays dormant (the release uses the v1 runner).
+_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.22.1")
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -35,11 +40,9 @@ import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
-import vllm_ascend.patch.worker.patch_deepseek_compressor  # noqa
 
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
-    import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 else:
