@@ -538,7 +538,6 @@ setup(
         # only collects .py, which would leave a wheel install unable to build the
         # kernel. Mirror vllm_ascend/ops/mega_moe_w4a4.py:_KERNEL_DEPS.
         "vllm_ascend.ops": [
-            "mega_moe_w4a4_qwen36_pto-isa.cpp",
             "mega_moe_w4a4_pto-isa.cpp",
             "int4_cvt.hpp",
         ],

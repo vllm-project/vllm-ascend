@@ -49,7 +49,13 @@ using namespace matmul;
 using namespace pto;
 #endif
 
-// ===== Shape constants (Qwen3.6-35B-A3B via I_DIM_OVERRIDE; default I=512) =====
+// ===== Shape constants (Qwen3.6-35B-A3B) =====
+// I_DIM_OVERRIDE used to be set by a 4-line companion file (mega_moe_w4a4_qwen36_pto-isa.cpp)
+// that only `#define`d it and `#include`d this kernel. That split was carried over from a
+// multi-model research layout; this PR targets only Qwen3.6 (I=128), so the define is inlined
+// here and the shim removed. Defining it selects the I=128 path and renames the entry symbols
+// to *_qwen36 (what the host wrapper looks up via lib.call_mega_kernel_hybrid_qwen36).
+#define I_DIM_OVERRIDE 128
 constexpr uint32_t H_DIM = 2048;
 #ifdef I_DIM_OVERRIDE
 constexpr uint32_t I_DIM = I_DIM_OVERRIDE;

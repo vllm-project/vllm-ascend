@@ -648,7 +648,6 @@
   source_file_dependencies:
     - vllm_ascend/ops/mega_moe_w4a4.py
     - vllm_ascend/ops/mega_moe_w4a4_pto-isa.cpp
-    - vllm_ascend/ops/mega_moe_w4a4_qwen36_pto-isa.cpp
     - vllm_ascend/ops/int4_cvt.hpp
     - vllm_ascend/quantization/methods/w4a4_dynamic.py
   tests:

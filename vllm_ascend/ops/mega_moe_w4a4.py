@@ -42,13 +42,12 @@ import torch
 import vllm_ascend.envs as envs_ascend
 
 _OPS_DIR = os.path.dirname(os.path.abspath(__file__))
-_KERNEL_SRC = os.path.join(_OPS_DIR, "mega_moe_w4a4_qwen36_pto-isa.cpp")
+_KERNEL_SRC = os.path.join(_OPS_DIR, "mega_moe_w4a4_pto-isa.cpp")
 _KERNEL_LIB = envs_ascend.VLLM_ASCEND_MEGA_MOE_SO or os.path.join(_OPS_DIR, "mega_moe_w4a4_jit.so")
-# Every source the .so is built from — the staleness check must compare against
-# all of them (the qwen36 shim only ``#include``s the real implementation).
+# Every source the .so is built from — the staleness check must compare against all of them
+# (the kernel `#include`s int4_cvt.hpp).
 _KERNEL_DEPS = [
     _KERNEL_SRC,
-    os.path.join(_OPS_DIR, "mega_moe_w4a4_pto-isa.cpp"),
     os.path.join(_OPS_DIR, "int4_cvt.hpp"),
 ]
 
