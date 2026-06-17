@@ -133,7 +133,7 @@ jobs:
         env:
           ALL_ARGS: ${{ steps.resolve.outputs.all_args }}
         run: |
-          TESTS=$(echo "$ALL_ARGS" | tr '\n' ' ' | xargs)
+          TESTS=$(echo "$ALL_ARGS" | tr '\n' ' ')
           if [ -z "$TESTS" ]; then
             echo "::error::No test paths provided. Usage: /e2e <test-path-1> [test-path-2] ..."
             exit 1
@@ -155,7 +155,13 @@ jobs:
           TESTS=$(echo "${{ steps.validate.outputs.tests }}" | tr '\n' ' ')
           read -ra TEST_ARRAY <<< "$TESTS"
           python3 .github/workflows/scripts/select_tests.py \
-            --changed-files "${TEST_ARRAY[@]}"
+            --explicit-e2e-tests "${TEST_ARRAY[@]}"
+
+      - name: Fail if no valid tests
+        if: steps.groups.outputs.has_tests != 'true'
+        run: |
+          echo "::error::No valid test paths matched. Please verify the paths exist and try again."
+          exit 1
 
   trigger-selected-tests:
     name: e2e-comment (${{ matrix.vllm_version }})
