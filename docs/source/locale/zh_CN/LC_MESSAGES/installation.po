@@ -325,8 +325,8 @@ msgid "Atlas 300I: `export SOC_VERSION=ascend310p1`"
 msgstr "Atlas 300I：`export SOC_VERSION=ascend310p1`"
 
 #: ../../source/installation.md:233
-msgid "Atlas A5: `export SOC_VERSION=<value starting with \"ascend950\">`"
-msgstr "Atlas A5：`export SOC_VERSION=<以 \"ascend950\" 开头的值>`"
+msgid "Ascend 950 Products: `export SOC_VERSION=<value starting with \"ascend950\">`"
+msgstr "Ascend 950 系列产品：`export SOC_VERSION=<以 \"ascend950\" 开头的值>`"
 
 #: ../../source/installation.md:236
 msgid "Set up using Docker"

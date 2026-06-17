@@ -17,7 +17,6 @@
 
 
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -296,15 +295,6 @@ def triton_split_qkv_rmsnorm_mrope(
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    logger.debug(
-        "[TritonOps] triton_split_qkv_rmsnorm_mrope: qkv.shape=%s, "
-        "num_q_heads=%s, num_kv_heads=%s, head_size=%s, rope_dim=%s",
-        qkv.shape,
-        num_q_heads,
-        num_kv_heads,
-        head_size,
-        rope_dim,
-    )
     core_num = get_vectorcore_num()
 
     q_size = num_q_heads * head_size

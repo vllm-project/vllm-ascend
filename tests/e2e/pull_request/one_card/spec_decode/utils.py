@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from vllm_ascend.utils import vllm_version_is
-
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODELS = {
@@ -32,11 +30,7 @@ BASELINES = {
     "eagle": [0.74, 0.44, 0.29],
     "eagle3": [0.68, 0.40, 0.18],
     "draft_parallel": [0.83, 0.50, 0.33, 0.17, 0.17, 0.17, 0.17, 0.00],
-    "dflash": (
-        [0.67, 0.67, 0.44, 0.33, 0.11, 0.00, 0.00, 0.00]
-        if vllm_version_is("0.21.0")
-        else [0.60, 0.50, 0.30, 0.20, 0.20, 0.10, 0.00, 0.00]
-    ),
+    "dflash": [0.60, 0.50, 0.30, 0.20, 0.20, 0.10, 0.00, 0.00],
 }
 
 

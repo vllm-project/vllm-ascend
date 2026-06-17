@@ -1261,8 +1261,15 @@ def refresh_block_size(vllm_config):
         return
 
     if model_config.hf_config.model_type == "deepseek_v4":
-        # TODO(qcs): generalize the block_size
-        cache_config.block_size = 128
+        if cache_config.block_size is None:
+            cache_config.block_size = 32
+        elif cache_config.block_size not in [32, 64, 128]:
+            logger.warning(
+                "For deepseek_v4 model, block size should be 32, 64 or 128. "
+                "Setting block size to 32 for better performance."
+            )
+            cache_config.block_size = 32
+        return
 
     if model_config.is_hybrid:
         # Hybrid attention+mamba models rely on the model-specific sizing
@@ -1540,6 +1547,13 @@ def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
+
+
+def is_hidden_state_cache_spec(spec) -> bool:
+    """Whether ``spec`` marks an ``extract_hidden_states`` cache-only layer."""
+    from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+
+    return isinstance(spec, HiddenStateCacheSpec)
 
 
 @lru_cache(maxsize=1)

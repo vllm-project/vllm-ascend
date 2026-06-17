@@ -21,7 +21,6 @@ import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
-from vllm_ascend import envs
 from vllm_ascend.utils import is_310p
 
 if not is_310p():
@@ -36,6 +35,7 @@ import vllm_ascend.patch.platform.patch_anthropic_system_message  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_tool_call_parser  # noqa
 import vllm_ascend.patch.platform.patch_deepseek_v4_tool_call_parser  # noqa
 import vllm_ascend.patch.platform.patch_deepseek_v4_thinking  # noqa
+import vllm_ascend.patch.platform.patch_weight_transfer_engine  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
@@ -46,8 +46,6 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
-
-if envs.VLLM_ASCEND_APPLY_DSV4_PATCH:
-    import vllm_ascend.patch.platform.patch_speculative_config  # noqa
+import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 
 import vllm_ascend.patch.platform.patch_scheduler  # noqa
