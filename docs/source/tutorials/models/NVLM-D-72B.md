@@ -43,28 +43,6 @@ docker run --rm \
   -it $IMAGE bash
 ```
 
-Build from source:
-
-```{code-block} bash
-   :substitutions:
-# Install vLLM.
-git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
-cd vllm
-VLLM_TARGET_DEVICE=empty pip install -v -e .
-cd ..
-
-# Install vLLM Ascend.
-git clone --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-git submodule update --init --recursive
-pip install -v -e .
-cd ..
-```
-
-### Software Stack Version Verification
-
-The environment is based on CANN 8.5.1 built into the GiteeAI platform, and successfully runs torch-npu 2.9.0, vLLM 0.19.1, and vLLM-Ascend 0.19.1rc1 through the Python 3.11 Conda environment.
-
 ## Deployment
 
 ### Single-node Deployment (4-NPU)
@@ -125,12 +103,3 @@ Expected output (with a real photo):
 ```json
 {"choices": [{"message": {"content": "The image features an animated scene set in an outdoor environment during what appears to be either dawn or dusk, given the pastel hues of the sky..."}}], "usage": {"prompt_tokens": 823, "completion_tokens": 256}}
 ```
-
-## Accuracy Evaluation
-
-Reference values (from `tests/e2e/models/configs/NVLM-D-72B.yaml`):
-
-| Task  | Metric                       | Expected (yaml) |
-|-------|------------------------------|-----------------|
-| gsm8k | exact_match,strict-match     | 0.35            |
-| gsm8k | exact_match,flexible-extract | 0.47            |
