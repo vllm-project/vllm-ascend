@@ -51,7 +51,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 ## Deployment
 
 ### Atlas 300I A2 2UP
-``` bash
+```bash
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --tensor-parallel-size 1 \
   --max-model-len 4096 \
@@ -60,12 +60,12 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --port 8000
 ```
 ### Atlas 300I DUO
-``` bash
+```bash
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --tensor-parallel-size 1 \
   --gpu_memory_utilization 0.9 \
   --dtype float16 \
-  --max-model-len 4096 \
+  --max_model_len 4096 \
   --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
   --port 8000
