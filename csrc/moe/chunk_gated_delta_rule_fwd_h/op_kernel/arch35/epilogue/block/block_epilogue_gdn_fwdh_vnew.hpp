@@ -98,8 +98,6 @@ public:
         uint32_t kHeadDim,
         uint32_t vHeadDim,
         Arch::CrossCoreFlag cube1Done
-        // const LayoutOutput &layoutOutput,
-        // const LayoutInput &LayoutInput    
     )
     {
         uint32_t mActual = chunkSize;

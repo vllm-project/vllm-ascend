@@ -48,7 +48,6 @@ struct GDNFwdHOffsets {
     bool isFinalState;
     uint32_t blockTokens;
     bool isDummyHead;
-    // for debug
     uint32_t batchIdx;
     uint32_t headIdx;
     uint32_t chunkIdx;

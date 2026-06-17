@@ -41,7 +41,6 @@ struct GDNFwdOOffsets {
     uint32_t hvWorkOffset;
     bool isFinalState;
     uint32_t blockTokens;
-    // for debug
     uint32_t batchIdx;
     uint32_t headIdx;
     uint32_t chunkIdx;

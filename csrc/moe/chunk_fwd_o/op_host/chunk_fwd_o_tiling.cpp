@@ -100,8 +100,6 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
     constexpr size_t GM_ALIGN = 512;
     int64_t pingpongStages = 2;
 
-    // Note: blockDim limiting was removed — 310P runs correctly with all cores
-    // (idle cores skip the while loop harmlessly)
     context->SetBlockDim(aicCoreNum);
 
     size_t workspaceOffset = ascendcPlatform.GetLibApiWorkSpaceSize();

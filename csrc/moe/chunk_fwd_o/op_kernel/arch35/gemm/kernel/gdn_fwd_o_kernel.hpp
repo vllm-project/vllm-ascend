@@ -53,7 +53,6 @@ using _65536 = tla::Int<65536>;
 using namespace Catlass;
 using namespace tla;
 
-// template <>
 namespace Catlass::Gemm::Kernel {
 
 template<
