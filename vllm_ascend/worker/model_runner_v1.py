@@ -52,7 +52,11 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionMetadata,
+)
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
@@ -3688,13 +3692,20 @@ class NPUModelRunner(GPUModelRunner):
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
         # TODO: refactor the logic of attention
-        # Initialize drafter attention group initialization
-        if self.speculative_config and (
-            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+            )
         ):
-            assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
+            assert isinstance(
+                self.drafter,
+                AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer,
+            )
             block_size = (self.kernel_block_sizes[0] if isinstance(
-            self.kernel_block_sizes, list) else self.kernel_block_sizes)
+                self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group() and not is_profiling:
@@ -4759,13 +4770,48 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_groups: list[KVCacheGroupSpec],
         is_profiling: bool = False,
     ) -> None:
+        min_cg_support = AttentionCGSupport.ALWAYS
+        min_cg_attn_backend = None
+
+        for attn_backend_set, kv_cache_group in zip(
+            attention_backends, kv_cache_groups
+        ):
+            for attn_backend in attn_backend_set:
+                builder_cls = attn_backend.get_builder_cls()
+                cg_support = builder_cls.get_cudagraph_support(
+                    self.vllm_config, kv_cache_group.kv_cache_spec
+                )
+                if cg_support.value < min_cg_support.value:
+                    min_cg_support = cg_support
+                    min_cg_attn_backend = attn_backend.__name__
+
         with update_pass_config(self):
-            super()._check_and_update_cudagraph_mode(
-                attention_backends,
-                kv_cache_groups,
+            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                min_cg_support,
+                min_cg_attn_backend,
+                self.uniform_decode_query_len,
+                self.parallel_config.tensor_parallel_size,
+                self.kv_cache_config,
+                self.max_num_reqs,
                 is_profiling=is_profiling,
             )
+            self.cudagraph_dispatcher.initialize_cudagraph_keys(
+                cudagraph_mode, self.uniform_decode_query_len
+            )
 
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_extract_hidden_states()
+            )
+        ):
+            assert isinstance(
+                self.drafter,
+                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+            )
+            self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
