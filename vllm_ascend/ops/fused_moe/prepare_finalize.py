@@ -391,7 +391,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         if self.multistream_overlap_gate:
             torch.npu.current_stream().wait_stream(PrepareAndFinalize.quant_stream)
-        
+
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
 

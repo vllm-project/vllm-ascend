@@ -837,7 +837,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                         key, value = all_kv.split([self.head_size, self.head_size], dim=-1)
                     else:
                         query, key, value = self._gather_and_restore_pcp_qkv(query, key, value, attn_metadata)
-                        output_local_padded_tokens_fa = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size - output_padded.shape[0]
+                        output_local_padded_tokens_fa = (
+                            attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size - output_padded.shape[0]
+                        )
                         if output_local_padded_tokens_fa > 0:
                             output_padded = F.pad(
                                 output, pad=(0, 0, 0, 0, 0, output_local_padded_tokens_fa), mode="constant", value=0
