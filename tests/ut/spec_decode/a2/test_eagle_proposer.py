@@ -2629,9 +2629,10 @@ class TestRunMergedDraft(TestBase):
             }
         )
 
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
-        with patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False):
+        with (
+            patch.object(llm_base_proposer, "reduce_sample_enabled", return_value=False),
+            patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
+        ):
             draft_token_ids = self.proposer._run_merged_draft(
                 num_input_tokens=12,
                 batch_size=2,
@@ -2681,9 +2682,8 @@ class TestRunMergedDraft(TestBase):
         forward_context.attn_metadata = None
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         with (
+            patch.object(llm_base_proposer, "reduce_sample_enabled", return_value=False),
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=True),
             patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
@@ -2739,8 +2739,6 @@ class TestRunMergedDraft(TestBase):
             (1, False, torch.tensor([1, 3], dtype=torch.int64), (2, 1)),
             (2, True, torch.tensor([0, 1, 2, 3], dtype=torch.int64), (2, 2)),
         ]
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         for num_speculative_tokens, parallel_drafting, token_indices_to_sample, expected_shape in test_cases:
             with self.subTest(num_speculative_tokens=num_speculative_tokens, parallel_drafting=parallel_drafting):
                 self.proposer.method = "eagle3"
@@ -2751,7 +2749,10 @@ class TestRunMergedDraft(TestBase):
                 self.proposer.input_ids[:4] = torch.tensor([279, 1196, 374, 8014], dtype=torch.int32)
                 self.proposer.positions[:4] = torch.tensor([17, 18, 19, 20], dtype=torch.int64)
 
-                with patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False):
+                with (
+                    patch.object(llm_base_proposer, "reduce_sample_enabled", return_value=False),
+                    patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
+                ):
                     draft_token_ids = self.proposer._run_merged_draft(
                         num_input_tokens=4,
                         batch_size=2,
