@@ -16,7 +16,19 @@
 #
 """Determine which tests to run based on changed files in a PR.
 
-Pipeline:
+Two input modes are supported (mutually exclusive):
+
+- ``--changed-files`` / ``--diff-base``: PR-driven. The input is a list of
+  source files changed in a PR. Modules are matched by their
+  ``source_file_dependencies``, and their configured tests are collected
+  and routed to runners.
+
+- ``--explicit-e2e-tests``: Slash-command driven. The input is a list of
+  e2e test paths (files or directories) supplied via the ``/e2e`` PR
+  comment. Module matching is bypassed entirely; each path is routed
+  directly to the appropriate runner.
+
+Pipeline (PR-driven mode):
   1. Diff       -- get changed files from git.
   2. Match      -- identify affected modules via test_config.yaml.
   3. Collect    -- gather test paths (always resolved to individual files).
@@ -365,6 +377,10 @@ def _scan_e2e_test_dir(
     """
     path = Path(_pytest_node_file_path(dir_path))
     if not path.exists():
+        print(
+            f"Warning: Path does not exist: {dir_path}",
+            file=sys.stderr,
+        )
         return
 
     if path.is_file():
@@ -651,7 +667,7 @@ def _print_summary(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Determine test scope based on changed files",
+        description="Determine test scope from changed files or explicit e2e test paths",
     )
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument(
@@ -663,6 +679,15 @@ def main():
         "--diff-base",
         type=str,
         help="Git ref to diff against (e.g. origin/main)",
+    )
+    input_group.add_argument(
+        "--explicit-e2e-tests",
+        nargs="+",
+        help="List of explicit e2e test paths (files or directories) to run. "
+        "Bypasses module matching and routes each path to the appropriate runner. "
+        "Use this for the /e2e slash command to run a specific subset of tests. "
+        "Supports ``::nodeid`` suffix (e.g. ``test_foo.py::TestClass::test_method``) "
+        "to run a single test method.",
     )
     parser.add_argument(
         "--config",
@@ -680,67 +705,79 @@ def main():
     _load_runner_mapping(args.config)
     config = _resolve_config_inheritance(next(yaml.safe_load_all(args.config.read_text())))
 
-    changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
-    matched_modules = (
-        [module["name"] for module in config] if args.run_all_modules else _match_modules(changed_files, config)
-    )
-    test_dirs, cpu_only_dirs = _collect_test_dirs(matched_modules, config)
-
     skip_tests: set[str] = set()
     for module in config:
         for s in module.get("skip_tests", []):
             skip_tests.add(s.rstrip("/"))
 
-    changed_test_files = [
-        f
-        for f in changed_files
-        if (_is_ut_path(f) or _is_e2e_path(f))
-        and Path(_pytest_node_file_path(f)).name.startswith("test_")
-        and Path(_pytest_node_file_path(f)).exists()
-    ]
-
-    ut_dirs = [d for d in test_dirs if _is_ut_path(d)]
-    cpu_only_ut_dirs = [d for d in cpu_only_dirs if _is_ut_path(d)]
-    e2e_dirs = [d for d in test_dirs if _is_e2e_path(d)]
-
-    all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
-
-    for dir_path in ut_dirs:
-        p = Path(_pytest_node_file_path(dir_path))
-        if p.is_file():
-            key = _route_ut_dir(dir_path)
-            all_groups[key].append(dir_path)
-        else:
-            _scan_ut_test_dir(dir_path, all_groups)
-    for dir_path in cpu_only_ut_dirs:
-        p = Path(_pytest_node_file_path(dir_path))
-        if p.is_file():
-            key = _route_ut_dir(dir_path)
-            if key == _DEFAULT_KEY:
-                all_groups[key].append(dir_path)
-        else:
-            _scan_ut_test_dir(dir_path, all_groups, cpu_only=True)
-
-    for dir_path in e2e_dirs:
-        _scan_e2e_test_dir(dir_path, all_groups)
-
-    for changed_test_file in changed_test_files:
-        if "::" in changed_test_file:
-            changed_targets = [changed_test_file]
-        else:
-            changed_targets = _configured_nodeid_targets_for_file(changed_test_file, config) or [changed_test_file]
-        for f in changed_targets:
-            if _is_skipped_test_target(f, skip_tests):
+    if args.explicit_e2e_tests:
+        matched_modules: list[str] = []
+        all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
+        for path in args.explicit_e2e_tests:
+            if not _is_e2e_path(path):
+                print(
+                    f"Warning: Skipping non-e2e path: {path}",
+                    file=sys.stderr,
+                )
                 continue
-            if _is_ut_path(f):
-                key = _route_ut_dir(f)
-                all_groups[key].append(f)
-            elif _is_e2e_path(f):
-                key = _route_e2e_file(f)
-                if key is not None:
-                    all_groups[key].append(f)
+            _scan_e2e_test_dir(path, all_groups)
+    else:
+        changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
+        matched_modules = (
+            [module["name"] for module in config] if args.run_all_modules else _match_modules(changed_files, config)
+        )
+        test_dirs, cpu_only_dirs = _collect_test_dirs(matched_modules, config)
 
-    _dedup_groups(all_groups)
+        changed_test_files = [
+            f
+            for f in changed_files
+            if (_is_ut_path(f) or _is_e2e_path(f))
+            and Path(_pytest_node_file_path(f)).name.startswith("test_")
+            and Path(_pytest_node_file_path(f)).exists()
+        ]
+
+        ut_dirs = [d for d in test_dirs if _is_ut_path(d)]
+        cpu_only_ut_dirs = [d for d in cpu_only_dirs if _is_ut_path(d)]
+        e2e_dirs = [d for d in test_dirs if _is_e2e_path(d)]
+
+        all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
+
+        for dir_path in ut_dirs:
+            p = Path(_pytest_node_file_path(dir_path))
+            if p.is_file():
+                key = _route_ut_dir(dir_path)
+                all_groups[key].append(dir_path)
+            else:
+                _scan_ut_test_dir(dir_path, all_groups)
+        for dir_path in cpu_only_ut_dirs:
+            p = Path(_pytest_node_file_path(dir_path))
+            if p.is_file():
+                key = _route_ut_dir(dir_path)
+                if key == _DEFAULT_KEY:
+                    all_groups[key].append(dir_path)
+            else:
+                _scan_ut_test_dir(dir_path, all_groups, cpu_only=True)
+
+        for dir_path in e2e_dirs:
+            _scan_e2e_test_dir(dir_path, all_groups)
+
+        for changed_test_file in changed_test_files:
+            if "::" in changed_test_file:
+                changed_targets = [changed_test_file]
+            else:
+                changed_targets = _configured_nodeid_targets_for_file(changed_test_file, config) or [changed_test_file]
+            for f in changed_targets:
+                if _is_skipped_test_target(f, skip_tests):
+                    continue
+                if _is_ut_path(f):
+                    key = _route_ut_dir(f)
+                    all_groups[key].append(f)
+                elif _is_e2e_path(f):
+                    key = _route_e2e_file(f)
+                    if key is not None:
+                        all_groups[key].append(f)
+
+        _dedup_groups(all_groups)
 
     if skip_tests:
         for key in list(all_groups.keys()):
