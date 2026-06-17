@@ -186,14 +186,27 @@ class MooncakeBackend(Backend):
                 config.preferred_segment = self.local_seg
             config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
-            for value in res:
-                if value < 0:
-                    logger.error("Failed to put key. keys=%s, result=%s. Check memory and store capacity.", keys, res)
-                    if self._lazy_init:
-                        logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            failed_codes = [int(value) for value in res if value < 0]
+            failed_count = len(failed_codes)
+            if failed_count:
+                error_codes = sorted(set(failed_codes))
+                logger.error(
+                    "Failed to put %d keys out of %d. error_codes=%s. Check memory and store capacity.",
+                    failed_count,
+                    len(keys),
+                    error_codes,
+                )
+                logger.debug("Failed to put key details. keys=%s, result=%s", keys, res)
+                if self._lazy_init:
+                    logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
             logger.error(
-                "Failed to put key. keys=%s, type=%s, error=%s. Check store state and memory.",
+                "Failed to put %d keys out of %d. Check store state and memory.",
+                len(keys),
+                len(keys),
+            )
+            logger.debug(
+                "Failed to put key details. keys=%s, type=%s, error=%s",
                 keys,
                 type(e).__name__,
                 e,
@@ -203,7 +216,13 @@ class MooncakeBackend(Backend):
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
-            logger.error("get() called before store init. keys=%s. Call put() first to trigger initialization.", keys)
+            logger.error(
+                "Failed to get %d keys out of %d. Store is not initialized; "
+                "call put() first to trigger initialization.",
+                len(keys),
+                len(keys),
+            )
+            logger.debug("Failed to get key details. keys=%s", keys)
             return
         assert self.store is not None
         logger.debug(
@@ -214,23 +233,29 @@ class MooncakeBackend(Backend):
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             res_list = list(res)
-            logger.debug(
-                "MooncakeBackend.get result keys=%d result_sample=%s negative_count=%d",
-                len(keys),
-                res_list[:12],
-                sum(1 for value in res_list if value < 0),
-            )
+            failed_codes = [int(value) for value in res_list if value < 0]
+            failed_count = len(failed_codes)
+            error_codes = sorted(set(failed_codes))
+            if failed_count:
+                logger.error(
+                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
+                    failed_count,
+                    len(keys),
+                    error_codes,
+                )
+                logger.debug("Failed to get key details. keys=%s, result=%s", keys, res_list)
             for i, value in enumerate(res_list):
-                if value < 0:
-                    logger.error(
-                        "Failed to get key. keys=%s, result=%s. Check key existence and memory state.", keys, res_list
-                    )
-                elif value > 0:
+                if value > 0:
                     res_list[i] = 0
             return res_list
         except Exception as e:
             logger.error(
-                "Failed to get key. keys=%s, type=%s, error=%s. Check store state and network.",
+                "Failed to get %d keys out of %d. Check store state and network.",
+                len(keys),
+                len(keys),
+            )
+            logger.debug(
+                "Failed to get key details. keys=%s, type=%s, error=%s",
                 keys,
                 type(e).__name__,
                 e,
