@@ -1,17 +1,15 @@
 import json
-import logging
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
 import torch
 import torch_npu
+from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
-
-logger = logging.getLogger(__name__)
 
 
 # largely follow vllm.v1.worker.utils.bind_kv_cache
@@ -388,8 +386,10 @@ class HashEncoder:
         assert self.device.type == "npu"
 
         if dtype not in [torch.float16, torch.float32, torch.float64]:
-            logger.warning("NPU only supports float16, float32 and float64 for hash_weights")
-            logger.warning("automatically using float16 for hash_weights now")
+            logger.warning(
+                "NPU only supports float16/32/64 for hash_weights; got %s. Using float16.",
+                dtype,
+            )
             self.dtype = torch.float16
 
         self._init_hash_weights()

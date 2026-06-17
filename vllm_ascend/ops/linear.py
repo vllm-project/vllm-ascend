@@ -25,6 +25,7 @@ import torch.nn as nn
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
 from vllm.distributed import divide
+from vllm.logger import logger
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED,
     ColumnParallelLinear,
@@ -126,6 +127,13 @@ class AscendLinearBase(LinearBase):
             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
         self.return_bias = return_bias
         self.disable_tp = disable_tp
+        logger.debug(
+            "AscendLinearBase(%s): input=%d, output=%d, disable_tp=%s",
+            self.prefix,
+            input_size,
+            output_size,
+            disable_tp,
+        )
 
 
 class AscendQKVParallelLinear(QKVParallelLinear):

@@ -35,7 +35,6 @@ def communicator_switch():
 
     CudaCommunicator = vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator
     vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator = NPUCommunicator
-
     try:
         yield
     finally:
