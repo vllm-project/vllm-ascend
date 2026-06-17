@@ -57,18 +57,6 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
     quantization implementations.
     """
 
-    def __new__(cls, *args, **kwargs):
-        if not args and not kwargs:
-            err_msg = (
-                "The model you are trying to load does not contain a valid "
-                "compressed-tensors quantization configuration. "
-                "Please ensure the model was quantized with compressed-tensors, "
-                "or remove '--quantization' if loading an unquantized float model."
-            )
-            logger.error(err_msg)
-            raise ValueError(err_msg)
-        return super().__new__(cls)
-
     def __init__(
         self,
         target_scheme_map: dict[str, Any],
