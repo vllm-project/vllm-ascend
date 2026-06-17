@@ -787,17 +787,6 @@ class NPUWorker(WorkerBase):
                 bind_cpus(self.local_rank)
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
-        if has_kv_transfer_group():
-            try:
-                connector = get_kv_transfer_group()
-                if hasattr(connector, "init_backend"):
-                    connector.init_backend()
-            except Exception as e:
-                logger.warning(
-                    "Init KV transfer backend failed in rank%d: %s",
-                    self.local_rank,
-                    e,
-                )
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)

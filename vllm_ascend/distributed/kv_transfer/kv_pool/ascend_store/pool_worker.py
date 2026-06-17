@@ -253,11 +253,6 @@ class KVPoolWorker:
     def _init_state_vars(self) -> None:
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
-        self._registered_buffer_ptrs: list[int] = []
-        self._registered_buffer_lengths: list[int] = []
-        self._kv_caches_registered = False
-        self._backend_initialized = False
-        self._buffers_registered = False
         self._transfer_threads_started = False
 
     def _init_layerwise_config(self) -> None:
@@ -294,21 +289,6 @@ class KVPoolWorker:
             1,
             "layerwise recv",
         )
-
-    def init_backend(self) -> None:
-        if not self._backend_initialized:
-            if hasattr(self.m_store, "init_store"):
-                self.m_store.init_store()
-            self._backend_initialized = True
-        if not self._kv_caches_registered:
-            return
-        if not self._buffers_registered:
-            self.m_store.register_buffer(
-                self._registered_buffer_ptrs,
-                self._registered_buffer_lengths,
-            )
-            self._buffers_registered = True
-        self._start_kv_transfer_threads()
 
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
@@ -627,11 +607,12 @@ class KVPoolWorker:
             group_cache_families=self.group_kv_cache_families,
             group_num_layers=self.group_num_layers,
         )
-        self._registered_buffer_ptrs = ptrs
-        self._registered_buffer_lengths = lengths
-        self._kv_caches_registered = True
-        if self._backend_initialized:
-            self.init_backend()
+        # Initialize store, register buffers, and start transfer threads
+        # directly here (like main) — no separate init_backend handshake.
+        if hasattr(self.m_store, "init_store"):
+            self.m_store.init_store()
+        self.m_store.register_buffer(ptrs, lengths)
+        self._start_kv_transfer_threads()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
