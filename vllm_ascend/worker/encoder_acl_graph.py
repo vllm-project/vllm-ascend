@@ -324,7 +324,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         token_budget: int,
         replay_buffers: dict[str, torch.Tensor | None],
     ) -> torch.Tensor | None:
-        num_items = self.model.get_encoder_cudagraph_num_items(mm_kwargs)
+        num_items = len(self._get_item_specs(mm_kwargs))
         if token_budget not in self.budget_graphs:
             self.graph_misses += num_items
             return None
