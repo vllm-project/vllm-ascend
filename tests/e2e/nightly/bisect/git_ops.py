@@ -144,6 +144,16 @@ def changed_files(repo: Path, base: str, target: str) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def commit_changed_files(repo: Path, commit: str) -> list[str]:
+    """Files changed by a single ``commit`` relative to its first parent.
+
+    This is the "what did this PR touch" view (``git show --name-only``). For a
+    root commit with no parent it lists the full tree.
+    """
+    out = _git(repo, "show", "--first-parent", "--name-only", "--format=", commit)
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 def matches_any(files: list[str], globs: tuple[str, ...]) -> list[str]:
     """Return the subset of ``files`` matching any glob in ``globs``."""
     hits: list[str] = []

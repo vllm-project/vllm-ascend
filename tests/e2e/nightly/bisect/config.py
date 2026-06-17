@@ -164,13 +164,33 @@ class BisectOptions:
     # Verify the endpoints before searching (good must PASS, bad must FAIL).
     verify_good: bool = True
     verify_bad: bool = True
-    # Editable reinstall command pieces; {repo} is filled at runtime.
+    # Editable reinstall command pieces. --no-input avoids any interactive
+    # prompt that could hang the (silent, log-redirected) build step.
     pip_install_cmd: list[str] = field(
-        default_factory=lambda: ["pip", "install", "-e", "."]
+        default_factory=lambda: [
+            "pip", "install", "-e", ".", "--no-input", "--disable-pip-version-check",
+        ]
     )
     pip_requirements_cmd: list[str] = field(
-        default_factory=lambda: ["pip", "install", "-r", "requirements-dev.txt"]
+        default_factory=lambda: [
+            "pip", "install", "-r", "requirements-dev.txt",
+            "--no-input", "--disable-pip-version-check",
+        ]
     )
+    # The nightly container is already built+installed at its current HEAD (the
+    # bad commit that just failed). Treating HEAD as the established build
+    # baseline makes the bad endpoint a checkout-only (no rebuild / no slow
+    # requirements reinstall) trial. Set force_initial_build=True to opt back
+    # into a conservative clean rebuild on the first trial.
+    assume_built_head: bool = True
+    force_initial_build: bool = False
+    # How to decide whether a rebuild is needed for each bisected commit:
+    #   "per-commit" (default): inspect only that commit's own diff (the files
+    #       that commit changed) -> compile iff it touched native/cpp files.
+    #   "since-build": inspect every file changed between the last successfully
+    #       built commit and the target -> safe against bisect jumps (a native
+    #       change in a jumped-over commit still triggers a rebuild).
+    native_check: str = "per-commit"
     # Multi-node coordination.
     num_nodes: int = 1
     node_index: int = 0

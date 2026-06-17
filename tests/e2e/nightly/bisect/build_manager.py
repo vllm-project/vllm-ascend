@@ -60,18 +60,31 @@ class BuildManager:
     def __init__(self, options: BisectOptions):
         self.opt = options
         self.repo = options.repo_dir
-        # The commit whose binary is currently installed. None -> unknown, so
-        # the first prepare() forces a rebuild to establish a clean baseline.
+        # The commit whose binary is currently installed. By default we trust
+        # that the nightly container is already built at its current HEAD, so we
+        # seed the baseline with it -> the bad endpoint becomes checkout-only and
+        # we avoid a slow/network-bound first-prepare reinstall. None means the
+        # first prepare() must do a conservative clean rebuild.
         self.last_built_commit: str | None = None
+        if options.assume_built_head and not options.force_initial_build:
+            try:
+                self.last_built_commit = git_ops.current_commit(self.repo)
+                logger.info("[build] assuming container is built at HEAD %s",
+                            self.last_built_commit[:12])
+            except Exception:  # noqa: BLE001 - best effort; fall back to rebuild
+                self.last_built_commit = None
 
     # ------------------------------------------------------------ decision
     def decide(self, target_commit: str) -> BuildDecision:
         if self.last_built_commit is None:
+            # No trusted baseline: rebuild, but only reinstall requirements when
+            # they are actually known-stale (we cannot diff, so be safe=False
+            # and rely on the container already having dev deps).
             return BuildDecision(
                 rebuild=True,
-                reinstall_reqs=True,
+                reinstall_reqs=False,
                 native_hits=[],
-                reason="no established build baseline (first prepare)",
+                reason="no established build baseline (clean rebuild)",
             )
         if self.last_built_commit == target_commit:
             return BuildDecision(
@@ -81,20 +94,27 @@ class BuildManager:
                 reason="already built this exact commit",
             )
 
-        files = git_ops.changed_files(self.repo, self.last_built_commit, target_commit)
+        # Choose which set of changed files drives the decision.
+        if self.opt.native_check == "per-commit":
+            files = git_ops.commit_changed_files(self.repo, target_commit)
+            scope = "this commit"
+        else:
+            files = git_ops.changed_files(self.repo, self.last_built_commit, target_commit)
+            scope = "since last build"
+
         native = git_ops.matches_any(files, NATIVE_GLOBS + BUILD_DEF_GLOBS)
         reqs = git_ops.matches_any(files, REQUIREMENTS_GLOBS)
 
         if native:
-            reason = f"native/build-def files changed since last build: {native[:5]}"
+            reason = f"native/build-def files changed ({scope}): {native[:5]}"
             return BuildDecision(True, bool(reqs), native, reason)
         if reqs:
-            return BuildDecision(False, True, [], f"requirements changed: {reqs}")
+            return BuildDecision(False, True, [], f"requirements changed ({scope}): {reqs}")
         return BuildDecision(
             rebuild=False,
             reinstall_reqs=False,
             native_hits=[],
-            reason="only .py/config changed -> editable install, no rebuild",
+            reason=f"no native/cpp changes ({scope}) -> editable install, no compile",
         )
 
     # ------------------------------------------------------------- prepare
@@ -109,6 +129,9 @@ class BuildManager:
 
         git_ops.checkout(self.repo, target_commit)
 
+        if (decision.reinstall_reqs or decision.rebuild) and log_file is not None:
+            logger.info("[build] compiling/installing (this can take a while); "
+                        "follow progress with: tail -f %s", log_file)
         if decision.reinstall_reqs:
             self._run(self.opt.pip_requirements_cmd, log_file, "pip install requirements")
         if decision.rebuild:

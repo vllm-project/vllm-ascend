@@ -278,6 +278,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-verify-good", action="store_true")
     p.add_argument("--no-verify-bad", action="store_true")
     p.add_argument("--trial-timeout-s", type=float, default=5400.0)
+    p.add_argument("--force-initial-build", action="store_true",
+                   help="clean-rebuild on the first trial instead of trusting "
+                        "the container's existing build at HEAD")
+    p.add_argument("--no-assume-built-head", action="store_true",
+                   help="do not treat the container's HEAD as already built")
+    p.add_argument("--native-check", choices=["per-commit", "since-build"],
+                   default="per-commit",
+                   help="'per-commit' (default): decide rebuild from each bisected "
+                        "commit's own diff (compile iff it touched native/cpp files); "
+                        "'since-build': from all changes since the last build")
     return p.parse_args(argv)
 
 
@@ -302,6 +312,9 @@ def main(argv: list[str] | None = None) -> int:
         num_nodes=args.num_nodes,
         node_index=args.node_index,
         trial_timeout_s=args.trial_timeout_s,
+        assume_built_head=not args.no_assume_built_head,
+        force_initial_build=args.force_initial_build,
+        native_check=args.native_check,
     )
 
     # On a multi-node worker, drive the worker loop instead of the search.
