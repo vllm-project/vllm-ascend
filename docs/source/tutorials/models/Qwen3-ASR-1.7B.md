@@ -70,7 +70,6 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
   --port 8000
-
 ```
 
 
