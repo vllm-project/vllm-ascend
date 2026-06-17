@@ -261,34 +261,9 @@ class KVPoolWorker:
         self.layer_load_finished_events: list[threading.Event] | None = None
         self.layer_save_finished_events: list[threading.Event] | None = None
 
-        self.kv_transfer_thread_cpus: list[int] = []
-
         self.next_layer_to_submit = 0
         self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
         self.sync_save_events: list[torch.npu.Event] | None = None
-
-    def _bind_kv_transfer_thread(
-        self,
-        thread: KVTransferThread | None,
-        cpu_index: int,
-        name: str,
-    ) -> None:
-        # KV-transfer thread CPU binding is disabled (cpu_binding reverted to main).
-        return
-
-    def rebind_kv_transfer_threads(self) -> None:
-        if not self.use_gva_layerwise:
-            return
-        self._bind_kv_transfer_thread(
-            self.kv_send_thread,
-            0,
-            "layerwise send",
-        )
-        self._bind_kv_transfer_thread(
-            self.kv_recv_thread,
-            1,
-            "layerwise recv",
-        )
 
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
@@ -321,11 +296,6 @@ class KVPoolWorker:
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
-                self._bind_kv_transfer_thread(
-                    self.kv_send_thread,
-                    0,
-                    "layerwise send",
-                )
             elif self.kv_role in ["kv_producer", "kv_both"]:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreKeyLayerSendingThread(
@@ -380,12 +350,6 @@ class KVPoolWorker:
                 )
             self.kv_recv_thread.start()
             ready_event.wait()
-            if self.use_gva_layerwise:
-                self._bind_kv_transfer_thread(
-                    self.kv_recv_thread,
-                    1,
-                    "layerwise recv",
-                )
         else:
             if self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put:
                 ready_event_sending = threading.Event()
