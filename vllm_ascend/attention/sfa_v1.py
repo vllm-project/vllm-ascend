@@ -160,10 +160,6 @@ class AscendSFAMetadata:
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     dsa_cp_context: DSACPContext | None = None
     reshape_cache_event: torch.npu.Event = None
-    prefill_allgather_kli_event: torch.npu.Event = None
-    prefill_allgather_kv_event: torch.npu.Event = None
-    prefill_kli_cache_event: torch.npu.Event = None
-    prefill_kv_cache_event: torch.npu.Event = None
     sfa_cp_metadata: AscendPCPMetadata | None = None
     prefill_slot_mapping: torch.Tensor | None = None
     num_decodes: int = 0

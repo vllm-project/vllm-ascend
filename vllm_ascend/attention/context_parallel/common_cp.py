@@ -48,7 +48,10 @@ class AscendPCPMetadata:
     max_num_tokens_across_pcp: int = 0
     total_num_scheduled_tokens: int = 0
     block_arange: torch.Tensor = None
-
+    prefill_allgather_kli_event: torch.npu.Event = None
+    prefill_allgather_kv_event: torch.npu.Event = None
+    prefill_kli_cache_event: torch.npu.Event = None
+    prefill_kv_cache_event: torch.npu.Event = None
 
 @dataclass
 class CPChunkedContextMetadata:

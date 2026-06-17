@@ -396,8 +396,8 @@ class AscendSFACPImpl(AscendSFAImpl):
         prefill_q_pe = q_pe[num_decode_tokens:]
         prefill_topk_indices = topk_indices[num_decode_tokens:]
         prefill_actual_seq_lengths_key = actual_seq_lengths_key[num_decodes:]
-        if attn_metadata.prefill_allgather_kv_event is not None:
-            attn_metadata.prefill_allgather_kv_event.wait()
+        if attn_metadata.sfa_cp_metadata.prefill_allgather_kv_event is not None:
+            attn_metadata.sfa_cp_metadata.prefill_allgather_kv_event.wait()
         if self.pcp_size == 1:
             prefill_attn_out = self._execute_sparse_flash_attention(
                 prefill_ql_nope,
@@ -614,8 +614,8 @@ class AscendSFACPImpl(AscendSFAImpl):
         prefill_q = q[num_decode_tokens:]
         prefill_weights = weights[num_decode_tokens:]
         prefill_actual_seq_lengths_key = actual_seq_lengths_key[num_decodes:]
-        if attn_metadata.prefill_allgather_kli_event is not None:
-            attn_metadata.prefill_allgather_kli_event.wait()
+        if attn_metadata.sfa_cp_metadata.prefill_allgather_kli_event is not None:
+            attn_metadata.sfa_cp_metadata.prefill_allgather_kli_event.wait()
         if self.pcp_size == 1:
             prefill_topk_indices = self._execute_indexer_select(
                 prefill_q,
@@ -815,10 +815,11 @@ class AscendSFACPImpl(AscendSFAImpl):
             AscendAttentionState.SpecDecoding,
         }
         if attn_metadata.num_prefills > 0:
-            attn_metadata.prefill_allgather_kli_event = torch.npu.Event()
-            attn_metadata.prefill_allgather_kv_event = torch.npu.Event()
-            attn_metadata.prefill_kv_cache_event = torch.npu.Event()
-            attn_metadata.prefill_kli_cache_event = torch.npu.Event()
+            assert attn_metadata.sfa_cp_metadata is not None
+            attn_metadata.sfa_cp_metadata.prefill_allgather_kli_event = torch.npu.Event()
+            attn_metadata.sfa_cp_metadata.prefill_allgather_kv_event = torch.npu.Event()
+            attn_metadata.sfa_cp_metadata.prefill_kv_cache_event = torch.npu.Event()
+            attn_metadata.sfa_cp_metadata.prefill_kli_cache_event = torch.npu.Event()
 
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
         if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
@@ -885,7 +886,7 @@ class AscendSFACPImpl(AscendSFAImpl):
             )
             if attn_metadata.num_prefills > 0:
                 _, _ = self.exec_kv_prefill(k_nope, k_pe, kv_cache, attn_metadata)
-                attn_metadata.prefill_kv_cache_event.record()
+                attn_metadata.sfa_cp_metadata.prefill_kv_cache_event.record()
             k_li = self._get_full_kv(k_li, attn_metadata)
 
         if kv_cache is not None:
@@ -919,7 +920,7 @@ class AscendSFACPImpl(AscendSFAImpl):
                         slot_mapping.view(-1, 1),
                         k_li_scale.view(-1, k_li_scale.shape[-1]),
                     )
-                attn_metadata.prefill_kli_cache_event.record()
+                attn_metadata.sfa_cp_metadata.prefill_kli_cache_event.record()
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
 
@@ -938,13 +939,13 @@ class AscendSFACPImpl(AscendSFAImpl):
                 prefill_valid_block_ids = attn_metadata.sfa_cp_metadata.valid_block_ids
                 prefill_block_table = attn_metadata.sfa_cp_metadata.block_table_cp
                 assert prefill_valid_block_ids is not None and prefill_block_table is not None
-                attn_metadata.prefill_kli_cache_event.wait()
+                attn_metadata.sfa_cp_metadata.prefill_kli_cache_event.wait()
                 prefill_key = self.gather_kv_cross_cp_compact(kv_cache[2], prefill_valid_block_ids)  # k_li
-                attn_metadata.prefill_allgather_kli_event.record()
-                attn_metadata.prefill_kv_cache_event.wait()
+                attn_metadata.sfa_cp_metadata.prefill_allgather_kli_event.record()
+                attn_metadata.sfa_cp_metadata.prefill_kv_cache_event.wait()
                 prefill_k_nope = self.gather_kv_cross_cp_compact(kv_cache[0], prefill_valid_block_ids)  # k_nope
                 prefill_k_rope = self.gather_kv_cross_cp_compact(kv_cache[1], prefill_valid_block_ids)  # k_rope
-                attn_metadata.prefill_allgather_kv_event.record()
+                attn_metadata.sfa_cp_metadata.prefill_allgather_kv_event.record()
                 prefill_kv = (prefill_k_nope, prefill_k_rope)
 
         # o-proj weight allgather
@@ -1009,12 +1010,12 @@ class AscendSFACPImpl(AscendSFAImpl):
 
         if self.enable_dsa_cp_with_pcp_shard:
             quant_method = getattr(self.o_proj.quant_method, "quant_method", self.o_proj.quant_method)
-            outputo = quant_method.apply(self.o_proj, attn_output, tp_rank=self.pcp_rank)
-            outputo = get_pcp_group().all_reduce(outputo)
+            output_o = quant_method.apply(self.o_proj, attn_output, tp_rank=self.pcp_rank)
+            output_o = get_pcp_group().all_reduce(output_o)
         else:
-            outputo = self.o_proj(attn_output)[0]
+            output_o = self.o_proj(attn_output)[0]
 
-        output[...] = outputo
+        output[...] = output_o
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
