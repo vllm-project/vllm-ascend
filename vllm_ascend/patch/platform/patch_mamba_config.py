@@ -122,7 +122,18 @@ def verify_and_update_config(cls, vllm_config) -> None:
             "exactly equal.",
             mamba_padding_pct,
         )
-    if using_kv_store_with_hybrid:
+    # The extract_hidden_states connector (ExampleHiddenStatesConnector) only
+    # manages the dedicated hidden-state cache-only layer; it does not migrate
+    # mamba KV blocks across instances, so it does not require the block-aligned
+    # mamba cache mode. Forcing "align" for it would route hybrid models onto
+    # vLLM's fused GPU postprocess Triton kernel (introduced in vLLM #40172),
+    # which the Ascend Triton backend cannot compile. Leave the mode as vLLM
+    # derived it (e.g. "none" when prefix caching is off) for this case.
+    spec_config = vllm_config.speculative_config
+    is_extract_hidden_states = (
+        spec_config is not None and getattr(spec_config, "method", None) == "extract_hidden_states"
+    )
+    if using_kv_store_with_hybrid and not is_extract_hidden_states:
         if cache_config.mamba_cache_mode == "none":
             cache_config.mamba_cache_mode = "align"
         else:
