@@ -24,12 +24,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.cpu_binding import (
-    bind_thread_to_cpus,
-    get_cpu_binding_rank,
-    get_memcache_client_cpus,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
@@ -101,7 +95,6 @@ class KVPoolWorker:
 
     def _init_parallelism_info(self, model_config, parallel_config) -> None:
         self.local_rank = envs.LOCAL_RANK
-        self.cpu_binding_rank = get_cpu_binding_rank(self.local_rank, parallel_config)
 
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
@@ -238,19 +231,8 @@ class KVPoolWorker:
         real_backend = getattr(backend_module, backend_name)
 
         if self.backend.lower() == "memcache":
-            memcache_client_cpus = extra_config.get("memcache_client_cpus")
-            if memcache_client_cpus is None:
-                try:
-                    memcache_client_cpus = get_memcache_client_cpus(self.cpu_binding_rank)
-                except Exception as err:
-                    logger.warning(
-                        "Failed to get MemCache client CPUs for rank%d: %s",
-                        self.cpu_binding_rank,
-                        err,
-                    )
             self.m_store = real_backend(  # type: ignore[misc]
                 parallel_config,
-                memcache_client_cpus,
                 lazy_init=True,
             )
         else:
@@ -285,15 +267,6 @@ class KVPoolWorker:
         self.layer_save_finished_events: list[threading.Event] | None = None
 
         self.kv_transfer_thread_cpus: list[int] = []
-        if get_ascend_config().enable_cpu_binding:
-            try:
-                self.kv_transfer_thread_cpus = get_memcache_client_cpus(self.cpu_binding_rank)
-            except Exception as err:
-                logger.warning(
-                    "Failed to get MemCache CPUs for KV transfer threads in rank%d: %s",
-                    self.cpu_binding_rank,
-                    err,
-                )
 
         self.next_layer_to_submit = 0
         self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
@@ -305,22 +278,8 @@ class KVPoolWorker:
         cpu_index: int,
         name: str,
     ) -> None:
-        if thread is None or thread.native_id is None:
-            return
-        if cpu_index >= len(self.kv_transfer_thread_cpus):
-            return
-        cpu = self.kv_transfer_thread_cpus[cpu_index]
-        try:
-            bind_thread_to_cpus(thread.native_id, [cpu])
-            logger.info("Bound %s thread %d to CPU%d", name, thread.native_id, cpu)
-        except Exception as err:
-            logger.warning(
-                "Failed to bind %s thread %d to CPU%d: %s",
-                name,
-                thread.native_id,
-                cpu,
-                err,
-            )
+        # KV-transfer thread CPU binding is disabled (cpu_binding reverted to main).
+        return
 
     def rebind_kv_transfer_threads(self) -> None:
         if not self.use_gva_layerwise:

@@ -21,7 +21,7 @@ extend-ignore-identifiers-re = [".*Unc.*", ".*_thw",
     ".*ot.*", ".*[Tt]h[rR].*",
     # tools/ai_qos.py: align with driver qos_mata_config / original_sdma_mata (not "meta")
     ".*(?i)mata.*"]
-extend-ignore-words-re = ["CANN", "cann","ND","alog","nd","BA","datas","ful","udo","artifcat","Wrk",]
+extend-ignore-words-re = ["CANN", "cann","ND","alog","nd","BA","datas","ful","udo","artifcat",]
 extend-ignore-re = []
 
 [default.extend-identifiers]
