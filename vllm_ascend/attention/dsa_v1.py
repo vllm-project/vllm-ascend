@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
 import vllm.envs as envs_vllm
@@ -19,6 +20,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
@@ -29,6 +31,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     npu_stream_switch,
     olora_tp_enable,
+    oproj_tp_enable,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -1550,6 +1553,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Attention impls are not walked by vllm's process_weights_after_loading
+        # dispatcher (only LinearMethodBase subclasses are). OTP buffers are
+        # allocated lazily on the first _forward_o_proj call, which always runs
+        # before ACL graph capture (profiling run triggers it).
         pass
 
     # TODO: cast to bfloat16 to speed up
@@ -1571,6 +1578,94 @@ class AscendDSAImpl(DSAAttentionImpl):
             x = x_rot.reshape(1, num_tokens, -1, rotary_dim)
         return x
 
+    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        num_tokens = o_proj_input.shape[0]
+        group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
+        o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
+        # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
+        # + quantized batch matmul). Preserve it as-is: it predates and is
+        # orthogonal to the OTP / olora_tp paths below, so it must win first.
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            o = o_proj_input
+            o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+            o = torch_npu.npu_transpose_quant_batchmatmul(
+                o,
+                self.wo_a.weight,
+                dtype=torch.bfloat16,
+                bias=None,
+                group_sizes=(0, 0, 32),
+                x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            )
+            o = o.reshape(num_tokens, -1)
+            output[...] = self.wo_b(o)
+        elif oproj_tp_enable():
+            oproj_group = get_otp_group()
+            oproj_tp_size = oproj_group.world_size
+            if self.n_local_groups % oproj_tp_size != 0:
+                raise ValueError(
+                    "n_local_groups must be divisible by "
+                    f"oproj_tensor_parallel_size, got {self.n_local_groups} "
+                    f"and {oproj_tp_size}."
+                )
+
+            groups_per_rank = self.n_local_groups // oproj_tp_size
+
+            # DSV3.1 O-matrix pattern (mirrors
+            # vllm_ascend.ops.linear_op.OProjRowParallelOp): redistribute the
+            # tokens across the OTP group with a dynamic all_to_all — a fresh
+            # recv buffer per call, no static max-padded buffer and no capacity
+            # padding. Variable token counts are carried per ACL graph bucket
+            # the same way the standard o_proj (OProjRowParallelOp) carries
+            # them, so this path does not pin a fixed exchange size.
+            # [num_tokens, n_local_groups, gh]
+            # -> [num_tokens, oproj_tp_size, groups_per_rank, gh]
+            o_proj_input = o_proj_input.view(num_tokens, oproj_tp_size, groups_per_rank, group_hidden_dim)
+            # Lay the OTP-rank split on dim 0 for all_to_all_single.
+            send_buf = o_proj_input.permute(1, 0, 2, 3).contiguous().view(-1)
+            recv_buf = torch.empty(
+                oproj_tp_size * num_tokens * groups_per_rank * group_hidden_dim,
+                dtype=o_proj_input.dtype,
+                device=o_proj_input.device,
+            )
+            dist.all_to_all_single(recv_buf, send_buf, group=oproj_group.device_group)
+            # Rank r now owns groups-slice r for every rank's tokens.
+            o_proj_input = recv_buf.view(oproj_tp_size * num_tokens, groups_per_rank, group_hidden_dim)
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self.wo_a.weight,
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+            o_proj_input = o_proj_input.reshape(oproj_tp_size * num_tokens, -1)
+            o_proj_output = self.wo_b(o_proj_input)
+            o_proj_output = oproj_group.reduce_scatter(o_proj_output, dim=0)
+            output[...] = o_proj_output
+        elif olora_tp_enable():
+            o_proj_input = self.wo_a(o_proj_input)
+            output[...] = self.wo_b(o_proj_input)
+        else:
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self.wo_a.weight,
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+            o_proj_input = o_proj_input.reshape(num_tokens, -1)
+            output[...] = self.wo_b(o_proj_input)
+        return output
+
     def forward(  # type: ignore[override]
         self,
         layer_name,
@@ -1581,11 +1676,20 @@ class AscendDSAImpl(DSAAttentionImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+        output_padded = output
+        forward_context = get_forward_context()
+        o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
         if attn_metadata is None:
-            return output.fill_(0)
+            # Profiling run: run o_proj on zero input so HCCL collectives are
+            # captured by the ACL graph.  Non-OTP just zeros the output.
+            if oproj_tp_enable():
+                o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+                self._forward_o_proj(o_proj_input, output)
+            else:
+                output.fill_(0)
+            return output
         if not isinstance(attn_metadata, list):
             attn_metadata = [attn_metadata]
-        output_padded = output
         # Process for Flash Comm V1
         has_prefill = attn_metadata[0].num_prefills > 0
         has_decode = attn_metadata[0].num_decodes > 0
@@ -1612,8 +1716,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             prefill_hidden_states = hidden_states[decode_tokens:actual_tokens]
             decode_hidden_states = hidden_states[:decode_tokens]
 
-        forward_context = get_forward_context()
-        o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         if has_prefill:
@@ -1638,7 +1740,6 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
-        num_tokens = o_proj_input.shape[0]
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input.unsqueeze(1),
@@ -1649,42 +1750,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         )
 
         # o
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            o = o_proj_input.view(num_tokens, self.n_local_groups, -1)
-            o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-            o = torch_npu.npu_transpose_quant_batchmatmul(
-                o,
-                self.wo_a.weight,
-                dtype=torch.bfloat16,
-                bias=None,
-                group_sizes=(0, 0, 32),
-                x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-            )
-            o = o.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o)
-        else:
-            o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, -1)
-            if olora_tp_enable():
-                o_proj_input = self.wo_a(o_proj_input)
-            else:
-                # wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
-                # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
-                    self.wo_a.weight,
-                    bias=None,
-                    scale=None,
-                    perm_x1=(1, 0, 2),
-                    perm_x2=(0, 1, 2),
-                    perm_y=(1, 0, 2),
-                    batch_split_factor=1,
-                )
-                o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o_proj_input)
+        self._forward_o_proj(o_proj_input, output)
 
         return output_padded
 

@@ -17,6 +17,7 @@
 
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.distributed import divide
@@ -167,7 +168,23 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             return self._forward_origin(input_)
 
     def _forward_embed_tp(self, input_):
-        complete_input = self.comm_group.all_gather(input_, dim=0)
+        # DSV3.1 pattern (mirrors vllm_ascend.ops.linear_op.OProjRowParallelOp):
+        # raw dist collectives with a fresh recv buffer per call — no static
+        # max-padded buffer. The raw *_into_tensor / *_tensor variants are used
+        # instead of the comm_group.all_gather / reduce_scatter wrappers: the
+        # wrappers go through list-based collectives that are both slower
+        # (perf) and graph-unfriendly (replay desync corrupts output = the
+        # accuracy regression seen with the base embed_tp path). Dynamic
+        # buffers are address-stable within a single ACL graph bucket via the
+        # graph memory pool, so this works without recompute_scheduler_enable.
+        num_tokens = input_.shape[0]
+        device = input_.device
+
+        # all_gather token ids so every rank sees all tokens.
+        ag_out = torch.empty(self.tp_size * num_tokens, dtype=input_.dtype, device=device)
+        dist.all_gather_into_tensor(ag_out, input_.contiguous().view(-1), group=self.comm_group.device_group)
+        complete_input = ag_out
+
         masked_input, input_mask = self._get_masked_input_and_mask(
             complete_input,
             self.shard_indices.org_vocab_start_index,
@@ -176,12 +193,15 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.shard_indices.added_vocab_start_index,
             self.shard_indices.added_vocab_end_index,
         )
-        # Get the embeddings.
+        # Local embedding lookup on this rank's vocab shard. Embedding lookup is
+        # a local op; its fresh allocation does not affect ACL graph replay.
         output_parallel = self.quant_method.embedding(self, masked_input.long())
         output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-        output = self.comm_group.reduce_scatter(output_parallel, dim=0)
-        output = output.view(input_.shape[0], -1)
-        return output
+
+        # reduce_scatter the summed partial embeddings back to per-rank slices.
+        rs_out = torch.empty((num_tokens, self.embedding_dim), dtype=output_parallel.dtype, device=device)
+        dist.reduce_scatter_tensor(rs_out, output_parallel.contiguous(), group=self.comm_group.device_group)
+        return rs_out.view(num_tokens, -1)
 
     def _forward_origin(self, input_):
         if self.tp_size > 1:

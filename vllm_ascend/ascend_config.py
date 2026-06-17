@@ -448,10 +448,18 @@ class FinegrainedTPConfig:
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
-            # dummy_run does not run the entire attention module in eager mode,
-            # so the o_proj tp split can only be used in graph mode.
-            if vllm_config.model_config and vllm_config.model_config.enforce_eager:
-                raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
+            # wo_a/wo_b are sharded solely by the OTP group (which splits DP,
+            # orthogonal to the standard TP group), but _forward_o_proj reshapes
+            # the attention output with n_local_groups = n_groups // tp_size
+            # (standard TP). When tp_size > 1 the weight-shard and input-shard
+            # operate on different axes of the rank grid and no longer align,
+            # so oproj TP currently requires standard tp_size == 1.
+            if vllm_config.parallel_config.tensor_parallel_size > 1:
+                raise AssertionError(
+                    "oproj_tensor_parallel_size currently requires "
+                    "tensor_parallel_size == 1, got "
+                    f"{vllm_config.parallel_config.tensor_parallel_size}."
+                )
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
