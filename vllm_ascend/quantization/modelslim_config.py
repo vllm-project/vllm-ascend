@@ -394,12 +394,12 @@ def create_scheme_for_layer(
         return scheme_cls()
 
     err_msg = (
-        f"Currently, vLLM Ascend doesn't support quant_type={quant_type} "
-        f"for layer_type={layer_type}. Please use a supported quantization format "
+        "Currently, vLLM Ascend doesn't support quant_type=%s for layer_type=%s. "
+        "Please use a supported quantization format "
         "or load the model with its original float weights."
     )
-    logger.error(err_msg)
-    raise NotImplementedError(err_msg)
+    logger.error(err_msg, quant_type, layer_type)
+    raise NotImplementedError(err_msg % (quant_type, layer_type))
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
