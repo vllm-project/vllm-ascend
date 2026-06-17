@@ -134,7 +134,7 @@ class ProfilingChunkScheduler(Scheduler):
         t_start = time.perf_counter()
 
         for i in range(total_steps):
-            chunk_size = int(base_chunk_size - max(i - 1, 0) * (base_chunk_size / num_samples))
+            chunk_size = int(base_chunk_size - (i - 1) * (base_chunk_size / num_samples))
             if chunk_size <= 0:
                 break
 
@@ -269,9 +269,6 @@ class ProfilingChunkScheduler(Scheduler):
         while req_index < len(self.running) and token_budget > 0 and time_budget > 0:
             # <<< PROFILING CHUNK <<<
             request = self.running[req_index]
-            current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
-            if current_batch_size == self.max_num_per_batch:
-                break
 
             if (
                 request.num_output_placeholders > 0
@@ -332,7 +329,7 @@ class ProfilingChunkScheduler(Scheduler):
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(request, num_new_tokens)
 
-            if num_new_tokens <= 0:
+            if num_new_tokens == 0:
                 req_index += 1
                 continue
 
@@ -434,8 +431,7 @@ class ProfilingChunkScheduler(Scheduler):
             # >>> PROFILING CHUNK >>>
             while (self.waiting or self.skipped_waiting) and token_budget > 0 and time_budget > 0:
                 # <<< PROFILING CHUNK <<<
-                current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
-                if len(self.running) == self.max_num_running_reqs or current_batch_size == self.max_num_per_batch:
+                if len(self.running) == self.max_num_running_reqs:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()

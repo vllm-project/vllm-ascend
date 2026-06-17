@@ -28,7 +28,9 @@ to transparently pass aux hidden states through IntermediateTensors across PP
 stages. Each PP stage carries forward all aux states from previous stages,
 and the last PP rank merges them into a single list for the drafter.
 
-Currently supports: DeepseekV2Model (used by Kimi K2/K2.6, DeepSeek-V2/V3).
+Currently supports:
+- DeepseekV2Model (used by Kimi K2/K2.6, DeepSeek-V2/V3)
+- EagleModelMixin-based models (MiniMaxM2, Llama, Qwen2, etc.)
 """
 
 import logging
@@ -129,6 +131,54 @@ def _make_deepseek_v2_forward():
 
     return pp_eagle3_forward
 
+def _make_eagle_mixin_forward():
+    def pp_eagle3_forward(
+        self,
+        input_ids: "torch.Tensor | None",
+        positions: torch.Tensor,
+        intermediate_tensors: "IntermediateTensors | None" = None,
+        inputs_embeds: "torch.Tensor | None" = None,
+    ):
+        pp_group = get_pp_group()
+
+        prev_aux_list = _extract_aux_from_intermediate(intermediate_tensors)
+
+        if pp_group.is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.embed_input_ids(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        aux_hidden_states = self._maybe_add_hidden_state(list(prev_aux_list), 0, hidden_states, residual)
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
+            hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(aux_hidden_states, idx + 1, hidden_states, residual)
+
+        if not pp_group.is_last_rank:
+            result = IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                }
+            )
+            for i, t in enumerate(aux_hidden_states):
+                result.tensors[f"{_AUX_KEY_PREFIX}{i}"] = t
+            return result
+
+        hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
+    return pp_eagle3_forward
 
 def _patch_make_empty_intermediate_tensors(inner_model: nn.Module) -> None:
     if getattr(inner_model, "_eagle3_pp_aux_make_empty_patched", False):
@@ -157,16 +207,22 @@ def _patch_make_empty_intermediate_tensors(inner_model: nn.Module) -> None:
 
 def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
+    from vllm.model_executor.models.interfaces import EagleModelMixin
 
-    if not isinstance(inner_model, DeepseekV2Model):
+    if isinstance(inner_model, DeepseekV2Model):
+        make_forward = _make_deepseek_v2_forward
+    elif isinstance(inner_model, EagleModelMixin):
+        make_forward = _make_eagle_mixin_forward
+    else:
         logger.warning(
-            "Eagle3 PP aux propagation is only supported for DeepseekV2Model, got %s. Skipping patch.",
+            "Eagle3 PP aux propagation is only supported for DeepseekV2Model "
+            "or EagleModelMixin-based models, got %s. Skipping patch.",
             type(inner_model).__name__,
         )
         return False
 
     if not getattr(inner_model, "_eagle3_pp_aux_forward_patched", False):
-        inner_model.forward = _make_deepseek_v2_forward().__get__(inner_model, type(inner_model))
+        inner_model.forward = make_forward().__get__(inner_model, type(inner_model))
         inner_model._eagle3_pp_aux_forward_patched = True
     _patch_make_empty_intermediate_tensors(inner_model)
 
