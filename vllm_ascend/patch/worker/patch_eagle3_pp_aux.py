@@ -131,6 +131,7 @@ def _make_deepseek_v2_forward():
 
     return pp_eagle3_forward
 
+
 def _make_eagle_mixin_forward():
     def pp_eagle3_forward(
         self,
@@ -179,6 +180,7 @@ def _make_eagle_mixin_forward():
         return hidden_states
 
     return pp_eagle3_forward
+
 
 def _patch_make_empty_intermediate_tensors(inner_model: nn.Module) -> None:
     if getattr(inner_model, "_eagle3_pp_aux_make_empty_patched", False):
