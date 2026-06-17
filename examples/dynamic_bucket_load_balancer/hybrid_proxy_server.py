@@ -419,7 +419,12 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     request_tokens = proxy_state.calculate_request_tokens(request_length)
     group_idx, task = proxy_state.select_server_group(request_id, request_tokens, priority_score)
 
-    server_idx = proxy_state.select_server(priority_score, group_idx)
+    try:
+        server_idx = proxy_state.select_server(priority_score, group_idx)
+    except Exception:
+        if global_args.enable_dynamic_bucket and task is not None:
+            proxy_state.bucket_load_balancer.release_task(task.id)
+        raise
 
     if global_args.enable_dynamic_bucket and task is not None:
         task.server_info = ServerInfo("DP",server_idx)

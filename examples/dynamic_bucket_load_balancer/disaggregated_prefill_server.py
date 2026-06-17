@@ -966,6 +966,9 @@ async def stream_service_response_with_retry(
                     yield chunk
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            if first_chunk_sent:
+                logger.error(f"Streaming to client interrupted after response started: {str(e)}")
+                return
             if attempt < max_retries:
                 logger.warning(f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}")
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
@@ -1000,7 +1003,12 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
 
     logger.debug(f'Selected group_idx: {group_idx}')
 
-    prefiller_idx = proxy_state.select_prefiller(prefiller_score, group_idx)
+    try:
+        prefiller_idx = proxy_state.select_prefiller(prefiller_score, group_idx)
+    except Exception:
+        if global_args.enable_dynamic_bucket and task is not None:
+            proxy_state.bucket_load_balancer.release_task(task.id)
+        raise
 
     if global_args.enable_dynamic_bucket and task is not None:
         task.server_info = ServerInfo(InstanceType.PREFILL,prefiller_idx)
@@ -1024,27 +1032,31 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
         proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
         raise
     proxy_state.release_prefiller(prefiller_idx, prefiller_score,task)
-    response_json = response.json()
-    kv_transfer_params = response_json.get("kv_transfer_params", {})
-    if kv_transfer_params:
-        req_data["kv_transfer_params"] = kv_transfer_params
-    # Select decoder
-    decoder_score = proxy_state.calculate_decode_scores(request_length)
-    logger.debug("Decoder score: %f", decoder_score)
-    # Use the prefiller's kv_transfer_params to select decoder
-    decoder_idx = proxy_state.select_decoder(decoder_score)
-    decoder = proxy_state.decoders[decoder_idx]
-    logger.debug("Using %s %s", prefiller.url, decoder.url)
-    return InstanceInfo(
-        request_id=request_id,
-        prefiller_idx=prefiller_idx,
-        prefiller_score=prefiller_score,
-        prefiller=prefiller,
-        decoder=decoder,
-        decoder_idx=decoder_idx,
-        decoder_score=decoder_score,
-    )
 
+    try:
+        response_json = response.json()
+        kv_transfer_params = response_json.get("kv_transfer_params", {})
+        if kv_transfer_params:
+            req_data["kv_transfer_params"] = kv_transfer_params
+        # Select decoder
+        decoder_score = proxy_state.calculate_decode_scores(request_length)
+        logger.debug("Decoder score: %f", decoder_score)
+        # Use the prefiller's kv_transfer_params to select decoder
+        decoder_idx = proxy_state.select_decoder(decoder_score)
+        decoder = proxy_state.decoders[decoder_idx]
+        logger.debug("Using %s %s", prefiller.url, decoder.url)
+        return InstanceInfo(
+            request_id=request_id,
+            prefiller_idx=prefiller_idx,
+            prefiller_score=prefiller_score,
+            prefiller=prefiller,
+            decoder=decoder,
+            decoder_idx=decoder_idx,
+            decoder_score=decoder_score,
+        )
+    except Exception:
+        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+        raise
 
 @dataclass
 class InstanceInfo:
@@ -1154,6 +1166,9 @@ async def _handle_completions(api: str, request: Request):
                             # new one, otherwise its active_tokens leak (the finally below
                             # only releases the final instance_info.decoder)
                             proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                            # Prevent double-release in finally block if selection fails
+                            instance_info.decoder_idx = len(proxy_state.decoders)
+                            instance_info.decoder_score = 0
                             instance_info = await _handle_select_instance(api, req_data, tmp_request_length)
                             break
                         if retry_count > 0 and not stream_flag:
