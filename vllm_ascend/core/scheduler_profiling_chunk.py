@@ -379,7 +379,7 @@ class ProfilingChunkScheduler(Scheduler):
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
                     preempted_reqs.append(preempted_req)
-                    logger.info(
+                    logger.debug(
                         "[ProfilingChunk] Preempted request %s. running_count=%s, token_budget=%s",
                         preempted_req.request_id,
                         len(self.running),

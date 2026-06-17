@@ -507,8 +507,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             flash_comm_v1_enabled = False
             mmrs_fusion = False
             logger.debug(
-                "matmul_and_reduce: _EXTRA_CTX access failed (profile_run?), "
-                "using defaults: flash_comm_v1=False, mmrs_fusion=False",
+                "matmul_and_reduce: _EXTRA_CTX access failed, using defaults: flash_comm_v1=False, mmrs_fusion=False",
             )
 
         x = input_parallel

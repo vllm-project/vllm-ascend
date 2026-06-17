@@ -722,7 +722,7 @@ class NPUWorker(WorkerBase):
                     warmup_sizes.append(compile_range.end)
 
         for size in sorted(warmup_sizes, reverse=True):
-            logger.info("Compile and warming up model for size %s", size)
+            logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
 
         npugraph_memory_bytes = 0
@@ -882,7 +882,7 @@ class NPUWorker(WorkerBase):
         if not is_first_pp_rank:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    "[ProfilingChunk] PP rank %s: profiled %s tokens, latency=%.2f ms (not used)",
+                    "[ProfilingChunk] PP rank %s: profiled %d tokens, latency=%.2f ms (not used)",
                     get_pp_group().rank_in_group,
                     num_tokens,
                     latency_ms,
@@ -924,7 +924,7 @@ class NPUWorker(WorkerBase):
         self.model_config.max_model_len = max_model_len
         if self.model_runner is not None:
             self.model_runner.update_max_model_len(max_model_len)
-        logger.debug("Updated max_model_len to %s", max_model_len)
+        logger.debug("Updated max_model_len to %d", max_model_len)
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
@@ -1027,7 +1027,7 @@ class NPUWorker(WorkerBase):
     def check_health(self) -> None:
         import subprocess
 
-        logger.debug("check_health starting for rank %s...", self.local_rank)
+        logger.info("check_health starting for rank %s...", self.local_rank)
         try:
             result = subprocess.run(
                 ["npu-smi", "info", "-i", str(self.local_rank), "-t", "health"],
@@ -1038,7 +1038,7 @@ class NPUWorker(WorkerBase):
 
             if result.returncode == 0:
                 parse_text_output(result.stdout)
-                logger.debug("check_health success for rank %s.", self.local_rank)
+                logger.info("check_health success for rank %s.", self.local_rank)
             else:
                 logger.warning("query NPU card %s fail: %s", self.local_rank, result.stderr)
         except subprocess.TimeoutExpired:

@@ -122,9 +122,11 @@ class AscendEagleSpeculator(EagleSpeculator):
         self.input_batch = input_batch
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "EagleSpeculator.propose: num_reqs=%d, num_tokens=%d",
+                "EagleSpeculator.propose: num_reqs=%d, num_tokens=%d, dummy_run=%s, is_profile=%s",
                 input_batch.num_reqs,
                 input_batch.num_tokens,
+                dummy_run,
+                is_profile,
             )
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
@@ -342,7 +344,7 @@ def build_attn_metadata_wrapper():
 # the bug is reported to huawei CANN team, but not fixed yet.
 # NOTE(drslark): make a temporary patch only for `torch.gather`
 _original_gather = torch.gather
-logger.info("Patching torch.gather for CANN cache bug workaround (torch.gather pollutes buffer caches).")
+logger.debug("Patching torch.gather for CANN cache bug workaround (torch.gather pollutes buffer caches).")
 
 
 def gather(input, dim, index, *, sparse_grad=False, out=None):

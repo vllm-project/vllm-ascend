@@ -17,7 +17,6 @@
 # This file is a part of the vllm-ascend project.
 #
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables, _load_ptr
@@ -61,13 +60,6 @@ class AscendBlockTables(BlockTables):
             self.max_num_batched_tokens,
             dtype=torch.int32,
             device=self.device,
-        )
-        logger.debug(
-            "AscendBlockTables: block_sizes=%s, use_hybrid_blocks=%s, cp_size=%d, cp_rank=%d",
-            self.block_sizes,
-            self.use_hybrid_blocks,
-            cp_size,
-            cp_rank,
         )
 
     def compute_slot_mappings(

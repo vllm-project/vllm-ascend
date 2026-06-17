@@ -246,7 +246,7 @@ class KVCompConfig:
             logger.info("hash_weight_type is 'random', hash_weight will be generated automatically.")
             self.hash_weight = None
         else:
-            logger.info("hash_weight_type is 'fixed', please manually set hash_weight in the config json file.")
+            logger.warning("hash_weight_type is 'fixed', please manually set hash_weight in the config json file.")
 
     # generate MLA config data
     def generate_mla_config_data(
@@ -310,7 +310,7 @@ class KVCompConfig:
             self.hash_weight_kv_lora = None
             self.hash_weight_qk_rope = None
         else:
-            logger.info(
+            logger.warning(
                 "hash_weight_type is 'fixed', "
                 "please manually set hash_weight_kv_lora and hash_weight_qk_rope in the config json file."
             )

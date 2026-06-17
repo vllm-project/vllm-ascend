@@ -20,7 +20,6 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
@@ -51,12 +50,6 @@ class AscendInputBuffers(InputBuffers):
             max_num_reqs + 2,
             dtype=torch.int32,
             device=device,
-        )
-
-        logger.debug(
-            "AscendInputBuffers: max_num_reqs=%d, max_num_tokens=%d",
-            max_num_reqs,
-            max_num_tokens,
         )
 
         # Create seq_lens_cpu and seq_lens_np.
