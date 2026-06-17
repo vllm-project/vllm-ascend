@@ -1281,7 +1281,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths_q,
             "actual_seq_lengths_kv": actual_seq_lengths_kv,
         }
-        wait_for_kv_layer_from_connector(layer_name)
         record_attention_compute_start()
 
         if self.head_padding > 0:
@@ -1673,6 +1672,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
+        if has_prefill:
+            wait_for_kv_layer_from_connector(layer_name)
         # Preprocess for decode tokens
         if has_decode:
             decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata)
@@ -1757,9 +1758,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
-            # TODO prefill kv offload need to remove
-            wait_for_kv_layer_from_connector(layer_name)
-            record_attention_compute_start()
             output_decode = self._forward_decode(
                 decode_preprocess_res.ql_nope,
                 decode_preprocess_res.q_pe,
