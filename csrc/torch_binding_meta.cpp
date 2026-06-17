@@ -1626,6 +1626,22 @@ void store_kv_block(
 
 } 
 
+std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_310_meta(
+    const at::Tensor& a,
+    const at::Tensor& b,
+    const at::Tensor& A_log,
+    const at::Tensor& dt_bias,
+    double beta,
+    double threshold)
+{
+    std::vector<c10::SymInt> out_sym_sizes = {1, a.sym_size(0), a.sym_size(1)};
+
+    at::Tensor g = at::empty_symint(out_sym_sizes, a.options().dtype(at::kFloat));
+    at::Tensor beta_output = at::empty_symint(out_sym_sizes, a.options());
+
+    return std::tuple<at::Tensor, at::Tensor>(g, beta_output);
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1639,6 +1655,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_causal_conv1d_310", &vllm_ascend::meta::npu_causal_conv1d_310_meta);
     // npu_recurrent_gated_delta_rule_310
     ops.impl("npu_recurrent_gated_delta_rule_310", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_310_meta);
+    //npu_fused_gdn_gating_310
+    ops.impl("npu_fused_gdn_gating_310", &vllm_ascend::meta::npu_fused_gdn_gating_310_meta);
 }
 }
 #else
