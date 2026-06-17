@@ -1018,6 +1018,13 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.cache_config.cpu_kvcache_space_bytes = None
 
+            if getattr(vllm_config.cache_config, "calculate_kv_scales", False):
+                logger.warning(
+                    "Parameter is not supported on Ascend NPU. "
+                    "parameter=calculate_kv_scales, action: resetting to False."
+                )
+                vllm_config.cache_config.calculate_kv_scales = False
+
         # ==================== 3. MultiModal Config ====================
         multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
         if multimodal_config:
@@ -1192,6 +1199,34 @@ class NPUPlatform(Platform):
                     ubatch_size,
                 )
                 vllm_config.parallel_config.ubatch_size = 0
+
+            if getattr(vllm_config.parallel_config, "enable_eplb", False):
+                logger.warning(
+                    "'--enable-eplb' is not supported on Ascend NPU. "
+                    "Please use '--additional-config "
+                    "'{\"eplb_config\": {\"expert_map_path\": \"...\", "
+                    "\"num_redundant_experts\": N}}' instead. "
+                    "action: resetting to False."
+                )
+                vllm_config.parallel_config.enable_eplb = False
+
+            if getattr(vllm_config.parallel_config, "enable_elastic_ep", False):
+                logger.warning(
+                    "'--enable-elastic-ep' is not supported on Ascend NPU. "
+                    "Please use '--additional-config "
+                    "'{\"eplb_config\": {...}}' instead. "
+                    "action: resetting to False."
+                )
+                vllm_config.parallel_config.enable_elastic_ep = False
+
+        # ==================== 10. Compilation Config ====================
+        if vllm_config.compilation_config:
+            if getattr(vllm_config.compilation_config, "use_inductor_graph_partition", False) is not None:
+                logger.warning(
+                    "Parameter is not supported on Ascend NPU (use_inductor is False). "
+                    "parameter=use_inductor_graph_partition, action: resetting to None."
+                )
+                vllm_config.compilation_config.use_inductor_graph_partition = False
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
