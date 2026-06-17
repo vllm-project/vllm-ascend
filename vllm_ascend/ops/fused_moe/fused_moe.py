@@ -46,20 +46,16 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
-    vllm_version_is,
 )
 
-if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map
-else:
 
-    def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
-        global_indices = torch.where(expert_map != -1)[0]
-        local_indices = expert_map[global_indices]
-        return ", ".join(
-            f"{local_index.item()}->{global_index.item()}"
-            for local_index, global_index in zip(local_indices, global_indices)
-        )
+def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
+    global_indices = torch.where(expert_map != -1)[0]
+    local_indices = expert_map[global_indices]
+    return ", ".join(
+        f"{local_index.item()}->{global_index.item()}"
+        for local_index, global_index in zip(local_indices, global_indices)
+    )
 
 
 @dataclass
@@ -69,6 +65,8 @@ class FusedMoEResult:
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
     swiglu_limit: float = 0.0
+    swiglu_alpha: float = 1.702
+    swiglu_beta: float = 1.0
 
 
 @dataclass
@@ -79,6 +77,8 @@ class FusedMoEEvents:
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
     swiglu_limit: float = 0.0
+    swiglu_alpha: float = 1.702
+    swiglu_beta: float = 1.0
 
 
 def mock_false():
@@ -179,13 +179,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             input_ids=input_ids,
         )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.21.0"):
-                # In 0.21.0, capturer is a process-wide singleton.
-                from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_global_experts_capturer
-
-                capturer = get_global_experts_capturer()
-            else:
-                capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
+            capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
             if capturer is not None:
                 capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
 
@@ -232,6 +226,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale_bias = None
             w2_scale_bias = None
 
+        if getattr(layer, "swigluoai_uninterleave", False):
+            activation = "swigluoai_uninterleave"
+
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
@@ -255,6 +252,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
+                swiglu_alpha=getattr(layer, "swiglu_alpha", 1.702),
+                swiglu_beta=getattr(layer, "swiglu_beta", 1.0),
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
@@ -421,9 +420,11 @@ class AscendFusedMoE(FusedMoE):
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
         self.local_num_experts = self.global_num_experts // self.ep_size
-        if not vllm_version_is("0.21.0"):
+        if hasattr(self, "expert_map_manager"):
             self.expert_map_manager._local_num_experts = self.local_num_experts
             self.expert_map_manager._expert_map = self._expert_map
+        elif not hasattr(self, "expert_mask"):
+            self.expert_mask = None
         if self._expert_map is not None:
             logger.info_once(
                 "[fused_moe/layer] Expert parallelism is enabled."
@@ -447,7 +448,29 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
         self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
-        self.swiglu_limit = getattr(self.vllm_config.model_config.hf_config, "swiglu_limit", 0)
+        hf_config = self.vllm_config.model_config.hf_config
+        text_config = getattr(
+            self.vllm_config.model_config,
+            "hf_text_config",
+            getattr(hf_config, "text_config", hf_config),
+        )
+        self.swiglu_limit = (
+            self.swiglu_limit
+            if self.swiglu_limit is not None
+            else getattr(text_config, "swiglu_limit", getattr(hf_config, "swiglu_limit", 0))
+        )
+        current_swiglu_alpha = getattr(self, "swiglu_alpha", None)
+        current_swiglu_beta = getattr(self, "swiglu_beta", None)
+        self.swiglu_alpha = (
+            current_swiglu_alpha
+            if current_swiglu_alpha is not None
+            else getattr(text_config, "swiglu_alpha", getattr(hf_config, "swiglu_alpha", 1.702))
+        )
+        self.swiglu_beta = (
+            current_swiglu_beta
+            if current_swiglu_beta is not None
+            else getattr(text_config, "swiglu_beta", getattr(hf_config, "swiglu_beta", 1.0))
+        )
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
@@ -732,6 +755,8 @@ class AscendFusedMoE(FusedMoE):
                 before_gmm2_evt=fused_experts_results.before_gmm2_evt,
                 before_combine_evt=fused_experts_results.before_combine_evt,
                 swiglu_limit=fused_experts_results.swiglu_limit,
+                swiglu_alpha=fused_experts_results.swiglu_alpha,
+                swiglu_beta=fused_experts_results.swiglu_beta,
             )
         else:
             # The vLLM FusedMoE forward_impl does not return events.
@@ -769,6 +794,7 @@ class AscendFusedMoE(FusedMoE):
                 # Execute activation concurrently with gmm2.
 
                 maybe_wait_event(fused_moe_evts.before_gmm2)
+                is_swigluoai_uninterleave = getattr(self, "swigluoai_uninterleave", False)
                 quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
                     x=hidden_states,
                     weight_scale=self._shared_experts.gate_up_proj.weight_scale_fp32,
@@ -781,6 +807,8 @@ class AscendFusedMoE(FusedMoE):
                     quant_mode=1,
                     swiglu_mode=1,
                     clamp_limit=fused_moe_evts.swiglu_limit,
+                    glu_alpha=fused_moe_evts.swiglu_alpha if is_swigluoai_uninterleave else 1.0,
+                    glu_bias=fused_moe_evts.swiglu_beta if is_swigluoai_uninterleave else 0.0,
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.
@@ -890,6 +918,8 @@ class AscendFusedMoE(FusedMoE):
                     before_gmm2=fused_moe_results.before_gmm2_evt,
                     before_combine=fused_moe_results.before_combine_evt,
                     swiglu_limit=fused_moe_results.swiglu_limit,
+                    swiglu_alpha=fused_moe_results.swiglu_alpha,
+                    swiglu_beta=fused_moe_results.swiglu_beta,
                 ),
             )
         return shared_out, routed_out
