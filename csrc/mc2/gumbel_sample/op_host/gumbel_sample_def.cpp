@@ -71,7 +71,7 @@ public:
 
         // target_soc_shorts = ["ascend910b"]（覆盖 Ascend910B2 / Ascend910B3）
         this->AICore().AddConfig("ascend910b", aicoreConfig);
-        this->AICore().AddConfig("ascend910_93", aicore_config);
+        this->AICore().AddConfig("ascend910_93", aicoreConfig);
     }
 };
 
