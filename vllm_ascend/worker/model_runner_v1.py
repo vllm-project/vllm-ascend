@@ -5269,3 +5269,84 @@ class NPUModelRunner(GPUModelRunner):
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
         )
+
+
+def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
+    return int(tensor[1, :].min().item())
+
+
+def _get_gpu_model_runner_module_name(model_runner) -> str:
+    gpu_model_runner_cls = next(
+        (cls for cls in model_runner.__class__.__mro__ if cls.__name__ == "GPUModelRunner"),
+        None,
+    )
+    if gpu_model_runner_cls is None:
+        raise TypeError(
+            "Could not find GPUModelRunner in the MRO. "
+            "The class hierarchy may have changed."
+        )
+    return gpu_model_runner_cls.__module__
+
+
+@contextmanager
+def _torch_cuda_wrapper():
+    class _EventPlaceholder:
+        def __init__(self, *args, **kwargs) -> None:
+            self.record = lambda *a, **kw: None
+            self.synchronize = lambda *a, **kw: None
+            self.wait = lambda *a, **kw: None
+            self.query = lambda *a, **kw: True
+
+    class _StreamPlaceholder:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    try:
+        torch.Event = torch.npu.Event
+        torch.cuda.Event = torch.npu.Event
+        torch.cuda.Stream = torch.npu.Stream
+        torch.cuda.default_stream = torch.npu.default_stream
+        torch.cuda.current_stream = torch.npu.current_stream
+        torch.cuda.stream = torch.npu.stream
+        torch.cuda.synchronize = torch.npu.synchronize
+        torch.cuda.mem_get_info = torch.npu.mem_get_info
+        yield
+    except Exception as e:
+        torch.cuda.Event = _EventPlaceholder
+        torch.cuda.Stream = _StreamPlaceholder
+        torch.cuda.default_stream = _StreamPlaceholder
+        torch.cuda.current_stream = _StreamPlaceholder
+        torch.cuda.stream = _StreamPlaceholder
+        torch.cuda.synchronize = _StreamPlaceholder
+        torch.cuda.mem_get_info = _StreamPlaceholder
+        raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
+    finally:
+        torch.cuda.Event = _EventPlaceholder
+        torch.cuda.Stream = torch.cuda.Stream
+        torch.cuda.default_stream = torch.npu.default_stream
+        torch.cuda.current_stream = torch.npu.current_stream
+        torch.cuda.stream = torch.npu.stream
+        torch.cuda.synchronize = torch.npu.synchronize
+        torch.cuda.mem_get_info = torch.npu.mem_get_info
+
+
+@contextmanager
+def _replace_gpu_model_runner_function_wrapper(target_module_name):
+    try:
+        target_module = sys.modules[target_module_name]
+        setattr(target_module, "graph_capture", graph_capture)
+        yield
+    except Exception as e:
+        raise RuntimeError(f"NPUModelRunner failed, error is {e}")
+    finally:
+        setattr(target_module, "graph_capture", graph_capture)
+
+
+@contextmanager
+def update_pass_config(model_runner):
+    try:
+        original_pass_config_sp = model_runner.compilation_config.pass_config.enable_sp
+        model_runner.compilation_config.pass_config.enable_sp = enable_sp(model_runner.vllm_config)
+        yield
+    finally:
+        model_runner.compilation_config.pass_config.enable_sp = original_pass_config_sp
