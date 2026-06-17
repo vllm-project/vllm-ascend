@@ -23,7 +23,8 @@ on:
 
 jobs:
   slashCommandDispatch:
-    runs-on: ubuntu-latest
+    if: github.event.issue.pull_request != null && github.event.comment.user.type == 'User'
+    runs-on: linux-amd64-cpu-8-hk
     steps:
       - name: Slash Command Dispatch
         uses: peter-evans/slash-command-dispatch@v5
@@ -52,6 +53,6 @@ jobs:
               {
                 "command": "nightly",
                 "permission": "none",
-                "issue_type": "both"
+                "issue_type": "pull-request"
               }
             ]

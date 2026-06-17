@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   triage:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     if: |
       startsWith(github.event.issue.title, '[Bug]:') ||
       startsWith(github.event.issue.title, '[Installation]:') ||

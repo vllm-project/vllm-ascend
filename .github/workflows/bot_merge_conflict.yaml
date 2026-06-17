@@ -10,7 +10,7 @@ on:
 
 jobs:
   main:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     steps:
       - name: check if prs are dirty
         uses: eps1lon/actions-label-merge-conflict@v3
