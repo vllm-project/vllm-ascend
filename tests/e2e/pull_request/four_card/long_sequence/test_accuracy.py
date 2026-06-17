@@ -72,9 +72,9 @@ QWEN3_NEXT_GOLDEN = [
 ]
 
 DSV3_2_GOLDEN = [
-    "The capital of France isbearerdenomorthal",
+    "The capital of France isbearerhaloce梗",
     "Hello, my name is Tom, I am" + "ERIC slicpacelike Chop",
-    "The president of United States is平行astra unbehetroni",
+    "The president of United States isoint054 Rund959arki",
 ]
 
 DEEPSEEK_MTP3_GOLDEN = [
