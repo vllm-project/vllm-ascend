@@ -1,5 +1,6 @@
 model_name: "AI-ModelScope/NVLM-D-72B"
 hardware: "Atlas A2 Series"
+model_type: "vllm-vlm"
 
 test_cases:
   - model: "AI-ModelScope/NVLM-D-72B"
@@ -20,25 +21,21 @@ test_cases:
 serve:
   tensor_parallel_size: 4
   dtype: bfloat16
-  max_model_len: 4096
+  max_model_len: 16384
   gpu_memory_utilization: 0.90
   trust_remote_code: true
-  enforce_eager: true
 
 envs:
   OMP_NUM_THREADS: "4"
-  VLLM_USE_V1: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
 
 tasks:
-  - name: "gsm8k"
-    metrics:
-      - name: "exact_match,strict-match"
-        value: 0.35
-      - name: "exact_match,flexible-extract"
-        value: 0.47
+- name: "mmmu_val"
+  metrics:
+  - name: "acc,none"
+    value: 0.53
 
-num_fewshot: 5
+num_fewshot: 0
 apply_chat_template: true
 fewshot_as_multiturn: false
 batch_size: "auto"
