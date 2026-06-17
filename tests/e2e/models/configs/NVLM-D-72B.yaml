@@ -1,6 +1,6 @@
 model_name: "AI-ModelScope/NVLM-D-72B"
-hardware: "Atlas A2 Series"
 model_type: "vllm-vlm"
+hardware: "Atlas A2 Series"
 
 serve:
   tensor_parallel_size: 4
