@@ -214,114 +214,24 @@ def test_causal_conv1d(dim, width, extra_state_len, seq_len, has_bias,
 @pytest.mark.parametrize('itype', [torch.bfloat16])
 @pytest.mark.parametrize('silu_activation', [True])
 @pytest.mark.parametrize('has_bias', [True])
-@pytest.mark.parametrize('seq_len_combos', [
-    ([128], [256], [128, 256]),
-    ([64, 512], [64, 512]),
-    ([128, 256, 512], [128, 256, 512]),
-])
+@pytest.mark.parametrize('batch_size', [4, 16])
+@pytest.mark.parametrize('seq_len_base', [128, 512])
+@pytest.mark.parametrize('seq_len_fluctuation', [0, 64])
 @pytest.mark.parametrize('width', [4])
 @pytest.mark.parametrize('dim', [2048])
 def test_causal_conv1d_fn_batch_consistency(
-    dim, width, seq_len_combos, has_bias, silu_activation, itype,
-    has_initial_state):
+    dim, width, batch_size, seq_len_base, seq_len_fluctuation, has_bias,
+    silu_activation, itype, has_initial_state):
 
     torch.random.manual_seed(42)
     device = "npu"
     activation = None if not silu_activation else "silu"
 
-    if len(seq_len_combos) == 3:
-        seq_len_single_a, seq_len_single_b, seq_len_batch = seq_len_combos
-    else:
-        seq_len_single_a, seq_len_batch = seq_len_combos
-        seq_len_single_b = seq_len_single_a
-
-    weight = torch.randn(dim, width, device=device, dtype=itype)
-    bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
-
-    all_seq_lens = seq_len_batch
-    num_seq = len(all_seq_lens)
-    cu_seqlen = sum(all_seq_lens)
-    state_len = width - 1
-
-    x_all = torch.randn(cu_seqlen, dim, device=device, dtype=itype)
-
-    if has_initial_state:
-        conv_states_all = torch.randn(num_seq, state_len, dim,
-                                      device=device, dtype=itype)
-    else:
-        conv_states_all = torch.zeros(num_seq, state_len, dim,
-                                      device=device, dtype=itype)
-    has_initial_state_tensor = torch.tensor([has_initial_state] * num_seq,
-                                            device=device, dtype=torch.bool)
-
-    query_start_loc_batch = torch.cumsum(
-        torch.tensor([0] + all_seq_lens, device=device, dtype=torch.int32),
-        dim=0)
-    cache_indices_batch = torch.arange(num_seq, device=device, dtype=torch.int32)
-
-    x_batch = x_all.transpose(0, 1)
-    conv_states_batch = conv_states_all.transpose(-1, -2).clone()
-
-    out_batch = causal_conv1d_fn(
-        x_batch,
-        weight,
-        bias=bias,
-        activation=activation,
-        conv_states=conv_states_batch,
-        has_initial_state=has_initial_state_tensor,
-        cache_indices=cache_indices_batch,
-        query_start_loc=query_start_loc_batch,
-    )
-
-    offset = 0
-    for seq_idx, sl in enumerate(all_seq_lens):
-        x_single = x_all[offset:offset + sl].transpose(0, 1)
-        conv_states_single = conv_states_all[seq_idx:seq_idx + 1].transpose(
-            -1, -2).clone()
-        has_init_single = torch.tensor([has_initial_state],
-                                       device=device, dtype=torch.bool)
-        cache_idx_single = torch.tensor([0], device=device, dtype=torch.int32)
-        qsl_single = torch.tensor([0, sl], device=device, dtype=torch.int32)
-
-        out_single = causal_conv1d_fn(
-            x_single,
-            weight,
-            bias=bias,
-            activation=activation,
-            conv_states=conv_states_single,
-            has_initial_state=has_init_single,
-            cache_indices=cache_idx_single,
-            query_start_loc=qsl_single,
-        )
-
-        out_batch_seq = out_batch[:, offset:offset + sl]
-        validate_cmp(out_batch_seq, out_single, itype)
-        validate_cmp(conv_states_batch[seq_idx:seq_idx + 1],
-                     conv_states_single, itype)
-
-        offset += sl
-
-    gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
-
-
-@pytest.mark.parametrize('has_initial_state', [False, True])
-@pytest.mark.parametrize('itype', [torch.bfloat16])
-@pytest.mark.parametrize('silu_activation', [True])
-@pytest.mark.parametrize('has_bias', [True])
-@pytest.mark.parametrize('seq_len', [[128, 256], [64, 512, 1024]])
-@pytest.mark.parametrize('width', [4])
-@pytest.mark.parametrize('dim', [2048])
-def test_npu_causal_conv1d_custom_batch_consistency(
-    dim, width, seq_len, has_bias, silu_activation, itype,
-    has_initial_state):
-
-    torch.random.manual_seed(42)
-    enable_custom_op()
-    device = "npu"
-    activation = None if not silu_activation else "silu"
-    activation_num = 1 if activation else 0
+    seq_len = [
+        seq_len_base + torch.randint(-seq_len_fluctuation,
+                                     seq_len_fluctuation + 1, (1,)).item()
+        for _ in range(batch_size)
+    ]
 
     weight = torch.randn(dim, width, device=device, dtype=itype)
     bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
@@ -342,15 +252,108 @@ def test_npu_causal_conv1d_custom_batch_consistency(
                                             device=device, dtype=torch.bool)
 
     query_start_loc_batch = torch.cumsum(
+        torch.tensor([0] + seq_len, device=device, dtype=torch.int32),
+        dim=0)
+    cache_indices_batch = torch.arange(num_seq, device=device, dtype=torch.int32)
+
+    x_batch = x_all.transpose(0, 1)
+    conv_states_batch = conv_states_all.transpose(-1, -2).clone()
+
+    out_batch = causal_conv1d_fn(
+        x_batch,
+        weight,
+        bias=bias,
+        activation=activation,
+        conv_states=conv_states_batch,
+        has_initial_state=has_initial_state_tensor,
+        cache_indices=cache_indices_batch,
+        query_start_loc=query_start_loc_batch,
+    )
+
+    offset = 0
+    for seq_idx, sl in enumerate(seq_len):
+        x_single = x_all[offset:offset + sl].transpose(0, 1)
+        conv_states_single = conv_states_all[seq_idx:seq_idx + 1].transpose(
+            -1, -2).clone()
+        has_init_single = torch.tensor([has_initial_state],
+                                       device=device, dtype=torch.bool)
+        cache_idx_single = torch.tensor([0], device=device, dtype=torch.int32)
+        qsl_single = torch.tensor([0, sl], device=device, dtype=torch.int32)
+
+        out_single = causal_conv1d_fn(
+            x_single,
+            weight,
+            bias=bias,
+            activation=activation,
+            conv_states=conv_states_single,
+            has_initial_state=has_init_single,
+            cache_indices=cache_idx_single,
+            query_start_loc=qsl_single,
+        )
+
+        validate_cmp(out_batch[:, offset:offset + sl], out_single, itype)
+        validate_cmp(conv_states_batch[seq_idx:seq_idx + 1],
+                     conv_states_single, itype)
+
+        offset += sl
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize('has_initial_state', [False, True])
+@pytest.mark.parametrize('itype', [torch.bfloat16])
+@pytest.mark.parametrize('silu_activation', [True])
+@pytest.mark.parametrize('has_bias', [True])
+@pytest.mark.parametrize('batch_size', [4, 16])
+@pytest.mark.parametrize('seq_len_base', [128, 512])
+@pytest.mark.parametrize('seq_len_fluctuation', [0, 64])
+@pytest.mark.parametrize('width', [4])
+@pytest.mark.parametrize('dim', [2048])
+def test_npu_causal_conv1d_custom_batch_consistency(
+    dim, width, batch_size, seq_len_base, seq_len_fluctuation, has_bias,
+    silu_activation, itype, has_initial_state):
+
+    torch.random.manual_seed(42)
+    enable_custom_op()
+    device = "npu"
+    activation = None if not silu_activation else "silu"
+    activation_num = 1 if activation else 0
+
+    seq_len = [
+        seq_len_base + torch.randint(-seq_len_fluctuation,
+                                     seq_len_fluctuation + 1, (1,)).item()
+        for _ in range(batch_size)
+    ]
+
+    weight = torch.randn(dim, width, device=device, dtype=itype)
+    bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
+
+    num_seq = len(seq_len)
+    cu_seqlen = sum(seq_len)
+    state_len = width - 1
+
+    x_all = torch.randn(cu_seqlen, dim, device=device, dtype=itype)
+
+    if has_initial_state:
+        conv_states_init = torch.randn(num_seq, state_len, dim,
+                                       device=device, dtype=itype)
+    else:
+        conv_states_init = torch.zeros(num_seq, state_len, dim,
+                                       device=device, dtype=itype)
+    has_initial_state_tensor = torch.tensor([has_initial_state] * num_seq,
+                                            device=device, dtype=torch.bool)
+
+    query_start_loc_batch = torch.cumsum(
         torch.tensor([0] + seq_len, device=device, dtype=torch.int32), dim=0)
     cache_indices_batch = torch.arange(num_seq, device=device, dtype=torch.int32)
 
-    x_batch = x_all.transpose(-1, -2)
     weight_T = weight.transpose(-1, -2)
-    conv_states_batch = conv_states_all.clone()
+    conv_states_batch = conv_states_init.clone()
 
     out_batch = torch.ops._C_ascend.npu_causal_conv1d_custom(
-        x_batch,
+        x_all,
         weight_T,
         conv_state=conv_states_batch,
         bias_opt=bias,
@@ -361,19 +364,18 @@ def test_npu_causal_conv1d_custom_batch_consistency(
         activation_mode=activation_num,
         pad_slot_id=PAD_SLOT_ID,
         run_mode=0,
-    ).transpose(-1, -2)
+    )
 
     offset = 0
     for seq_idx, sl in enumerate(seq_len):
-        x_single = x_all[offset:offset + sl].transpose(-1, -2)
-        conv_states_single = conv_states_all[seq_idx:seq_idx + 1].clone()
+        conv_states_single = conv_states_init[seq_idx:seq_idx + 1].clone()
         has_init_single = torch.tensor([has_initial_state],
                                        device=device, dtype=torch.bool)
         cache_idx_single = torch.tensor([0], device=device, dtype=torch.int32)
         qsl_single = torch.tensor([0, sl], device=device, dtype=torch.int32)
 
         out_single = torch.ops._C_ascend.npu_causal_conv1d_custom(
-            x_single,
+            x_all[offset:offset + sl],
             weight_T,
             conv_state=conv_states_single,
             bias_opt=bias,
@@ -384,10 +386,9 @@ def test_npu_causal_conv1d_custom_batch_consistency(
             activation_mode=activation_num,
             pad_slot_id=PAD_SLOT_ID,
             run_mode=0,
-        ).transpose(-1, -2)
+        )
 
-        out_batch_seq = out_batch[offset:offset + sl]
-        validate_cmp(out_batch_seq, out_single, itype)
+        validate_cmp(out_batch[offset:offset + sl], out_single, itype)
         validate_cmp(conv_states_batch[seq_idx:seq_idx + 1],
                      conv_states_single, itype)
 
@@ -401,10 +402,10 @@ def test_npu_causal_conv1d_custom_batch_consistency(
 @pytest.mark.parametrize('itype', [torch.bfloat16])
 @pytest.mark.parametrize('silu_activation', [True])
 @pytest.mark.parametrize('has_bias', [True])
+@pytest.mark.parametrize('batch_size', [4, 64])
 @pytest.mark.parametrize('seqlen', [1, 3])
 @pytest.mark.parametrize('width', [4])
 @pytest.mark.parametrize('dim', [2048])
-@pytest.mark.parametrize('batch_size', [3, 64])
 def test_causal_conv1d_update_npu_batch_consistency(
     batch_size, dim, width, seqlen, has_bias, silu_activation, itype):
 
@@ -421,14 +422,14 @@ def test_causal_conv1d_update_npu_batch_consistency(
         dtype=torch.int32, device=device)
 
     x_all = torch.randn(batch_size, seqlen, dim, device=device, dtype=itype)
-    conv_state_all = torch.randn(total_entries, width - 1, dim,
-                                 device=device, dtype=itype).transpose(1, 2)
+    conv_state_storage_init = torch.randn(total_entries, width - 1, dim,
+                                          device=device, dtype=itype)
 
-    x_batch = x_all.transpose(1, 2)
-    conv_state_batch = conv_state_all.clone()
+    conv_state_storage_batch = conv_state_storage_init.clone()
+    conv_state_batch = conv_state_storage_batch.transpose(1, 2)
 
     out_batch = causal_conv1d_update(
-        x_batch,
+        x_all.transpose(1, 2),
         conv_state_batch,
         weight,
         bias,
@@ -438,12 +439,12 @@ def test_causal_conv1d_update_npu_batch_consistency(
     )
 
     for i in range(batch_size):
-        x_single = x_all[i:i + 1].transpose(1, 2)
+        conv_state_storage_single = conv_state_storage_init.clone()
+        conv_state_single = conv_state_storage_single.transpose(1, 2)
         single_idx = conv_state_indices[i:i + 1]
-        conv_state_single = conv_state_all.clone()
 
         out_single = causal_conv1d_update(
-            x_single,
+            x_all[i:i + 1].transpose(1, 2),
             conv_state_single,
             weight,
             bias,
@@ -453,8 +454,9 @@ def test_causal_conv1d_update_npu_batch_consistency(
         )
 
         validate_cmp(out_batch[i:i + 1], out_single, itype)
-        validate_cmp(conv_state_batch[single_idx[0]:single_idx[0] + 1],
-                     conv_state_single[single_idx[0]:single_idx[0] + 1], itype)
+        cache_idx = conv_state_indices[i].item()
+        validate_cmp(conv_state_storage_batch[cache_idx:cache_idx + 1],
+                     conv_state_storage_single[cache_idx:cache_idx + 1], itype)
 
     gc.collect()
     torch.npu.empty_cache()
@@ -464,15 +466,24 @@ def test_causal_conv1d_update_npu_batch_consistency(
 @pytest.mark.parametrize('itype', [torch.bfloat16])
 @pytest.mark.parametrize('silu_activation', [True])
 @pytest.mark.parametrize('has_bias', [True])
-@pytest.mark.parametrize('seq_len', [[2, 4], [1, 3, 5]])
+@pytest.mark.parametrize('batch_size', [4, 16])
+@pytest.mark.parametrize('seq_len_base', [2, 8])
+@pytest.mark.parametrize('seq_len_fluctuation', [0, 4])
 @pytest.mark.parametrize('width', [4])
 @pytest.mark.parametrize('dim', [2048])
 def test_causal_conv1d_update_npu_varlen_batch_consistency(
-    dim, width, seq_len, has_bias, silu_activation, itype):
+    dim, width, batch_size, seq_len_base, seq_len_fluctuation, has_bias,
+    silu_activation, itype):
 
     torch.random.manual_seed(42)
     device = "npu"
     activation = None if not silu_activation else "silu"
+
+    seq_len = [
+        seq_len_base + torch.randint(-seq_len_fluctuation,
+                                     seq_len_fluctuation + 1, (1,)).item()
+        for _ in range(batch_size)
+    ]
 
     num_seq = len(seq_len)
     total_tokens = sum(seq_len)
@@ -486,17 +497,17 @@ def test_causal_conv1d_update_npu_varlen_batch_consistency(
         dtype=torch.int32, device=device)
 
     x_all = torch.randn(total_tokens, dim, device=device, dtype=itype)
-    conv_state_all = torch.randn(total_entries, dim, width - 1,
-                                 device=device, dtype=itype)
+    conv_state_storage_init = torch.randn(total_entries, width - 1, dim,
+                                          device=device, dtype=itype)
 
     query_start_loc = torch.cumsum(
         torch.tensor([0] + seq_len, device=device, dtype=torch.int32), dim=0)
 
-    x_varlen = x_all
-    conv_state_varlen = conv_state_all.clone()
+    conv_state_storage_varlen = conv_state_storage_init.clone()
+    conv_state_varlen = conv_state_storage_varlen.transpose(1, 2)
 
     out_varlen = causal_conv1d_update(
-        x_varlen,
+        x_all,
         conv_state_varlen,
         weight,
         bias,
@@ -509,13 +520,13 @@ def test_causal_conv1d_update_npu_varlen_batch_consistency(
 
     offset = 0
     for seq_idx, sl in enumerate(seq_len):
-        x_single = x_all[offset:offset + sl]
         single_idx = conv_state_indices[seq_idx:seq_idx + 1]
         qsl_single = torch.tensor([0, sl], device=device, dtype=torch.int32)
-        conv_state_single = conv_state_all.clone()
+        conv_state_storage_single = conv_state_storage_init.clone()
+        conv_state_single = conv_state_storage_single.transpose(1, 2)
 
         out_single = causal_conv1d_update(
-            x_single,
+            x_all[offset:offset + sl],
             conv_state_single,
             weight,
             bias,
@@ -527,8 +538,9 @@ def test_causal_conv1d_update_npu_varlen_batch_consistency(
         )
 
         validate_cmp(out_varlen[offset:offset + sl], out_single, itype)
-        validate_cmp(conv_state_varlen[single_idx[0]:single_idx[0] + 1],
-                     conv_state_single[single_idx[0]:single_idx[0] + 1], itype)
+        cache_idx = conv_state_indices[seq_idx].item()
+        validate_cmp(conv_state_storage_varlen[cache_idx:cache_idx + 1],
+                     conv_state_storage_single[cache_idx:cache_idx + 1], itype)
 
         offset += sl
 
