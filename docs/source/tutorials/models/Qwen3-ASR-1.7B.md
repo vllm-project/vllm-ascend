@@ -57,19 +57,19 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --max-model-len 4096 \
   --gpu-memory-utilization 0.9 \
   --enforce-eager \
-  --port 8000 
+  --port 8000
 ```
 
 ### Atlas 300I DUO
 ``` bash
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
-  --port 8000 \
   --tensor-parallel-size 1 \
   --gpu_memory_utilization 0.9 \
   --dtype float16 \
   --max-model-len 4096 \
   --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}'
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
+  --port 8000
 
 ```
 
@@ -121,7 +121,7 @@ In the current evaluation, **Qwen3-ASR-1.7B** processed **100 samples** in appro
 |Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Total Samples | 100 |
 |Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Total Runtime | 57 s |
 |Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Average Throughput | 1.73 samples/s |
-|Atlas 300I DUO| Performance | ai-shell1       wav/ test (7176 samples) | Total Runtime | 3182 s |
+|Atlas 300I DUO| Performance | ai-shell1 wav/test (7176 samples) | Total Runtime | 3182 s |
 
 ### Remarks
 
