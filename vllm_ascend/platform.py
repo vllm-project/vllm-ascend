@@ -146,7 +146,7 @@ def prune_capture_sizes_for_950(vllm_config):
     update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
     logger.warning(
         "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility"
-        + "and this warning will be cleared soon.",
+        "and this warning will be cleared soon.",
         len(original_sizes),
         MAX_CAPTURE_SIZES_FOR_950,
     )
