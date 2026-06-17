@@ -530,6 +530,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
                 slot_mapping_cpu=self.runner.input_batch.block_table[0].slot_mapping.cpu,
                 positions=self.runner.positions,
+                # MTP graph-mode fix: DSA build_decode_metadata indexes positions_cpu;
+                # mirror main model (model_runner_v1.py) so drafter graph capture doesn't hit None.
+                positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
@@ -550,9 +553,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if self.pcp_size * self.dcp_size > 1 and draft_step > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                     common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
+                # MTP graph-mode fix: DSA build() asserts *_ratio_to_sas_metadata is not None;
+                # mirror _propose() so drafter graph capture passes empty sas_metadata dicts.
+                extra_attn_metadata_args: dict = {}
+                if self.use_compress:
+                    extra_attn_metadata_args = dict(
+                        prefill_ratio_to_sas_metadata=dict(),
+                        decode_ratio_to_sas_metadata=dict(),
+                        common_ratio_to_sas_metadata=dict(),
+                        block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
+                    )
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
                     AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
+                    **extra_attn_metadata_args,
                 )
                 per_layer_attn_metadata = dict()
                 for layer_name in self.attn_layer_names:
