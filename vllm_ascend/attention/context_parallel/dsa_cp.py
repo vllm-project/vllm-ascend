@@ -12,7 +12,6 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
@@ -21,9 +20,7 @@ from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
-    attention_calculation_stream,
     get_ascend_device_type,
-    npu_stream_switch,
     olora_tp_enable,
 )
 
@@ -923,9 +920,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         self.attn_sink = kwargs["attn_sink"]
 
-        ascend_config = get_ascend_config()
-        self.multistream_dsa_preprocess = ascend_config.multistream_dsa_preprocess
-
         self.vllm_config = get_current_vllm_config()
 
         # indexer param
@@ -1027,17 +1021,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             (swa_metadata,) = attn_metadata
         common_attn_metadata = attn_metadata[0]
 
-        overlap_hidden_states_allgather = self.multistream_dsa_preprocess and need_gather_q_kv
-        wait_hidden_states_local_event = (
-            torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
-        )
-        with npu_stream_switch(attention_calculation_stream(), enabled=overlap_hidden_states_allgather):
-            if wait_hidden_states_local_event:
-                torch.npu.current_stream().wait_event(wait_hidden_states_local_event)
-            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
-            wait_hidden_states_allgather_event = (
-                torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
-            )
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
 
         assert common_attn_metadata.req_metadata is not None
         assert swa_metadata.req_metadata is not None
@@ -1109,9 +1093,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-
-        if wait_hidden_states_allgather_event:
-            torch.npu.current_stream().wait_event(wait_hidden_states_allgather_event)
 
         kv = self.wkv(hidden_states)
         kv = self.kv_norm(kv)
