@@ -12,7 +12,7 @@ Refer to the [supported models matrix](../../user_guide/support_matrix/supported
 
 ### Model Weight
 
-`CohereLabs/c4ai-command-r-v01` (BF16): requires **4 × Atlas 800I A2 (64G)** NPUs. [Model weight](https://huggingface.co/CohereLabs/c4ai-command-r-v01)
+`CohereLabs/c4ai-command-r-v01` (BF16): requires **4 × Atlas 800I A2 (64G)** NPUs. [Download model weight](https://www.modelscope.cn/models/AI-ModelScope/c4ai-command-r-v01)
 
 It is recommended to download the model weight to a shared cache directory (for example, `/root/.cache/`).
 
