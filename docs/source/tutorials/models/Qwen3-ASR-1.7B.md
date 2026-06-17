@@ -51,7 +51,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 ## Deployment
 
 ### Atlas 300I A2 2UP
-```bash
+```shell
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --tensor-parallel-size 1 \
   --max-model-len 4096 \
@@ -61,7 +61,7 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
 ```
 
 ### Atlas 300I DUO
-```bash
+```shell
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --tensor-parallel-size 1 \
   --gpu_memory_utilization 0.9 \
