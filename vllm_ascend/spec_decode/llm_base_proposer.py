@@ -502,7 +502,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         batch_descriptor=None,
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
-        profile_cpp=False,
     ):
         (
             num_tokens,
@@ -590,8 +589,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # TODO: temporarily hack here, we should find out batch_size for profile_run
         if is_profile:
             batch_size = min(batch_size, self.runner.max_num_reqs)
-        elif profile_cpp:
-            batch_size = 1
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = (None, None)
