@@ -56,7 +56,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
-from vllm_ascend.cpu_binding import bind_cpus, get_cpu_binding_rank
+from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
@@ -783,7 +783,10 @@ class NPUWorker(WorkerBase):
         # Bind after warmup so hot allocations are already materialized on the
         # worker process before migratepages/taskset run.
         if get_ascend_config().enable_cpu_binding:
-            bind_cpus(get_cpu_binding_rank(self.local_rank, self.parallel_config))
+            try:
+                bind_cpus(self.local_rank)
+            except Exception as e:
+                logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
         if has_kv_transfer_group():
             try:
                 connector = get_kv_transfer_group()

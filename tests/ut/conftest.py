@@ -137,10 +137,10 @@ def _clear_enable_sp_before_test():
 
 @pytest.fixture(autouse=True)
 def _mock_ascend_store_deps(request):
-    # ascend_store code imports vllm_ascend helpers (get_ascend_config,
-    # get_cpu_binding_rank, AttentionComputeStartGate, ...) which _mock_deps.py
-    # no longer mocks globally (mutating the real modules leaked into other
-    # UTs). Mock them per-test, scoped to the ascend_store tests only.
+    # ascend_store code imports vllm_ascend helpers (AttentionComputeStartGate,
+    # get/reset_attention_compute_start_gate, ...) which _mock_deps.py no longer
+    # mocks globally (mutating the real modules leaked into other UTs). Mock them
+    # per-test, scoped to the ascend_store tests only.
     if "distributed/ascend_store/" not in request.node.nodeid:
         yield
         return
@@ -148,13 +148,8 @@ def _mock_ascend_store_deps(request):
 
     _pfx = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"
     with (
-        patch(f"{_pfx}.pool_worker.get_ascend_config"),
-        patch(f"{_pfx}.pool_worker.get_cpu_binding_rank", return_value=0),
-        patch(f"{_pfx}.pool_worker.get_memcache_client_cpus", return_value=[0, 1]),
-        patch(f"{_pfx}.pool_worker.bind_thread_to_cpus"),
         patch(f"{_pfx}.pool_worker.get_attention_compute_start_gate"),
         patch(f"{_pfx}.pool_worker.reset_attention_compute_start_gate"),
-        patch(f"{_pfx}.memcache_utils.get_memcache_client_cpus", return_value=[0, 1]),
         patch(f"{_pfx}.config_data.AttentionComputeStartGate", type("AttentionComputeStartGate", (), {})),
     ):
         yield
