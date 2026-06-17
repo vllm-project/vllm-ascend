@@ -82,6 +82,8 @@ class FusedExpertsResult:
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
     swiglu_limit: float = 0.0
+    swiglu_alpha: float = 1.702
+    swiglu_beta: float = 1.0
 
 
 class MoECommMethod(ABC):
@@ -168,6 +170,8 @@ class MoECommMethod(ABC):
             group_list_type=token_dispatch_output.group_list_type,
             expert_tokens=token_dispatch_output.group_list,
             swiglu_limit=fused_experts_input.swiglu_limit,
+            swiglu_alpha=fused_experts_input.swiglu_alpha,
+            swiglu_beta=fused_experts_input.swiglu_beta,
         )
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
@@ -344,5 +348,9 @@ class FusedMC2CommImpl(MoECommMethod):
         else:
             raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")
         return FusedExpertsResult(
-            routed_out=out, expert_tokens=expert_tokens, swiglu_limit=fused_experts_input.swiglu_limit
+            routed_out=out,
+            expert_tokens=expert_tokens,
+            swiglu_limit=fused_experts_input.swiglu_limit,
+            swiglu_alpha=fused_experts_input.swiglu_alpha,
+            swiglu_beta=fused_experts_input.swiglu_beta,
         )
