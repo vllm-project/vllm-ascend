@@ -72,7 +72,7 @@ else:
 
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
-MAX_NUM_BATCH_SIZES = 4
+MAX_CAPTURE_SIZES_FOR_950 = 4
 
 
 def _get_npu_smi_field(lines: list[str], key: str) -> str | None:
@@ -133,15 +133,15 @@ def config_deprecated_logging():
     warnings_logger.propagate = False
 
 
-def update_aclgraph_sizes(vllm_config):
+def prune_capture_sizes_for_950(vllm_config):
     """Reduce the number of stages captured by cudagraph"""
     original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
     if not original_sizes:
         return
-    if len(original_sizes) <= MAX_NUM_BATCH_SIZES:
+    if len(original_sizes) <= MAX_CAPTURE_SIZES_FOR_950:
         return
-    step = (len(original_sizes) - 1) / (MAX_NUM_BATCH_SIZES - 1)
-    indices = [round(i * step) for i in range(MAX_NUM_BATCH_SIZES)]
+    step = (len(original_sizes) - 1) / (MAX_CAPTURE_SIZES_FOR_950 - 1)
+    indices = [round(i * step) for i in range(MAX_CAPTURE_SIZES_FOR_950)]
     indices[0], indices[-1] = 0, len(original_sizes) - 1
     sampled_sizes = [original_sizes[i] for i in indices]
     update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
@@ -604,7 +604,7 @@ class NPUPlatform(Platform):
             )
             # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
             if get_ascend_device_type() == AscendDeviceType.A5:
-                update_aclgraph_sizes(vllm_config)
+                prune_capture_sizes_for_950(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,
