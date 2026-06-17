@@ -42,9 +42,22 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
 
         discard_sampled_tokens_req_indices = discard_request_indices[:num_discarded_requests]
-        valid_sampled_token_ids_gpu = sampled_token_ids.clone()
+        valid_sampled_token_ids_gpu = sampled_token_ids
         if discard_sampled_tokens_req_indices.numel() != 0:
-            valid_sampled_token_ids_gpu.index_fill_(0, discard_sampled_tokens_req_indices, -1)
+            request_indices = torch.arange(
+                sampled_token_ids.shape[0],
+                device=sampled_token_ids.device,
+                dtype=discard_sampled_tokens_req_indices.dtype,
+            )
+            discard_mask = torch.eq(
+                request_indices.unsqueeze(1),
+                discard_sampled_tokens_req_indices.unsqueeze(0),
+            ).any(dim=1)
+            valid_sampled_token_ids_gpu = torch.where(
+                discard_mask.unsqueeze(1),
+                torch.full_like(sampled_token_ids, -1),
+                sampled_token_ids,
+            )
 
         valid_mask = (valid_sampled_token_ids_gpu != -1) & (valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size)
         valid_sampled_tokens_count = valid_mask.sum(dim=1)
