@@ -71,6 +71,8 @@ else:
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
+# Delete after the driver is released; temporarily hard-coded to 4
+MAX_CAPTURE_SIZES_FOR_950 = 4
 
 
 def _get_npu_smi_field(lines: list[str], key: str) -> str | None:
@@ -129,6 +131,25 @@ def config_deprecated_logging():
             warnings_logger.addHandler(handler)
 
     warnings_logger.propagate = False
+
+
+def prune_capture_sizes_for_950(vllm_config):
+    original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
+    if not original_sizes:
+        return
+    if len(original_sizes) <= MAX_CAPTURE_SIZES_FOR_950:
+        return
+    step = (len(original_sizes) - 1) / (MAX_CAPTURE_SIZES_FOR_950 - 1)
+    indices = [round(i * step) for i in range(MAX_CAPTURE_SIZES_FOR_950)]
+    indices[0], indices[-1] = 0, len(original_sizes) - 1
+    sampled_sizes = [original_sizes[i] for i in indices]
+    update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
+    logger.warning(
+        "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility"
+        "and this warning will be cleared soon.",
+        len(original_sizes),
+        MAX_CAPTURE_SIZES_FOR_950,
+    )
 
 
 class NPUPlatform(Platform):
@@ -598,6 +619,9 @@ class NPUPlatform(Platform):
                     "vllm::dsa_forward",
                 ]
             )
+            # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                prune_capture_sizes_for_950(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,
