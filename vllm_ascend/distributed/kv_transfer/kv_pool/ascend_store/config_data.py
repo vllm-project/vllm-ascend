@@ -636,7 +636,7 @@ class RequestTracker:
             mask_spec_count = min(len(block_ids) - 1, self.num_speculative_blocks)
             group_block_ids = self.allocated_block_ids_by_group[kv_cache_group_id]
             if mask_spec_count >= self.num_speculative_blocks:
-                group_block_ids[-self.num_speculative_blocks:] = [0] * self.num_speculative_blocks
+                group_block_ids[-self.num_speculative_blocks :] = [0] * self.num_speculative_blocks
             else:
                 group_block_ids[-self.num_speculative_blocks : mask_spec_count - self.num_speculative_blocks] = [
                     0

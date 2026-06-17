@@ -511,9 +511,12 @@ class KVPoolWorker:
         if not self.use_hybrid:
             return
         alignment = 2 * 1024 * 1024
-        for storage_key in registered_regions.keys():
+        for storage_key in registered_regions:
             start, end = registered_regions[storage_key]
             new_start = start // alignment * alignment
+            # Because the addresses of raw tensors are aligned to 2MB,
+            # all shared sub-tensors, when aligned downwards, should theoretically not exceed the address bounds.
+            assert new_start >= storage_key, "invalid kv cache tensor, raw tensor ptr must be align to 2MB"
             registered_regions[storage_key] = (new_start, end)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
