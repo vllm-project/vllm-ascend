@@ -982,7 +982,7 @@ class KVPoolScheduler:
         hand the connector_output, free non-null mamba blocks and so on.
         """
         meta = connector_output.kv_connector_worker_meta
-        if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
+        if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata) or self._block_pool is None:
             return
 
         for event_id, count in meta.completed_events.items():
