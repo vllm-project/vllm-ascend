@@ -20,7 +20,7 @@ from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
 
-MODEL = "Qwen/Qwen3.6-27B"
+MODEL = "Qwen/Qwen3.6-27B/"
 
 
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
