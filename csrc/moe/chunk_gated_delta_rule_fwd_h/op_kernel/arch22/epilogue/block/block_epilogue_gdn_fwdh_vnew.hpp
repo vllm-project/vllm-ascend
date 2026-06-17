@@ -160,21 +160,13 @@ public:
 
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
         if constexpr(std::is_same<GElementInput, float>::value) {
-#ifdef CATLASS_UNIFIED_CORE
-            AscendC::DataCopy(gUbTensor, gInputThisSubBlock, mActual);
-#else
             AscendC::DataCopyParams gUbParams{1, (uint16_t)(mActual * sizeof(float)), 0, 0};
             AscendC::DataCopyPadParams gUbPadParams{false, 0, 0, 0};
             AscendC::DataCopyPad(gUbTensor, gInputThisSubBlock, gUbParams, gUbPadParams);
-#endif
         } else {
-#ifdef CATLASS_UNIFIED_CORE
-            AscendC::DataCopy(gInputUbTensor, gInputThisSubBlock, mActual);
-#else
             AscendC::DataCopyParams gUbParams{1, (uint16_t)(mActual * sizeof(half)), 0, 0};
             AscendC::DataCopyPadParams gUbPadParams{false, 0, 0, 0};
             AscendC::DataCopyPad(gInputUbTensor, gInputThisSubBlock, gUbParams, gUbPadParams);
-#endif
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
@@ -203,9 +195,7 @@ public:
         AscendC::Broadcast<float, 2, 1>(calcUbTensor, gUbTensor[gbrcRealStart], dstShape_, srcShape_, shareBuffer_);
         AscendC::PipeBarrier<PIPE_V>();
 
-#ifndef CATLASS_UNIFIED_CORE
         Arch::CrossCoreWaitFlag(cube1Done);
-#endif
 
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0 + pingpongFlag);

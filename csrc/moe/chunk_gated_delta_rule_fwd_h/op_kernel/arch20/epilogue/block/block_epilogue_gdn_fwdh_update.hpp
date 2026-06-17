@@ -134,9 +134,6 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
         AscendC::Muls(calcUbTensor, calcUbTensor, muls, mActualThisSubBlock * nActual);
 
-#ifndef CATLASS_UNIFIED_CORE
-        Arch::CrossCoreWaitFlag(cube2Done);
-#endif
 
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);

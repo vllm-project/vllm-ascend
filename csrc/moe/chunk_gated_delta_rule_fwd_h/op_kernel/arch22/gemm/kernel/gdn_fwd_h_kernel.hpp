@@ -7,52 +7,6 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 310)
-#define CATLASS_ARCH 3510
-#elif defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-#define CATLASS_ARCH 2201
-#define CATLASS_UNIFIED_CORE 1
-
-#include "catlass/arch/arch.hpp"
-#include "catlass/arch/cross_core_sync.hpp"
-#include "catlass/arch/resource.hpp"
-#include "catlass/catlass.hpp"
-#include "catlass/debug.hpp"
-#include "catlass/epilogue/block/block_epilogue.hpp"
-#include "../../epilogue/block/block_epilogue_gdn_fwdh_update.hpp"
-#include "../../epilogue/block/block_epilogue_gdn_fwdh_vnew.hpp"
-#include "catlass/gemm/block/block_mmad.hpp"
-#include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
-#include "catlass/gemm/block/block_swizzle.hpp"
-#include "../block/block_scheduler_gdn_fwd_h.hpp"
-#include "catlass/gemm/dispatch_policy.hpp"
-#include "catlass/gemm/gemm_type.hpp"
-#include "catlass/layout/layout.hpp"
-#include "catlass/gemm_coord.hpp"
-#include "tla/tensor.hpp"
-#include "tla/layout.hpp"
-#include "tla/tensor.hpp"
-
-using _0 = tla::Int<0>;
-using _1 = tla::Int<1>;
-using _2 = tla::Int<2>;
-using _4 = tla::Int<4>;
-using _8 = tla::Int<8>;
-using _16 = tla::Int<16>;
-using _32 = tla::Int<32>;
-using _64 = tla::Int<64>;
-using _128 = tla::Int<128>;
-using _256 = tla::Int<256>;
-using _512 = tla::Int<512>;
-using _1024 = tla::Int<1024>;
-using _2048 = tla::Int<2048>;
-using _4096 = tla::Int<4096>;
-using _8192 = tla::Int<8192>;
-using _16384 = tla::Int<16384>;
-using _32768 = tla::Int<32768>;
-using _65536 = tla::Int<65536>;
-
-#else
 #define CATLASS_ARCH 2201
 
 #include "catlass/arch/arch.hpp"
@@ -74,7 +28,6 @@ using _65536 = tla::Int<65536>;
 #include "tla/tensor.hpp"
 #include "tla/layout.hpp"
 #include "tla/tensor.hpp"
-#endif
 
 
 
@@ -93,11 +46,7 @@ template<
 class GDNFwdHKernel {
 public:
     
-#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 310)
-    using ArchTag = Arch::Ascend950;
-#else
     using ArchTag = Arch::AtlasA2;
-#endif
     using CubeScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdHCube;
     using VecScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdHVec;
 
@@ -233,24 +182,16 @@ public:
         gmNumSeq.SetGlobalBuffer((__gm__ int64_t *)(user + numSeqWorkspaceOffset));
         gmNumChunks.SetGlobalBuffer((__gm__ int64_t *)(user + numChunksWorkspaceOffset));
 
-#ifdef CATLASS_UNIFIED_CORE
-        cubeBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user);
-#else
         if ASCEND_IS_AIC {
             cubeBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user);
         }
         if ASCEND_IS_AIV {
             vecBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user);
         }
-#endif
     }
     
     __aicore__ inline void Process() {
-#ifdef CATLASS_UNIFIED_CORE
-        ProcessUnifiedCore();
-#else
         ProcessSplitCore();
-#endif
     }
 
     __aicore__ inline void ProcessUnifiedCore() {

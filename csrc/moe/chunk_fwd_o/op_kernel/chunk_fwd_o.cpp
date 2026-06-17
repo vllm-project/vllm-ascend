@@ -13,8 +13,14 @@
  */
 
 // #include "chunk_fwd_o.h"
-#include "compat_310p.h"
-#include "gemm/kernel/gdn_fwd_o_kernel.hpp"
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
+#include "arch20/compat_310p.h"
+#include "arch20/gemm/kernel/gdn_fwd_o_kernel.hpp"
+#elif defined(__CCE_AICORE__) && (__CCE_AICORE__ == 310)
+#include "arch35/gemm/kernel/gdn_fwd_o_kernel.hpp"
+#else
+#include "arch22/gemm/kernel/gdn_fwd_o_kernel.hpp"
+#endif
 #include "lib/matmul_intf.h"
 
 using namespace Catlass;

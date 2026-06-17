@@ -7,52 +7,6 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 310)
-#define CATLASS_ARCH 3510
-#elif defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-#define CATLASS_ARCH 2201
-#define CATLASS_UNIFIED_CORE 1
-
-#include "catlass/arch/arch.hpp"
-#include "catlass/arch/cross_core_sync.hpp"
-#include "catlass/arch/resource.hpp"
-#include "catlass/catlass.hpp"
-#include "catlass/debug.hpp"
-#include "catlass/epilogue/block/block_epilogue.hpp"
-#include "../../epilogue/block/block_epilogue_gdn_fwdo_qkmask.hpp"
-#include "../../epilogue/block/block_epilogue_gdn_fwdo_output.hpp"
-#include "catlass/gemm/block/block_mmad.hpp"
-#include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
-#include "catlass/gemm/block/block_swizzle.hpp"
-#include "../block/block_scheduler_gdn_fwd_o.hpp"
-#include "catlass/gemm/dispatch_policy.hpp"
-#include "catlass/gemm/gemm_type.hpp"
-#include "catlass/layout/layout.hpp"
-#include "catlass/gemm_coord.hpp"
-#include "tla/tensor.hpp"
-#include "tla/layout.hpp"
-#include "tla/tensor.hpp"
-
-using _0 = tla::Int<0>;
-using _1 = tla::Int<1>;
-using _2 = tla::Int<2>;
-using _4 = tla::Int<4>;
-using _8 = tla::Int<8>;
-using _16 = tla::Int<16>;
-using _32 = tla::Int<32>;
-using _64 = tla::Int<64>;
-using _128 = tla::Int<128>;
-using _256 = tla::Int<256>;
-using _512 = tla::Int<512>;
-using _1024 = tla::Int<1024>;
-using _2048 = tla::Int<2048>;
-using _4096 = tla::Int<4096>;
-using _8192 = tla::Int<8192>;
-using _16384 = tla::Int<16384>;
-using _32768 = tla::Int<32768>;
-using _65536 = tla::Int<65536>;
-
-#else
 #define CATLASS_ARCH 2201
 
 #include "catlass/arch/arch.hpp"
@@ -94,7 +48,6 @@ using _16384 = tla::Int<16384>;
 using _32768 = tla::Int<32768>;
 using _65536 = tla::Int<65536>;
 
-#endif
 
 #include "kernel_operator.h"
 using namespace Catlass;
@@ -111,11 +64,7 @@ template<
 class GDNFwdOKernel {
 public:
     
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-    using ArchTag = Arch::Ascend950;
-#else
     using ArchTag = Arch::AtlasA2;
-#endif
     using GDNFwdOOffsets = Catlass::Gemm::Block::GDNFwdOOffsets;
 
     using CubeScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdOCube;
@@ -253,9 +202,6 @@ public:
         gmAftermaskWorkspace.SetGlobalBuffer((__gm__ ElementAttenMasked *)(user + aftermaskWorkspaceOffset));
         gmMask.SetGlobalBuffer((__gm__ ElementMask *)(user + maskWorkspaceOffset));
 
-#ifdef CATLASS_UNIFIED_CORE
-        cubeBlockScheduler.Init(cu_seqlens, chunk_offsets, tiling);
-#else
         if ASCEND_IS_AIC {
             cubeBlockScheduler.Init(cu_seqlens, chunk_offsets, tiling);
         }
@@ -263,44 +209,19 @@ public:
         if ASCEND_IS_AIV {
             vecBlockScheduler.Init(cu_seqlens, chunk_offsets, tiling);
         }
-#endif
     }
 
     __aicore__ inline void Process() {
-#ifdef CATLASS_UNIFIED_CORE
-        ProcessUnifiedCore();
-#else
         ProcessSplitCore();
-#endif
     }
 
     __aicore__ inline void InitCausalMask() {
         AscendC::LocalTensor<float> maskUbTensor = resource.ubBuf.template GetBufferByByte<float>(0);
-#ifdef CATLASS_UNIFIED_CORE
-        // 310P: Duplicate count must be >= 8 (vector width = 8 floats).
-        // Build lower-triangular mask: row i has 1.0 in cols [0..i], 0.0 elsewhere.
-        // Fill all 1.0 first, then zero the upper triangle with count >= 8.
-        AscendC::Duplicate<float>(maskUbTensor, (float)1.0, 64 * 64);
-        AscendC::PipeBarrier<PIPE_V>();
-        for (uint32_t i = 0; i < 64; ++i) {
-            uint32_t zeroStart = i + 1;
-            uint32_t zeroLen = 64 - zeroStart;
-            if (zeroLen >= 8) {
-                AscendC::Duplicate<float>(maskUbTensor[i * 64 + zeroStart], (float)0.0, zeroLen);
-            } else {
-                for (uint32_t j = 0; j < zeroLen; ++j) {
-                    maskUbTensor.SetValue(i * 64 + zeroStart + j, (float)0.0);
-                }
-            }
-        }
-        AscendC::PipeBarrier<PIPE_V>();
-#else
         AscendC::Duplicate<float>(maskUbTensor, (float)0.0, 64 * 64);
         AscendC::PipeBarrier<PIPE_V>();
         for (uint32_t i = 0; i < 64; ++i)
             AscendC::Duplicate<float>(maskUbTensor[i * 64], (float)1.0, i + 1);
         AscendC::PipeBarrier<PIPE_V>();
-#endif
     }
 
     __aicore__ inline void ProcessUnifiedCore() {
@@ -384,78 +305,6 @@ public:
                 // GM fence: ensure Cube2/3 L0C→UB→MTE3→GM writes are committed
                 AscendC::PipeBarrier<PIPE_ALL>();
 
-#ifdef CATLASS_UNIFIED_CORE
-                // VEC2 inline for 310P: o = scale * (v_work + exp(g) * h_work)
-                // The epilogue class uses event-based MTE2 sync that breaks after cube matmul on 310P.
-                {
-                    constexpr uint32_t STAGE_ROWS = 32;
-                    uint32_t bt = prevOffsets.blockTokens;
-                    uint32_t stageCnt = STAGE_ROWS * vHeadDim;
-                    // UB layout: vwUb[0..stageCnt), hwUb[stageCnt..2*stageCnt), gUb[2*stageCnt..+64)
-                    AscendC::LocalTensor<float> vwUb = resource.ubBuf.template GetBufferByByte<float>(0);
-                    AscendC::LocalTensor<float> hwUb = resource.ubBuf.template GetBufferByByte<float>(stageCnt * sizeof(float));
-                    AscendC::LocalTensor<float> gUb  = resource.ubBuf.template GetBufferByByte<float>(stageCnt * sizeof(float) * 2);
-                    // outUb (half) after gUb, aligned to 512B
-                    constexpr uint32_t G_RESERVE = 512;
-                    AscendC::LocalTensor<ElementVNEW> outUb = resource.ubBuf.template GetBufferByByte<ElementVNEW>(
-                        stageCnt * sizeof(float) * 2 + G_RESERVE);
-
-                    for (uint32_t row = 0; row < bt; row += STAGE_ROWS) {
-                        uint32_t rows = (row + STAGE_ROWS <= bt) ? STAGE_ROWS : (bt - row);
-                        uint32_t elems = rows * vHeadDim;
-                        uint32_t gmOff = row * vHeadDim;
-
-                        // Load v_work, h_work, g from GM
-                        AscendC::DataCopy(vwUb, gmVWorkspace[prevOffsets.hvWorkOffset + gmOff], elems);
-                        AscendC::DataCopy(hwUb, gmHWorkspace[prevOffsets.hvWorkOffset + gmOff], elems);
-                        // Load g (may be float or half)
-                        if constexpr (std::is_same<ElementG, float>::value) {
-                            AscendC::DataCopy(gUb, gmG[prevOffsets.gOffset + row], rows);
-                        } else {
-                            AscendC::LocalTensor<ElementG> gTyped = resource.ubBuf.template GetBufferByByte<ElementG>(
-                                stageCnt * sizeof(float) * 2 + 256);
-                            AscendC::DataCopy(gTyped, gmG[prevOffsets.gOffset + row], rows);
-                            AscendC::PipeBarrier<PIPE_ALL>();
-                            AscendC::Cast(gUb, gTyped, AscendC::RoundMode::CAST_NONE, rows);
-                        }
-                        AscendC::PipeBarrier<PIPE_ALL>();
-
-                        // exp(g)
-                        AscendC::Exp(gUb, gUb, rows);
-                        AscendC::PipeBarrier<PIPE_V>();
-
-                        // Broadcast exp(g) into gBrc: each row r gets exp(g[r]) repeated Dv times
-                        // gBrc lives after outUb in UB
-                        AscendC::LocalTensor<float> gBrc = resource.ubBuf.template GetBufferByByte<float>(
-                            stageCnt * sizeof(float) * 2 + G_RESERVE + stageCnt * sizeof(ElementVNEW));
-                        {
-                            uint32_t dstShape[2] = {rows, vHeadDim};
-                            uint32_t srcShape[2] = {rows, 1};
-                            // Broadcast needs a shared temp buffer — use space after gBrc
-                            AscendC::LocalTensor<uint8_t> brcTmp = resource.ubBuf.template GetBufferByByte<uint8_t>(
-                                stageCnt * sizeof(float) * 2 + G_RESERVE + stageCnt * sizeof(ElementVNEW) + elems * sizeof(float));
-                            AscendC::Broadcast<float, 2, 1>(gBrc, gUb, dstShape, srcShape, brcTmp);
-                        }
-                        AscendC::PipeBarrier<PIPE_V>();
-                        AscendC::Mul(hwUb, hwUb, gBrc, elems);
-                        AscendC::PipeBarrier<PIPE_V>();
-
-                        // v_work + exp(g)*h_work
-                        AscendC::Add(vwUb, vwUb, hwUb, elems);
-                        AscendC::PipeBarrier<PIPE_V>();
-                        // * scale
-                        AscendC::Muls(vwUb, vwUb, (float)scale, elems);
-                        AscendC::PipeBarrier<PIPE_V>();
-                        // Cast to output dtype
-                        AscendC::Cast(outUb, vwUb, AscendC::RoundMode::CAST_NONE, elems);
-                        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                        AscendC::DataCopyParams cp{1, static_cast<uint16_t>(elems * sizeof(ElementVNEW) / 32), 0, 0};
-                        AscendC::DataCopy(gmO[prevOffsets.ovOffset + gmOff], outUb, cp);
-                        AscendC::PipeBarrier<PIPE_ALL>();
-                    }
-                }
-#else
                 // VEC2: output epilogue
                 EpilogueGDNFwdOOutput epilogueGDNFwdOOutput(resource);
                 epilogueGDNFwdOOutput(
@@ -464,7 +313,6 @@ public:
                     scale, prevOffsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
                     prevOffsets.batchIdx, prevOffsets.headIdx, prevOffsets.chunkIdx
                 );
-#endif
             }
 
             needRun = true;

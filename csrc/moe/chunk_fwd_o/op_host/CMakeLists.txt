@@ -25,7 +25,7 @@ add_ops_compile_options(
         -I${CATLASS_INCLUDE_DIR_ABS}
         -I${COMMON_KERNEL_UTILS_DIR_ABS}
         -include
-        ${KERNEL_DIR_ABS}/compat_310p.h
+        ${KERNEL_DIR_ABS}/arch20/compat_310p.h
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
