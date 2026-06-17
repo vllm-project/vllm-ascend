@@ -1381,6 +1381,22 @@ class AscendDSAImpl(DSAAttentionImpl):
     understand this class
     """
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
+    ):
+        # MTP graph-mode fix: DSA does not need per-step graph param updates
+        # (same as SFA). The generic full-graph drafter path calls
+        # impl_cls.update_graph_params(...), so this no-op must exist or it
+        # raises AttributeError under FULL_DECODE_ONLY + MTP.
+        pass
+
     def __init__(
         self,
         n_heads: int,
