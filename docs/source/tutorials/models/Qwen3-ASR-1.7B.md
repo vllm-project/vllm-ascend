@@ -59,7 +59,6 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --enforce-eager \
   --port 8000
 ```
-
 ### Atlas 300I DUO
 ``` bash
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
@@ -71,9 +70,6 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
   --port 8000
 ```
-
-
-
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
