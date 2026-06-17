@@ -243,13 +243,9 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
         idx = tl.load(h0_indices + i_n)
-        # if idx >= 0:
-        tmp0 = tl.where(idx < 0, 0, idx)
-        p_h0 = h0_source + tmp0 * HV * K * V + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-        temp1 = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
-        temp2 = tl.zeros_like(temp1)
-        value0 = tl.where(idx < 0, temp2, temp1)
-        b_h += value0  # tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+        if idx >= 0:
+            p_h0 = h0_source + idx * HV * K * V + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i in range(0, T):
         # Load inputs
