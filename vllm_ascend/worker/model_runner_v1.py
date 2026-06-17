@@ -985,13 +985,14 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
 
         # Keep discard_request_mask in sync for PP+async helpers.
-        # Without this, the mask stays all-False on Ascend, which (a) makes
-        # chunked-prefill broadcast-skip logic dead and (b) makes non-last
-        # PP ranks build prev_req_id_to_index over all requests (including
-        # discarded prefill chunks), diverging from the last rank and
-        # breaking PP collective symmetry.
-        self.discard_request_mask.np[:num_reqs] = discard_requests_mask
-        self.discard_request_mask.copy_to_gpu(num_reqs)
+        # Required when PP>1 with async scheduling: non-last PP ranks use
+        # this mask to build prev_req_id_to_index. Without the sync, the
+        # mask stays all-False on Ascend, causing non-last ranks to include
+        # discarded prefill chunks in the mapping, diverging from the last
+        # rank and breaking PP collective symmetry.
+        if self.use_async_scheduling and get_pp_group().world_size > 1:
+            self.discard_request_mask.np[:num_reqs] = discard_requests_mask
+            self.discard_request_mask.copy_to_gpu(num_reqs)
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
