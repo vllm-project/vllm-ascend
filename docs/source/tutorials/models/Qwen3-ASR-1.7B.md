@@ -59,6 +59,7 @@ vllm serve "Qwen/Qwen3-ASR-1.7B" \
   --enforce-eager \
   --port 8000
 ```
+
 ### Atlas 300I DUO
 ```bash
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
