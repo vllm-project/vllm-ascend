@@ -110,6 +110,20 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Layerwise KV pool: number of shared transfer buffers for layer reuse.
+    # None (default) = one buffer per layer (no reuse).
+    "VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS": lambda: (
+        int(v) if (v := os.getenv("VLLM_ASCEND_KV_POOL_LAYERWISE_NUM_SHARED_BUFFERS")) else None
+    ),
+    # Layerwise KV pool: number of layers to prefetch ahead of compute.
+    "VLLM_ASCEND_KV_POOL_LAYERWISE_PREFETCH_LAYERS": lambda: int(
+        os.getenv("VLLM_ASCEND_KV_POOL_LAYERWISE_PREFETCH_LAYERS", "1")
+    ),
+    # Layerwise KV pool: comma-separated independent (non-reused) layer indices.
+    # None (default) = [0, num_layers-1]. "all" = every layer is independent.
+    "VLLM_ASCEND_KV_POOL_LAYERWISE_INDEPENDENT_LAYERS": lambda: os.getenv(
+        "VLLM_ASCEND_KV_POOL_LAYERWISE_INDEPENDENT_LAYERS"
+    ),
 }
 
 # end-env-vars-definition

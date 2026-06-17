@@ -27,6 +27,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_config import (
+    get_layerwise_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
@@ -261,8 +264,15 @@ class KVPoolWorker:
         self.layer_load_finished_events: list[threading.Event] | None = None
         self.layer_save_finished_events: list[threading.Event] | None = None
 
+        layerwise_config = get_layerwise_config(
+            self.num_layers, self._extra_config,
+        )
+        self.layerwise_offload = layerwise_config.has_layer_reuse
+        self.num_prefetch_layers = layerwise_config.num_prefetch_layers
+        self.independent_layers = layerwise_config.independent_layers
+        self.prefetch_layer_map = layerwise_config.prefetch_layer_map
+
         self.next_layer_to_submit = 0
-        self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
         self.sync_save_events: list[torch.npu.Event] | None = None
 
     def _start_kv_transfer_threads(self) -> None:
