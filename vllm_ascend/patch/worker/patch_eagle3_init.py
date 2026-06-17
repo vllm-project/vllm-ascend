@@ -119,6 +119,7 @@ def _patched_eagle3_deepseek_v2_init(self, *, vllm_config, prefix: str = ""):
         requires_grad=False,
     )
 
+
 Eagle3LlamaForCausalLM.__init__ = _patched_eagle3_llama_init
 Eagle3DeepseekV2ForCausalLM.__init__ = _patched_eagle3_deepseek_v2_init
 
