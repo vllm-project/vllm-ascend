@@ -1204,8 +1204,8 @@ class NPUPlatform(Platform):
                 logger.warning(
                     "'--enable-eplb' is not supported on Ascend NPU. "
                     "Please use '--additional-config "
-                    "'{\"eplb_config\": {\"expert_map_path\": \"...\", "
-                    "\"num_redundant_experts\": N}}' instead. "
+                    '\'{"eplb_config": {"expert_map_path": "...", '
+                    '"num_redundant_experts": N}}\' instead. '
                     "action: resetting to False."
                 )
                 vllm_config.parallel_config.enable_eplb = False
