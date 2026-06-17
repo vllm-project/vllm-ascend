@@ -783,7 +783,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://<node0_ip>:<port>/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "deepseek_v4",
+        "model": "dsv4",
         "messages": [
             {
                 "role": "user",
