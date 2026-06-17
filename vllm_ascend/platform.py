@@ -134,7 +134,6 @@ def config_deprecated_logging():
 
 
 def prune_capture_sizes_for_950(vllm_config):
-    """Reduce the number of stages captured by cudagraph"""
     original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
     if not original_sizes:
         return
@@ -145,6 +144,11 @@ def prune_capture_sizes_for_950(vllm_config):
     indices[0], indices[-1] = 0, len(original_sizes) - 1
     sampled_sizes = [original_sizes[i] for i in indices]
     update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
+    logger.warning(
+            "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility and this warning will be cleared soon.",
+            len(original_sizes),
+            MAX_CAPTURE_SIZES_FOR_950,
+        )
 
 
 class NPUPlatform(Platform):
