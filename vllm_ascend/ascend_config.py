@@ -140,10 +140,7 @@ class AscendConfig:
         # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
-        self.multistream_dsa_preprocess = additional_config.get("multistream_dsa_preprocess", False)
-        self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", False)
-        self.prefill_comm_compute_overlap = additional_config.get("prefill_comm_compute_overlap", False)
-
+        self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
             "enable_matmul_allreduce",

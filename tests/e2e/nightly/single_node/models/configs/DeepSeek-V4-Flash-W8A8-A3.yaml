@@ -55,7 +55,7 @@ test_cases:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - "--async-scheduling"
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"true","multistream_overlap_shared_expert":true,"multistream_dsa_preprocess":false}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"true","enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true}'
     benchmarks:
       acc-gpqa:
         case_type: accuracy
