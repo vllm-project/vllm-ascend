@@ -12,12 +12,17 @@ import torch.nn.functional as F
 import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.triton.kda.kda import chunk_kda
-from vllm_ascend.ops.triton.kda.l2norm import l2norm_fwd
 
 DEVICE = "npu"
 
 NPU_RMSE_RATIO_O = 0.005
 NPU_RMSE_RATIO_HT = 0.005
+
+
+def reference_l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    dtype = x.dtype
+    x = x.to(torch.float32)
+    return (x * torch.rsqrt(torch.sum(x * x, dim=-1, keepdim=True) + eps)).to(dtype)
 
 
 def naive_recurrent_kda(
@@ -122,8 +127,8 @@ def test_chunk_kda(
     ref_states = []
     for i in range(N):
         s, e = cu_seqlens[i], cu_seqlens[i + 1]
-        q_i = l2norm_fwd(q[:, s:e].contiguous())
-        k_i = l2norm_fwd(k[:, s:e].contiguous())
+        q_i = reference_l2norm(q[:, s:e].contiguous())
+        k_i = reference_l2norm(k[:, s:e].contiguous())
         o_i, ht_i = naive_recurrent_kda(
             q_i,
             k_i,
