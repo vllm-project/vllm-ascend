@@ -49,7 +49,7 @@ env:
 
 jobs:
   build-cache:
-    name: build-${{ matrix.chip_type }}-cache
+    name: build-${{ matrix.chip_type }}-${{ matrix.runner }}-${{ matrix.os }}-cache
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
