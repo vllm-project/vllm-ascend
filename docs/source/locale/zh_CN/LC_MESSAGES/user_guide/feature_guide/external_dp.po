@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-15 09:41+0000\n"
+"POT-Creation-Date: 2026-06-17 11:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -60,7 +60,7 @@ msgid ""
 msgstr "一个启动脚本，用于通过一条命令启动多个 vLLM 实例。"
 
 #: ../../source/user_guide/feature_guide/external_dp.md:12
-msgid "A request-length-aware load-balance proxy for external DP."
+msgid "A request-length-aware load-balancing proxy for external DP."
 msgstr "一个支持外部数据并行、可感知请求长度的负载均衡代理。"
 
 #: ../../source/user_guide/feature_guide/external_dp.md:14

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-22 08:13+0000\n"
+"POT-Creation-Date: 2026-06-17 11:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -120,8 +120,8 @@ msgstr ""
 "CPU 核心重叠。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
-msgid "A2 / 310P / Others"
-msgstr "A2 / 310P / 其他"
+msgid "A2 / Atlas 300 inference products / Others"
+msgstr "A2 / Atlas 300 推理产品 / 其他"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
 msgid "`topo_affinity`"
@@ -595,8 +595,10 @@ msgid "`IRQ`: 15-16, `Main`: 17, `ACL`: 18, `Release`: 19"
 msgstr "`IRQ`: 15-16, `Main`: 17, `ACL`: 18, `Release`: 19"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:159
-msgid "Example 5: A2/310P topo_affinity with NUMA extension"
-msgstr "示例 5: 具有NUMA扩展的 A2/310P topo_affinity"
+msgid ""
+"Example 5: A2/Atlas 300 inference products topo_affinity with NUMA "
+"extension"
+msgstr "示例 5: 具有NUMA扩展的 A2/Atlas 300 推理产品 topo_affinity"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:163
 #, python-brace-format
@@ -824,3 +826,6 @@ msgstr ""
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:228
 msgid "Tests: tests/ut/device_allocator/test_cpu_binding.py"
 msgstr "测试：tests/ut/device_allocator/test_cpu_binding.py"
+
+#~ msgid "A2 / 310P / Others"
+#~ msgstr "A2 / 310P / 其他"

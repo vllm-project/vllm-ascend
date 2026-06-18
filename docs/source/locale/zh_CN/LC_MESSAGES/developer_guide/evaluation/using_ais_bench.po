@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-22 08:13+0000\n"
+"POT-Creation-Date: 2026-06-17 11:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -50,9 +50,9 @@ msgstr "在 docker 中运行 vLLM 服务器。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:45
 msgid ""
-"`--max_model_len` should be greater than `35000`, this will be suitable "
+"`--max-model-len` should be greater than `35000`, this will be suitable "
 "for most datasets. Otherwise the accuracy evaluation may be affected."
-msgstr "`--max_model_len` 应大于 `35000`，这适用于大多数数据集。否则可能会影响精度评估。"
+msgstr "`--max-model-len` 应大于 `35000`，这适用于大多数数据集。否则可能会影响精度评估。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:48
 msgid "The vLLM server is started successfully, if you see logs as below:"
