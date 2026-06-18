@@ -10,8 +10,6 @@ The `Qwen3.5-27B` model is first supported in `vllm-ascend:v0.17.0rc1`. This doc
 
 ## 2 Supported Features
 
-This section introduces the features supported by the `Qwen3.5-27B` model, including supported hardware, quantization methods, data parallelism, long-sequence features, and more.
-
 Please refer to the [Supported Features List](../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
 Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for feature configuration information.
