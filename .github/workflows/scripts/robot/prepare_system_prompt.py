@@ -4,7 +4,7 @@
 import argparse
 from pathlib import Path
 
-PROMPT_DIR = Path(__file__).resolve().parent / "issue_review_prompts"
+PROMPT_DIR = Path(__file__).resolve().parent / "description_check_prompts"
 
 
 def load_system_prompt() -> str:

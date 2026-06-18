@@ -1,7 +1,7 @@
 name: "Issue Review Bot"
 on:
   issues:
-    types: [opened]
+    types: [opened, edited]
 
 permissions:
   issues: write
@@ -11,11 +11,22 @@ jobs:
   review:
     runs-on: ubuntu-latest
     if: |
-      startsWith(github.event.issue.title, '[Bug]:') ||
-      startsWith(github.event.issue.title, '[Installation]:') ||
-      startsWith(github.event.issue.title, '[Usage]:') ||
-      startsWith(github.event.issue.title, '[Doc]:') ||
-      startsWith(github.event.issue.title, '[Misc]:')
+      github.event.issue.state == 'open' &&
+      (
+        github.event.action == 'opened' ||
+        github.event.changes.title ||
+        github.event.changes.body
+      ) &&
+      (
+        startsWith(github.event.issue.title, '[Bug]:') ||
+        startsWith(github.event.issue.title, '[Installation]:') ||
+        startsWith(github.event.issue.title, '[Install]:') ||
+        startsWith(github.event.issue.title, '[Usage]:') ||
+        startsWith(github.event.issue.title, '[Doc]:') ||
+        startsWith(github.event.issue.title, '[Misc]:') ||
+        startsWith(github.event.issue.title, '[Feature]:') ||
+        startsWith(github.event.issue.title, '[Perf]:')
+      )
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,22 +54,26 @@ jobs:
         if: success()
         run: python .github/workflows/scripts/robot/prepare_system_prompt.py --output system_prompt.txt
 
-      # Step 4: Call LLM with assembled prompt → review_output.md
+      # Step 4: Call LLM for description completeness check → review_result.json
       - name: Call LLM
         id: llm
         if: success()
         env:
-          VLLM_BASE_URL: ${{ secrets.VLLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
           VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
+          VLLM_BASE_URL: ${{ secrets.VLLM_BASE_URL }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           python .github/workflows/scripts/robot/call_llm.py \
             --system-prompt system_prompt.txt \
             --template template.txt \
-            --output review_output.md
+            --type-key issue_type.txt \
+            --output review_result.json
 
-      # Step 5: Post the review as a comment
+      # Step 5: Post comment if description incomplete → label_action.txt
       - name: Post handler
         id: post
         if: success()
@@ -66,4 +81,49 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
-        run: python .github/workflows/scripts/robot/handle_review.py --input review_output.md
+        run: |
+          python .github/workflows/scripts/robot/handle_review.py \
+            --input review_result.json \
+            --label-output label_action.txt
+
+      # Step 6: Add or remove the need-detail-desc label
+      - name: Manage label
+        id: label
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          NEED_DETAIL_LABEL: ${{ vars.ISSUE_DESCRIPTION_CHECK_NEED_DETAIL_LABEL || 'need-detail-desc' }}
+        with:
+          script: |
+            const fs = require('fs');
+            const action = fs.readFileSync('label_action.txt', 'utf8').trim();
+            const label = process.env.NEED_DETAIL_LABEL || 'need-detail-desc';
+            const issueNumber = context.issue.number;
+
+            if (action === 'add') {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: [label]
+              });
+              console.log(`Added label '${label}' to issue #${issueNumber}`);
+            } else if (action === 'remove') {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  name: label
+                });
+                console.log(`Removed label '${label}' from issue #${issueNumber}`);
+              } catch (e) {
+                if (e.status === 404) {
+                  console.log(`Label '${label}' not present on issue #${issueNumber}, skipping remove`);
+                } else {
+                  throw e;
+                }
+              }
+            } else {
+              console.log(`Unknown label action: '${action}', skipping`);
+            }
