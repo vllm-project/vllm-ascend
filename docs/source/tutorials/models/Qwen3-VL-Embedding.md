@@ -33,9 +33,46 @@ Using the Qwen3-VL-Embedding-8B model as an example, first run the docker contai
 
 ### Online Inference
 
-```bash
-vllm serve Qwen/Qwen3-VL-Embedding-8B --runner pooling
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} 910B4
+:sync: 910B4
+
+Run the following script to start the vLLM server on single 910B4:
+
+```shell
+#!/bin/sh
+vllm serve Qwen/Qwen3-VL-Embedding-8B  \
+  --served-model-name Qwen/Qwen3-VL-Embedding-8B  \
+  --runner pooling \
+  --port 8000
 ```
+
+::::
+::::{tab-item} Atlas 300 inference products
+:sync: Atlas 300 inference products
+
+Run the following script to start the vLLM server on single Atlas 300 inference products:
+
+```shell
+#!/bin/sh
+vllm serve Qwen/Qwen3-VL-Embedding-8B  \
+  --served-model-name Qwen/Qwen3-VL-Embedding-8B  \
+  --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
+  --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+  --runner pooling \
+  --dtype float16 \
+  --port 8000 \
+  --max-model-len 1024
+```
+
+:::{note}
+The `--max_model_len` option is added to prevent errors when generating the attention operator mask on the Atlas 300 inference products.
+:::
+
+::::
+:::::
 
 Once your server is started, you can query the model with input prompts.
 
