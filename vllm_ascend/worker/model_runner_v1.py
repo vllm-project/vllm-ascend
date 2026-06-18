@@ -2241,7 +2241,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 input_ids=input_ids,
-                eplb_heat_collection_status=self.eplb_heat_collection_status if self.self.dynamic_eplb else False,
+                eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -3522,7 +3522,7 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 has_sinks = self._has_sinks,
                 input_ids=input_ids,
-                eplb_heat_collection_status=self.eplb_heat_collection_status if self.self.dynamic_eplb else False,
+                eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
