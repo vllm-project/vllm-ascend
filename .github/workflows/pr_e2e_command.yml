@@ -34,7 +34,7 @@ permissions:
 jobs:
   e2e-test:
     name: Run /e2e tests
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-4-hk
     outputs:
       pr_sha: ${{ steps.resolve.outputs.pr_sha }}
       test_groups: ${{ steps.groups.outputs.test_groups }}
@@ -198,7 +198,7 @@ jobs:
     name: Report result
     needs: [e2e-test, trigger-selected-tests]
     if: always() && needs.e2e-test.result == 'success' && needs.e2e-test.outputs.notify_comment_id != ''
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Update comment with result
         uses: peter-evans/create-or-update-comment@v5
