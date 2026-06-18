@@ -228,13 +228,34 @@ class TestD2RHAdapter(unittest.TestCase):
         self.assertEqual(transferred_meta["remote_engine_id"], d2rh.CPU_STAGING_ENGINE_ID)
         self.assertEqual(transferred_meta["remote_handshake_port"], d2rh.CPU_STAGING_HANDSHAKE_PORT)
 
+    def test_d2rh_block_map_helpers_keep_manager_api_as_block_ids(self):
+        block_map = d2rh._build_block_map(([10, 11], [20]), ([0, 1], [0]))
+        self.assertEqual(block_map, {(0, 10): 0, (0, 11): 1, (1, 20): 0})
+        self.assertEqual(d2rh._group_block_map_values(block_map), ([0, 1], [0]))
+
     def test_cpu_cache_manager_reuses_freed_blocks(self):
         manager = d2rh.D2RHCPUCacheManager(2)
-        first = manager.alloc_blocks(2)
-        self.assertEqual(first, [0, 1])
-        self.assertIsNone(manager.alloc_blocks(1))
-        manager.free_blocks([0])
-        self.assertEqual(manager.alloc_blocks(1), [0])
+        first = manager.alloc_blocks(([10, 11],))
+        self.assertEqual(first, ([0, 1],))
+        self.assertIsNone(manager.alloc_blocks(([12],)))
+        manager.free_blocks(([0],))
+        self.assertEqual(manager.alloc_blocks(([12],)), ([0],))
+
+    def test_cpu_cache_manager_allocates_blocks_per_group(self):
+        manager = d2rh.D2RHCPUCacheManager(4)
+
+        block_ids = manager.alloc_blocks(([10, 11], [20, 21]))
+        self.assertEqual(block_ids, ([0, 1], [2, 3]))
+        self.assertIsNone(manager.alloc_blocks(([], [22])))
+
+        manager.free_blocks(([], [2]))
+        self.assertEqual(manager.alloc_blocks(([], [22])), ([], [2]))
+
+    def test_cpu_cache_manager_group_allocation_is_atomic(self):
+        manager = d2rh.D2RHCPUCacheManager(1)
+
+        self.assertIsNone(manager.alloc_blocks(([10], [20, 21])))
+        self.assertEqual(manager.alloc_blocks(([10], [])), ([0], []))
 
 
 if __name__ == "__main__":

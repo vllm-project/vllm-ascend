@@ -522,20 +522,38 @@ CPU_STAGING_ENGINE_ID = "__d2rh_cpu_staging__"
 CPU_STAGING_HANDSHAKE_PORT = -1
 
 
-def _iter_block_ids(block_ids: BlockIds) -> Iterator[tuple[int, int]]:
-    for group_id, group_block_ids in enumerate(block_ids):
-        for block_id in group_block_ids:
-            yield group_id, block_id
+def _build_block_map(remote_block_ids: BlockIds, local_block_ids: BlockIds) -> dict[tuple[int, int], int]:
+    return {
+        (group_id, remote_block_id): local_block_id
+        for group_id, (remote_group_block_ids, local_group_block_ids) in enumerate(
+            zip(remote_block_ids, local_block_ids)
+        )
+        for remote_block_id, local_block_id in zip(remote_group_block_ids, local_group_block_ids)
+    }
+
+
+def _group_block_map_values(block_map: dict[tuple[int, int], int]) -> BlockIds:
+    max_group_id = max((group_id for group_id, _ in block_map), default=-1)
+    grouped_block_ids: list[list[int]] = [[] for _ in range(max_group_id + 1)]
+    seen_block_ids: list[set[int]] = [set() for _ in range(max_group_id + 1)]
+    for (group_id, _), block_id in block_map.items():
+        if block_id in seen_block_ids[group_id]:
+            continue
+        seen_block_ids[group_id].add(block_id)
+        grouped_block_ids[group_id].append(block_id)
+    return tuple(grouped_block_ids)
 
 
 class D2RHCPUCacheManager:
     def __init__(self, num_blocks: int):
+        self.num_blocks = num_blocks
         self.free_queue = deque(range(num_blocks))
         self.used_set: set[int] = set()
         self.lock = threading.Lock()
 
-    def alloc_blocks(self, num_blocks: int) -> list[int] | None:
+    def alloc_blocks(self, remote_block_ids: BlockIds) -> BlockIds | None:
         with self.lock:
+            num_blocks = sum(len(group_block_ids) for group_block_ids in remote_block_ids)
             if num_blocks > len(self.free_queue):
                 logger.info(
                     "CPU staging does not have enough blocks, need=%d free=%d",
@@ -543,16 +561,21 @@ class D2RHCPUCacheManager:
                     len(self.free_queue),
                 )
                 return None
-            block_ids = [self.free_queue.popleft() for _ in range(num_blocks)]
-            self.used_set.update(block_ids)
-            return block_ids
 
-    def free_blocks(self, block_ids: list[int]) -> None:
+            allocated_block_ids: list[list[int]] = []
+            for group_block_ids in remote_block_ids:
+                group_allocated_block_ids = [self.free_queue.popleft() for _ in group_block_ids]
+                self.used_set.update(group_allocated_block_ids)
+                allocated_block_ids.append(group_allocated_block_ids)
+            return tuple(allocated_block_ids)
+
+    def free_blocks(self, block_ids: BlockIds) -> None:
         with self.lock:
-            for block_id in block_ids:
-                if block_id in self.used_set:
-                    self.used_set.remove(block_id)
-                    self.free_queue.append(block_id)
+            for group_blocks in block_ids:
+                for block_id in group_blocks:
+                    if block_id in self.used_set:
+                        self.used_set.remove(block_id)
+                        self.free_queue.append(block_id)
 
 
 class D2RHThread(threading.Thread):
@@ -665,12 +688,11 @@ class D2RHThread(threading.Thread):
                     try:
                         params = msg[2]
                         remote_block_ids: BlockIds = tuple(params.get("remote_block_ids") or ())
-                        block_keys = list(_iter_block_ids(remote_block_ids))
-                        cpu_block_ids = self.cpu_kvcache_manager.alloc_blocks(len(block_keys))
+                        cpu_block_ids = self.cpu_kvcache_manager.alloc_blocks(remote_block_ids)
                         if cpu_block_ids is None:
                             pull_ack = STAGING_FULL
                         else:
-                            block_map = dict(zip(block_keys, cpu_block_ids))
+                            block_map = _build_block_map(remote_block_ids, cpu_block_ids)
                             remote_request_id = params.get("remote_request_id", request_id)
                             self.remote_local_block_map[request_id] = block_map
                             self.remote_local_block_map[remote_request_id] = block_map
@@ -925,7 +947,7 @@ class KVCacheRecvingThread(BaseKVCacheRecvingThread):
                 block_map = self.remote_local_block_map.pop(remote_request_id, None)
                 self.remote_local_block_map.pop(request_id, None)
                 if block_map:
-                    self.cpu_kvcache_manager.free_blocks(list(set(block_map.values())))
+                    self.cpu_kvcache_manager.free_blocks(_group_block_map_values(block_map))
 
 
 class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
