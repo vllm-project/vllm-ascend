@@ -142,6 +142,9 @@ class VwnLlamaModel(Eagle3LlamaModel):
                 )
             else:
                 self.input_norm = None
+
+            self.fc_norm = None
+            self.num_aux_hidden_states = 3
             self.fc = ReplicatedLinear(
                 input_size=fc_input_size,
                 output_size=self.config.hidden_size,

@@ -152,6 +152,7 @@ def _mock_npu_env():
         patch.object(torch.ops.vllm, "unquantized_gemm", F.linear),
         patch.object(torch.ops.vllm, "maybe_calc_kv_scales", lambda *a, **kw: None),
         patch.object(torch.ops.vllm, "maybe_pad_and_reduce", lambda x, *a, **kw: x),
+        patch("vllm.model_executor.layers.logits_processor.tensor_model_parallel_all_gather", lambda x, *a, **kw: x),
         patch.object(torch_npu, "npu_rms_norm", side_effect=_cpu_rms_norm, create=True),
         patch.object(torch_npu, "npu_add_rms_norm", side_effect=_cpu_add_rms_norm, create=True),
         patch.object(
@@ -396,7 +397,6 @@ class TestVwnLlamaModel:
 
 class TestEagle3VwnLlamaForCausalLM:
     def test_init_and_forward(self):
-        """Init creates VwnLlamaModel; forward returns (postnorm, prenorm)."""
         with _make_model_with_mocked_ops(vwn_m=4) as (model, _, hs):
             assert isinstance(model.model, VwnLlamaModel)
             num_tokens = 3
@@ -422,3 +422,30 @@ class TestEagle3VwnLlamaForCausalLM:
             embeds = model.embed_input_ids(torch.randint(0, _VOCAB, (num_tokens,)))
 
         assert embeds.shape == (num_tokens, _HIDDEN)
+
+
+class TestEagle3InheritedSurface:
+    """Contract tests for upstream methods Eagle3VwnLlamaForCausalLM inherits
+    but does not override.
+
+    The drafter calls these during real speculative decoding. They read
+    ``self.model.*`` attributes (e.g. fc_norm, num_aux_hidden_states) that
+    VwnLlamaModel must keep declaring; these tests fail fast if upstream adds a
+    new attribute read that VWN forgets to expose, instead of waiting for an
+    expensive NPU E2E run.
+    """
+
+    def test_combine_hidden_states(self):
+        with _make_model_with_mocked_ops(vwn_m=4) as (model, _, hs):
+            num_tokens = 3
+            # fc_input_size = hidden_size * num_aux_hidden_states (=3)
+            combined = model.combine_hidden_states(torch.randn(num_tokens, hs * 3))
+
+        assert combined.shape == (num_tokens, hs)
+
+    def test_compute_logits(self):
+        with _make_model_with_mocked_ops(vwn_m=4) as (model, _, hs):
+            num_tokens = 3
+            logits = model.compute_logits(torch.randn(num_tokens, hs))
+
+        assert logits.shape == (num_tokens, _VOCAB)
