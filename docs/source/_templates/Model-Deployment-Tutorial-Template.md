@@ -77,7 +77,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide specific installation steps and commands (parameters should be explained with meaning, value range, units, etc.).
 - **Version Number Writing Specification:** Prefer using placeholders (values are centrally configured). If a fixed value is used and it differs from the documented validation version, a comment MUST be added stating: "Please replace with your actual version."
 - Provide verification commands and expected status: guide users to check the installation result by executing commands (e.g., docker ps), specifying success criteria such as status codes or output characteristics.
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs.
+- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 
 ### 4.1 Docker Image Installation
 
@@ -120,7 +120,7 @@ docker run ...
 - Describe the architectural characteristics and applicable scenarios of single-node deployment.
 - Provide startup command templates and key parameter descriptions.
 - Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK).
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs.
+- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
 
 **Example:**
@@ -148,9 +148,9 @@ Expected Result: Omitted (fill in according to actual output).
 **Content Writing Requirements:**
 
 - Describe the principles of PD separation architecture and applicable scenarios.
-- Provide startup procedures, key configurations, and **deployment verification instructions**,indicate performance metrics.
+- Provide startup procedures, key configurations, and **deployment verification instructions**, and indicate performance metrics.
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs.
+- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 
 **Example:** Omitted
 
