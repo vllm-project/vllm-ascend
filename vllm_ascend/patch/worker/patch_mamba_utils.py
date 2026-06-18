@@ -4,6 +4,10 @@ import itertools
 from typing import Any
 
 import torch
+
+# Replace the CUDA-only selective_scan_fn on NPU with our PyTorch-based
+# implementation, since torch.ops._C.selective_scan_fwd is not available.
+import vllm.model_executor.layers.mamba.ops.mamba_ssm  # noqa: E402
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.utils.math_utils import cdiv
@@ -16,7 +20,10 @@ from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+from vllm_ascend.ops.triton.mamba.selective_scan import selective_scan_fn_npu
 from vllm_ascend.utils import is_310p
+
+vllm.model_executor.layers.mamba.ops.mamba_ssm.selective_scan_fn = selective_scan_fn_npu
 
 
 def _can_launch_triton_batch_memcpy() -> bool:
