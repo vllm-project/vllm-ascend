@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps

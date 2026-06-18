@@ -814,20 +814,10 @@ class KVCacheRecvingThread(threading.Thread):
         )
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
-            _sample_n = min(5, len(src_list))
             logger.error(
-                "Mooncake transfer failed for request %s, ret=%s, session=%s, "
-                "src_list_len=%s, dst_list_len=%s, length_list_len=%s, "
-                "sample_src=%s, sample_dst=%s, sample_len=%s",
+                "Mooncake transfer failed for request. remote_request_id=%s, ret=%d. ",
                 req_meta["remote_request_id"],
                 ret,
-                session_id,
-                len(src_list),
-                len(dst_list),
-                len(length_list),
-                src_list[:_sample_n],
-                dst_list[:_sample_n],
-                length_list[:_sample_n],
             )
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
@@ -1448,7 +1438,6 @@ class MooncakeConnectorScheduler:
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
-        logger.warning("[ADDR] Scheduler init: local_ip=%s side_channel_host=%s", self.local_ip, self.side_channel_host)
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -1766,8 +1755,6 @@ class MooncakeConnectorWorker:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
-        logger.warning("[ADDR] Worker init: pp_rank=%s tp_rank=%s side_channel_host=%s pp_size=%s",
-                       self.pp_rank, self.tp_rank, self.side_channel_host, self.pp_size)
         self.pcp_size = get_pcp_group().world_size
         # Use global hidden layer count (not PP-sliced) for MTP index assignment,
         # ensuring consistent MTP layer indices between P and D nodes in PD+PP mode.
