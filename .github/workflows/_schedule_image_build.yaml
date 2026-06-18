@@ -84,11 +84,11 @@ jobs:
           - arch: linux/amd64
             runner: ubuntu-latest
             tag: amd64
-            csrc_tag: ARM64
+
           - arch: linux/arm64
             runner: ubuntu-22.04-arm
             tag: arm64
-            csrc_tag: X86
+
     steps:
 
     - name: Validate inputs (workflow_dispatch only)
@@ -218,7 +218,7 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-        key: vllm-ascend-build-v1-${{ matrix.csrc_tag }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+        key: vllm-ascend-build-v1-${{ runner.arch}}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
 
     - name: Build and push
