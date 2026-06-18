@@ -429,7 +429,7 @@ Take the `serve` subcommand as an example. The `--random-output-len` parameter c
 
 ```shell
 vllm bench serve \
-    --model Eco-Tech/Qwen3-30B-A3B-w8a8 \
+    --model your_model_path \
     --served-model-name qwen3 \
     --port 8000 \
     --dataset-name random \
