@@ -228,6 +228,7 @@ nav:
         - tutorials/models/Qwen3-ASR-1.7B.md
         - tutorials/models/Cohere-Transcribe.md
         - tutorials/models/Qwen2.5-Math-RM-72B.md
+        - tutorials/models/AI21-Jamba-1.5-Mini.md
         - tutorials/models/InternVL3.5.md
         - tutorials/models/Dots3-Note.md
     - Feature Tutorials:

@@ -1,0 +1,23 @@
+model_name: "AI-ModelScope/AI21-Jamba-1.5-Mini"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 2
+  dtype: bfloat16
+  max_model_len: 4096
+  gpu_memory_utilization: 0.90
+  trust_remote_code: true
+
+tasks:
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,strict-match"
+        value: 0.35
+      - name: "exact_match,flexible-extract"
+        value: 0.35
+
+num_fewshot: 5
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"
