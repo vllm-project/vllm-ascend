@@ -6,7 +6,7 @@ MiniMax-M2 is MiniMax's flagship large language model series, including **MiniMa
 
 This document will show the main verification steps for both MiniMax-M2.5 and MiniMax-M2.7, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-This document is validated and written based on **vLLM-Ascend v0.13.0**. Both MiniMax-M2.5 and MiniMax-M2.7 are fully supported in this version, and all **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, EAGLE3 speculative decoding), it is recommended to use v0.13.0 or a later version.
+This document is written based on the latest vLLM-Ascend version. Both MiniMax-M2.5 and MiniMax-M2.7 are fully supported. To use the latest features (e.g., PD separation, EAGLE3 speculative decoding), it is recommended to use the latest version.
 
 ## 2 Supported Features
 
@@ -22,11 +22,12 @@ The following model weights and EAGLE3 weights are available on ModelScope. Sear
 
 | Model | Description | Recommended Hardware | Source |
 |-------|-------------|---------------------|--------|
-| `MiniMax-M2.7` / `MiniMax-M2.5` | FP8 checkpoint | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) | [ModelScope](https://modelscope.cn) |
-| `MiniMax-M2.7-w8a8-QuaRot` / `MiniMax-M2.5-w8a8-QuaRot` | W8A8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) | [ModelScope](https://modelscope.cn) |
-| `Eagle3` (MiniMax-M2.5/M2.7) | Speculative decoding head model | Matches the base model node count | [ModelScope](https://modelscope.cn) |
+| `MiniMax-M2.7` / `MiniMax-M2.5` | FP8 checkpoint | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) or 1× Ascend950 Products (experimental) | [ModelScope](https://modelscope.cn) |
+| `MiniMax-M2.7-w8a8-QuaRot` / `MiniMax-M2.5-w8a8-QuaRot` | W8A8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) or 1× Ascend950 Products (experimental) | [MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) |
+| `MiniMax-M2.7-w8a8c8-QuaRot` | W8A8C8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) or 1× Ascend950 Products (experimental) | [MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8c8-QuaRot) |
+| `Eagle3` (MiniMax-M2.5/M2.7) | Speculative decoding head model | Matches the base model node count | [MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) |
 
-It is recommended to download the model weights to a shared directory, such as `/mnt/sfs_turbo/.cache/`. The current release automatically detects the MiniMax-M2 FP8 checkpoint, disables FP8 quantization kernels on NPU, and loads the weights by dequantizing to BF16. This behavior may be removed once public BF16 weights are available.
+It is recommended to download the model weights to a shared directory, such as `/root/.cache/`.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -77,29 +78,22 @@ docker run --rm \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /mnt/sfs_turbo/.cache:/home/cache \
+-v /root/.cache:/root/.cache \
 -it $IMAGE bash
 ```
 
 **A2 series**
 
-Create and run `minimax-docker-run.sh`.
-
-Notes:
-
-- The default configuration assumes an **Atlas 800I A2 8-NPU** node and sets `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`. Update it based on your hardware.
-- Map your model weight directory into the container (the example maps it to `/opt/data/verification/`).
+Map your model weight directory into the container (the example maps it to `/root/.cache/`).
 
 ```{code-block} bash
 #!/bin/sh
 NAME=minimax
-DEVICES="0,1,2,3,4,5,6,7"
 IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 docker run -itd -u 0 --ipc=host --privileged \
   -e VLLM_USE_MODELSCOPE=True \
   -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
-  -e ASCEND_RT_VISIBLE_DEVICES=$DEVICES \
   --name $NAME \
   --net=host \
   --device /dev/davinci_manager \
@@ -112,16 +106,15 @@ docker run -itd -u 0 --ipc=host --privileged \
   -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
   -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
   -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -v /home/:/home/ \
-  # Map the model weights here
-  -v /opt/data/verification/:/opt/data/verification/ \
   -v /root/.cache:/root/.cache \
-  -v /mnt/performance/:/mnt/performance/ \
   -it $IMAGE bash
+```
 
-# Start and enter the container
-# bash minimax-docker-run.sh
-# docker exec -it minimax bash
+Save the script as `minimax-docker-run.sh`, then start and enter the container:
+
+```bash
+bash minimax-docker-run.sh
+docker exec -it minimax bash
 ```
 
 **Verification:**
@@ -166,8 +159,8 @@ Below is a recommended startup configuration for short-context conditions (e.g.,
 
 Notes:
 
-- If you only care about short-context low latency, you can set `--max-model-len 32768`, `--tensor-parallel-size 16`, and `--data-parallel-size 1`.
-- `export VLLM_ASCEND_BALANCE_SCHEDULING=1` enhances scheduling capacity between prefill and decode. This works best with a larger `--data-parallel-size` and can increase performance when concurrency approaches `data-parallel-size × max-num-seqs`.
+- If you only care about short-context low latency, you can set `--max-model-len 32768`, `--tensor-parallel-size 8`, and `--data-parallel-size 1`.
+- `export VLLM_ASCEND_BALANCE_SCHEDULING=0` disables balanced prefill/decode scheduling (set to 0 due to known issues).
 
 ```{code-block} bash
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -183,7 +176,7 @@ export TASK_QUEUE_ENABLE=1
 
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=0
 
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --served-model-name "MiniMax-M2.7" \
@@ -207,7 +200,7 @@ Remarks:
 
 - `minimax_m2_append_think` keeps `<think>...</think>` inside `content`.
 - If you mainly rely on the reasoning semantics of `/v1/responses`, it is recommended to use `--reasoning-parser minimax_m2` instead.
-- To achieve better performance on long-context scenarios (e.g., 128k or 64k), we recommend the following adjustments, and you can remove `export VLLM_ASCEND_BALANCE_SCHEDULING=1`:
+- To achieve better performance on long-context scenarios (e.g., 128k or 64k), we recommend the following adjustments:
 
 ```{code-block} bash
     --tensor-parallel-size 8 \
@@ -221,6 +214,8 @@ Remarks:
     --gpu-memory-utilization 0.85 \
     --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}'
 ```
+
+> **Note**: The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--speculative_config` based on your actual input/output length, concurrency, and hardware configuration.
 
 - If you need to test with `curl` and tool calling, add the following to the startup command:
 
@@ -258,12 +253,8 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-seqs 32 \
     --seed 1024 \
     --max-num-batched-tokens 32768 \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,16,20,32,80,96,128,200,256,320]}' \
-    --gpu-memory-utilization 0.9 \
-    --enable-auto-tool-choice \
-    --tool-call-parser minimax_m2 \
-    --reasoning-parser minimax_m2_append_think \
-    --enable-force-include-usage \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --gpu-memory-utilization 0.85 \
     --additional-config '{"enable_cpu_binding":true}' \
     --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/",  "num_speculative_tokens":3}'
@@ -275,33 +266,25 @@ Remarks:
 - `--max-num-batched-tokens 32768` is applicable to input sequence lengths of 32k or longer.
 - `--max-num-batched-tokens 16384` is applicable to input sequence lengths of 16k.
 - `--max-num-batched-tokens 6144` is applicable to short sequence input scenarios such as 2k and 3.5k.
+- If you need to test with `curl` and tool calling, add the following to the startup command:
+
+```{code-block} bash
+    --enable-auto-tool-choice \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2_append_think \
+    --enable-force-include-usage \
+```
 
 #### Key Parameter Reference
 
 | Parameter | Description | Recommended Range |
 |-----------|-------------|-------------------|
-| `--tensor-parallel-size` | Number of NPUs for tensor parallelism | 4–16 (A3) / 8 (A2) |
+| `--tensor-parallel-size` | Number of NPUs for tensor parallelism | 1–8 |
 | `--data-parallel-size` | Number of data parallel replicas | 1–4 |
 | `--max-num-seqs` | Maximum concurrent sequences | 16–48 |
-| `--max-model-len` | Maximum model context length | 32768–138000 |
-| `--max-num-batched-tokens` | Maximum tokens per batch | 6144–65536 |
+| `--max-model-len` | Maximum model context length | up to 204800 (200k) |
 | `--gpu-memory-utilization` | Fraction of NPU memory for KV cache | 0.85–0.92 |
 | `--speculative_config` | EAGLE3 speculative decoding settings | `"num_speculative_tokens": 1–3` |
-
-#### Environment Variable Reference
-
-| Variable | Description | Common Value |
-|----------|-------------|-------------|
-| `HCCL_OP_EXPANSION_MODE` | HCCL operation expansion mode | `"AIV"` |
-| `HCCL_BUFFSIZE` | HCCL communication buffer size (MB) | `512` (A2) / `1024` (A3) |
-| `PYTORCH_NPU_ALLOC_CONF` | PyTorch NPU memory allocator config | `expandable_segments:True` |
-| `VLLM_ASCEND_ENABLE_FUSED_MC2` | Enable fused MC2 kernel | `1` |
-| `VLLM_ASCEND_ENABLE_FLASHCOMM1` | Enable FlashComm v1 communication optimization | `1` |
-| `VLLM_ASCEND_BALANCE_SCHEDULING` | Enable balanced prefill/decode scheduling | `1` (short context) |
-| `TASK_QUEUE_ENABLE` | Enable task queue for improved scheduling | `1` |
-| `LD_PRELOAD` | Preload jemalloc for memory optimization | `/usr/lib/.../libjemalloc.so.2` |
-| `HCCL_INTRA_PCIE_ENABLE` | Enable intra-node PCIe communication (A2) | `1` |
-| `HCCL_INTRA_ROCE_ENABLE` | Enable intra-node RoCE communication (A2) | `0` |
 
 ### 5.2 Multi-Node PD Separation Deployment
 
@@ -360,8 +343,8 @@ Then prepare `run_dp_template.sh` on each node.
 ```bash
 unset http_proxy https_proxy ftp_proxy
 
-nic_name="enp194s0f0"     # change to your own nic name
-local_ip="90.90.97.36"    # change to your own IP
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
@@ -377,10 +360,12 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export TASK_QUEUE_ENABLE=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+export PYTHONHASHSEED=0
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -394,20 +379,19 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --tensor-parallel-size $7 \
     --enable-expert-parallel \
     --served-model-name minimax \
-    --max-model-len 131072 \
+    --max-model-len 200000 \
     --max-num-batched-tokens 16384 \
     --max-num-seqs 64 \
     --trust-remote-code \
-    --no-enable-prefix-caching \
     --gpu-memory-utilization 0.85 \
     --quantization ascend \
     --enforce-eager \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
-    --additional-config '{"recompute_scheduler_enable":true}' \
+    --additional-config '{"enable_cpu_binding":true}' \
     --kv-transfer-config \
-        '{"kv_connector": "MooncakeLayerwiseConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
-        "kv_port": "49810",
+        "kv_port": "35880",
         "engine_id": "0",
         "kv_connector_extra_config": {
              "use_ascend_direct": true,
@@ -421,8 +405,8 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
 ```bash
 unset http_proxy https_proxy ftp_proxy
 
-nic_name="enp194s0f0"     # change to your own nic name
-local_ip="90.90.97.40"    # change to your own IP
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
@@ -438,9 +422,12 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+export PYTHONHASHSEED=0
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -454,22 +441,22 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --tensor-parallel-size $7 \
     --enable-expert-parallel \
     --served-model-name minimax \
-    --max-model-len 131072 \
+    --max-model-len 200000 \
     --max-num-batched-tokens 16384 \
-    --max-num-seqs 64 \
+    --max-num-seqs 16 \
     --trust-remote-code \
     --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.9 \
+    --gpu-memory-utilization 0.85 \
     --quantization ascend \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
-    --additional-config '{"recompute_scheduler_enable":true}' \
+    --additional-config '{"enable_cpu_binding":true}' \
     --kv-transfer-config \
-        '{"kv_connector": "MooncakeLayerwiseConnector",
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
-        "kv_port": "36900",
-        "engine_id": "2",
+        "kv_port": "56900",
+        "engine_id": "1",
         "kv_connector_extra_config": {
              "use_ascend_direct": true,
              "prefill": {"dp_size": 2, "tp_size": 8},
@@ -501,12 +488,12 @@ python launch_online_dp.py \
 
 #### Request Forwarding
 
-Run the proxy on any machine that can reach both nodes. You can get the proxy script from the repository: [load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py).
+Run the proxy on any machine that can reach both nodes. You can get the proxy script from the repository: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
 
 ```bash
 unset http_proxy https_proxy
 
-python load_balance_proxy_layerwise_server_example.py \
+python load_balance_proxy_server_example.py \
     --port 8009 \
     --host <prefill_ip> \
     --prefiller-hosts \
@@ -606,6 +593,8 @@ For details, please refer to [Using AISBench](../../developer_guide/evaluation/u
 
 Using the `gsm8k` dataset as an example test dataset, run the accuracy evaluation for `MiniMax-M2.7-W8A8` in online mode.
 
+> **Note**: Post-processing parameters (e.g., `max_tokens`, `temperature`, `stop` tokens) should match those defined in the model weight's `generation_config.json`. The recommended maximum output length for evaluation is 64k (65536 tokens).
+
 1. For `lm_eval` installation, please refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md).
 2. Run `lm_eval` to execute the accuracy evaluation:
 
@@ -654,18 +643,18 @@ vllm bench serve \
 
 | Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|------------|----------------|------------------------|
-| High Throughput (32K → 1K) | 1P1D deployment | 16 (A3) | MiniMax-M2.7-W8A8 | Increase `max-num-seqs` and `data-parallel-size` |
-| Long Context (128K → 2K) | Single-node | 16 (A3) | MiniMax-M2.7-W8A8 | Enable context parallelism, reduce `data-parallel-size` |
-| Low Latency | Single-node | 8–16 | MiniMax-M2.7-W8A8 | Reduce `max-num-batched-tokens`, enable FullGraph |
+| Short Context High Throughput (3.5K → 1.5K) | 1P2D PD separation | 24 (A3) | MiniMax-M2.7-W8A8 | P: DP4TP4EP16, D: DP8TP4EP32 |
+| Long Context (128K → 1K, prefix cache 90%) | 1P1D PD separation | 16 (A3) | MiniMax-M2.7-W8A8 | P: DP2TP8, D: DP2TP8 |
 
 #### Detailed Configuration
 
 | Scenario | Configuration | NPUs | TP | DP | Max Num Batched Tokens | Max Num Seqs | Max Model Len | MTP (EAGLE3) | FUSED_MC2 | FlashComm1 | Async Scheduling |
 |----------|---------------|------|----|----|------------------------|--------------|---------------|--------------|-----------|------------|------------------|
-| High Throughput (32K→1K) | A3 Single-node | 16 | 4 | 4 | 32 | 48 | 40k | 3 | On | On | On |
-| Long Context (128K→2K) | A3 Single-node | 16 | 8 | 1 | 8 | 16 | 138k | 1 | On | On | Off |
-| Low Latency (3.5K→1.5K) | A3 Single-node | 16 | 16 | 1 | 8 | 16 | 32k | 3 | On | On | On |
-| A2 (8-NPU) | A2 Single-node | 8 | 8 | 1 | 16 | 32 | 32k | 3 | Off | On | On |
+| Short Context (3.5K→1.5K) | 1P2D P node | 16 | 4 | 4 | 16384 | 128 | 32k | - | On | On | Off |
+| Short Context (3.5K→1.5K) | 1P2D D node | 8 | 4 | 8 | 16384 | 128 | 32k | 3 | On | On | On |
+| Long Context (128K→1K) | 1P1D P node | 16 | 8 | 2 | 16384 | 64 | 200k | 3 | On | On | Off |
+| Long Context (128K→1K) | 1P1D D node | 16 | 8 | 2 | 16384 | 16 | 200k | 3 | On | On | On |
+| A2 (8-NPU) | A2 Single-node | 8 | 8 | 1 | 16384 | 32 | 32k | 3 | Off | On | On |
 
 ### 9.2 Tuning Guidelines
 
@@ -693,7 +682,7 @@ The following optimizations are enabled by default and require no additional con
 | ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |
 | FlashComm v1 | High-concurrency, TP scenarios | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather | Threshold protection: only takes effect when the actual number of tokens exceeds the threshold |
 | Fused MC2 | TP ≥ 4 scenarios | `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |
-| Balanced Scheduling | High DP scenarios | `export VLLM_ASCEND_BALANCE_SCHEDULING=1` | Enhances scheduling capacity between prefill and decode | Works best when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
+| Balanced Scheduling | High DP scenarios | `export VLLM_ASCEND_BALANCE_SCHEDULING=1` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`0`). Set to `1` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
 | EAGLE3 Speculative Decoding | All scenarios | `--speculative_config '{"method": "eagle3", "model": "/path/to/Eagle3/", "num_speculative_tokens": 3}'` | Uses a draft model to predict future tokens | 1–3 tokens for long context; 3 tokens for short context |
 | jemalloc Preload | All scenarios | `export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2` | Replaces default memory allocator to reduce fragmentation | Ensure jemalloc is installed in the container |
 
