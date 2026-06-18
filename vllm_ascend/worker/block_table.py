@@ -274,7 +274,7 @@ class BlockTable:
 
     def get_device_tensor(self, num_reqs: int | None = None) -> torch.Tensor:
         """Returns the device tensor of the block table."""
-        if num_reqs:
+        if num_reqs is not None:
             return self.block_table.gpu[:num_reqs]
         return self.block_table.gpu
 
