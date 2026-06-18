@@ -624,6 +624,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     else:
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        # BNSD layout with speculative decoding: expand
+                        # per-sequence actual_seq_lengths to per-token.
+                        if (c8_k_aq_scale is not None
+                                and num_tokens > len(actual_seq_lengths_q)):
+                            tokens_per_seq = num_tokens // len(seq_lens)
+                            actual_seq_lengths_q = [
+                                l for l in seq_lens
+                                for _ in range(tokens_per_seq)
+                            ]
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -704,6 +713,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             graph_params = get_graph_params()
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        # BNSD layout with speculative decoding: FIA expects
+        # len(actual_seq_lengths) >= num_tokens or == 1.
+        # actual_seq_lengths_q is per-sequence (from query_start_loc[1:]),
+        # but num_tokens > batch_size when spec_tokens > 0.
+        if (self.enable_c8_quant
+                and num_tokens > len(actual_seq_lengths_q)):
+            per_seq_lens = attn_metadata.seq_lens_list
+            tokens_per_seq = num_tokens // len(per_seq_lens)
+            actual_seq_lengths_q = [
+                l for l in per_seq_lens for _ in range(tokens_per_seq)
+            ]
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
 
