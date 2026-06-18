@@ -29,7 +29,6 @@ from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGra
 
 from vllm_ascend.utils import vllm_version_is
 
-
 # ---------------------------------------------------------------------------
 # Per–encoder-budget ACL graph bookkeeping (ViT FIA tasks)
 # ---------------------------------------------------------------------------
@@ -425,9 +424,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
 
         meta = _get_replay_metadata_buffers(graph_meta)
         cu_seqlens_cpu = None if meta.get("cu_seqlens") is None else meta.get("cu_seqlens").cpu()
-        cu_window_seqlens_cpu = (
-            None if meta.get("cu_window_seqlens") is None else meta.get("cu_window_seqlens").cpu()
-        )
+        cu_window_seqlens_cpu = None if meta.get("cu_window_seqlens") is None else meta.get("cu_window_seqlens").cpu()
         seq_lens_cpu = None if meta.get("sequence_lengths") is None else meta.get("sequence_lengths").cpu()
 
         update_stream = self.update_stream

@@ -341,8 +341,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             self.num_kv_heads,
             self.num_heads,
             self.scale_value,
-            out,
-            softmax_lse,
+            weak_ref_tensors(out),
+            weak_ref_tensors(softmax_lse),
         )
         params.attn_params[token_budget].append(packed)
         params.events[token_budget].append(event)
