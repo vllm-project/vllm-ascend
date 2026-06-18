@@ -39,6 +39,11 @@ else:
     triton_q_rms = None  # type: ignore
 
 
+def _is_missing_aclnn_kernel_error(exc: RuntimeError) -> bool:
+    msg = str(exc)
+    return "not in libopapi.so" in msg or ("libopapi.so" in msg and "not found" in msg)
+
+
 class BaseDeviceAdaptor:
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
@@ -59,17 +64,32 @@ class BaseDeviceAdaptor:
         active_expert_range=None,
         quant_mode: int = -1,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
-            hidden_states,
-            topk_ids,
-            scale=scale,
-            active_num=active_num,
-            expert_num=expert_num,
-            expert_tokens_num_type=expert_tokens_num_type,
-            expert_tokens_num_flag=expert_tokens_num_flag,
-            active_expert_range=active_expert_range,
-            quant_mode=quant_mode,
-        )
+        try:
+            return torch.ops._C_ascend.npu_moe_init_routing_custom(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
+        except RuntimeError as exc:
+            if not _is_missing_aclnn_kernel_error(exc):
+                raise
+            return torch_npu.npu_moe_init_routing_v2(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
 
     @staticmethod
     def maybe_normalize_mxfp_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:

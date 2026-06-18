@@ -25,6 +25,11 @@ from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
 
 
+def _is_missing_aclnn_kernel_error(exc: RuntimeError) -> bool:
+    msg = str(exc)
+    return "not in libopapi.so" in msg or ("libopapi.so" in msg and "not found" in msg)
+
+
 class AscendRMSNorm(RMSNorm):
     def __init__(
         self,
@@ -70,9 +75,16 @@ class AscendRMSNorm(RMSNorm):
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if enable_custom_op():
-                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                    x, residual, self.weight, self.bias, self.variance_epsilon
-                )
+                try:
+                    x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                        x, residual, self.weight, self.bias, self.variance_epsilon
+                    )
+                except RuntimeError as exc:
+                    if not _is_missing_aclnn_kernel_error(exc):
+                        raise
+                    x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
+                    if self.bias is not None:
+                        x.add_(self.bias)
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
                 if self.bias is not None:
@@ -99,9 +111,16 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if enable_custom_op():
-                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                    x, residual, 1.0 + self.weight, None, self.variance_epsilon
-                )
+                try:
+                    x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                        x, residual, 1.0 + self.weight, None, self.variance_epsilon
+                    )
+                except RuntimeError as exc:
+                    if not _is_missing_aclnn_kernel_error(exc):
+                        raise
+                    x, _, residual = torch_npu.npu_add_rms_norm(
+                        x, residual, 1.0 + self.weight, self.variance_epsilon
+                    )
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
