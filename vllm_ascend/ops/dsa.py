@@ -189,7 +189,6 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata
 
     if attn_metadata is None:
-        self.dsa_attn.impl.dsa_warmup_with_multistream(hidden_states)
         output.fill_(0)
         return
 
