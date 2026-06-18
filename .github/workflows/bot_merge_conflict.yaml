@@ -8,41 +8,9 @@ jobs:
   main:
     runs-on: linux-amd64-cpu-8-hk
     steps:
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -y && sudo apt-get install -y curl
-          sudo mkdir -p -m 755 /etc/apt/keyrings
-          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install gh -y
-
-      - name: Check and label merge conflicts
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          LABEL="merge-conflicts"
-          REPO="${{ github.repository }}"
-
-          if [ "${{ github.event_name }}" = "push" ]; then
-            # Push to base branch (e.g. PR merged): check ALL open PRs
-            PR_NUMBERS=$(gh pr list --state open --json number --jq '.[].number' --limit 1000)
-          else
-            # PR synchronize: check only this PR
-            PR_NUMBERS="${{ github.event.pull_request.number }}"
-          fi
-
-          for PR in $PR_NUMBERS; do
-            MERGEABLE=$(gh pr view "$PR" --repo "$REPO" --json mergeable --jq '.mergeable' 2>/dev/null || echo "UNKNOWN")
-            case "$MERGEABLE" in
-              CONFLICTING)
-                gh pr edit "$PR" --repo "$REPO" --add-label "$LABEL" 2>/dev/null || true
-                ;;
-              MERGEABLE)
-                gh pr edit "$PR" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null || true
-                ;;
-            esac
-          done
+      - name: check if prs are dirty
+        uses: eps1lon/actions-label-merge-conflict@v3
+        with:
+          dirtyLabel: "merge-conflicts"
+          repoToken: "${{ secrets.GITHUB_TOKEN }}"
+          commentOnDirty: "This pull request has conflicts, please resolve those before we can evaluate the pull request."
