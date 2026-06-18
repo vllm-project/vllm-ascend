@@ -703,8 +703,11 @@ std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_meta(
     const at::Tensor& a,
     const at::Tensor& b,
     const at::Tensor& dt_bias,
-    double beta)
+    double beta,
+    double threshold)
 {
+    (void)beta;
+    (void)threshold;
     int64_t batch = a.size(0);
     int64_t num_heads = a.size(1);
 

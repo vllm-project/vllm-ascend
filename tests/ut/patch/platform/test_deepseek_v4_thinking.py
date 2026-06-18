@@ -3,8 +3,6 @@
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import deepseek_v4
 
-from vllm_ascend.patch.platform import patch_deepseek_v4_thinking  # noqa: F401
-
 
 class FakeTokenizer:
     vocab_size = 1

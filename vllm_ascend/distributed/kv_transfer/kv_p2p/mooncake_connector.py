@@ -42,12 +42,14 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
@@ -93,6 +95,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_size_scale: list[list[int]]
     num_blocks: int
     block_lens: list[list[int]]
+    block_strides: list[list[int]]
     local_ip: str = ""
 
 
@@ -120,6 +123,13 @@ class GroupPull:
     num_group_pulls: int
     prefill_pp_rank: int = 0
     is_group_transfer_end: bool = False
+
+
+@dataclass(frozen=True)
+class GroupTransferInfo:
+    tokens_per_block: int
+    blocks_per_window: int
+    is_state_group: bool
 
 
 @dataclass
@@ -209,7 +219,7 @@ class KVCacheTaskTracker:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
-                logger.info(
+                logger.error(
                     "Force freed expired request: %s. "
                     "Reason: Request exceeded timeout threshold (%s seconds). "
                     "Action: Resources have been forcibly released to prevent memory leak.",
@@ -396,6 +406,7 @@ class KVCacheRecvingThread(threading.Thread):
         side_channel_port: int,
         local_kv_caches_base_addr: list[list[int]],
         block_len_per_addr: list[list[int]],
+        block_stride_per_addr: list[list[int]],
         is_hma_required=False,
         ready_event: threading.Event | None = None,
         vllm_config: VllmConfig | None = None,
@@ -422,11 +433,23 @@ class KVCacheRecvingThread(threading.Thread):
         self.kv_caches_base_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.kv_caches_base_addr[local_engine_id][local_handshake_port] = local_kv_caches_base_addr
         self.block_len_per_addr = block_len_per_addr
+        self.block_stride_per_addr = block_stride_per_addr
         if kv_group2layeridx is None:
             kv_group2layeridx = {}
         self.kv_group2layeridx = kv_group2layeridx
+        self.group_compress_ratios: dict[int, int] = {}
+        for group_id, (group_spec, _) in self.kv_group2layeridx.items():
+            compress_ratio = 1
+            kv_cache_spec = group_spec.get("kv_cache_spec")
+            if isinstance(kv_cache_spec, dict):
+                for spec in kv_cache_spec.values():
+                    if isinstance(spec, dict) and isinstance(spec.get("compress_ratio"), int):
+                        compress_ratio = max(1, spec["compress_ratio"])
+                        break
+            self.group_compress_ratios[group_id] = compress_ratio
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
         self.remote_block_size_scale: dict[str, dict[int, list[list[int]]]] = SizedDict()
+        self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
@@ -639,6 +662,7 @@ class KVCacheRecvingThread(threading.Thread):
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
         remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         remote_block_size_scale = self.remote_block_size_scale[remote_engine_id][remote_handshake_port]
+        remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
         session_id = f"{remote_host}:{remote_transfer_port}"
 
         req_start_time = time.perf_counter()
@@ -678,7 +702,8 @@ class KVCacheRecvingThread(threading.Thread):
                 # For FullAttentionSpec prefix cache with hybrid kernel blocks.
                 num_computed_tokens = req_meta.get("num_computed_tokens", 0)
                 remote_kernel_block_size = self.block_size // remote_scale
-                remote_start_idx = num_computed_tokens // remote_kernel_block_size
+                remote_kernel_token_size = remote_kernel_block_size * self.group_compress_ratios[group_idx]
+                remote_start_idx = num_computed_tokens // remote_kernel_token_size
                 kernel_remote_block_ids = kernel_remote_block_ids[remote_start_idx:]
                 num_kernel_blocks = min(len(kernel_remote_block_ids), len(kernel_local_block_ids))
                 kernel_remote_block_ids = kernel_remote_block_ids[:num_kernel_blocks]
@@ -715,6 +740,8 @@ class KVCacheRecvingThread(threading.Thread):
                         src_layer_base_addr=local_kv_caches_base_addrs[layer_idx],
                         dst_layer_base_addr=remote_kv_caches_base_addrs[layer_idx],
                         block_len=self.block_len_per_addr[layer_idx],
+                        block_stride=self.block_stride_per_addr[layer_idx],
+                        remote_block_stride=remote_block_stride_per_addr[layer_idx],
                         remote_block_id=grouped_remote_block_ids[0][0],
                         local_block_id=grouped_local_block_ids[0][0],
                         tp_num_need_pulls=tp_num_need_pulls,
@@ -744,10 +771,19 @@ class KVCacheRecvingThread(threading.Thread):
                     src_layer_base_addr = local_kv_caches_base_addrs[layer_idx][cache_idx]
                     dst_layer_base_addr = remote_kv_caches_base_addrs[layer_idx][cache_idx]
                     block_len = self.block_len_per_addr[layer_idx][cache_idx]
+                    block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
+                    remote_block_stride = remote_block_stride_per_addr[layer_idx][cache_idx]
                     inner_block_len = block_len // tp_num_need_pulls
-                    for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
-                        src = src_layer_base_addr + local_block_id[0] * block_len + inner_offset * inner_block_len
-                        dst = dst_layer_base_addr + remote_block_id[0] * inner_block_len
+                    transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
+                        grouped_remote_block_ids,
+                        grouped_local_block_ids,
+                        src_block_stride=remote_block_stride,
+                        dst_block_stride=block_stride,
+                        block_len=inner_block_len,
+                    )
+                    for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
+                        src = src_layer_base_addr + local_block_id[0] * block_stride + inner_offset * inner_block_len
+                        dst = dst_layer_base_addr + remote_block_id[0] * remote_block_stride
                         length = inner_block_len * len(local_block_id)
                         src_list.append(src)
                         dst_list.append(dst)
@@ -890,6 +926,8 @@ class KVCacheRecvingThread(threading.Thread):
         src_layer_base_addr: list[int],
         dst_layer_base_addr: list[int],
         block_len: list[int],
+        block_stride: list[int],
+        remote_block_stride: list[int],
         remote_block_id: int,
         local_block_id: int,
         tp_num_need_pulls: int,
@@ -902,6 +940,8 @@ class KVCacheRecvingThread(threading.Thread):
         remote_conv_addr, remote_ssm_addr = dst_layer_base_addr[:2]
         local_conv_addr, local_ssm_addr = src_layer_base_addr[:2]
         local_conv_len, local_ssm_len = block_len[:2]
+        local_conv_stride, local_ssm_stride = block_stride[:2]
+        remote_conv_stride, remote_ssm_stride = remote_block_stride[:2]
 
         tp_ratio = tp_num_need_pulls
         remote_conv_len = local_conv_len // tp_ratio
@@ -910,14 +950,14 @@ class KVCacheRecvingThread(threading.Thread):
         if tp_ratio == 1:
             src_list.extend(
                 [
-                    local_conv_addr + local_block_id * local_conv_len,
-                    local_ssm_addr + local_block_id * local_ssm_len,
+                    local_conv_addr + local_block_id * local_conv_stride,
+                    local_ssm_addr + local_block_id * local_ssm_stride,
                 ]
             )
             dst_list.extend(
                 [
-                    remote_conv_addr + remote_block_id * remote_conv_len,
-                    remote_ssm_addr + remote_block_id * remote_ssm_len,
+                    remote_conv_addr + remote_block_id * remote_conv_stride,
+                    remote_ssm_addr + remote_block_id * remote_ssm_stride,
                 ]
             )
             length_list.extend([remote_conv_len, remote_ssm_len])
@@ -952,14 +992,14 @@ class KVCacheRecvingThread(threading.Thread):
                 local_addr_offset = (
                     (i * remote_conv_width + remote_conv_offset) * tp_ratio + remote_tp_offset * remote_conv_size
                 ) * conv_dtype_size
-                src_list.append(local_conv_addr + local_block_id * local_conv_len + local_addr_offset)
-                dst_list.append(remote_conv_addr + remote_block_id * remote_conv_len + remote_addr_offset)
+                src_list.append(local_conv_addr + local_block_id * local_conv_stride + local_addr_offset)
+                dst_list.append(remote_conv_addr + remote_block_id * remote_conv_stride + remote_addr_offset)
                 length_list.append(remote_conv_size * conv_dtype_size)
 
         src_list.append(
-            local_ssm_addr + local_block_id * local_ssm_len + remote_tp_offset * local_ssm_len // tp_num_need_pulls
+            local_ssm_addr + local_block_id * local_ssm_stride + remote_tp_offset * local_ssm_len // tp_num_need_pulls
         )
-        dst_list.append(remote_ssm_addr + remote_block_id * remote_ssm_len)
+        dst_list.append(remote_ssm_addr + remote_block_id * remote_ssm_stride)
         length_list.append(remote_ssm_len)
 
     def _get_group_kv_caches(self, group_idx: int, layer_indices: list[int] | None = None) -> dict[str, Any]:
@@ -1155,6 +1195,7 @@ class KVCacheRecvingThread(threading.Thread):
             self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
             self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
+            self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -1413,6 +1454,119 @@ class MooncakeConnectorScheduler:
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
+        self.use_hybrid = (
+            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            and any(not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in kv_cache_config.kv_cache_groups)
+            and len(kv_cache_config.kv_cache_groups) > 1
+        )
+        self.use_compress = self._model_uses_compress()
+        self.group_transfer_info = [self._get_group_transfer_info(group) for group in kv_cache_config.kv_cache_groups]
+        self.need_truncate = self.use_compress or any(info.is_state_group for info in self.group_transfer_info)
+
+    def _model_uses_compress(self) -> bool:
+        hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
+        compress_ratios = getattr(hf_config, "compress_ratios", None)
+        return isinstance(compress_ratios, (list, tuple, dict))
+
+    def _get_group_transfer_info(self, group: Any) -> GroupTransferInfo:
+        specs = self._get_group_unique_specs(group)
+        first_spec = specs[0] if specs else group.kv_cache_spec
+        block_size = getattr(group.kv_cache_spec, "block_size", getattr(first_spec, "block_size", self.block_size))
+        is_state_group = any(isinstance(spec, MambaSpec) for spec in specs)
+        sliding_window = 0
+        compress_ratio = 1
+        for spec in specs:
+            if isinstance(spec, SlidingWindowSpec):
+                sliding_window = spec.sliding_window
+            elif hasattr(spec, "compress_ratio"):
+                compress_ratio = spec.compress_ratio
+
+        return GroupTransferInfo(
+            tokens_per_block=block_size * max(1, int(compress_ratio)),
+            blocks_per_window=cdiv(sliding_window, block_size) + 1 if sliding_window else 0,
+            is_state_group=is_state_group,
+        )
+
+    def _get_group_unique_specs(self, group: Any) -> list[Any]:
+        if not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+            return [group.kv_cache_spec]
+
+        specs = []
+        for layer_name in group.layer_names:
+            layer_spec = group.kv_cache_spec.kv_cache_specs[layer_name]
+            if layer_spec not in specs:
+                specs.append(layer_spec)
+        return specs
+
+    def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
+        """Return blocks that contain prompt KV, dropping MTP extra blocks.
+
+        State groups such as Mamba are not context-block aligned with attention
+        KV, so keep them unchanged and only clip attention-like groups here.
+        SWA tail clipping is handled as a separate step after this.
+        """
+        if len(block_ids) == 0:
+            return block_ids
+
+        assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
+
+        transfer_block_ids = []
+        for blocks, group_info in zip(block_ids, self.group_transfer_info):
+            if group_info.is_state_group:
+                transfer_block_ids.append(blocks)
+            else:
+                num_prompt_blocks = cdiv(prompt_len, group_info.tokens_per_block)
+                transfer_block_ids.append(blocks[:num_prompt_blocks])
+        return tuple(transfer_block_ids)
+
+    def _get_swa_transfer_block_ids(self, block_ids: BlockIds) -> BlockIds:
+        """Clip SWA groups to their window tail and drop placeholder block 0."""
+        if len(block_ids) == 0:
+            return block_ids
+
+        assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
+
+        transfer_block_ids = []
+        for blocks, group_info in zip(block_ids, self.group_transfer_info):
+            if group_info.is_state_group or group_info.blocks_per_window == 0:
+                transfer_block_ids.append(blocks)
+            else:
+                window_blocks = blocks[-group_info.blocks_per_window :]
+                transfer_block_ids.append([block_id for block_id in window_blocks if block_id != 0])
+        return tuple(transfer_block_ids)
+
+    def _state_prefill_token_count(self, num_prompt_tokens: int) -> int:
+        """D-side only. Returns N-1 for Mamba models since the decoder
+        always recomputes the last token and must start from h(N-1)."""
+        if self.need_truncate and num_prompt_tokens > 1:
+            return num_prompt_tokens - 1
+        return num_prompt_tokens
+
+    def _truncate_request_for_prefill(self, request: "Request") -> None:
+        """P-side only: drop the last prompt token so the prefiller computes
+        h(N-1) instead of h(N). The decoder recomputes the last token to
+        derive h(N) correctly.
+
+        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        request is preempted and rescheduled."""
+        params = request.kv_transfer_params
+        if (
+            params is not None
+            # Guard against repeated truncation after preemption/reschedule.
+            and not params.get("_p_side_truncated")
+            and request.num_prompt_tokens > 1
+        ):
+            if request.prompt_token_ids is not None:
+                request.prompt_token_ids.pop()
+            elif request.prompt_embeds is not None:
+                request.prompt_embeds = request.prompt_embeds[:-1]
+            else:
+                return
+
+            request._all_token_ids.pop()
+            request.num_prompt_tokens -= 1
+            request.max_tokens = 1
+            params["_p_side_truncated"] = True
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
@@ -1439,11 +1593,15 @@ class MooncakeConnectorScheduler:
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
-            assert num_computed_tokens % self.block_size == 0
+            token_ids = request.prompt_token_ids or []
+            actual = self._state_prefill_token_count(len(token_ids))
             params["num_computed_tokens"] = num_computed_tokens
-            # Note: We use the full token count as transmit data here.
-            count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
-            return count, count > 0
+            count = max(actual - num_computed_tokens, 0)
+            if count > 0:
+                return count, True
+
+        if params is not None and params.get("do_remote_decode") and self.need_truncate:
+            self._truncate_request_for_prefill(request)
 
         # No remote prefill for this request.
         return 0, False
@@ -1521,20 +1679,14 @@ class MooncakeConnectorScheduler:
         ):
             return False, None
 
-        computed_block_ids = block_ids
+        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        computed_block_ids = self._get_transfer_block_ids(block_ids, len(request.prompt_token_ids))
+        computed_block_ids = self._get_swa_transfer_block_ids(computed_block_ids)
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
         delay_free_blocks = sum(computed_block_lens) > 0
         if delay_free_blocks:
-            logger.info("Delaying free of %d blocks for request %s", len(computed_block_ids), request.request_id)
+            logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
-
-        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
-        computed_block_ids = tuple(
-            block_ids[:num_prompt_blocks]
-            if not isinstance(self.kv_cache_groups[i].kv_cache_spec, MambaSpec)
-            else block_ids
-            for i, block_ids in enumerate(computed_block_ids)
-        )
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -1607,6 +1759,11 @@ class MooncakeConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self.num_blocks: int = kv_cache_config.num_blocks
         self.kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] = {}
+        self.use_hybrid = (
+            not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            and any(not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in self.kv_cache_config.kv_cache_groups)
+            and len(self.kv_cache_config.kv_cache_groups) > 1
+        )
         self._is_hma_required = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and any(
             not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in kv_cache_config.kv_cache_groups
         )
@@ -1779,6 +1936,27 @@ class MooncakeConnectorWorker:
 
         return ptrs, lengths
 
+    def _get_registered_kv_tensor_buffers_hybrid(
+        self, kv_caches: dict[str, torch.Tensor]
+    ) -> tuple[list[int], list[int]]:
+        ptrs: list[int] = []
+        lengths: list[int] = []
+
+        for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
+            shared_addrs: list[int] = []
+            for layer_name in kv_cache_tensor.shared_by:
+                for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name]):
+                    shared_addrs.append(single_kv_cache.data_ptr())
+
+            if not shared_addrs:
+                continue
+            base_addr = min(shared_addrs)
+            assert base_addr % (2 * 1024 * 1024) == 0, f"Tensor start addr {base_addr} is not align with 2M."
+            ptrs.append(base_addr)
+            lengths.append(kv_cache_tensor.size)
+
+        return ptrs, lengths
+
     def _get_registered_layer_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
         ptrs: list[int] = []
         lengths: list[int] = []
@@ -1817,7 +1995,15 @@ class MooncakeConnectorWorker:
         # Per-layer byte length of one tensor block:
         # [layer_idx][cache_idx] -> element_size * prod(block_shape).
         self.block_len_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
+        # Per-layer full tensor shape for each registered KV cache address:
+        # [layer_idx][cache_idx] -> cache tensor shape, including num_blocks.
+        self.block_shape_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
+        # Per-layer byte stride between consecutive tensor blocks:
+        # [layer_idx][cache_idx] -> stride(0) * element_size.
+        self.block_stride_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
 
+        # TODO: For DSV4 use_compress, metadata/transfer can be optimized by
+        # aggregating layer views that share the same raw KVCacheTensor.
         for layer_name, kv_cache_tuple in kv_caches.items():
             layer_idx = layer_name_to_idx[layer_name]
             for single_kv_cache in self._as_kv_cache_tuple(kv_cache_tuple):
@@ -1825,11 +2011,16 @@ class MooncakeConnectorWorker:
                 block_size_scale = tensor_num_blocks // self.num_blocks
                 block_shape = single_kv_cache.shape[1:]
                 self.block_len_per_addr[layer_idx].append(single_kv_cache.element_size() * math.prod(block_shape))
+                self.block_stride_per_addr[layer_idx].append(single_kv_cache.stride(0) * single_kv_cache.element_size())
+                self.block_shape_per_addr[layer_idx].append(single_kv_cache.shape)
                 self.block_size_scale[layer_idx].append(block_size_scale)
                 self.kv_caches_base_addr[layer_idx].append(single_kv_cache.data_ptr())
 
         if has_mamba_group:
             ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
+            register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
+        elif self.use_hybrid:
+            ptrs, lengths = self._get_registered_kv_tensor_buffers_hybrid(kv_caches)
             register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
         else:
             # For normal attention / sparse-c8 KV cache, keep metadata at the
@@ -1842,10 +2033,13 @@ class MooncakeConnectorWorker:
 
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
-            "block_len_per_addr=%s, block_size_scale=%s, ptrs=%s, lengths=%s",
+            "block_len_per_addr=%s, block_stride_per_addr=%s, block_shape_per_addr=%s, "
+            "block_size_scale=%s, ptrs=%s, lengths=%s",
             self.kv_group2layeridx,
             self.kv_caches_base_addr,
             self.block_len_per_addr,
+            self.block_stride_per_addr,
+            self.block_shape_per_addr,
             self.block_size_scale,
             register_regions.ptrs,
             register_regions.lengths,
@@ -1860,6 +2054,7 @@ class MooncakeConnectorWorker:
             block_size_scale=self.block_size_scale,
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_addr,
+            block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
         )
         self.xfer_handshake_metadata = metadata
@@ -1890,6 +2085,7 @@ class MooncakeConnectorWorker:
                 self.side_channel_port,
                 self.kv_caches_base_addr,
                 self.block_len_per_addr,
+                self.block_stride_per_addr,
                 self._is_hma_required,
                 ready_event,
                 self.vllm_config,
@@ -2546,16 +2742,22 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignor
 
 
 def group_concurrent_contiguous(
-    src: list[int], dst: list[int]
-) -> tuple[list[npt.NDArray[np.int64]], list[npt.NDArray[np.int64]]]:
-    """Vectorised NumPy implementation."""
+    src: list[int],
+    dst: list[int],
+    src_block_stride: int = 1,
+    dst_block_stride: int = 1,
+    block_len: int = 1,
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Group block ids that are contiguous in both id space and memory."""
     src_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
     dst_indices: npt.NDArray[np.int64] = np.array(dst, dtype=np.int64)
 
     if src_indices.size == 0:
         return [], []
 
-    brk = np.where((np.diff(src_indices) != 1) | (np.diff(dst_indices) != 1))[0] + 1
+    src_byte_contiguous = np.diff(src_indices) * src_block_stride == block_len
+    dst_byte_contiguous = np.diff(dst_indices) * dst_block_stride == block_len
+    brk = np.where(~(src_byte_contiguous & dst_byte_contiguous))[0] + 1
     src_groups = np.split(src_indices, brk)
     dst_groups = np.split(dst_indices, brk)
 
@@ -2563,6 +2765,27 @@ def group_concurrent_contiguous(
     dst_groups = [g.tolist() for g in dst_groups]
 
     return src_groups, dst_groups
+
+
+def split_if_not_byte_contiguous(
+    src_groups: list[list[int]],
+    dst_groups: list[list[int]],
+    src_block_stride: int,
+    dst_block_stride: int,
+    block_len: int,
+) -> tuple[list[list[int]], list[list[int]]]:
+    if src_block_stride == block_len and dst_block_stride == block_len:
+        return src_groups, dst_groups
+
+    src = [bid for group in src_groups for bid in group]
+    dst = [bid for group in dst_groups for bid in group]
+    return group_concurrent_contiguous(
+        src,
+        dst,
+        src_block_stride=src_block_stride,
+        dst_block_stride=dst_block_stride,
+        block_len=block_len,
+    )
 
 
 def string_to_int64_hash(input_str):
