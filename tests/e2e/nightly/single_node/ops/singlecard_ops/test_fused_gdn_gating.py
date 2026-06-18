@@ -24,6 +24,8 @@ SEED = 42
 NUM_HEADS_VALUES = [4, 6, 8, 12, 16, 24, 32, 48, 64, 128]
 BATCH_SIZES = [1, 7, 37, 128, 512, 4096, 16384]
 DTYPES = [torch.bfloat16, torch.float16]
+PARAM_DTYPES = [torch.float32, torch.bfloat16, torch.float16]
+DTYPE_COMBINATIONS = [(dtype, param_dtype) for dtype in DTYPES for param_dtype in PARAM_DTYPES]
 
 
 # ---------------------------------------------------------------------------
@@ -37,11 +39,12 @@ def _golden_fused_gdn_gating(
     b: torch.Tensor,
     dt_bias: torch.Tensor,
     beta: float = 1.0,
+    threshold: float = 20.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """CPU golden reference for fused_gdn_gating.
 
-    Uses the same numerically stable softplus form as the AscendC kernel:
-        softplus_o = max(x, 0) + log(1 + exp(-|beta*x|)) / beta
+    Uses the same softplus threshold semantics as the Triton kernel:
+        where(beta * x <= threshold, log(1 + exp(beta * x)) / beta, x)
 
     Returns:
         g:           [1, batch, num_heads], fp32.
@@ -60,7 +63,11 @@ def _golden_fused_gdn_gating(
 
     x = a_f + dt_bias_expanded
     beta_x = beta * x
-    softplus_o = torch.maximum(x, torch.tensor(0.0)) + torch.log(1.0 + torch.exp(-torch.abs(beta_x))) / beta
+    softplus_o = torch.where(
+        beta_x <= threshold,
+        torch.log1p(torch.exp(beta_x)) / beta,
+        x,
+    )
 
     g = -torch.exp(A_log_expanded) * softplus_o
     g = g.unsqueeze(0)
@@ -80,15 +87,34 @@ def _make_inputs(
     num_heads: int,
     batch: int,
     dtype: torch.dtype,
+    param_dtype: torch.dtype = torch.float32,
     seed: int = SEED,
 ):
     """Build random tensors on CPU for both golden and NPU execution."""
     torch.manual_seed(seed)
-    A_log = torch.randn(num_heads, dtype=torch.float32)
-    dt_bias = torch.randn(num_heads, dtype=torch.float32)
+    A_log = torch.randn(num_heads, dtype=param_dtype)
+    dt_bias = torch.randn(num_heads, dtype=param_dtype)
     a = torch.randn(batch, num_heads, dtype=dtype)
     b = torch.randn(batch, num_heads, dtype=dtype)
     return A_log, a, b, dt_bias
+
+
+def _force_softplus_threshold_cases(
+    a: torch.Tensor,
+    dt_bias: torch.Tensor,
+    beta: float,
+    threshold: float,
+) -> None:
+    """Force beta * (a + dt_bias) to cover threshold and non-threshold paths."""
+    if a.shape[0] < 4 or a.shape[1] < 4:
+        return
+
+    dt_bias[:4] = 0
+    boundary = threshold / beta
+    a[0, 0] = boundary + 2.0  # linear branch
+    a[1, 1] = boundary  # softplus branch at equality
+    a[2, 2] = boundary - 0.5  # softplus branch below threshold
+    a[3, 3] = -boundary - 2.0  # negative softplus input
 
 
 def _npu_op_exec(
@@ -97,13 +123,10 @@ def _npu_op_exec(
     b: torch.Tensor,
     dt_bias: torch.Tensor,
     beta: float = 1.0,
+    threshold: float = 20.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Execute the AscendC operator on NPU and return CPU tensors."""
-    # Ensure correct dtypes and contiguity for the NPU operator.
-    if A_log.dtype != torch.float32:
-        A_log = A_log.to(torch.float32)
-    if dt_bias.dtype != torch.float32:
-        dt_bias = dt_bias.to(torch.float32)
+    # Ensure contiguity for the NPU operator.
     if not A_log.is_contiguous():
         A_log = A_log.contiguous()
     if not dt_bias.is_contiguous():
@@ -115,6 +138,7 @@ def _npu_op_exec(
         b.npu(),
         dt_bias.npu(),
         float(beta),
+        float(threshold),
     )
     return g.cpu(), beta_output.cpu()
 
@@ -161,6 +185,7 @@ def test_fused_gdn_gating_vs_reference(num_heads, batch, dtype):
 @pytest.mark.parametrize("batch", [1, 37])
 def test_fused_gdn_gating_non_default_params(num_heads, batch):
     A_log, a, b, dt_bias = _make_inputs(num_heads, batch, torch.bfloat16)
+    _force_softplus_threshold_cases(a, dt_bias, beta=0.5, threshold=1.0)
 
     ref_g, ref_beta = _golden_fused_gdn_gating(
         A_log,
@@ -168,6 +193,7 @@ def test_fused_gdn_gating_non_default_params(num_heads, batch):
         b,
         dt_bias,
         beta=0.5,
+        threshold=1.0,
     )
     npu_g, npu_beta = _npu_op_exec(
         A_log,
@@ -175,6 +201,39 @@ def test_fused_gdn_gating_non_default_params(num_heads, batch):
         b,
         dt_bias,
         beta=0.5,
+        threshold=1.0,
+    )
+
+    _assert_close(npu_g, npu_beta, ref_g, ref_beta)
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize(("dtype", "param_dtype"), DTYPE_COMBINATIONS)
+def test_fused_gdn_gating_dtype_matrix(dtype, param_dtype):
+    A_log, a, b, dt_bias = _make_inputs(
+        32,
+        37,
+        dtype,
+        param_dtype=param_dtype,
+    )
+    _force_softplus_threshold_cases(a, dt_bias, beta=1.0, threshold=2.0)
+
+    ref_g, ref_beta = _golden_fused_gdn_gating(
+        A_log,
+        a,
+        b,
+        dt_bias,
+        threshold=2.0,
+    )
+    npu_g, npu_beta = _npu_op_exec(
+        A_log,
+        a,
+        b,
+        dt_bias,
+        threshold=2.0,
     )
 
     _assert_close(npu_g, npu_beta, ref_g, ref_beta)

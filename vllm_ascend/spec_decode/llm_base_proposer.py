@@ -16,7 +16,6 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
     init_model_parallel_group,
-    patch_tensor_parallel_group,
 )
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
@@ -52,7 +51,30 @@ from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+
+if vllm_version_is("0.22.1"):
+    from vllm.distributed.parallel_state import patch_tensor_parallel_group  # type: ignore[import-not-found]
+else:
+    import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
+
+    @contextmanager
+    def patch_tensor_parallel_group(tp_group):
+        """Temporarily swap the global TP group for draft-model spec decode.
+
+        Backports vllm 0.21's ``patch_tensor_parallel_group`` which was removed
+        on vLLM main. Used so the draft model can run with a TP degree that
+        differs from the target model.
+        """
+        old_tp_group = _ps.get_tp_group()
+        _ps._TP_STATE_PATCHED = True
+        _ps._TP = tp_group
+        try:
+            yield
+        finally:
+            _ps._TP_STATE_PATCHED = False
+            _ps._TP = old_tp_group
+
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -116,6 +138,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Assign runner before it's used in the methods below
         self.runner = runner
+
+        logger.debug(
+            "[spec_decode/base] Initializing spec decode proposer: method=%s,"
+            " num_speculative_tokens=%s, hidden_size=%s, pass_hidden_states=%s,"
+            " parallel_drafting=%s, use_cuda_graph=%s, device=%s",
+            self.method,
+            self.num_speculative_tokens,
+            self.hidden_size,
+            pass_hidden_states_to_model,
+            self.speculative_config.parallel_drafting if self.speculative_config else False,
+            runner._use_aclgraph() if runner else False,
+            device,
+        )
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
@@ -217,7 +252,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_vllm_config = self._create_draft_vllm_config()
         draft_load_config = self.speculative_config.draft_load_config
         logger.info(
-            "AscendSpecDecodeBaseProposer._get_model(): loading draft model with load_format=%s, model=%s",
+            "[spec_decode/base] Loading draft model: method=%s, load_format=%s, model=%s",
+            self.method,
             getattr(draft_load_config, "load_format", None),
             getattr(self.speculative_config.draft_model_config, "model", None),
         )
@@ -230,6 +266,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return model
 
     def load_model(self, model: nn.Module) -> None:
+        assert get_pp_group().is_last_rank, f"{self.method} drafter must be loaded on the last pipeline stage."
+
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
 
         with self.maybe_eager_context:
@@ -294,6 +332,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else self.model.mask_hidden.view(self.hidden_size)
             )
 
+        logger.info(
+            "[spec_decode/base] Draft model loaded successfully: method=%s, num_draft_attn_layers=%d, block_size=%d",
+            self.method,
+            len(self._draft_attn_layer_names),
+            self.kernel_block_size,
+        )
+
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
         Some draft models may not have their own embedding layers, and some may
@@ -316,9 +361,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if not self.model.has_own_embed_tokens:
                     share_embeddings = True
                     logger.info(
-                        "Detected EAGLE model without its own embed_tokens in the"
-                        " checkpoint. Sharing target model embedding weights with the"
-                        " draft model."
+                        "[spec_decode/base] Detected EAGLE model without its own"
+                        " embed_tokens in the checkpoint. Sharing target model"
+                        " embedding weights with the draft model."
                     )
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
@@ -332,20 +377,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 ):
                     share_embeddings = True
                     logger.info(
-                        "Detected EAGLE model with embed_tokens identical to the target"
-                        " model. Sharing target model embedding weights with the draft"
-                        " model."
+                        "[spec_decode/base] Detected EAGLE model with embed_tokens"
+                        " identical to the target model. Sharing target model embedding"
+                        " weights with the draft model."
                     )
                 else:
                     logger.info(
-                        "Detected EAGLE model with distinct embed_tokens weights. "
-                        "Keeping separate embedding weights from the target model."
+                        "[spec_decode/base] Detected EAGLE model with distinct"
+                        " embed_tokens weights. Keeping separate embedding weights"
+                        " from the target model."
                     )
             else:
                 # MTP model
                 share_embeddings = not self.use_compress
                 if share_embeddings:
-                    logger.info("Detected MTP model. Sharing target model embedding weights with the draft model.")
+                    logger.info(
+                        "[spec_decode/base] Detected MTP model. Sharing target model"
+                        " embedding weights with the draft model."
+                    )
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
@@ -353,7 +402,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
-                "Since PP > 1 or other reasons the model head loaded its own vocab embedding"
+                "[spec_decode/base] PP>1: draft model loaded its own vocab embedding"
                 " weights instead of sharing them with the target model."
             )
 
@@ -374,17 +423,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             if draft_has_own_lm_head:
                 logger.info(
-                    "DFlash draft uses d2t vocab remapping; keeping the draft's "
-                    "own lm_head instead of sharing the target lm_head."
+                    "[spec_decode/base] DFlash draft uses d2t vocab remapping;"
+                    " keeping the draft's own lm_head instead of sharing the target"
+                    " lm_head."
                 )
             else:
-                logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
+                logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
                 if hasattr(model, "lm_head"):
                     self.model.lm_head = model.lm_head
                 elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
                     self.model.lm_head = model.get_language_model().lm_head
                 else:
-                    logger.warning("Target model has no accessible lm_head for sharing.")
+                    logger.warning(
+                        "[spec_decode/base] Target model has no accessible lm_head"
+                        " for sharing. Draft model will use its own lm_head."
+                        " This may cause incorrect logits if the draft lm_head"
+                        " is not trained."
+                    )
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
@@ -392,6 +447,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     layer_module.shared_head.head = model.lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
+            logger.info(
+                "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
+                " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
+                self.use_eagle,
+                self.enable_enpu,
+            )
             self.update_stream = torch.npu.Stream()
             self._runnable = ACLGraphWrapper(
                 self._run_merged_draft,
@@ -407,8 +468,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 del self.model.model.topk_indices_buffer
             self.model.model.topk_indices_buffer = target_language_model.model.topk_indices_buffer
             logger.info(
-                "Detecting MTP model with topk_indices_buffer."
-                "Sharing target model topk_indices_buffer with the draft model."
+                "[spec_decode/base] Detected MTP model with topk_indices_buffer."
+                " Sharing target model topk_indices_buffer with the draft model."
             )
 
     def get_model(self) -> nn.Module:
@@ -491,6 +552,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
+                slot_mapping_cpu=self.runner.input_batch.block_table[0].slot_mapping.cpu,
                 positions=self.runner.positions,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
@@ -499,9 +561,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.pcp_size * self.dcp_size > 1:
                 # update long_seq related params and flatten block_table
                 common_attn_metadata.prefill_context_parallel_metadata = self.runner.pcp_manager.long_seq_metadata
-                common_attn_metadata.block_table_tensor = self.runner.input_batch.block_table[0].get_device_tensor()[
-                    : num_reqs * self.decode_threshold
-                ]
 
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
@@ -514,8 +573,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
                 if self.pcp_size * self.dcp_size > 1 and draft_step > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-                    slicing_length = num_reqs * self.decode_threshold
-                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:slicing_length]
+                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
                     AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
@@ -541,6 +599,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             inputs_embeds = self.inputs_embeds[:num_tokens]
         else:
             inputs_embeds = None
+
+        self.token_indices_to_sample.fill_(0)
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -832,13 +892,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                 slot_indices = torch.cat(slot_indices_list, dim=0)
 
-                # fold block_table (restore it to original size before flattened)
-                block_indices = torch.cat(
-                    [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d, dim=0)[:-1]]
-                )
-                common_attn_metadata.block_table_tensor[:batch_size] = common_attn_metadata.block_table_tensor[
-                    block_indices
-                ]
                 common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
 
                 # Copy the old attn_metadata and update
@@ -1275,7 +1328,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self._split_pcp_input(req_scheduled_tokens_p, input_ids_p, target_hidden_states_p)
                 )
                 num_tokens = num_tokens_d + num_tokens_p
-                target_positions = target_positions[:num_tokens]
+                if self.uses_mrope:
+                    target_positions = target_positions[:, :num_tokens]
+                else:
+                    target_positions = target_positions[:num_tokens]
                 self.input_ids[:num_tokens].copy_(torch.cat([input_ids_d, input_ids_p], dim=0))
                 target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
                 # 2. update sample_indices according to main model
@@ -1507,15 +1563,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
-        common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_max_model_len, 1)
+        exceeds_mask = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
+        common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
         if common_attn_metadata.seq_lens_cpu is not None:
             common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
-            exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
-            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
+            exceeds_mask_cpu = common_attn_metadata.seq_lens_cpu[:batch_size] > self.max_model_len
+            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_cpu, 1)
         if common_attn_metadata._seq_lens_cpu is not None:
             common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
-            exceeds_mask_internal = common_attn_metadata._seq_lens_cpu[:batch_size] >= self.max_model_len
-            common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal, 1)
+            exceeds_mask_internal_cpu = common_attn_metadata._seq_lens_cpu[:batch_size] > self.max_model_len
+            common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal_cpu, 1)
         if common_attn_metadata.num_computed_tokens_cpu is not None:
             common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
@@ -1604,6 +1661,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
+                attn_metadata.decode_meta.dcp_mtp_attn_mask = None
 
         return common_attn_metadata, attn_metadata
 
@@ -1776,6 +1834,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             max_query_len=new_query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
+            slot_mapping_cpu=common_attn_metadata.slot_mapping_cpu,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
             positions_cpu=common_attn_metadata.positions_cpu[token_indices]
@@ -1867,6 +1926,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
+            slot_mapping_cpu=common_attn_metadata.slot_mapping_cpu,
             positions=common_attn_metadata.positions,
             positions_cpu=common_attn_metadata.positions_cpu,
             attn_state=self.runner.attn_state,
