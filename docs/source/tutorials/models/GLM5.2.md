@@ -651,15 +651,16 @@ Before you start, please
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=256
+        export HCCL_BUFFSIZE=400
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
@@ -693,8 +694,8 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 8
+                                "dp_size": 2,
+                                "tp_size": 16
                         },
                         "decode": {
                                 "dp_size": 8,
@@ -720,15 +721,16 @@ Before you start, please
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=256
+        export HCCL_BUFFSIZE=400
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
@@ -762,8 +764,8 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 8
+                                "dp_size": 2,
+                                "tp_size": 16
                         },
                         "decode": {
                                 "dp_size": 8,
@@ -798,6 +800,7 @@ Before you start, please
         export DYNAMIC_EPLB=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_ASCEND_ENABLE_MLAPO=1
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
@@ -831,8 +834,8 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 8
+                                "dp_size": 2,
+                                "tp_size": 16
                         },
                         "decode": {
                                 "dp_size": 8,
@@ -845,8 +848,8 @@ Before you start, please
     4. Decode node 1
 
          ```shell
-         nic_name="xxxx" # change to your own nic name
-         local_ip="xxxx" # change to your own ip
+        nic_name="xxxx" # change to your own nic name
+        local_ip="xxxx" # change to your own ip
             
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_IF_IP=$local_ip
@@ -867,8 +870,9 @@ Before you start, please
         export DYNAMIC_EPLB=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_ASCEND_ENABLE_MLAPO=1
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        vllm serve /mnt/share/weight/GLM-5.2-0610-Provider-w8a8/ \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -900,8 +904,8 @@ Before you start, please
             "kv_connector_extra_config": {
                          "use_ascend_direct": true,
                          "prefill": {
-                                 "dp_size": 4,
-                                 "tp_size": 8
+                                 "dp_size": 2,
+                                 "tp_size": 16
                          },
                          "decode": {
                                  "dp_size": 8,
@@ -917,14 +921,14 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8  --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 2. Prefill node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8  --dp-size-local 2 --dp-rank-start 2 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 2 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 3. Decode node 0
@@ -940,6 +944,34 @@ Once the preparation is done, you can start the server with the following comman
     # change ip to your own
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_p0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
+
+To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+
+```shell
+unset http_proxy
+unset https_proxy
+
+python load_balance_proxy_server_example.py \
+    --port 8000 \
+    --host 0.0.0.0 \
+    --prefiller-hosts \
+       $node_p0_ip \
+       $node_p1_ip \
+    --prefiller-ports \
+       9081 9081 \
+    --decoder-hosts \
+      $node_d0_ip \
+      $node_d0_ip \
+      $node_d0_ip \
+      $node_d0_ip \
+      $node_d1_ip \
+      $node_d1_ip \
+      $node_d1_ip \
+      $node_d1_ip \
+    --decoder-ports \
+      9900 9901 9902 9903 \
+      9900 9901 9902 9903 \  
+```
 
 #### Deployment on 8 Atlas 800 A2
 
@@ -1138,8 +1170,6 @@ Once the preparation is done, start the server with the following commands:
 
 For request forwarding on this 8-node A2 layout, use 4 prefiller hosts (1 endpoint each) and 4 decoder hosts (2 endpoints each) in the Request Forwarding command below.
 
-### Request Forwarding
-
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 ```shell
@@ -1151,24 +1181,24 @@ python load_balance_proxy_server_example.py \
     --host 0.0.0.0 \
     --prefiller-hosts \
        $node_p0_ip \
-       $node_p0_ip \
        $node_p1_ip \
-       $node_p1_ip \
+       $node_p2_ip \
+       $node_p3_ip \
     --prefiller-ports \
-       6700 6701 \
-       6700 6701 \
+       9081 9081 \
+       9081 9081 \
     --decoder-hosts \
       $node_d0_ip \
       $node_d0_ip \
-      $node_d0_ip \
-      $node_d0_ip \
       $node_d1_ip \
       $node_d1_ip \
-      $node_d1_ip \
-      $node_d1_ip \
+      $node_d2_ip \
+      $node_d2_ip \
+      $node_d3_ip \
+      $node_d3_ip \
     --decoder-ports \
-      6800 6801 6802 6803 \
-      6800 6801 6802 6803 \  
+      9900 9901 9900 9901 \
+      9900 9901 9900 9901 \  
 ```
 
 **Notice:**
