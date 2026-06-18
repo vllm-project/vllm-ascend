@@ -840,8 +840,6 @@ Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://doc
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
     ```
 
-Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html) to get the detailed boot method.
-
 **Notice:**
 To support a long context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj", "o_proj"]` and `"enable_dsa_cp": true` needs to be added to `--additional-config` on each prefill node.
 
