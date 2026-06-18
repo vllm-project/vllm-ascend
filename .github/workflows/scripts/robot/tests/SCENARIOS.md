@@ -29,17 +29,31 @@ Extract type → Load template → Load prompt → LLM check → Post/Delete com
 | I2 | (new) | `opened` | FAIL | Post | +need-detail-desc |
 | I3 | Clean | `edited` | PASS | — | — |
 | I4 | Clean | `edited` | FAIL | Post | +need-detail-desc |
-| I5 | Flagged | `edited` | PASS | new Post pass | −need-detail-desc |
-| I6 | Flagged | `edited` | FAIL | Old keep, new posted | (unchanged) |
+| I5 | Flagged | `edited` | PASS | new post pass | −need-detail-desc |
+| I6 | Flagged | `edited` | FAIL | new posted | (unchanged) |
 
 ### Concurrency
 
-```
-group: issue-review-${{ github.event.issue.number }}
-cancel-in-progress: false
+```yaml
+concurrency:
+  group: issue-review-${{ github.event.issue.number }}
+  cancel-in-progress: false
 ```
 
-Multiple triggers on the same issue queue up. No parallel runs.
+**Why `cancel-in-progress: false`?**
+
+When events fire rapidly on the same issue (e.g. user opens then immediately edits), `false` queues them:
+
+```
+opened  ──► run ████████████ done
+edited  ──────────────── queued ──► run ████████ done
+```
+
+With `true`, the `opened` run would be **cancelled mid-LLM-call**, leaving the issue in an inconsistent state (partial labels, no comment). `false` guarantees each run completes with a consistent result.
+
+**Why per-issue grouping?**
+
+`issue-review-5` only serialises runs for issue #5. Issue #7 runs in parallel — different group key. No unnecessary blocking across different issues.
 
 ---
 
@@ -106,12 +120,12 @@ Commit skipped         → (don't touch need-commit-fix)
 |---|------|:--:|:--:|---------|--------|
 | P5 | Clean | PASS | skip | — | — |
 | P6 | Clean | FAIL | skip | Post | +need-detail-desc |
-| P7 | Desc-flagged | PASS | skip | Old deleted | −need-detail-desc |
-| P8 | Desc-flagged | FAIL | skip | Old deleted, new posted | (unchanged) |
-| P9 | Commit-flagged | PASS | skip | Old deleted, new posted | (unchanged) |
-| P10 | Commit-flagged | FAIL | skip | Old deleted, new posted | +need-detail-desc |
-| P11 | Both-flagged | PASS | skip | Old deleted, new posted | −need-detail-desc |
-| P12 | Both-flagged | FAIL | skip | Old deleted, new posted | (unchanged) |
+| P7 | Desc-flagged | PASS | skip | new post pass | −need-detail-desc |
+| P8 | Desc-flagged | FAIL | skip |  new posted | (unchanged) |
+| P9 | Commit-flagged | PASS | skip | new post pass | (unchanged) |
+| P10 | Commit-flagged | FAIL | skip |  new posted | +need-detail-desc |
+| P11 | Both-flagged | PASS | skip |  new post pass | −need-detail-desc |
+| P12 | Both-flagged | FAIL | skip |  new posted | (unchanged) |
 
 **Key**: Commit phase skipped → commit label never touched. P9–P12 preserve the commit label correctly.
 
@@ -121,12 +135,12 @@ Commit skipped         → (don't touch need-commit-fix)
 |---|------|:--:|:--:|---------|--------|
 | P13 | Clean | skip | PASS | — | — |
 | P14 | Clean | skip | FAIL | Post | +need-commit-fix |
-| P15 | Commit-flagged | skip | PASS | Old deleted | −need-commit-fix |
-| P16 | Commit-flagged | skip | FAIL | Old deleted, new posted | (unchanged) |
-| P17 | Desc-flagged | skip | PASS | Old deleted | (unchanged) |
-| P18 | Desc-flagged | skip | FAIL | Old deleted, new posted | +need-commit-fix |
-| P19 | Both-flagged | skip | PASS | Old deleted, new posted | −need-commit-fix |
-| P20 | Both-flagged | skip | FAIL | Old deleted, new posted | (unchanged) |
+| P15 | Commit-flagged | skip | PASS | new post pass | −need-commit-fix |
+| P16 | Commit-flagged | skip | FAIL |  new posted | (unchanged) |
+| P17 | Desc-flagged | skip | PASS | new post pass | (unchanged) |
+| P18 | Desc-flagged | skip | FAIL |  new posted | +need-commit-fix |
+| P19 | Both-flagged | skip | PASS | new post pass | −need-commit-fix |
+| P20 | Both-flagged | skip | FAIL |  new posted | (unchanged) |
 
 **Key**: Desc phase skipped → desc label never touched. P17–P20 preserve the desc label correctly.
 
@@ -136,9 +150,23 @@ Same as `opened`. Both phases execute, labels managed normally.
 
 ### Concurrency
 
-```
-group: pr-review-${{ github.event.pull_request.number }}
-cancel-in-progress: false
+```yaml
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 ```
 
-Multiple triggers on the same PR queue up. `edited` always finishes before `synchronize` runs.
+**Why `cancel-in-progress: false`?**
+
+Force-push to a PR fires both `edited` and `synchronize` in quick succession. The correct sequence is `edited` first (cleans up old comment, updates desc label) → then `synchronize` (rechecks commits, updates commit label).
+
+```
+edited ──► run ████████████ done
+sync   ──────────────── queued ──► run ████████ done
+```
+
+With `cancel-in-progress: true`, `edited` would be **killed mid-run** when `sync` arrives. The LLM call, label update, and comment cleanup would all be aborted — leaving stale labels and comments.
+
+**Why per-PR grouping?**
+
+`pr-review-42` only serialises runs for PR #42. PR #43 runs independently. Different group keys = parallel execution where safe.
