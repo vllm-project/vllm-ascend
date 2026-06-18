@@ -424,3 +424,70 @@ def test_generate_pcp_mtp_input(
         target_input_ids_pcp_full)
     assert torch.equal(pcp_manager.query_start_loc_pcp_full.cpu[:num_reqs + 1],
                        target_query_start_loc_pcp_full)
+
+
+@pytest.mark.parametrize(
+    "pcp_size, num_scheduled_tokens, num_pcp_pads, num_decode_reqs,"
+    " expected_cu_num_scheduled_tokens",
+    [
+        # Case 1: no prefill reqs -> returned unchanged
+        (2, [1, 1], [1, 1], 2, [1, 2]),
+        # Case 2: prefill only (num_decode_reqs == 0). Exercises the bug where
+        # the original diff dropped the first req's length and the base
+        # indexed cu[-1] instead of 0.
+        #   cu = [3, 8]; prefill per-req = [3, 5] -> pad to 4 -> [4, 8]
+        #   base = 0; prefill_cu = [4, 12]; *2 - pads[0:] = [8, 24]
+        (2, [3, 5], [0, 0], 0, [8, 24]),
+        # Case 3: mix decode + prefill
+        #   cu = [1, 2, 5, 10]; prefill per-req = [3, 5] -> pad to 4 -> [4, 8]
+        #   base = cu[1] = 2; prefill_cu = [6, 14]; *2 - pads[2:] = [12, 28]
+        (2, [1, 1, 3, 5], [1, 1, 0, 0], 2, [1, 2, 12, 28]),
+        # Case 4: pcp_size = 4, mix decode + prefill with uneven prefill tokens
+        #   cu = [1, 2, 7, 16]; prefill per-req = [5, 9] -> pad to 8 -> [8, 16]
+        #   base = cu[1] = 2; prefill_cu = [10, 26]; *4 - pads[2:] = [40, 104]
+        (4, [1, 1, 5, 9], [3, 3, 0, 0], 2, [1, 2, 40, 104]),
+    ],
+)
+def test_adjust_cu_num_scheduled_tokens_for_pcp(
+    pcp_size,
+    num_scheduled_tokens,
+    num_pcp_pads,
+    num_decode_reqs,
+    expected_cu_num_scheduled_tokens,
+):
+    vllm_config = MagicMock()
+    vllm_config.model_config = MagicMock()
+    vllm_config.speculative_config.num_speculative_tokens = 0
+
+    pcp_manager = PCPManager(
+        pcp_world_size=pcp_size,
+        pcp_rank=0,
+        dcp_world_size=1,
+        dcp_rank=0,
+        max_buffer_num_tokens=10000,
+        max_num_reqs=1000,
+        device="cpu",
+        vllm_config=vllm_config,
+        use_async_scheduling=False,
+        pin_memory=False,
+    )
+
+    num_reqs = len(num_scheduled_tokens)
+    cu_num_scheduled_tokens = np.cumsum(
+        np.array(num_scheduled_tokens, dtype=np.int32)
+    )
+    num_pcp_pads_arr = np.array(num_pcp_pads, dtype=np.int32)
+
+    # Seed the manager state normally populated by init_batch_info.
+    pcp_manager.num_decode_reqs = num_decode_reqs
+    pcp_manager.num_prefill_reqs = num_reqs - num_decode_reqs
+
+    result = pcp_manager.adjust_cu_num_scheduled_tokens_for_pcp(
+        cu_num_scheduled_tokens, num_pcp_pads_arr
+    )
+
+    assert np.array_equal(
+        result, np.array(expected_cu_num_scheduled_tokens, dtype=np.int32)
+    ), (
+        f"Expected {expected_cu_num_scheduled_tokens}, got {result.tolist()}"
+    )

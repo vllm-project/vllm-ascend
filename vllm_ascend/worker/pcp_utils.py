@@ -17,7 +17,9 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
+import math
 from collections.abc import Callable
+from itertools import accumulate
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -211,6 +213,47 @@ class PCPManager:
         self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens)
         self.query_lens_pcp_full.cpu[self.num_reqs :].fill_(0)
         self.query_lens_pcp_full.copy_to_gpu()
+
+    def adjust_cu_num_scheduled_tokens_for_pcp(
+        self,
+        cu_num_scheduled_tokens: np.ndarray,
+        num_pcp_pads: np.ndarray,
+    ) -> np.ndarray:
+        # Re-align cu_num_scheduled_tokens under PCP hybrid attention so the
+        # caller can build correct logits_indices for PCP. Prefill requests
+        # need to be padded up to a multiple of (pcp_world_size * 2) tokens,
+        # while decode requests are simply multiplied by pcp_world_size and
+        # offset by the per-req pcp pads.
+        if self.num_prefill_reqs <= 0:
+            return cu_num_scheduled_tokens
+
+        # Prepend 0 so per-req lengths come out of the diff cleanly. This
+        # also fixes the num_decode_reqs == 0 case, where the raw diff
+        # cu[1:] - cu[:-1] would drop the first req's length and the base
+        # below would index cu[-1] instead of 0.
+        padded_cu = np.concatenate(([0], cu_num_scheduled_tokens))
+        per_req_lens = padded_cu[1:] - padded_cu[:-1]
+
+        prefill_lens = per_req_lens[self.num_decode_reqs :]
+        pad_multiple = self.pcp_world_size * 2
+        prefill_lens = [
+            math.ceil(num / pad_multiple) * pad_multiple for num in prefill_lens
+        ]
+
+        base = (
+            int(cu_num_scheduled_tokens[self.num_decode_reqs - 1])
+            if self.num_decode_reqs > 0
+            else 0
+        )
+        prefill_cu = [base + s for s in accumulate(prefill_lens)]
+
+        cu_num_scheduled_tokens = cu_num_scheduled_tokens.copy()
+        cu_num_scheduled_tokens[self.num_decode_reqs :] = prefill_cu
+        cu_num_scheduled_tokens[self.num_decode_reqs :] = (
+            cu_num_scheduled_tokens[self.num_decode_reqs :] * self.pcp_world_size
+            - num_pcp_pads[self.num_decode_reqs :]
+        )
+        return cu_num_scheduled_tokens
 
     def cache_local_schedule_layout(
         self,

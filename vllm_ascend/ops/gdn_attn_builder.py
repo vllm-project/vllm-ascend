@@ -753,6 +753,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
         )
+
+        self.spec_sequence_masks: torch.Tensor = torch.empty(
+            (sequence_index_capacity,),
+            dtype=torch.bool,
+            device=device
+        )
+
         self.spec_sequence_masks_cpu: torch.Tensor = torch.empty(
             (sequence_index_capacity,),
             dtype=torch.bool,

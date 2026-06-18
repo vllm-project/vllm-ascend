@@ -28,7 +28,6 @@ from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from itertools import accumulate
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
@@ -1599,21 +1598,13 @@ class NPUModelRunner(GPUModelRunner):
         # while pcp > 1, decode results may contain padding (from pcp all-gather),
         # update logits_indices after getting draft_token_ids from ori logits_indices
         if self.pcp_size > 1:
-            if self.pcp_manager.pcp_use_hybrid_attn: 
+            if self.pcp_manager.pcp_use_hybrid_attn:
                 if self.pcp_manager.num_prefill_reqs > 0:
-                    num_scheduled_tokens = cu_num_scheduled_tokens[1:] - cu_num_scheduled_tokens[:-1]
-                    prefill_num_scheduled_tokens = num_scheduled_tokens[-self.pcp_manager.num_prefill_reqs: ]
-                    prefill_num_scheduled_tokens = [math.ceil(num / (self.pcp_size * 2)) * 2 * self.pcp_size 
-                                                    for num in prefill_num_scheduled_tokens]
-                    prefill_num_scheduled_tokens = list(accumulate(prefill_num_scheduled_tokens))
-                    prefill_num_scheduled_tokens = [cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs - 1] + num 
-                                                    for num in prefill_num_scheduled_tokens]
-                    cu_num_scheduled_tokens[-self.pcp_manager.num_prefill_reqs:] = prefill_num_scheduled_tokens
-                    cu_num_scheduled_tokens = cu_num_scheduled_tokens.copy()
-                    cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] = (
-                        cu_num_scheduled_tokens[self.pcp_manager.num_decode_reqs:] * self.pcp_size 
-                        - num_pcp_pads[self.pcp_manager.num_decode_reqs:]) # type: ignore
-
+                    cu_num_scheduled_tokens = (
+                        self.pcp_manager.adjust_cu_num_scheduled_tokens_for_pcp(
+                            cu_num_scheduled_tokens, num_pcp_pads
+                        )
+                    )
             else:
                 cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
             logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
