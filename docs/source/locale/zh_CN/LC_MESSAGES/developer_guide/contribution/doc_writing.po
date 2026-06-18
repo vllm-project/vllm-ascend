@@ -1,0 +1,597 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 08:44+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:1
+msgid "Documentation writing guide"
+msgstr "文档编写指南"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:3
+msgid "Guide to Writing Model Tutorial Documentation"
+msgstr "模型教程文档编写指南"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:5
+msgid ""
+"`docs/source/_templates/Model-Deployment-Tutorial-Template.md` is a "
+"template for writing model deployment tutorials. You can copy and modify "
+"it to create new docs."
+msgstr ""
+"`docs/source/_templates/Model-Deployment-Tutorial-Template.md` 是编写模型部署教程的模板。您可以复制并修改它以创建新文档。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:7
+msgid "Testable documentation code block generation (``model-code``)"
+msgstr "可测试文档代码块生成 (``model-code``)"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:9
+msgid ""
+"For **documentation authors**: how to insert testable command blocks into"
+" docs"
+msgstr "对于**文档作者**：如何在文档中插入可测试的命令块"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:10
+msgid "For **developers**: how to add a new converter"
+msgstr "对于**开发者**：如何添加新的转换器"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:12
+msgid "Built-in supported `converter_tag` values:"
+msgstr "内置支持的 `converter_tag` 值："
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "converter_tag"
+msgstr "converter_tag"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "Renders"
+msgstr "渲染内容"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "YAML source"
+msgstr "YAML 源"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "`single_node`"
+msgstr "`single_node`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "One `vllm serve` script for a single node"
+msgstr "单节点的 `vllm serve` 脚本"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "`test_cases[case_index]`"
+msgstr "`test_cases[case_index]`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "`multi_node`"
+msgstr "`multi_node`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "One host's `vllm serve` script"
+msgstr "单个主机的 `vllm serve` 脚本"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "`deployment[host_index]`"
+msgstr "`deployment[host_index]`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "`external_dp_template`"
+msgstr "`external_dp_template`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "One external-DP node's env exports + `vllm serve` command"
+msgstr "单个外部DP节点的环境导出 + `vllm serve` 命令"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "`templates[host_index]` (+ top-level `model`)"
+msgstr "`templates[host_index]` (+ 顶层 `model`)"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "`external_dp_launch`"
+msgstr "`external_dp_launch`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "One `launch_online_dp.py` line per node"
+msgstr "每个节点一行 `launch_online_dp.py`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "`config[]`"
+msgstr "`config[]`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "`external_dp_proxy`"
+msgstr "`external_dp_proxy`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "The load-balance proxy launch command"
+msgstr "负载均衡代理启动命令"
+
+#: ../../source/developer_guide/contribution/doc_writing.md
+msgid "`config[]` + `routing`"
+msgstr "`config[]` + `routing`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:22
+msgid "For authors: add a block"
+msgstr "作者指南：添加代码块"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:25
+msgid ""
+"By default, the generator scans only `.md` files under "
+"`docs/source/tutorials/models/` and produces artifacts. If you put "
+"``model-code`` blocks in other directories, Sphinx builds will not "
+"automatically generate the corresponding scripts."
+msgstr ""
+"默认情况下，生成器仅扫描 `docs/source/tutorials/models/` 下的 `.md` 文件并生成产物。如果您将 ``model-code`` 块放在其他目录中，Sphinx 构建将不会自动生成相应的脚本。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:29
+msgid "Single node (`single_node`)"
+msgstr "单节点 (`single_node`)"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:31
+#: ../../source/developer_guide/contribution/doc_writing.md:77
+msgid "Template 1: minimal (metadata only)"
+msgstr "模板1：最小化（仅元数据）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:41
+#: ../../source/developer_guide/contribution/doc_writing.md:97
+msgid "Template 2: with text (use `{{ generated }}` placeholder)"
+msgstr "模板2：带文本（使用 `{{ generated }}` 占位符）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:55
+#: ../../source/developer_guide/contribution/doc_writing.md:123
+#: ../../source/developer_guide/contribution/doc_writing.md:204
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Option"
+msgstr "选项"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Required"
+msgstr "必需"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Default"
+msgstr "默认值"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`block_name`"
+msgstr "`block_name`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Yes"
+msgstr "是"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "None"
+msgstr "无"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Block name; must be unique within the current document"
+msgstr "代码块名称；在当前文档中必须唯一"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`converter_tag`"
+msgstr "`converter_tag`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Must be `single_node`"
+msgstr "必须为 `single_node`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`test_case_path`"
+msgstr "`test_case_path`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid ""
+"Repository-relative path that stays within the repo (no `..` escape); "
+"file must exist"
+msgstr "仓库相对路径，必须保持在仓库内（不允许 `..` 转义）；文件必须存在"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`case_index`"
+msgstr "`case_index`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "No"
+msgstr "否"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`0`"
+msgstr "`0`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Use `test_cases[case_index]` from the YAML as the rendering source"
+msgstr "使用 YAML 中的 `test_cases[case_index]` 作为渲染源"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:64
+#: ../../source/developer_guide/contribution/doc_writing.md:132
+msgid "YAML reference"
+msgstr "YAML 参考"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:66
+msgid "See existing files under `tests/e2e/nightly/single_node/models/configs/`."
+msgstr "请参考 `tests/e2e/nightly/single_node/models/configs/` 下的现有文件。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:68
+msgid "`single_node` reads `test_cases[case_index]`. Common fields include:"
+msgstr "`single_node` 读取 `test_cases[case_index]`。常见字段包括："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:70
+msgid "`model`: model name (ultimately renders `vllm serve <model> ...`)"
+msgstr "`model`：模型名称（最终渲染为 `vllm serve <model> ...`）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:71
+#: ../../source/developer_guide/contribution/doc_writing.md:138
+msgid "`envs`: rendered as `export ...` (scalar values)"
+msgstr "`envs`：渲染为 `export ...`（标量值）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:72
+msgid ""
+"`server_cmd`: arguments appended to `vllm serve <model>` (shell string or"
+" token list)"
+msgstr "`server_cmd`：附加到 `vllm serve <model>` 的参数（shell 字符串或令牌列表）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:73
+msgid "`server_cmd_extra` (optional): extra appended arguments"
+msgstr "`server_cmd_extra`（可选）：额外附加的参数"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:75
+msgid "Multi node (`multi_node`)"
+msgstr "多节点 (`multi_node`)"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Must be `multi_node`"
+msgstr "必须为 `multi_node`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`host_index`"
+msgstr "`host_index`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Use `deployment[host_index]` from the YAML as the rendering source"
+msgstr "使用 YAML 中的 `deployment[host_index]` 作为渲染源"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:134
+msgid "See existing files under `tests/e2e/nightly/multi_node/config/`."
+msgstr "请参考 `tests/e2e/nightly/multi_node/config/` 下的现有文件。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:136
+msgid "`multi_node` reads `deployment[host_index]`. Common fields include:"
+msgstr "`multi_node` 读取 `deployment[host_index]`。常见字段包括："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:139
+msgid ""
+"`server_cmd`: a complete command (must start with `vllm serve <model>`; "
+"shell multi-line string or token list)"
+msgstr "`server_cmd`：完整命令（必须以 `vllm serve <model>` 开头；shell 多行字符串或令牌列表）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:141
+msgid ""
+"External data parallel (`external_dp_template` / `external_dp_launch` / "
+"`external_dp_proxy`)"
+msgstr "外部数据并行 (`external_dp_template` / `external_dp_launch` / `external_dp_proxy`)"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:143
+msgid ""
+"These three converters read one **shared** external-DP YAML (see "
+"`tests/e2e/nightly/multi_node/external_dp/config/`) and each render a "
+"different part of the deployment. They are tightly coupled to that schema"
+" by design."
+msgstr ""
+"这三个转换器读取一个**共享**的外部DP YAML（参见 `tests/e2e/nightly/multi_node/external_dp/config/`），每个转换器渲染部署的不同部分。它们设计上与那个模式紧密耦合。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:147
+msgid "The shared YAML provides:"
+msgstr "共享 YAML 提供："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:149
+msgid "`model`: model name (top level)"
+msgstr "`model`：模型名称（顶层）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:150
+msgid ""
+"`config`: a list of per-node settings (`port_start`, `dp_rpc_port`, "
+"`dp_size`, `dp_size_local`, `dp_rank_start`, `tp_size`, `dp_address`, "
+"...)"
+msgstr "`config`：每个节点设置的列表（`port_start`、`dp_rpc_port`、`dp_size`、`dp_size_local`、`dp_rank_start`、`tp_size`、`dp_address` 等）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:152
+msgid ""
+"`routing`: `type` plus `groups` (e.g. `prefiller` / `decoder` lists of "
+"`config` indices)"
+msgstr "`routing`：`type` 加上 `groups`（例如 `prefiller` / `decoder` 的 `config` 索引列表）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:153
+msgid "`templates`: a list of per-node `envs` and `server_cmd_template` entries"
+msgstr "`templates`：每个节点的 `envs` 和 `server_cmd_template` 条目列表"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:155
+#, python-brace-format
+msgid ""
+"`server_cmd_template` uses braced `${VAR}` placeholders that "
+"`external_dp_template` rewrites to the positional shell parameters "
+"consumed by `run_dp_template.sh`:"
+msgstr ""
+"`server_cmd_template` 使用花括号 `${VAR}` 占位符，`external_dp_template` 将其重写为 `run_dp_template.sh` 消费的位置 shell 参数："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+#, python-brace-format
+msgid "`${VAR}`"
+msgstr "`${VAR}`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Positional"
+msgstr "位置参数"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+#, python-brace-format
+msgid "`${VISIBLE_DEVICES}`"
+msgstr "`${VISIBLE_DEVICES}`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`$1`"
+msgstr "`$1`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+#, python-brace-format
+msgid "`${PORT}`"
+msgstr "`${PORT}`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`$2`"
+msgstr "`$2`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+#, python-brace-format
+msgid "`${DP_SIZE}`"
+msgstr "`${DP_SIZE}`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`$3`"
+msgstr "`$3`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+#, python-brace-format
+msgid "`${DP_RANK}`"
+msgstr "`${DP_RANK}`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`$4`"
+msgstr "`$4`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+#, python-brace-format
+msgid "`${DP_ADDRESS}`"
+msgstr ""
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`$5`"
+msgstr ""
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+#, python-brace-format
+msgid "`${DP_RPC_PORT}`"
+msgstr ""
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`$6`"
+msgstr ""
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+#, python-brace-format
+msgid "`${TP_SIZE}`"
+msgstr ""
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`$7`"
+msgstr ""
+
+#: ../../source/developer_guide/contribution/doc_writing.md:169
+msgid ""
+"Unbraced references such as `$SERVER_PORT` and unknown braced variables "
+"are left untouched so they remain live shell expansions."
+msgstr ""
+"未加花括号的引用如`$SERVER_PORT`以及未知的花括号变量将被保留原样，以保持其为活跃的shell展开式。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:172
+msgid "Templates"
+msgstr "模板"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:183
+msgid ""
+"`external_dp_launch` (one `python launch_online_dp.py ...` line per "
+"`config` node) and `external_dp_proxy` (the load-balance proxy command, "
+"e.g. `python load_balance_proxy_server_example.py ...`) read the whole "
+"cluster, so they take **no** index option:"
+msgstr ""
+"`external_dp_launch`（每个`config`节点对应一行`python launch_online_dp.py ...`）和`external_dp_proxy`（负载均衡代理命令，例如`python load_balance_proxy_server_example.py ...`）读取整个集群，因此它们**不**接受索引选项："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "One of `external_dp_template`, `external_dp_launch`, `external_dp_proxy`"
+msgstr "`external_dp_template`、`external_dp_launch`、`external_dp_proxy`之一"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "`external_dp_template` only"
+msgstr "仅`external_dp_template`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid "Use `templates[host_index]` from the YAML as the rendering source"
+msgstr "使用YAML中的`templates[host_index]`作为渲染源"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:214
+msgid ""
+"`external_dp_proxy` currently supports only `routing.type: "
+"disaggregated_prefill` and reads its `routing.groups.prefiller` / "
+"`routing.groups.decoder` node lists."
+msgstr ""
+"`external_dp_proxy`当前仅支持`routing.type: disaggregated_prefill`，并读取其`routing.groups.prefiller`/`routing.groups.decoder`节点列表。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:218
+msgid "Local debugging and generation"
+msgstr "本地调试与生成"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:220
+msgid "Generate only (without building the full site)"
+msgstr "仅生成（不构建完整站点）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:235
+msgid ""
+"By default, artifacts are written to: "
+"`docs/_build/doc_codegen/<doc_stem>/<block_name>.sh`."
+msgstr ""
+"默认情况下，生成物写入：`docs/_build/doc_codegen/<doc_stem>/<block_name>.sh`。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:238
+msgid ""
+"After the script is generated, please make sure to check whether the "
+"generated content is runnable, especially key parts such as environment "
+"variables and command-line parameters."
+msgstr ""
+"脚本生成后，请务必检查生成内容是否可运行，特别是环境变量和命令行参数等关键部分。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:241
+msgid "Concrete YAML-to-shell example"
+msgstr "具体YAML转shell示例"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:243
+msgid ""
+"The following `model-code` block reads the first test case from "
+"`tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml`:"
+msgstr ""
+"以下`model-code`块从`tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml`读取第一个测试用例："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:254
+msgid "The YAML fields read by the converter look like this:"
+msgstr "转换器读取的YAML字段如下所示："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:285
+msgid ""
+"Run the block in dry-run mode to see the generated shell without writing "
+"files:"
+msgstr ""
+"以dry-run模式运行该块，查看生成的shell内容而不写入文件："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:293
+msgid ""
+"The first line is the artifact path. The remaining lines are the "
+"generated shell content:"
+msgstr ""
+"第一行是生成物路径，其余行是生成的shell内容："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:317
+msgid ""
+"In this example, `envs` is rendered as `export` lines, `model` becomes "
+"`vllm serve <model>`, and `server_cmd` is appended as formatted command-"
+"line arguments. `SERVER_PORT: \"DEFAULT_PORT\"` is resolved to the "
+"default single-node port `8000`."
+msgstr ""
+"在此示例中，`envs`渲染为`export`行，`model`变为`vllm serve <model>`，`server_cmd`作为格式化命令行参数追加。`SERVER_PORT: \"DEFAULT_PORT\"`解析为默认单节点端口`8000`。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:322
+msgid "Build the site & preview locally"
+msgstr "构建站点并在本地预览"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:344
+msgid "For developers: add a new converter"
+msgstr "面向开发者：添加新转换器"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:346
+msgid ""
+"The goal of adding a converter is to make `converter_tag: <name>` render "
+"a given YAML structure into a script (`GeneratedScript`)."
+msgstr ""
+"添加转换器的目标是使`converter_tag: <name>`将给定的YAML结构渲染为脚本（`GeneratedScript`）。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:348
+msgid "What to change"
+msgstr "需要修改的内容"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:350
+msgid "In `tools/docs_codegen/converters.py`:"
+msgstr "在`tools/docs_codegen/converters.py`中："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:352
+msgid ""
+"Add a `BaseConverter` subclass that implements `convert(loaded_yaml, *, "
+"block) -> GeneratedScript`"
+msgstr ""
+"添加一个`BaseConverter`子类，实现`convert(loaded_yaml, *, block) -> GeneratedScript`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:353
+msgid ""
+"Give the converter a unique `name` (the value used by `converter_tag` in "
+"docs)"
+msgstr ""
+"为转换器指定唯一的`name`（即文档中`converter_tag`使用的值）"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:354
+msgid "Register it in `build_default_converters()`"
+msgstr "在`build_default_converters()`中注册"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:355
+msgid ""
+"Reuse the shared validation/rendering helpers in "
+"`tools/docs_codegen/utils.py` (`require_yaml_mapping`, `require_mapping`,"
+" `require_scalar_mapping`, `require_indexed_mapping`, "
+"`parse_command_tokens`, `render_cli_command`, ...) rather than re-"
+"validating the YAML shape inline"
+msgstr ""
+"复用`tools/docs_codegen/utils.py`中的共享验证/渲染辅助函数（`require_yaml_mapping`、`require_mapping`、`require_scalar_mapping`、`require_indexed_mapping`、`parse_command_tokens`、`render_cli_command`等），而非内联重新验证YAML结构"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:360
+msgid "If your converter needs new directive options (e.g. `:foo_index:`):"
+msgstr "如果转换器需要新的指令选项（例如`:foo_index:`）："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:362
+msgid ""
+"Add the option name to `MODEL_CODE_OPTION_NAMES` in "
+"`tools/docs_codegen/scanner.py`"
+msgstr ""
+"将选项名称添加到`tools/docs_codegen/scanner.py`的`MODEL_CODE_OPTION_NAMES`中"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:363
+msgid ""
+"Add the option name to `ModelCodeDirective.option_spec` in "
+"`tools/docs_codegen/sphinx_extension.py`"
+msgstr ""
+"将选项名称添加到`tools/docs_codegen/sphinx_extension.py`的`ModelCodeDirective.option_spec`中"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:365
+msgid ""
+"Add a real example snippet in any model doc (recommended under "
+"`docs/source/tutorials/models/`) and point it to a YAML file that exists "
+"(recommended under `tests/`)."
+msgstr ""
+"在任何模型文档中添加真实示例片段（建议放在`docs/source/tutorials/models/`下），并指向一个存在的YAML文件（建议放在`tests/`下）。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:367
+msgid "Minimal validation via CLI:"
+msgstr "通过CLI进行最小验证："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:369
+msgid ""
+"`python3 tools/docs_codegen/cli.py --doc <your_doc>` or `--block "
+"<doc>::<block_name>`"
+msgstr ""
+"`python3 tools/docs_codegen/cli.py --doc <your_doc>` 或 `--block <doc>::<block_name>`"

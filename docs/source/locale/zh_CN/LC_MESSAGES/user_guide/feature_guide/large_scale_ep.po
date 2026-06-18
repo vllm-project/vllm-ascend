@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-06-17 08:44+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -57,9 +57,9 @@ msgstr "物理层要求"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:12
 msgid ""
-"The physical machines must be located on the same WLAN, with network "
+"The physical machines must be located on the same LAN, with network "
 "connectivity."
-msgstr "物理机必须位于同一局域网（WLAN）内，并具备网络连通性。"
+msgstr "物理机必须位于同一局域网（LAN）内，并具备网络连通性。"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:13
 msgid ""
