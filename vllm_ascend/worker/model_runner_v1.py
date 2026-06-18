@@ -499,10 +499,10 @@ class NPUModelRunner(GPUModelRunner):
             self.process = self.eplb_process._launch_process()
             self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)
             # In pd colocation scenarios, we find that prefill/decode requests result in different
-            # expert worloads. To reduce expert imbalance more effectively, we can coolect eplb
+            # expert workloads. To reduce expert imbalance more effectively, we can coolect eplb
             # heat exclusively on a single stage rather than both prefill/decode.
             self.eplb_heat_collection_stage = eplb_config.eplb_heat_collection_stage
-            # Currently, we set the maxinum of tokens in decode stage as the threshold to distinguish
+            # Currently, we set the maximum of tokens in decode stage as the threshold to distinguish
             # prefill with decode.
             self.eplb_pd_thresholds = self.max_num_reqs * self.uniform_decode_query_len
             self.eplb_heat_collection_status = True
