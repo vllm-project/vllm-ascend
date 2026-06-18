@@ -70,7 +70,7 @@ def set_ascend_forward_context(
     draft_attn_metadatas=None,
     has_sinks=False,
     input_ids=None,
-    eplb_heat_collection_status: bool = True,
+    eplb_heat_collection_status: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
