@@ -22,7 +22,7 @@ The following model weights and EAGLE3 weights are available on ModelScope. Sear
 
 | Model | Description | Recommended Hardware | Source |
 |-------|-------------|---------------------|--------|
-| `MiniMax-M2.7` / `MiniMax-M2.5` | FP8 checkpoint | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) or 1× Ascend950 Products (experimental) | [ModelScope](https://modelscope.cn) |
+| `MiniMax-M2.7` / `MiniMax-M2.5` | BF16 checkpoint | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) or 1× Ascend950 Products (experimental) | [ModelScope](https://modelscope.cn/models/MiniMax/MiniMax-M2.7) |
 | `MiniMax-M2.7-w8a8-QuaRot` / `MiniMax-M2.5-w8a8-QuaRot` | W8A8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) or 1× Ascend950 Products (experimental) | [MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) |
 | `MiniMax-M2.7-w8a8c8-QuaRot` | W8A8C8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) or 1× Ascend950 Products (experimental) | [MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8c8-QuaRot) |
 | `Eagle3` (MiniMax-M2.5/M2.7) | Speculative decoding head model | Matches the base model node count | [MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) |
@@ -91,7 +91,7 @@ Map your model weight directory into the container (the example maps it to `/roo
 NAME=minimax
 IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
-docker run -itd -u 0 --ipc=host --privileged \
+docker run -itd -u 0 --ipc=host \
   -e VLLM_USE_MODELSCOPE=True \
   -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
   --name $NAME \
@@ -99,6 +99,14 @@ docker run -itd -u 0 --ipc=host --privileged \
   --device /dev/davinci_manager \
   --device /dev/devmm_svm \
   --device /dev/hisi_hdc \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci2 \
+  --device /dev/davinci3 \
+  --device /dev/davinci4 \
+  --device /dev/davinci5 \
+  --device /dev/davinci6 \
+  --device /dev/davinci7 \
   --shm-size=1200g \
   -v /usr/local/dcmi:/usr/local/dcmi \
   -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
@@ -159,8 +167,7 @@ Below is a recommended startup configuration for short-context conditions (e.g.,
 
 Notes:
 
-- If you only care about short-context low latency, you can set `--max-model-len 32768`, `--tensor-parallel-size 8`, and `--data-parallel-size 1`.
-- `export VLLM_ASCEND_BALANCE_SCHEDULING=0` disables balanced prefill/decode scheduling (set to 0 due to known issues).
+- If you only care about short-context low latency, you can set `--max-model-len 32768`, `--tensor-parallel-size 4`, and `--data-parallel-size 4`.
 
 ```{code-block} bash
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -174,8 +181,6 @@ sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
 
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=0
 
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
@@ -186,7 +191,10 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --async-scheduling \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true,
+                          "enable_fused_mc2":true,
+                          "enable_flashcomm1":true,
+                          weight_nz_mode":true}' \
     --enable-expert-parallel \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
@@ -216,7 +224,7 @@ Remarks:
     --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}'
 ```
 
-> **Note**: The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--speculative_config` based on your actual input/output length, concurrency, and hardware configuration.
+> **Note**: The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.
 
 - If you need to test with `curl` and tool calling, add the following to the startup command:
 
@@ -237,7 +245,6 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export TASK_QUEUE_ENABLE=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 export OMP_PROC_BIND=false
@@ -256,7 +263,8 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-batched-tokens 32768 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.85 \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true,
+                          "enable_flashcomm1":true}' \
     --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/",  "num_speculative_tokens":3}'
 ```
@@ -594,7 +602,7 @@ For details, please refer to [Using AISBench](../../developer_guide/evaluation/u
 
 Using the `gsm8k` dataset as an example test dataset, run the accuracy evaluation for `MiniMax-M2.7-W8A8` in online mode.
 
-> **Note**: Post-processing parameters (e.g., `max_tokens`, `temperature`, `stop` tokens) should match those defined in the model weight's `generation_config.json`. The recommended maximum output length for evaluation is 64k (65536 tokens).
+> **Note**: Post-processing parameters (e.g., `max_tokens`, `temperature`, `stop` tokens) should match those defined in the model weight's `generation_config.json`. The recommended maximum output length for GPQA-diamond and AIME2025 is 64k (65536 tokens).
 
 1. For `lm_eval` installation, please refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md).
 2. Run `lm_eval` to execute the accuracy evaluation:
@@ -649,13 +657,13 @@ vllm bench serve \
 
 #### Detailed Configuration
 
-| Scenario | Configuration | NPUs | TP | DP | Max Num Batched Tokens | Max Num Seqs | Max Model Len | MTP (EAGLE3) | FUSED_MC2 | FlashComm1 | Async Scheduling |
-|----------|---------------|------|----|----|------------------------|--------------|---------------|--------------|-----------|------------|------------------|
-| Short Context (3.5K→1.5K) | 1P2D P node | 16 | 4 | 4 | 16384 | 128 | 32k | - | On | On | On |
-| Short Context (3.5K→1.5K) | 1P2D D node | 8 | 4 | 8 | 16384 | 128 | 32k | 3 | On | On | On |
-| Long Context (128K→1K) | 1P1D P node | 16 | 8 | 2 | 16384 | 64 | 200k | 3 | On | On | On |
-| Long Context (128K→1K) | 1P1D D node | 16 | 8 | 2 | 16384 | 16 | 200k | 3 | On | On | On |
-| A2 (8-NPU) | A2 Single-node | 8 | 8 | 1 | 16384 | 32 | 32k | 3 | Off | On | On |
+| Scenario | Configuration | NPUs | TP | DP | EP | Max Num Batched Tokens | Max Num Seqs | Max Model Len | MTP (EAGLE3) | FUSED_MC2 | FlashComm1 | Async Scheduling |
+|----------|---------------|------|----|----|----|--------------------|--------------|---------------|--------------|-----------|------------|------------------|
+| Short Context (3.5K→1.5K) | 1P2D P node | 16 | 4 | 4 | 16 | 16384 | 128 | 32k | 3 | On | On | On |
+| Short Context (3.5K→1.5K) | 1P2D D node | 8 | 4 | 8 | 32 | 16384 | 128 | 32k | 3 | On | On | On |
+| Long Context (128K→1K) | 1P1D P node | 16 | 8 | 2 | 16 | 16384 | 64 | 200k | 3 | On | On | On |
+| Long Context (128K→1K) | 1P1D D node | 16 | 8 | 2 | 16 | 16384 | 16 | 200k | 3 | On | On | On |
+| A2 (8-NPU) | A2 Single-node | 8 | 8 | 1 | 8 | 16384 | 32 | 32k | 3 | Off | On | On |
 
 ### 9.2 Tuning Guidelines
 
