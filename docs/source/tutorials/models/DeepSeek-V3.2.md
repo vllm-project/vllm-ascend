@@ -986,15 +986,6 @@ In this chapter, we recommend best practices in prefill-decode disaggregation sc
 
   A: This is a known issue. Please ensure `--no-enable-prefix-caching` is set and use the latest version of vllm-ascend.
 
-- **Q: How to enable function call for DeepSeek-V3.2?**
-
-  A: The function call feature is supported from v0.13.0rc1 on. Please use the latest version and add following configurations in vLLM startup command
-
-  ```shell
-  --tool-call-parser deepseek_v3 \
-  --enable-auto-tool-choice \
-  ```
-
 - **Q: How to configure the model weight path correctly?**
 
   A: The model weight path in the deployment commands (e.g., `/root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot`) should be adjusted to your actual download path. Refer to the [Model Weight](#model-weight) section for details.
