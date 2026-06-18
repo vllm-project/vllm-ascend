@@ -31,26 +31,7 @@ API_HEADERS = {
 API_BASE = f"https://api.github.com/repos/{REPO}"
 
 
-def delete_old_bot_comments() -> None:
-    """Delete all previous comments from github-actions[bot] on this issue/PR."""
-    url = f"{API_BASE}/issues/{ISSUE_NUMBER}/comments"
-    resp = requests.get(url, headers=API_HEADERS, timeout=30)
-    resp.raise_for_status()
-    for comment in resp.json():
-        if comment.get("user", {}).get("login") == "github-actions[bot]":
-            try:
-                requests.delete(
-                    f"{API_BASE}/issues/comments/{comment['id']}",
-                    headers=API_HEADERS,
-                    timeout=15,
-                ).raise_for_status()
-                print(f"Deleted old bot comment id={comment['id']}")
-            except requests.HTTPError as e:
-                print(f"Failed to delete comment {comment['id']}: {e}")
-
-
 def post_comment(body: str) -> None:
-    delete_old_bot_comments()
     url = f"{API_BASE}/issues/{ISSUE_NUMBER}/comments"
     resp = requests.post(url, headers=API_HEADERS, json={"body": body}, timeout=30)
     resp.raise_for_status()
@@ -227,11 +208,6 @@ def main() -> None:
         commit_result = json.loads(commit_path.read_text())
 
     is_pr = commit_result is not None
-
-    # Always clean up old bot comments first, even if we won't post a new one.
-    # This handles cases where a previous FAIL state becomes PASS (e.g. user
-    # fixes their issue), ensuring stale guidance comments don't persist.
-    delete_old_bot_comments()
 
     if is_pr:
         desc_ok = desc_result.get("ok", True) if desc_result else True
