@@ -9,10 +9,26 @@
 # ruff: noqa: E501
 # mypy: ignore-errors
 
-import torch
-from vllm.triton_utils import tl, triton
+import os
 
-exp = tl.exp
+import torch
+from vllm.triton_utils import tl, tldevice, triton
+
+if os.environ.get("FLA_USE_FAST_OPS", "0") == "1":
+    div = tldevice.fast_dividef
+    exp = tldevice.fast_expf
+    log = tldevice.fast_logf
+    log2 = tldevice.fast_log2f
+else:
+
+    @triton.jit
+    def div_normal(x, y):
+        return x / y
+
+    div = div_normal
+    exp = tl.exp
+    log = tl.log
+    log2 = tl.log2
 
 
 @triton.heuristics(
@@ -116,6 +132,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
+        b_g = tl.load(p_g).to(tl.float32)
 
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
