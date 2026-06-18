@@ -218,7 +218,7 @@ export VLLM_USE_V1=1
 export TASK_QUEUE_ENABLE=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export HCCL_BUFFSIZE=1024
-vllm serve /data/weights/Qwen3-32B-w4a4-vllm \
+vllm serve your_model_path \
     --port 8004 \
     --data-parallel-size 1 \
     --tensor-parallel-size 2 \
@@ -238,7 +238,7 @@ Qwen3-8B-W4A8:
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=8,9
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-vllm serve /mnt/share/d30064004/qwen-doc-check/weights/qwen3-8b-w4a8 \
+vllm serve your_model_path \
     --served-model-name "qwen3-8b-w4a8" \
     --max-model-len 4096 \
     --port 20001 \
@@ -309,7 +309,7 @@ models = [
         attr="service",
         type=VLLMCustomAPIChat,
         abbr='vllm-api-general-chat',
-        path="/mnt/share/d30064004/vllm/weights/Qwen3-32B-W8A8",
+        path="your_model_path",
         model="qwen3",
         request_rate = 0,
         retry = 2,
@@ -356,7 +356,7 @@ Take `serve` as an example:
 
 ```shell
 vllm bench serve \
-    --model vllm-ascend/Qwen3-32B-W8A8 \
+    --model your_model_path \
     --served-model-name qwen3 \
     --port <port> \
     --dataset-name random \
@@ -404,7 +404,7 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /mnt/share/qwen3-32b-pdmix \
+vllm serve your_model_path \
   --served-model-name qwen3 \
   --trust-remote-code \
   --distributed-executor-backend mp \
@@ -431,7 +431,7 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /mnt/share/qwen3-32b-pdmix \
+vllm serve your_model_path \
   --host <host_ip> \
   --port <port> \
   --served-model-name qwen \
@@ -458,7 +458,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-vllm serve /mnt/share/qwen3-32b-pdmix \
+vllm serve your_model_path \
   --served-model-name qwen3 \
   --trust-remote-code \
   --distributed-executor-backend mp \
