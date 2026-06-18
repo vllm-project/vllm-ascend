@@ -23,6 +23,7 @@ Usage at the top of each test file:
     import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 """
 
+import logging
 import os
 import sys
 import types
@@ -87,6 +88,7 @@ _vllm_mock_modules = [
     "vllm.v1.core.kv_cache_utils",
     "vllm.v1.core.sched",
     "vllm.v1.core.sched.output",
+    "vllm.v1.core.single_type_kv_cache_manager",
     "vllm.v1.kv_cache_interface",
     "vllm.v1.kv_cache_spec_registry",
     "vllm.v1.outputs",
@@ -98,9 +100,14 @@ for _mod_name in _vllm_mock_modules:
         sys.modules[_mod_name] = MagicMock()
 
 sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
+sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
 
 _base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
-_base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]
+_base_mod.KVConnectorBase_V1 = type(  # type: ignore[attr-defined]
+    "KVConnectorBase_V1",
+    (),
+    {"__init__": lambda self, **kw: None},
+)
 _base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
@@ -154,9 +161,141 @@ class _KVCacheBlock:
 _kv_cache_utils_mod.KVCacheBlock = _KVCacheBlock  # type: ignore[attr-defined]
 
 
+class _FakeKVCacheSpec:
+    def __init__(self, block_size=16, **kwargs):
+        self.block_size = block_size
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+    def __eq__(self, other):
+        return type(self) is type(other) and self.__dict__ == getattr(other, "__dict__", {})
+
+    def copy_with_new_block_size(self, block_size):
+        kwargs = self.__dict__.copy()
+        kwargs["block_size"] = block_size
+        return type(self)(**kwargs)
+
+
+class _FakeFullAttentionSpec(_FakeKVCacheSpec):
+    pass
+
+
+class _FakeSlidingWindowSpec(_FakeKVCacheSpec):
+    def __init__(self, block_size=16, sliding_window=32, **kwargs):
+        super().__init__(block_size=block_size, sliding_window=sliding_window, **kwargs)
+
+
+class _FakeMambaSpec(_FakeKVCacheSpec):
+    pass
+
+
+class _FakeUniformTypeKVCacheSpecs(_FakeKVCacheSpec):
+    def __init__(self, block_size=16, kv_cache_specs=None, **kwargs):
+        super().__init__(block_size=block_size, **kwargs)
+        self.kv_cache_specs = kv_cache_specs or {}
+
+
+class _FakeKVCacheGroupSpec:
+    def __init__(self, layer_names=None, kv_cache_spec=None, is_eagle_group=False):
+        self.layer_names = layer_names or []
+        self.kv_cache_spec = kv_cache_spec or _FakeFullAttentionSpec()
+        self.is_eagle_group = is_eagle_group
+
+
+class _FakeKVCacheConfig:
+    def __init__(self, num_blocks=1, kv_cache_tensors=None, kv_cache_groups=None):
+        self.num_blocks = num_blocks
+        self.kv_cache_tensors = kv_cache_tensors or []
+        self.kv_cache_groups = kv_cache_groups or []
+
+
+class _FakeSingleTypeKVCacheManager:
+    @classmethod
+    def reachable_block_mask(
+        cls,
+        start_block,
+        end_block,
+        alignment_tokens,
+        kv_cache_spec,
+        use_eagle,
+        retention_interval=None,
+        num_prompt_tokens=None,
+    ):
+        return None
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes,
+        max_length,
+        kv_cache_group_ids,
+        block_pool,
+        kv_cache_spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+        dcp_world_size=1,
+        pcp_world_size=1,
+    ):
+        computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
+        max_blocks = max_length // kv_cache_spec.block_size
+        for block_hash in list(block_hashes)[:max_blocks]:
+            cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
+            if not cached:
+                break
+            for blocks, block in zip(computed, cached):
+                blocks.append(block)
+        if drop_eagle_block and computed and computed[0]:
+            for blocks in computed:
+                blocks.pop()
+        return computed
+
+
+class _FakeSlidingWindowManager(_FakeSingleTypeKVCacheManager):
+    @classmethod
+    def reachable_block_mask(
+        cls,
+        start_block,
+        end_block,
+        alignment_tokens,
+        kv_cache_spec,
+        use_eagle,
+        retention_interval=None,
+        num_prompt_tokens=None,
+    ):
+        if alignment_tokens is None:
+            return None
+        per_segment = max(alignment_tokens // kv_cache_spec.block_size, 1)
+        return [(idx + 1) % per_segment == 0 for idx in range(start_block, end_block)]
+
+
+_single_type_mod = sys.modules["vllm.v1.core.single_type_kv_cache_manager"]
+_single_type_mod.SingleTypeKVCacheManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
+_single_type_mod.FullAttentionManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
+_single_type_mod.SlidingWindowManager = _FakeSlidingWindowManager  # type: ignore[attr-defined]
+_single_type_mod.MambaManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
+_single_type_mod.spec_manager_map = {  # type: ignore[attr-defined]
+    _FakeFullAttentionSpec: _FakeSingleTypeKVCacheManager,
+    _FakeSlidingWindowSpec: _FakeSlidingWindowManager,
+    _FakeMambaSpec: _FakeSingleTypeKVCacheManager,
+}
+
+_kv_interface_mod = sys.modules["vllm.v1.kv_cache_interface"]
+_kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
+_kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
+_kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
+_kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
+_kv_interface_mod.UniformTypeKVCacheSpecs = _FakeUniformTypeKVCacheSpecs  # type: ignore[attr-defined]
+_kv_interface_mod.KVCacheGroupSpec = _FakeKVCacheGroupSpec  # type: ignore[attr-defined]
+_kv_interface_mod.KVCacheConfig = _FakeKVCacheConfig  # type: ignore[attr-defined]
+
+
 class _KVCacheSpecRegistry:
     @staticmethod
     def get_manager_class(spec):
+        if isinstance(spec, _FakeSlidingWindowSpec):
+            return _FakeSlidingWindowManager
+        if isinstance(spec, (_FakeFullAttentionSpec, _FakeMambaSpec)):
+            return _FakeSingleTypeKVCacheManager
         return getattr(spec, "manager_cls", None)
 
 

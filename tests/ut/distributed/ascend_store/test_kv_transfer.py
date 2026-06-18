@@ -101,12 +101,12 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
         self.store_mask_calls = []
         self.load_mask_calls = []
 
-    def store_mask(self, token_len, kv_cache_group_id, num_prompt_tokens=None):
-        self.store_mask_calls.append((token_len, kv_cache_group_id, num_prompt_tokens))
+    def store_mask(self, token_len, num_prompt_tokens=None):
+        self.store_mask_calls.append((token_len, num_prompt_tokens))
         return self._store_mask
 
-    def load_mask(self, block_hashes, token_len, kv_cache_group_id):
-        self.load_mask_calls.append((block_hashes, token_len, kv_cache_group_id))
+    def load_mask(self, block_hashes, token_len):
+        self.load_mask_calls.append((block_hashes, token_len))
         return self._load_mask
 
 
@@ -206,7 +206,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_handle_request_applies_store_mask_before_put(self):
         store = FakeStore([0, 0])
-        db = MaskedFakeTokenDatabase(store_mask=[False, True, False, True])
+        db = MaskedFakeTokenDatabase(store_mask=([False, True, False, True],))
         t = KVCacheStoreSendingThread(
             m_store=store,
             token_database=db,
@@ -229,7 +229,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.request_queue.put(req)
         t._handle_request(req)
 
-        self.assertEqual(db.store_mask_calls, [(64, 0, 64)])
+        self.assertEqual(db.store_mask_calls, [(64, 64)])
         keys, _, _ = store.put_calls[0]
         self.assertEqual(len(keys), 2)
         self.assertTrue(keys[0].endswith("@k1"))
@@ -381,7 +381,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
     def test_handle_request_applies_load_mask_before_get(self):
         store = FakeStore()
-        db = MaskedFakeTokenDatabase(load_mask=[False, True])
+        db = MaskedFakeTokenDatabase(load_mask=([False, True],))
         t = KVCacheStoreRecvingThread(
             m_store=store,
             token_database=db,
@@ -401,7 +401,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         t.request_queue.put(req)
         t._handle_request(req)
 
-        self.assertEqual(db.load_mask_calls, [([b"h0", b"h1"], 32, 0)])
+        self.assertEqual(db.load_mask_calls, [([b"h0", b"h1"], 32)])
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
         self.assertTrue(keys[0].endswith("@k1"))

@@ -17,11 +17,9 @@
 
 import hashlib
 import unittest
-from dataclasses import dataclass
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import config_data as config_data_mod
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
@@ -32,41 +30,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     PoolKey,
     ReqMeta,
     RequestTracker,
-    _get_manager_class_for_spec,
     get_block_hashes,
 )
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
-
-
-@dataclass
-class _FakeSpec:
-    block_size: int
-    manager_cls: type
-
-
-@dataclass
-class _FakeGroup:
-    kv_cache_spec: _FakeSpec
-    is_eagle_group: bool = False
-
-
-class _FakeMaskManager:
-    last_reachable_call = None
-    last_hit_call = None
-
-    @classmethod
-    def reachable_block_mask(cls, **kwargs):
-        cls.last_reachable_call = kwargs
-        return [idx % 2 == 1 for idx in range(kwargs["end_block"] - kwargs["start_block"])]
-
-    @classmethod
-    def find_longest_cache_hit(cls, **kwargs):
-        cls.last_hit_call = kwargs
-        block_pool = kwargs["block_pool"]
-        present = block_pool.get_cached_block(kwargs["block_hashes"][0], kwargs["kv_cache_group_ids"])[0]
-        return ([block_pool.null_block, present],)
 
 
 def _expected_grouped_hash(*block_hashes):
@@ -206,53 +174,31 @@ class TestChunkedTokenDatabase(unittest.TestCase):
 
         self.assertEqual(raw_keys, hex_keys)
 
-    def test_store_mask_uses_cache_family_store_granularity(self):
-        spec = _FakeSpec(block_size=8, manager_cls=_FakeMaskManager)
-        db = ChunkedTokenDatabase(
-            self.meta,
-            block_size=8,
-            partitions=None,
-            hash_block_size=8,
-            kv_cache_groups=[_FakeGroup(spec)],
-            alignment_tokens=32,
-            retention_interval=64,
-        )
-        db.set_group_buffers(
-            {0: [1000]},
-            {0: [80]},
-            group_cache_families={0: "c4"},
-        )
+    def test_store_mask_delegates_to_cache_coordinator(self):
+        coordinator = MagicMock()
+        coordinator.store_mask.return_value = ([False, True],)
+        self.db.set_cache_coordinator(coordinator)
 
-        mask = db.store_mask(128, kv_cache_group_id=0, num_prompt_tokens=100)
+        mask = self.db.store_mask(32, num_prompt_tokens=24)
 
-        self.assertEqual(mask, [False, True, False, True])
-        reachable_call = _FakeMaskManager.last_reachable_call
-        assert reachable_call is not None
-        self.assertEqual(reachable_call["end_block"], 4)
-        self.assertEqual(reachable_call["kv_cache_spec"].block_size, 32)
-        self.assertEqual(reachable_call["alignment_tokens"], 32)
-        self.assertEqual(reachable_call["retention_interval"], 64)
-        self.assertEqual(reachable_call["num_prompt_tokens"], 100)
+        self.assertEqual(mask, ([False, True],))
+        coordinator.store_mask.assert_called_once_with(32, 24)
 
-    def test_load_mask_uses_manager_hit_semantics(self):
-        spec = _FakeSpec(block_size=16, manager_cls=_FakeMaskManager)
-        db = ChunkedTokenDatabase(
-            self.meta,
-            block_size=16,
-            partitions=None,
-            hash_block_size=16,
-            kv_cache_groups=[_FakeGroup(spec)],
-            alignment_tokens=64,
-        )
-        db.set_group_buffers({0: [1000]}, {0: [160]})
+    def test_load_mask_delegates_to_cache_coordinator(self):
+        coordinator = MagicMock()
+        coordinator.load_mask.return_value = ([False, True],)
+        self.db.set_cache_coordinator(coordinator)
 
-        mask = db.load_mask([b"h0", b"h1"], token_len=32, kv_cache_group_id=0)
+        mask = self.db.load_mask([b"h0", b"h1"], token_len=32)
 
-        self.assertEqual(mask, [False, True])
-        hit_call = _FakeMaskManager.last_hit_call
-        assert hit_call is not None
-        self.assertEqual(hit_call["max_length"], 32)
-        self.assertEqual(hit_call["alignment_tokens"], 64)
+        self.assertEqual(mask, ([False, True],))
+        coordinator.load_mask.assert_called_once_with([b"h0", b"h1"], 32)
+
+    def test_mask_allows_chunk_uses_group_mask(self):
+        masks = ([False, True], [True, False])
+
+        self.assertTrue(self.db.mask_allows_chunk(masks, 0, 16))
+        self.assertFalse(self.db.mask_allows_chunk(masks, 1, 16))
 
     def test_get_block_hashes_rehashes_grouped_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
@@ -325,47 +271,6 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(len(new_keys), 2)
         self.assertIn("@pp_rank:0", new_keys[0])
         self.assertIn("@pp_rank:1", new_keys[1])
-
-
-class TestManagerClassResolution(unittest.TestCase):
-    def tearDown(self):
-        self._clear_resolver_cache()
-
-    @staticmethod
-    def _clear_resolver_cache():
-        for attr in ("_manager_class_cache",):
-            if hasattr(_get_manager_class_for_spec, attr):
-                delattr(_get_manager_class_for_spec, attr)
-
-    def test_manager_resolution_caches_imported_modules(self):
-        class FakeManager:
-            pass
-
-        class FakeSpec:
-            pass
-
-        self._clear_resolver_cache()
-        spec = FakeSpec()
-        registry_module = MagicMock()
-        registry_module.KVCacheSpecRegistry.get_manager_class.return_value = None
-        manager_module = MagicMock()
-        manager_module.spec_manager_map = {FakeSpec: FakeManager}
-        import_names: list[str] = []
-
-        def fake_import_module(name: str):
-            import_names.append(name)
-            if name == "vllm.v1.kv_cache_spec_registry":
-                return registry_module
-            if name == "vllm.v1.core.single_type_kv_cache_manager":
-                return manager_module
-            raise ImportError(name)
-
-        with patch.object(config_data_mod.importlib, "import_module", side_effect=fake_import_module):
-            self.assertIs(_get_manager_class_for_spec(spec), FakeManager)
-            self.assertIs(_get_manager_class_for_spec(spec), FakeManager)
-
-        self.assertEqual(import_names.count("vllm.v1.kv_cache_spec_registry"), 1)
-        self.assertEqual(import_names.count("vllm.v1.core.single_type_kv_cache_manager"), 1)
 
 
 class TestLoadSpec(unittest.TestCase):

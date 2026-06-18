@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import dataclasses
 import hashlib
-import importlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -11,14 +9,11 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, BlockHashListWithBlockSize, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.core.sched.output import NewRequestData
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
-_CACHE_MISSING = object()
-_MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 
 
 # Parameters related to the key
@@ -142,71 +137,6 @@ def get_cache_family_granularity(block_size: int, cache_family: str | None) -> i
     return block_size * infer_cache_family_ratio(cache_family)
 
 
-def _unwrap_spec(kv_cache_spec: Any) -> Any:
-    kv_cache_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
-    if kv_cache_specs is None:
-        return kv_cache_spec
-    return next(iter(kv_cache_specs.values()))
-
-
-def _get_manager_class_cache() -> dict[str, Any]:
-    cache = getattr(_get_manager_class_for_spec, _MANAGER_CLASS_CACHE_ATTR, None)
-    if not isinstance(cache, dict):
-        cache = {}
-        setattr(_get_manager_class_for_spec, _MANAGER_CLASS_CACHE_ATTR, cache)
-    return cast(dict[str, Any], cache)
-
-
-def _get_manager_class_for_spec(spec: Any) -> Any | None:
-    """Resolve the vLLM manager class across 0.20.x and 0.21.x APIs."""
-    cache = _get_manager_class_cache()
-    registry = cache.get("registry", _CACHE_MISSING)
-    if registry is _CACHE_MISSING:
-        try:
-            registry_module = importlib.import_module("vllm.v1.kv_cache_spec_registry")
-            registry = getattr(registry_module, "KVCacheSpecRegistry", None)
-        except ImportError:
-            registry = None
-        cache["registry"] = registry
-    if registry is not None:
-        manager_cls = registry.get_manager_class(spec)
-        if manager_cls is not None:
-            return manager_cls
-
-    spec_manager_map = cache.get("spec_manager_map", _CACHE_MISSING)
-    if spec_manager_map is _CACHE_MISSING:
-        try:
-            manager_module = importlib.import_module("vllm.v1.core.single_type_kv_cache_manager")
-            spec_manager_map = getattr(manager_module, "spec_manager_map", {})
-        except ImportError:
-            spec_manager_map = None
-        cache["spec_manager_map"] = spec_manager_map
-    if not spec_manager_map:
-        return None
-    manager_cls = spec_manager_map.get(type(spec))
-    if manager_cls is not None:
-        return manager_cls
-    for spec_cls, candidate in spec_manager_map.items():
-        if isinstance(spec, spec_cls):
-            return candidate
-    return None
-
-
-class ExternalCachedBlockPool:
-    """Tiny BlockPool stand-in used for connector-side load masks."""
-
-    def __init__(self) -> None:
-        self.null_block = KVCacheBlock(block_id=0)
-        self._present_block = KVCacheBlock(block_id=1)
-
-    def get_cached_block(
-        self,
-        block_hash: BlockHash,
-        group_ids: list[int],
-    ) -> list[KVCacheBlock]:
-        return [self._present_block] * len(group_ids)
-
-
 def _get_layer_compress_ratio(
     layer_name: str,
     compress_ratios: Sequence[int] | None,
@@ -309,6 +239,40 @@ class ChunkedTokenDatabase:
         }
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(self.kv_cache_groups)))
+        self.cache_coordinator: Any | None = None
+
+    def set_cache_coordinator(self, cache_coordinator: Any | None) -> None:
+        self.cache_coordinator = cache_coordinator
+
+    def store_mask(
+        self,
+        aligned_token_len: int,
+        num_prompt_tokens: int | None = None,
+    ) -> tuple[list[bool], ...] | None:
+        if self.cache_coordinator is None:
+            return None
+        return self.cache_coordinator.store_mask(aligned_token_len, num_prompt_tokens)
+
+    def load_mask(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+    ) -> tuple[list[bool], ...] | None:
+        if self.cache_coordinator is None:
+            return None
+        return self.cache_coordinator.load_mask(block_hashes, token_len)
+
+    def mask_allows_chunk(
+        self,
+        masks: tuple[list[bool], ...] | None,
+        kv_cache_group_id: int,
+        start: int,
+    ) -> bool:
+        if masks is None or kv_cache_group_id >= len(masks):
+            return True
+        group_mask = masks[kv_cache_group_id]
+        chunk_idx = start // self.get_block_size(kv_cache_group_id)
+        return chunk_idx < len(group_mask) and group_mask[chunk_idx]
 
     def _make_key_by_hash(
         self,
@@ -379,110 +343,6 @@ class ChunkedTokenDatabase:
             self.get_block_size(kv_cache_group_id),
             self._get_group_cache_family(kv_cache_group_id, cache_role),
         )
-
-    def _get_effective_group_spec(self, kv_cache_group_id: int, cache_role: str = "kv") -> Any | None:
-        if cache_role != "kv" or kv_cache_group_id >= len(self.kv_cache_groups):
-            return None
-        spec = _unwrap_spec(self.kv_cache_groups[kv_cache_group_id].kv_cache_spec)
-        store_granularity = self._get_store_granularity(kv_cache_group_id, cache_role)
-        if getattr(spec, "block_size", None) == store_granularity:
-            return spec
-        try:
-            return dataclasses.replace(spec, block_size=store_granularity)
-        except TypeError:
-            return spec
-
-    def _block_hashes_for_spec(
-        self,
-        block_hashes: BlockHashList | list[str],
-        spec: Any,
-    ) -> BlockHashList | list[str]:
-        block_size = getattr(spec, "block_size", self.hash_block_size)
-        if block_size == self.hash_block_size:
-            return block_hashes
-        if isinstance(block_hashes[0], str):
-            return get_block_hashes(block_hashes, block_size, self.hash_block_size)
-        return BlockHashListWithBlockSize(block_hashes, self.hash_block_size, block_size)
-
-    def store_mask(
-        self,
-        aligned_token_len: int,
-        kv_cache_group_id: int,
-        num_prompt_tokens: int | None = None,
-        cache_role: str = "kv",
-    ) -> list[bool] | None:
-        """Return per-store-chunk retention mask for a KV cache group.
-
-        None means every chunk is reachable and should be stored. The block
-        size used here is AscendStore's key granularity, including DSV4 cache
-        family ratios such as c4/c128.
-        """
-        spec = self._get_effective_group_spec(kv_cache_group_id, cache_role)
-        if spec is None:
-            return None
-        manager_cls = _get_manager_class_for_spec(spec)
-        if manager_cls is None:
-            return None
-        reachable_block_mask = getattr(manager_cls, "reachable_block_mask", None)
-        if reachable_block_mask is None:
-            return None
-        store_granularity = self._get_store_granularity(kv_cache_group_id, cache_role)
-        if aligned_token_len == 0:
-            return []
-        num_chunks = cdiv(aligned_token_len, store_granularity)
-        return reachable_block_mask(
-            start_block=0,
-            end_block=num_chunks,
-            alignment_tokens=self.alignment_tokens,
-            kv_cache_spec=spec,
-            use_eagle=kv_cache_group_id in self.eagle_group_ids,
-            retention_interval=self.retention_interval,
-            num_prompt_tokens=num_prompt_tokens,
-        )
-
-    def load_mask(
-        self,
-        block_hashes: BlockHashList | list[str],
-        token_len: int,
-        kv_cache_group_id: int,
-        cache_role: str = "kv",
-    ) -> list[bool] | None:
-        """Return per-store-chunk load mask for a KV cache group.
-
-        This mirrors MooncakeStore's load mask: only chunks a local manager
-        would populate at the external hit length are loaded.
-        """
-        if not block_hashes:
-            return []
-        spec = self._get_effective_group_spec(kv_cache_group_id, cache_role)
-        if spec is None:
-            return None
-        manager_cls = _get_manager_class_for_spec(spec)
-        if manager_cls is None:
-            return None
-        hashes = self._block_hashes_for_spec(block_hashes, spec)
-        cached_block_pool = ExternalCachedBlockPool()
-        hit_blocks = manager_cls.find_longest_cache_hit(
-            block_hashes=hashes,
-            max_length=token_len,
-            kv_cache_group_ids=[kv_cache_group_id],
-            block_pool=cast(BlockPool, cached_block_pool),
-            kv_cache_spec=spec,
-            drop_eagle_block=False,
-            alignment_tokens=self.alignment_tokens,
-        )
-        return [block is not cached_block_pool.null_block for block in hit_blocks[0]]
-
-    def mask_allows_chunk(
-        self,
-        mask: list[bool] | None,
-        start: int,
-        kv_cache_group_id: int,
-    ) -> bool:
-        if mask is None:
-            return True
-        chunk_idx = start // self.get_block_size(kv_cache_group_id)
-        return chunk_idx < len(mask) and mask[chunk_idx]
 
     def _get_group_buffers(
         self, kv_cache_group_id: int, cache_role: str = "kv"
