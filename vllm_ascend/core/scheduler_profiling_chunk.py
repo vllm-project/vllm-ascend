@@ -41,8 +41,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
-from vllm_ascend.core.recompute_scheduler import PreemptedRequestData
-from vllm_ascend.utils import vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -244,7 +242,6 @@ class ProfilingChunkScheduler(Scheduler):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
-        preempted_req_data: list[PreemptedRequestData] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -385,33 +382,6 @@ class ProfilingChunkScheduler(Scheduler):
                     else:
                         preempted_req = self.running.pop()
 
-                    preempted_req_id = preempted_req.request_id
-                    preempted_block_ids = self.kv_cache_manager.get_block_ids(
-                        preempted_req_id
-                    )
-                    preempted_num_computed_tokens = max(
-                        0,
-                        preempted_req.num_computed_tokens
-                        - preempted_req.num_output_placeholders,
-                    )
-                    preempted_req_data.append(
-                        PreemptedRequestData(
-                            req_id=preempted_req_id,
-                            block_ids=preempted_block_ids,
-                            num_computed_tokens=preempted_num_computed_tokens,
-                        )
-                    )
-                    preempt_hook = (
-                        getattr(self.connector, "update_state_before_preempt", None)
-                        if self.connector is not None
-                        else None
-                    )
-                    if preempt_hook is not None:
-                        preempt_hook(
-                            preempted_req,
-                            preempted_block_ids,
-                            preempted_num_computed_tokens,
-                        )
                     self._preempt_request(preempted_req, scheduled_timestamp)
                     preempted_reqs.append(preempted_req)
                     logger.info(
@@ -772,7 +742,6 @@ class ProfilingChunkScheduler(Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
-        scheduler_output.preempted_reqs = preempted_req_data  # type: ignore[attr-defined]
 
         if self.connector is not None:
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
