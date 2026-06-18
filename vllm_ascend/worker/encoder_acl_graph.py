@@ -69,7 +69,7 @@ def update_encoder_graph_workspace(token_budget: int, workspace: torch.Tensor) -
     _encoder_graph_params.workspaces[token_budget] = workspace
 
 
-def _get_replay_metadata_buffers(graph_meta: BudgetGraphMetadata) -> dict[str, torch.Tensor]:
+def get_replay_metadata_buffers(graph_meta: BudgetGraphMetadata) -> dict[str, torch.Tensor]:
     """Return encoder metadata buffers for FIA replay, across v0.22.1 and main APIs."""
     if vllm_version_is("0.22.1"):
         return graph_meta.metadata_buffers
@@ -422,10 +422,13 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             assert replay_buffers is not None
             self._copy_replay_buffers_legacy(graph_meta, mm_kwargs, replay_buffers)
 
-        meta = _get_replay_metadata_buffers(graph_meta)
-        cu_seqlens_cpu = None if meta.get("cu_seqlens") is None else meta.get("cu_seqlens").cpu()
-        cu_window_seqlens_cpu = None if meta.get("cu_window_seqlens") is None else meta.get("cu_window_seqlens").cpu()
-        seq_lens_cpu = None if meta.get("sequence_lengths") is None else meta.get("sequence_lengths").cpu()
+        meta: dict[str, torch.Tensor] = get_replay_metadata_buffers(graph_meta)
+        cu_seqlens = meta.get("cu_seqlens")
+        cu_seqlens_cpu = None if cu_seqlens is None else cu_seqlens.cpu()
+        cu_window_seqlens = meta.get("cu_window_seqlens")
+        cu_window_seqlens_cpu = None if cu_window_seqlens is None else cu_window_seqlens.cpu()
+        seq_lens = meta.get("sequence_lengths")
+        seq_lens_cpu = None if seq_lens is None else seq_lens.cpu()
 
         update_stream = self.update_stream
         if update_stream is None:
