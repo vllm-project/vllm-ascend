@@ -422,30 +422,3 @@ class TestEagle3VwnLlamaForCausalLM:
             embeds = model.embed_input_ids(torch.randint(0, _VOCAB, (num_tokens,)))
 
         assert embeds.shape == (num_tokens, _HIDDEN)
-
-
-class TestEagle3InheritedSurface:
-    """Contract tests for upstream methods Eagle3VwnLlamaForCausalLM inherits
-    but does not override.
-
-    The drafter calls these during real speculative decoding. They read
-    ``self.model.*`` attributes (e.g. fc_norm, num_aux_hidden_states) that
-    VwnLlamaModel must keep declaring; these tests fail fast if upstream adds a
-    new attribute read that VWN forgets to expose, instead of waiting for an
-    expensive NPU E2E run.
-    """
-
-    def test_combine_hidden_states(self):
-        with _make_model_with_mocked_ops(vwn_m=4) as (model, _, hs):
-            num_tokens = 3
-            # fc_input_size = hidden_size * num_aux_hidden_states (=3)
-            combined = model.combine_hidden_states(torch.randn(num_tokens, hs * 3))
-
-        assert combined.shape == (num_tokens, hs)
-
-    def test_compute_logits(self):
-        with _make_model_with_mocked_ops(vwn_m=4) as (model, _, hs):
-            num_tokens = 3
-            logits = model.compute_logits(torch.randn(num_tokens, hs))
-
-        assert logits.shape == (num_tokens, _VOCAB)

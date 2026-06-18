@@ -210,3 +210,48 @@ class Eagle3VwnLlamaForCausalLM(Eagle3LlamaForCausalLM):
                 ),
                 persistent=False,
             )
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        if self.draft_id_to_target_id is None:
+            assert logits.shape[1] == self.config.vocab_size, (
+                f"Expected logits to have shape (*, {self.config.vocab_size}), but got {logits.shape}"
+            )
+            return logits
+
+        base = torch.arange(self.config.draft_vocab_size, device=logits.device)
+        targets = base + self.draft_id_to_target_id
+        logits_new = logits.new_full(
+            (
+                logits.shape[0],
+                self.config.vocab_size,
+            ),
+            float("-inf"),
+        )
+        logits_new[:, targets] = logits
+        return logits_new
+
+    def combine_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.model.use_aux_hidden_state:
+            return hidden_states
+        # combine multiple auxiliary hidden states returned by eagle3
+
+        if self.model.norm_before_fc:
+            hidden_states = self.model.input_norm(hidden_states)
+
+        # `norm_before_fc` adds a single RMSNorm before the FC layer, whereas `fc_norm`
+        # applies separate RMSNorms to each chunk of the hidden states.
+        if self.model.fc_norm is not None:
+            chunks = hidden_states.chunk(self.model.num_aux_hidden_states, dim=-1)
+            hidden_states = torch.cat(
+                [norm(chunk) for norm, chunk in zip(self.model.fc_norm, chunks)],
+                dim=-1,
+            )
+
+        return self.model.fc(hidden_states)
