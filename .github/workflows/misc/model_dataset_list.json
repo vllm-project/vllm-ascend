@@ -1,5 +1,6 @@
 {
     "models": [
+      "AI-ModelScope/AI21-Jamba-1.5-Mini",
       "AngelSlim/Qwen3-32B_eagle3",
       "AngelSlim/Qwen3-a3B_eagle3",
       "Anionex/Qwen3-1.7B-W4A8-V1",
