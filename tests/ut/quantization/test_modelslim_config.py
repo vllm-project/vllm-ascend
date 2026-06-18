@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearBase
 
@@ -157,7 +157,8 @@ class TestAscendModelSlimConfig(TestBase):
             self.assertIsInstance(args[0], AscendC8KVCacheAttentionMethod)
 
     def test_get_quant_method_for_fused_moe(self):
-        fused_moe_layer = MagicMock(spec=FusedMoE)
+        # vLLM PR #41184 makes RoutedExperts own MoE weights.
+        fused_moe_layer = MagicMock(spec=RoutedExperts)
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
         mock_config = MagicMock()

@@ -578,8 +578,8 @@ class NPUWorker(WorkerBase):
             if envs_vllm.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
                 equiv_util = round(current_util - ng_util_delta, 4)
                 logger.info(
-                    "ACL graph memory profiling is enabled (default). "
-                    "The current --gpu-memory-utilization=%.4f is "
+                    "ACL graph memory profiling is enabled (default since "
+                    "v0.22.1). The current --gpu-memory-utilization=%.4f is "
                     "equivalent to --gpu-memory-utilization=%.4f without "
                     "ACL graph memory profiling. To maintain the same "
                     "effective KV cache size as before, increase "
@@ -596,7 +596,7 @@ class NPUWorker(WorkerBase):
                     "Without it, ACL graph memory is not accounted for "
                     "during KV cache allocation, which may require lowering "
                     "--gpu-memory-utilization to avoid OOM. Consider "
-                    "re-enabling it (the default) and increasing "
+                    "re-enabling it (the default as of v0.22.1) and increasing "
                     "--gpu-memory-utilization from %.4f to %.4f.",
                     current_util,
                     suggested_util,

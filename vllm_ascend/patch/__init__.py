@@ -965,7 +965,25 @@
 #       for loading extra KV cache quantisation parameters in model load_weights,
 #       or when the GQA model's weight names are aligned with the parameter
 #       names expected by the quantisation backend.
-# ** 27. File: worker/patch_qwen3vl.py**
+# ** 27. File: worker/patch_gpt_oss.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.gpt_oss.GptOssModel._load_weights_other`
+#    Why:
+#       vLLM PR #41184 moved MoE expert parameters from `mlp.experts.*` to
+#       `mlp.experts.routed_experts.*`. GPT-OSS' MXFP4 loader already remaps
+#       these names, but the generic/FP8 `_load_weights_other` path still looks
+#       up legacy names and raises KeyError for tensors such as
+#       `layers.0.mlp.experts.w2_weight`.
+#    How:
+#       Wrap `_load_weights_other` and remap legacy GPT-OSS expert weight names
+#       to the routed-experts parameter hierarchy when the target parameter
+#       exists.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/41184
+#    Future Plan:
+#       Remove this patch once upstream GPT-OSS applies the same remap in all
+#       weight loading paths.
+# ** 28. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3.Qwen3Attention.forward` and
 #      `vllm.model_executor.models.qwen3_moe.Qwen3MoeAttention.forward`
@@ -976,7 +994,7 @@
 #       when using mrope.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
-# ** 28. File: worker/patch_qwen3_dflash.py**
+# ** 29. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
 #    Why:
@@ -1004,7 +1022,7 @@
 #       Remove this patch when upstream vLLM supports MoE communication type abstraction that
 #       can be extended by hardware plugins like vllm-ascend.
 #
-# ** 29. File: platform/patch_mamba_manager.py**
+# ** 30. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:

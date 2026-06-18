@@ -33,8 +33,10 @@ from dataclasses import dataclass
 
 import pytest
 import torch
-from safetensors import safe_open
 from vllm import LLM, SamplingParams
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    example_hidden_states_connector,
+)
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -123,20 +125,22 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
     assert output.kv_transfer_params is not None
     hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
     assert hidden_states_path is not None
-    assert os.path.exists(hidden_states_path)
 
-    with safe_open(hidden_states_path, "pt") as f:
-        tensor_names = f.keys()
-        assert "hidden_states" in tensor_names
-        hidden_states = f.get_tensor("hidden_states")
-        assert hidden_states.shape == expected_shape
+    # Upstream vLLM #39949 added the hybrid attention extract_hidden_states
+    # smoke case; #43805 made ExampleHiddenStatesConnector persist hidden
+    # states asynchronously and synchronize readers through the .lock helper.
+    hidden_states_obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
 
-        if verify_token_ids:
-            token_ids = f.get_tensor("token_ids")
-            assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
+    assert "hidden_states" in hidden_states_obj
+    hidden_states = hidden_states_obj["hidden_states"]
+    assert hidden_states.shape == expected_shape
 
-        if verify_nonzero:
-            assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
+    if verify_token_ids:
+        token_ids = hidden_states_obj["token_ids"]
+        assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
+
+    if verify_nonzero:
+        assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
 
 
 @pytest.mark.parametrize("case", CASES)

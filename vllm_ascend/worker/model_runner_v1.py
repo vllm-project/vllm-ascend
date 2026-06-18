@@ -29,7 +29,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -3877,10 +3877,14 @@ class NPUModelRunner(GPUModelRunner):
         # upstream hook never fires. Instead, stash the capturer as a
         # plain attribute on every FusedMoE layer; ``apply()`` reads it
         # back on the hot path.
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        # vLLM PR #41184 registers MoERunner in static_forward_context and moves
+        # the experts under runner.routed_experts. Bind the capturer there so
+        # Ascend's direct select_experts path can still capture top-k ids.
+        from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+
         for module in self.compilation_config.static_forward_context.values():
-            if isinstance(module, FusedMoE):
-                module._ascend_routed_experts_capturer = capturer
+            if isinstance(module, MoERunner):
+                cast(Any, module.routed_experts)._ascend_routed_experts_capturer = capturer
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()

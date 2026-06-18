@@ -30,7 +30,9 @@ from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe.fused_moe import (
     AscendFusedMoE,
     AscendMoERunner,
+    AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
+    _clear_provisional_routed_expert_parameters,
 )
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -43,6 +45,13 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, adapt_patch
 
 adapt_patch(True)
+
+
+def _new_uninitialized_ascend_fused_moe():
+    # vLLM PR #41184 makes AscendFusedMoE.__new__ delegate to the upstream
+    # FusedMoE factory. These unit tests need a deliberately
+    # half-initialized object to exercise helper methods, so bypass that factory.
+    return nn.Module.__new__(AscendFusedMoE)
 
 
 def mock_ep_and_mc2_group(mocker):
@@ -220,6 +229,28 @@ def test_ascend_unquantized_skips_upstream_modular_kernel_init():
     assert method(object()) is None
 
 
+def test_clear_provisional_routed_expert_parameters_preserves_correction_bias():
+    # vLLM PR #41184 makes RoutedExperts.__init__ eagerly register expert
+    # weights; the Ascend RoutedExperts adapters drop those provisional params
+    # (so the Ascend quant_method can recreate them) while keeping the routing
+    # field e_score_correction_bias. The helper is shared by the generic NPU and
+    # 310P RoutedExperts subclasses, so verify the preserve semantics directly.
+    module = nn.Module()
+    module.register_parameter("w13_weight", nn.Parameter(torch.zeros(2), requires_grad=False))
+    module.register_parameter("w2_weight", nn.Parameter(torch.zeros(2), requires_grad=False))
+    module.register_parameter("e_score_correction_bias", nn.Parameter(torch.zeros(2), requires_grad=False))
+
+    _clear_provisional_routed_expert_parameters(module)
+
+    assert "w13_weight" not in module._parameters
+    assert "w2_weight" not in module._parameters
+    assert "e_score_correction_bias" in module._parameters
+
+    # The preserve set is configurable; an empty set drops everything.
+    _clear_provisional_routed_expert_parameters(module, preserve=frozenset())
+    assert len(module._parameters) == 0
+
+
 class Device(TypedDict):
     device_id: int
     device_expert: list[int]
@@ -310,7 +341,6 @@ def _method_uses_super(method) -> bool:
         source = inspect.getsource(method)
     except (OSError, TypeError):
         return False
-
     tree = ast.parse(textwrap.dedent(source))
     return any(
         isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "super"
@@ -319,28 +349,32 @@ def _method_uses_super(method) -> bool:
 
 
 class TestVllmParentInterfaceCompatibility:
+    # Upstream vLLM PR #41184 replaces the FusedMoE parent class with a
+    # factory and moves the subclassable surface to RoutedExperts/MoERunner.
+    _parent_interface_cases = [
+        (AscendUnquantizedFusedMoEMethod, fused_moe_module.UnquantizedFusedMoEMethod, "__init__"),
+        (
+            AscendUnquantizedFusedMoEMethod,
+            fused_moe_module.UnquantizedFusedMoEMethod,
+            "process_weights_after_loading",
+        ),
+        (AscendUnquantizedFusedMoEMethod, fused_moe_module.UnquantizedFusedMoEMethod, "apply"),
+        (AscendMoERunner, fused_moe_module.MoERunner, "__init__"),
+        (AscendMoERunner, fused_moe_module.MoERunner, "forward_impl"),
+        (AscendMoERunner, fused_moe_module.MoERunner, "_forward_impl"),
+        (AscendRoutedExperts, fused_moe_module.RoutedExperts, "__init__"),
+    ]
+
     @pytest.mark.parametrize(
         "child_cls,parent_cls,method_name",
-        [
-            (AscendUnquantizedFusedMoEMethod, fused_moe_module.UnquantizedFusedMoEMethod, "__init__"),
-            (
-                AscendUnquantizedFusedMoEMethod,
-                fused_moe_module.UnquantizedFusedMoEMethod,
-                "process_weights_after_loading",
-            ),
-            (AscendUnquantizedFusedMoEMethod, fused_moe_module.UnquantizedFusedMoEMethod, "apply"),
-            (AscendMoERunner, fused_moe_module.MoERunner, "__init__"),
-            (AscendMoERunner, fused_moe_module.MoERunner, "forward_impl"),
-            (AscendMoERunner, fused_moe_module.MoERunner, "_forward_impl"),
-            (AscendFusedMoE, fused_moe_module.FusedMoE, "__init__"),
-            (AscendFusedMoE, fused_moe_module.FusedMoE, "forward"),
-            (AscendFusedMoE, fused_moe_module.FusedMoE, "forward_impl"),
-            (AscendFusedMoE, fused_moe_module.FusedMoE, "maybe_all_reduce_tensor_model_parallel"),
-        ],
+        _parent_interface_cases,
     )
     def test_overridden_method_signature_accepts_parent_interface(self, child_cls, parent_cls, method_name):
         child_method = getattr(child_cls, method_name)
-        if not _method_uses_super(child_method):
+        explicitly_calls_parent = (
+            child_cls is AscendRoutedExperts and parent_cls is fused_moe_module.RoutedExperts
+        )
+        if not explicitly_calls_parent and not _method_uses_super(child_method):
             pytest.skip(
                 f"{child_cls.__name__}.{method_name} does not call "
                 "super(), so parent interface alignment is not "
@@ -529,7 +563,10 @@ class TestAscendMoERunner:
             assert runner._maybe_reduce_shared_expert_output("shared") == "shared"
 
     @pytest.mark.parametrize("has_shared_experts", [False, True])
-    def test_forward_impl_delegates_to_layer(self, monkeypatch, has_shared_experts):
+    def test_forward_impl_delegates_to_routed_experts(self, monkeypatch, has_shared_experts):
+        # vLLM PR #41184 removed the legacy layer argument from MoERunner and
+        # moved expert execution under runner.routed_experts. This test pins the
+        # new delegation path so it does not regress back to the old signature.
         runner = AscendMoERunner.__new__(AscendMoERunner)
         shared_experts = MagicMock() if has_shared_experts else None
         shared_experts_owner = next(
@@ -537,27 +574,71 @@ class TestAscendMoERunner:
             AscendMoERunner,
         )
         monkeypatch.setattr(shared_experts_owner, "shared_experts", property(lambda _: shared_experts), raising=False)
-        layer = MagicMock()
+        routed_experts = MagicMock()
+        runner.routed_experts = routed_experts
+        # A real runner always has gate/moe_config set; with no internal router
+        # gate (gate=None) _maybe_apply_internal_router_logits passes the
+        # router logits through unchanged so this test exercises pure delegation.
+        runner.gate = None
+        runner.moe_config = SimpleNamespace(num_logical_experts=3, num_experts=3)
+        runner._sequence_parallel_context = MagicMock()
+        runner._sequence_parallel_context.return_value.__enter__.return_value = None
+        runner._sequence_parallel_context.return_value.__exit__.return_value = None
         hidden_states = torch.randn(2, 4)
         router_logits = torch.randn(2, 3)
-        layer.forward_impl.return_value = "routed"
-        layer.shared_forward_impl.return_value = ("shared", "routed")
+        shared_input = torch.randn(2, 4)
+        routed_experts.forward_impl.return_value = "routed"
+        routed_experts.shared_forward_impl.return_value = ("shared", "routed")
 
-        result = runner.forward_impl(layer, hidden_states, router_logits, None)
+        result = runner.forward_impl(hidden_states, router_logits, shared_input)
 
         if has_shared_experts:
             assert result == ("shared", "routed")
-            layer.shared_forward_impl.assert_called_once_with(hidden_states, router_logits)
-            layer.forward_impl.assert_not_called()
+            routed_experts.shared_forward_impl.assert_called_once_with(hidden_states, router_logits, shared_input)
+            routed_experts.forward_impl.assert_not_called()
         else:
             assert result == "routed"
-            layer.forward_impl.assert_called_once_with(hidden_states, router_logits)
-            layer.shared_forward_impl.assert_not_called()
+            routed_experts.forward_impl.assert_called_once_with(hidden_states, router_logits)
+            routed_experts.shared_forward_impl.assert_not_called()
+
+    @pytest.mark.parametrize("has_shared_experts", [False, True])
+    def test_forward_impl_normalizes_internal_router_placeholder(self, monkeypatch, has_shared_experts):
+        runner = AscendMoERunner.__new__(AscendMoERunner)
+        shared_experts = MagicMock() if has_shared_experts else None
+        shared_experts_owner = next(
+            (cls for cls in type(runner).__mro__ if "shared_experts" in cls.__dict__),
+            AscendMoERunner,
+        )
+        monkeypatch.setattr(shared_experts_owner, "shared_experts", property(lambda _: shared_experts), raising=False)
+        runner.moe_config = SimpleNamespace(num_experts=64, num_logical_experts=64)
+        runner._fse_fuse_gate = False
+        gate_logits = torch.randn(2, 64)
+        runner.gate = MagicMock(return_value=(gate_logits, None))
+        routed_experts = MagicMock()
+        routed_experts.forward_impl.return_value = "routed"
+        routed_experts.shared_forward_impl.return_value = ("shared", "routed")
+        runner.routed_experts = routed_experts
+        runner._sequence_parallel_context = MagicMock()
+        runner._sequence_parallel_context.return_value.__enter__.return_value = None
+        runner._sequence_parallel_context.return_value.__exit__.return_value = None
+
+        hidden_states = torch.randn(2, 2048)
+        result = runner.forward_impl(hidden_states, hidden_states)
+
+        runner.gate.assert_called_once_with(hidden_states)
+        if has_shared_experts:
+            assert result == ("shared", "routed")
+            routed_experts.shared_forward_impl.assert_called_once_with(hidden_states, gate_logits, None)
+            routed_experts.forward_impl.assert_not_called()
+        else:
+            assert result == "routed"
+            routed_experts.forward_impl.assert_called_once_with(hidden_states, gate_logits)
+            routed_experts.shared_forward_impl.assert_not_called()
 
 
 class TestAscendFusedMoE:
     def _build_layer(self):
-        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        layer = _new_uninitialized_ascend_fused_moe()
         layer.quant_method = MagicMock()
         layer.ensure_moe_quant_config_init = MagicMock()
         layer.runner = MagicMock()
@@ -744,7 +825,7 @@ class TestAscendFusedMoE:
 
 class TestAscendFusedMoESharedExperts:
     def test_properties_and_forward_delegate(self, monkeypatch):
-        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        layer = _new_uninitialized_ascend_fused_moe()
         if not hasattr(type(layer), "gate"):
             pytest.skip("Current AscendFusedMoE does not expose gate property")
         layer.multistream_overlap_shared_expert = False
@@ -765,7 +846,7 @@ class TestAscendFusedMoESharedExperts:
         assert layer.forward(torch.ones(1, 2), torch.ones(1, 2)) == "forwarded"
 
     def test_shared_experts_split_with_expert_gate(self):
-        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        layer = _new_uninitialized_ascend_fused_moe()
         if not hasattr(layer, "_shared_experts_part1"):
             pytest.skip("Current AscendFusedMoE does not split shared experts")
         hidden_states = torch.tensor([[1.0, -1.0]])
@@ -787,7 +868,7 @@ class TestAscendFusedMoESharedExperts:
 
     @pytest.mark.parametrize("has_shared_experts", [False, True])
     def test_shared_forward_impl_routes_shared_output(self, monkeypatch, has_shared_experts):
-        layer = AscendFusedMoE.__new__(AscendFusedMoE)
+        layer = _new_uninitialized_ascend_fused_moe()
         if not hasattr(layer, "shared_forward_impl"):
             pytest.skip("Current AscendFusedMoE has no shared_forward_impl")
         layer.multistream_overlap_shared_expert = False
@@ -814,5 +895,39 @@ class TestAscendFusedMoESharedExperts:
         if has_shared_experts:
             assert result == ("shared_out", fused_result.routed_out)
             layer._forward_shared_experts.assert_called_once()
+        else:
+            torch.testing.assert_close(result, fused_result.routed_out)
+
+    @pytest.mark.parametrize("has_shared_experts", [False, True])
+    def test_shared_forward_impl_preserves_shared_input(self, monkeypatch, has_shared_experts):
+        # vLLM PR #41184 lets shared_experts_input differ from routed hidden_states
+        # after routed_input_transform.
+        layer = _new_uninitialized_ascend_fused_moe()
+        layer.multistream_overlap_shared_expert = False
+        layer.shared_multistream_overlap_gate = False
+        layer.use_overlapped = False
+        layer._shared_experts = MagicMock() if has_shared_experts else None
+        hidden_states = torch.randn(2, 4)
+        router_logits = torch.randn(2, 3)
+        fused_result = fused_moe_module.FusedMoEResult(
+            routed_out=torch.ones(2, 4),
+            before_dispatch_evt=MagicMock(),
+            before_combine_evt=MagicMock(),
+        )
+        monkeypatch.setattr(
+            fused_moe_module.torch.npu,
+            "current_stream",
+            MagicMock(return_value=MagicMock(record_event=MagicMock(return_value=MagicMock()))),
+        )
+        monkeypatch.setattr(fused_moe_module.AscendFusedMoE, "forward_impl", MagicMock(return_value=fused_result))
+        layer._forward_shared_experts = MagicMock(return_value="shared_out")
+
+        shared_input = torch.randn(2, 4)
+        result = layer.shared_forward_impl(hidden_states, router_logits, shared_input)
+
+        if has_shared_experts:
+            assert result == ("shared_out", fused_result.routed_out)
+            layer._forward_shared_experts.assert_called_once()
+            assert layer._forward_shared_experts.call_args.args[0] is shared_input
         else:
             torch.testing.assert_close(result, fused_result.routed_out)

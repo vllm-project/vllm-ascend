@@ -78,9 +78,13 @@ def build_attn_metadata(
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
+    causal: bool = True,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
+    # Upstream spec decode can request non-causal draft attention metadata.
+    # Preserve the flag in AscendCommonAttentionMetadata so backend builders see
+    # the same semantics as vLLM's build_attn_metadata.
 
     # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
@@ -117,6 +121,7 @@ def build_attn_metadata(
             num_input_tokens=num_input_tokens,
             prefill_context_parallel_metadata=prefill_context_parallel_metadata,
             max_seq_len=max_seq_len,
+            causal=causal,
             **common_attn_metadata_extra_kwargs,
         )
 

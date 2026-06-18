@@ -83,24 +83,27 @@ def _is_forced_tool_choice(request) -> bool:
     )
 
 
-_original_delegating_parse_tool_calls = DelegatingParser._parse_tool_calls
+# vLLM PRs #45190/#45171/#45104 renamed the parser hook to
+# _extract_tool_calls. Patch the parser entry point so forced tool-choice
+# with content=None returns no tool calls instead of failing inside the parser.
+_original_delegating_extract_tool_calls = DelegatingParser._extract_tool_calls
 
 
-def _patched_delegating_parse_tool_calls(
+def _patched_delegating_extract_tool_calls(
     self,
-    request,
     content: str | None,
-    enable_auto_tools: bool,
+    request,
+    enable_auto_tools: bool = False,
 ):
     if content is None and _is_forced_tool_choice(request):
         return [], None
 
-    return _original_delegating_parse_tool_calls(
+    return _original_delegating_extract_tool_calls(
         self,
-        request,
         content,
+        request,
         enable_auto_tools,
     )
 
 
-DelegatingParser._parse_tool_calls = _patched_delegating_parse_tool_calls
+DelegatingParser._extract_tool_calls = _patched_delegating_extract_tool_calls
