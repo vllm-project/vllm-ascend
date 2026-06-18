@@ -23,7 +23,7 @@ import logging
 import os
 import platform
 import time
-from ctypes import CDLL, c_int, c_void_p
+from ctypes import CDLL, c_int
 from types import NoneType
 
 import torch
@@ -698,9 +698,9 @@ class NPUWorker(WorkerBase):
     def _call_aclrt_snapshot_api(self, api_name: str) -> None:
         npu_aclrt_lib = self._get_acl_rt_lib()
         api = getattr(npu_aclrt_lib, api_name)
-        api.argtypes = [c_int, c_void_p]
+        api.argtypes = []
         api.restype = c_int
-        result = api(os.getpid(), None)
+        result = api()
         if result == 0:
             logger.info("[snapshot] [worker] [rank:%s] %s success.", self.rank, api_name)
         else:
