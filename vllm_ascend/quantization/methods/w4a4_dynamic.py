@@ -161,10 +161,19 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW4A8DynamicFusedMoEMethod):
         T, H = x.shape[0], x.shape[-1]
         x_2d = x.view(T, H) if x.dim() > 2 else x
         outer_dtype = x_2d.dtype
-        # The INT4 expert path is fp16-only on 910B; Qwen3.x linear-attn needs a
-        # bf16 model dtype, so cast at the MoE boundary and cast the result back.
+        # The INT4 expert path is fp16-only on 910B; the kernel consumes x as half*.
+        # bf16 is the validated production dtype (Qwen3.x linear-attn requires a bf16 model),
+        # cast to fp16 here — lossless in effect since activations are int4 dynamic-quantized
+        # in the kernel. Reject any other dtype (e.g. fp32): it's untested and would be
+        # reinterpreted as fp16 garbage. Matches this method's fail-fast stance on
+        # unsupported configs (EP/EPLB, packed layout, wrong dims).
         if outer_dtype == torch.bfloat16:
             x_2d = x_2d.to(torch.float16)
+        elif outer_dtype != torch.float16:
+            raise NotImplementedError(
+                f"W4A4 mega MoE supports fp16/bf16 hidden states; got {outer_dtype}. "
+                "Serve with dtype=bfloat16 (the validated Qwen3.x config) or float16."
+            )
 
         num_shared = getattr(layer, "n_shared_experts", 0) or 0
         num_logical_experts = get_moe_num_logical_experts(
@@ -211,7 +220,7 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW4A8DynamicFusedMoEMethod):
             n_gu=n_gu,
         ).clone()  # detach from the reused workspace
 
-        if outer_dtype == torch.bfloat16:
-            out = out.to(torch.bfloat16)
+        if outer_dtype != torch.float16:
+            out = out.to(outer_dtype)
         out = out.view_as(x) if x.dim() > 2 else out
         return FusedExpertsResult(routed_out=out)
