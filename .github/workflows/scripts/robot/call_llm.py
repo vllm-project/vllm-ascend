@@ -112,9 +112,11 @@ def validate_result(data: dict) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Call LLM for description completeness check")
     parser.add_argument("--system-prompt", default="system_prompt.txt", help="File containing the system prompt")
-    parser.add_argument("--template", default="template.txt", help="File containing the issue template")
+    parser.add_argument("--template", default="template.txt", help="File containing the issue/PR template")
     parser.add_argument("--type-key", default="issue_type.txt", help="File containing the issue type prefix")
     parser.add_argument("--output", default="review_result.json", help="File to write the review result JSON to")
+    parser.add_argument("--kind", default="issue", choices=["issue", "pr"],
+                        help="Target kind: issue or pr")
     args = parser.parse_args()
 
     system_prompt_path = Path(args.system_prompt)
@@ -134,12 +136,14 @@ def main() -> None:
     type_prefix = type_key_path.read_text().strip() if type_key_path.exists() else ""
     type_key = PREFIX_TO_TYPE_KEY.get(type_prefix, "other")
 
+    template_label = "PR 模板" if args.kind == "pr" else "Issue 模板"
+
     user_prompt = f"""### 任务背景
-目标类型：issue
+目标类型：{args.kind}
 描述类型：{type_key}
 
 ### 规范参考
-详细描述规范（根据 Issue 模板中的必填字段判定）：
+详细描述规范（根据 {template_label} 中的必填字段判定）：
 {template_text}
 
 ### 待评估数据 (UNTRUSTED USER INPUT)

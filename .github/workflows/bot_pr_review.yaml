@@ -1,0 +1,171 @@
+name: "PR Review Bot"
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.state == 'open'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install requests pyyaml
+
+      # Step 1: Extract PR info → pr_info.json
+      - name: Extract PR info
+        id: extract
+        run: python .github/workflows/scripts/robot/extract_pr_info.py --output pr_info.json
+
+      # Step 2: Load the PR template → template.txt
+      - name: Prepare template
+        id: template
+        if: success()
+        run: python .github/workflows/scripts/robot/prepare_template.py --input pr_info.json --output template.txt
+
+      # Step 3: Prepare description system prompt → desc_system_prompt.txt
+      - name: Prepare desc system prompt
+        id: sysprompt_desc
+        if: success()
+        run: python .github/workflows/scripts/robot/prepare_system_prompt.py --variant pr --output desc_system_prompt.txt
+
+      # Step 4: Call LLM for PR description check → description_result.json
+      - name: Call LLM for description
+        id: llm_desc
+        if: |
+          success() &&
+          (
+            github.event.action == 'opened' ||
+            github.event.action == 'reopened' ||
+            (github.event.action == 'edited' && (github.event.changes.title || github.event.changes.body)) ||
+            (github.event.action == 'synchronize' && github.event.changes.body)
+          )
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
+          VLLM_BASE_URL: ${{ secrets.VLLM_BASE_URL }}
+          ISSUE_TITLE: ${{ github.event.pull_request.title }}
+          ISSUE_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python .github/workflows/scripts/robot/call_llm.py \
+            --system-prompt desc_system_prompt.txt \
+            --template template.txt \
+            --type-key issue_type.txt \
+            --kind pr \
+            --output description_result.json
+
+      # If description check was skipped, create a placeholder
+      - name: Skip description check
+        id: skip_desc
+        if: success() && steps.llm_desc.outcome == 'skipped'
+        run: |
+          echo '{"ok": true, "score": 100, "executed": false}' > description_result.json
+
+      # Step 5: Prepare commit system prompt → commit_system_prompt.txt
+      - name: Prepare commit system prompt
+        id: sysprompt_commit
+        if: success()
+        run: python .github/workflows/scripts/robot/prepare_system_prompt.py --variant commit --output commit_system_prompt.txt
+
+      # Step 6: Check commit messages → commit_results.json
+      - name: Check commits
+        id: commit_check
+        if: |
+          success() &&
+          github.event.action != 'edited'
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
+          VLLM_BASE_URL: ${{ secrets.VLLM_BASE_URL }}
+          VALID_TYPES: ${{ vars.PR_COMMIT_CHECK_VALID_TYPES || 'feat,fix,perf,refactor,test,docs,chore' }}
+          REQUIRE_SIGNOFF: ${{ vars.PR_COMMIT_CHECK_REQUIRE_SIGNOFF || 'true' }}
+        run: |
+          python .github/workflows/scripts/robot/commit_check.py \
+            --pr-info pr_info.json \
+            --system-prompt commit_system_prompt.txt \
+            --output commit_results.json
+
+      # If commit check was skipped, create a placeholder
+      - name: Skip commit check
+        id: skip_commit
+        if: success() && steps.commit_check.outcome == 'skipped'
+        run: |
+          echo '{"executed": false, "total_commits": 0, "overall_ok": true, "failed_commits": []}' > commit_results.json
+
+      # Step 7: Post combined comment + write label actions → label_actions.json
+      - name: Post handler
+        id: post
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          NEED_DETAIL_LABEL: ${{ vars.PR_DESC_CHECK_NEED_DETAIL_LABEL || 'need-detail-desc' }}
+          NEED_COMMIT_FIX_LABEL: ${{ vars.PR_COMMIT_CHECK_NEED_FIX_LABEL || 'need-commit-fix' }}
+        run: |
+          if [ -f description_result.json ]; then
+            DESC_ARG="--input description_result.json"
+          else
+            DESC_ARG=""
+          fi
+          if [ -f commit_results.json ]; then
+            COMMIT_ARG="--commit-result commit_results.json"
+          else
+            COMMIT_ARG=""
+          fi
+          python .github/workflows/scripts/robot/handle_review.py \
+            $DESC_ARG \
+            $COMMIT_ARG \
+            --label-output label_actions.json
+
+      # Step 8: Manage labels (add/remove need-detail-desc, need-commit-fix)
+      - name: Manage labels
+        id: label
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const actions = JSON.parse(fs.readFileSync('label_actions.json', 'utf8'));
+            const issueNumber = context.issue.number;
+
+            for (const label of actions.remove || []) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  name: label
+                });
+                console.log(`Removed label '${label}' from PR #${issueNumber}`);
+              } catch (e) {
+                if (e.status === 404) {
+                  console.log(`Label '${label}' not present on PR #${issueNumber}, skipping remove`);
+                } else {
+                  throw e;
+                }
+              }
+            }
+
+            if ((actions.add || []).length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: actions.add
+              });
+              console.log(`Added labels [${actions.add}] to PR #${issueNumber}`);
+            }
