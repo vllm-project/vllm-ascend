@@ -31,7 +31,7 @@ from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, HAS_ACLNN_MOE_INIT_ROUTING_CUSTOM, get_ascend_device_type
+from vllm_ascend.utils import HAS_ACLNN_MOE_INIT_ROUTING_CUSTOM, AscendDeviceType, get_ascend_device_type
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811

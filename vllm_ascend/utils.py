@@ -19,11 +19,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import functools
 import json
 import math
 import os
-import ctypes
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
