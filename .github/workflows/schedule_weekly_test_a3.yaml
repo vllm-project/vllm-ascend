@@ -145,6 +145,7 @@ jobs:
       config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ github.sha }}
+      testcase_timeout: 600
       should_run: >-
         ${{
           needs.setup-vars.outputs.filter == 'all' ||
