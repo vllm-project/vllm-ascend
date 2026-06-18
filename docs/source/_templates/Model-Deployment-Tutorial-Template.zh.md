@@ -81,7 +81,7 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 ### 4.1 Docker镜像安装
 
-**示例：**  
+**示例：**
 
 :::::{tab-set}
 :sync-group: install

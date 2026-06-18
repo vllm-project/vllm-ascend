@@ -81,7 +81,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 
 ### 4.1 Docker Image Installation
 
-**Example:** 
+**Example:**
 
 :::::{tab-set}
 :sync-group: install
