@@ -3571,18 +3571,18 @@ class NPUModelRunner(GPUModelRunner):
 
             need_dummy_logits = not is_profile and lmhead_tp_enable()
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
-            dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
+            dummy_num_tokens = max_num_reqs_across_dp
 
             def dummy_compute_logits(hidden_states):
                 if not need_dummy_logits:
                     return None
-                return self.model.compute_logits(hidden_states[dummy_indices])
+                return self.model.compute_logits(hidden_states[:dummy_num_tokens])
 
             def dummy_drafter_compute_logits(hidden_states):
                 if not need_dummy_logits or self.drafter is None:
                     return
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
-                    return self.drafter.model.compute_logits(hidden_states[dummy_indices])
+                    return self.drafter.model.compute_logits(hidden_states[:dummy_num_tokens])
 
             with set_ascend_forward_context(
                 attn_metadata,
