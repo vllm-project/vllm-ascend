@@ -65,14 +65,47 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
 ### Online Inference
 
-Start the server with the following command:
+<details> <summary>Run the following script to start the vLLM server on single 910B4</summary>
 
-```bash
+```shell
+#!/bin/sh
+vllm serve Qwen/Qwen3-VL-Embedding-8B  \
+  --served-model-name Qwen/Qwen3-VL-Embedding-8B  \
+  --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \
+  --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+  --runner pooling \
+  --dtype float16 \
+  --port 8000 \
+  --max-model-len 1024
+```
+</details>
+
+<details> <summary>Run the following script to start the vLLM server on single Atlas 300 inference products</summary>
+
+```shell
+#!/bin/sh
 vllm serve Qwen/Qwen3-VL-Reranker-8B \
     --runner pooling \
     --max-model-len 4096 \
     --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}' \
-    --chat-template ./qwen3_vl_reranker.jinja
+    --chat-template ./qwen3_vl_reranker.jinja \
+    --dtype float16 \
+    --port 8000 \
+    --max-model-len 1024
+```
+</details>
+
+The `--max-model-len` option is added to prevent errors when generating the attention operator mask on the Atlas 300 inference products.
+
+Once your server is started, you can query the model with input prompts.
+
+```bash
+curl -X POST http://localhost:8000/v1/embeddings -H "Content-Type: application/json" -d '{
+  "input": [
+        "The capital of China is Beijing.",
+        "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."
+    ]
+}'
 ```
 
 Once your server is started, you can send request with follow examples.
