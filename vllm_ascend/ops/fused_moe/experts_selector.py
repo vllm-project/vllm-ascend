@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import functools
 import inspect
 from collections.abc import Callable
 
@@ -39,6 +40,7 @@ def _inspect_custom_routing_accepts_num_experts(custom_routing_function: Callabl
     )
 
 
+@functools.cache
 def _custom_routing_accepts_num_experts(custom_routing_function: Callable) -> bool:
     return _inspect_custom_routing_accepts_num_experts(custom_routing_function)
 

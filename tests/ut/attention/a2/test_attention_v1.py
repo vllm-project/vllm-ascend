@@ -8,9 +8,37 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
+    _metadata_key,
+    _split_optional_workspace_and_layer_name,
 )
 from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+
+
+class TestAttentionGraphHelpers(TestBase):
+    def test_metadata_key_prefers_existing_layer_name(self):
+        attn_metadata = {
+            "fallback": MagicMock(),
+            "model.layers.1.self_attn": MagicMock(),
+        }
+
+        result = _metadata_key(attn_metadata, "fallback", "model.layers.1.self_attn")
+
+        self.assertEqual(result, "model.layers.1.self_attn")
+
+    def test_metadata_key_uses_fallback_when_layer_name_missing(self):
+        attn_metadata = {"fallback": MagicMock()}
+
+        result = _metadata_key(attn_metadata, "fallback", "model.layers.1.self_attn")
+
+        self.assertEqual(result, "fallback")
+
+    def test_split_optional_workspace_and_layer_name(self):
+        workspace = MagicMock()
+
+        result = _split_optional_workspace_and_layer_name((workspace, "model.layers.1.self_attn"))
+
+        self.assertEqual(result, (workspace, "model.layers.1.self_attn"))
 
 
 class TestAscendAttentionBackend(TestBase):

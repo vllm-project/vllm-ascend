@@ -77,7 +77,9 @@ def _expand_attn_keys_for_graph_params(attn_keys: list[str], graph_param_count: 
 
 
 def _metadata_key(attn_metadata: dict, fallback_key: str, layer_name: str | None) -> str:
-    return layer_name if layer_name in attn_metadata else fallback_key
+    if layer_name is not None and layer_name in attn_metadata:
+        return layer_name
+    return fallback_key
 
 
 def _split_optional_workspace_and_layer_name(optional_items: tuple) -> tuple[torch.Tensor | None, str | None]:
