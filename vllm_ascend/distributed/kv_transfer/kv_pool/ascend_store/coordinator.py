@@ -15,7 +15,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import get_block_hashes
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    _block_hash_to_bytes,
+    get_block_hashes,
+)
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
@@ -38,7 +41,7 @@ class ExternalCachedBlockPool:
     ) -> list[KVCacheBlock] | None:
         if self._exists is None:
             return [self._present_block] * len(group_ids)
-        h = bytes(block_hash)
+        h = _block_hash_to_bytes(block_hash)
         if all((group_id, h) in self._exists for group_id in group_ids):
             return [self._present_block] * len(group_ids)
         return None
