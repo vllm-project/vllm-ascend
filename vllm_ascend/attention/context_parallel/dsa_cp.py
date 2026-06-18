@@ -1196,8 +1196,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 AscendAttentionState.SpecDecoding,
             }
         )
-        o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
-        local_attn_output = self._forward(layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv)
+        local_attn_output, o_proj_full_handles = self._forward(
+            layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            need_gather_q_kv,
+            full_gather_wo_a_enabled,
+        )
         o_proj_input = self._restore_tp_head_layout(
             local_attn_output,
             layer_name,
@@ -1260,6 +1266,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         kv_cache: tuple,
         attn_metadata: list[M],
         need_gather_q_kv: bool = False,
+        full_gather_wo_a_enabled: bool = False,
     ):
         """Run full-sequence KV cache updates and local-token attention."""
         (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = DeviceOperator.unpack_dsa_forward_kv_cache(
@@ -1346,6 +1353,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+
+        o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
         kv = self.wkv(hidden_states_cache)
         kv = self.kv_norm(kv)
@@ -1472,7 +1481,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
-        return attn_output
+        return attn_output, o_proj_full_handles
 
     def _restore_tp_head_layout(
         self,
