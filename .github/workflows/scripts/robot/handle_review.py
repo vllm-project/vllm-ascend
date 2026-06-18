@@ -24,13 +24,35 @@ NEED_DETAIL_LABEL = os.environ.get("NEED_DETAIL_LABEL", "need-detail-desc")
 NEED_COMMIT_FIX_LABEL = os.environ.get("NEED_COMMIT_FIX_LABEL", "need-commit-fix")
 
 
+API_HEADERS = {
+    "Authorization": f"Bearer {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github+json",
+}
+API_BASE = f"https://api.github.com/repos/{REPO}"
+
+
+def delete_old_bot_comments() -> None:
+    """Delete all previous comments from github-actions[bot] on this issue/PR."""
+    url = f"{API_BASE}/issues/{ISSUE_NUMBER}/comments"
+    resp = requests.get(url, headers=API_HEADERS, timeout=30)
+    resp.raise_for_status()
+    for comment in resp.json():
+        if comment.get("user", {}).get("login") == "github-actions[bot]":
+            try:
+                requests.delete(
+                    f"{API_BASE}/issues/comments/{comment['id']}",
+                    headers=API_HEADERS,
+                    timeout=15,
+                ).raise_for_status()
+                print(f"Deleted old bot comment id={comment['id']}")
+            except requests.HTTPError as e:
+                print(f"Failed to delete comment {comment['id']}: {e}")
+
+
 def post_comment(body: str) -> None:
-    url = f"https://api.github.com/repos/{REPO}/issues/{ISSUE_NUMBER}/comments"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
-    resp = requests.post(url, headers=headers, json={"body": body}, timeout=30)
+    delete_old_bot_comments()
+    url = f"{API_BASE}/issues/{ISSUE_NUMBER}/comments"
+    resp = requests.post(url, headers=API_HEADERS, json={"body": body}, timeout=30)
     resp.raise_for_status()
     print(f"Comment posted to #{ISSUE_NUMBER}")
 
