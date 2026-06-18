@@ -118,9 +118,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
                 except RuntimeError as exc:
                     if not _is_missing_aclnn_kernel_error(exc):
                         raise
-                    x, _, residual = torch_npu.npu_add_rms_norm(
-                        x, residual, 1.0 + self.weight, self.variance_epsilon
-                    )
+                    x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
