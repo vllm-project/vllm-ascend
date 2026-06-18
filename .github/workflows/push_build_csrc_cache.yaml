@@ -197,7 +197,7 @@ jobs:
             export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
           fi
           if [ "${{ runner.arch }}" = "X64" ]; then
-            export UV_EXTRA_INDEX_URL="$UV_EXTRA_INDEX_URL "https://download.pytorch.org/whl/cpu/"
+            export UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL} https://download.pytorch.org/whl/cpu/"
           fi
 
           pip install uc-manager
