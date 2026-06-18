@@ -650,9 +650,9 @@ vllm bench serve \
 
 | Scenario | Configuration | NPUs | TP | DP | Max Num Batched Tokens | Max Num Seqs | Max Model Len | MTP (EAGLE3) | FUSED_MC2 | FlashComm1 | Async Scheduling |
 |----------|---------------|------|----|----|------------------------|--------------|---------------|--------------|-----------|------------|------------------|
-| Short Context (3.5K→1.5K) | 1P2D P node | 16 | 4 | 4 | 16384 | 128 | 32k | - | On | On | Off |
+| Short Context (3.5K→1.5K) | 1P2D P node | 16 | 4 | 4 | 16384 | 128 | 32k | - | On | On | On |
 | Short Context (3.5K→1.5K) | 1P2D D node | 8 | 4 | 8 | 16384 | 128 | 32k | 3 | On | On | On |
-| Long Context (128K→1K) | 1P1D P node | 16 | 8 | 2 | 16384 | 64 | 200k | 3 | On | On | Off |
+| Long Context (128K→1K) | 1P1D P node | 16 | 8 | 2 | 16384 | 64 | 200k | 3 | On | On | On |
 | Long Context (128K→1K) | 1P1D D node | 16 | 8 | 2 | 16384 | 16 | 200k | 3 | On | On | On |
 | A2 (8-NPU) | A2 Single-node | 8 | 8 | 1 | 16384 | 32 | 32k | 3 | Off | On | On |
 
