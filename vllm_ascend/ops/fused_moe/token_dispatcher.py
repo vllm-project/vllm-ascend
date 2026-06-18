@@ -143,11 +143,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
         self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
 
-        # PD separation detection: P (kv_producer) uses fullmesh_v2, D (kv_consumer) uses hierarchy.
+        # PD separation: P (kv_producer) uses fullmesh_v2, D (kv_consumer) uses hierarchy.
         self.is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
         self.is_pd = vllm_config.kv_transfer_config is not None
-        if self.is_pd:
-            self.need_comm_alg = True
 
         if not self.enable_dispatch_v2 and self.need_comm_alg:
             raise RuntimeError(
