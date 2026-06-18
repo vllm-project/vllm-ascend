@@ -1199,6 +1199,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
+            self.non_spec_state_indices_tensor[batch_size:].fill_(NULL_BLOCK_ID)
             self.non_spec_state_indices_tensor[:num_decodes].copy_(
                 non_spec_state_indices_tensor,
                 non_blocking=True,
