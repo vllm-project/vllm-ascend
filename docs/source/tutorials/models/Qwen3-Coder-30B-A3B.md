@@ -513,10 +513,6 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers model-specific issues.
 
-### Q: What hardware is required for Qwen3-Coder-30B-A3B?
-
-The model can run on Atlas 800I A3 with 64G NPUs, typically using 1 to 4 cards.
-
 ### Q: How do I enable long context (beyond 256K)?
 
 Qwen3-Coder-30B-A3B natively supports 256K token context length. For contexts beyond 256K, YaRN rope scaling is required to extend up to 1M. Enable YaRN via `--hf-overrides`:
@@ -526,14 +522,6 @@ Qwen3-Coder-30B-A3B natively supports 256K token context length. For contexts be
 ```
 
 For contexts within the native 256K range, no additional configuration is needed. Just set `--max-model-len` to your desired length.
-
-### Q: Why is `--enable-expert-parallel` required?
-
-Qwen3-Coder-30B-A3B is a Mixture-of-Experts model where different experts reside on different NPUs. Expert Parallelism (EP) distributes these experts across devices, which is required for the model to fit in memory and run efficiently. MoE layers use either pure EP (expert parallelism) or pure TP (tensor parallelism); these two modes cannot be mixed.
-
-### Q: When should I use `VLLM_ASCEND_ENABLE_NZ=2`?
-
-Set `VLLM_ASCEND_ENABLE_NZ=2` when you want maximum throughput and your model uses fp16/bf16 weights. This forces FRACTAL_NZ weight format conversion for all weight types, improving compute efficiency. The default value `1` only converts quantized weights. Set to `0` for RL scenarios where NZ format may cause precision issues.
 
 ### Q: What makes Qwen3-Coder different from Qwen3-30B-A3B?
 
