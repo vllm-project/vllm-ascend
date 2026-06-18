@@ -36,7 +36,8 @@
       "model_list": [
         "Qwen3-Next-80B-A3B-Instruct",
         "Qwen3-Omni-30B-A3B-Instruct",
-        "Mixtral-8x7B-Instruct-v0.1"
+        "Mixtral-8x7B-Instruct-v0.1",
+        "DeepSeek-R1-Distill-Qwen-32B"
       ]
     }
   ],

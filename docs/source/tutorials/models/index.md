@@ -27,6 +27,7 @@ DeepSeek-V3.2.md
 DeepSeek-V4-Flash.md
 DeepSeek-V4-Pro.md
 DeepSeek-R1.md
+DeepSeek-R1-Distill-Qwen-32B.md
 DeepSeekOCR2.md
 GLM4.x.md
 GLM5.md
