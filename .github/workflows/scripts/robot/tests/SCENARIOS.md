@@ -29,8 +29,8 @@ Extract type → Load template → Load prompt → LLM check → Post/Delete com
 | I2 | (new) | `opened` | FAIL | Post | +need-detail-desc |
 | I3 | Clean | `edited` | PASS | — | — |
 | I4 | Clean | `edited` | FAIL | Post | +need-detail-desc |
-| I5 | Flagged | `edited` | PASS | Old deleted | −need-detail-desc |
-| I6 | Flagged | `edited` | FAIL | Old deleted, new posted | (unchanged) |
+| I5 | Flagged | `edited` | PASS | new Post pass | −need-detail-desc |
+| I6 | Flagged | `edited` | FAIL | Old keep, new posted | (unchanged) |
 
 ### Concurrency
 
