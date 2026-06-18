@@ -282,8 +282,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--good-table", default=DEFAULT_GOOD_TABLE)
     p.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
     p.add_argument("--repo-dir", default=str(REPO_ROOT))
-    p.add_argument("--num-nodes", type=int, default=int(os.getenv("LWS_GROUP_SIZE", "1")))
-    p.add_argument("--node-index", type=int, default=int(os.getenv("LWS_WORKER_INDEX", "0")))
+    p.add_argument("--num-nodes", type=int, default=None,
+                   help="cluster node count; if omitted for multi-node it is read "
+                        "from the config yaml's 'num_nodes' field")
+    p.add_argument("--node-index", type=int, default=int(os.getenv("LWS_WORKER_INDEX", "0")),
+                   help="this node's index; defaults to $LWS_WORKER_INDEX (set by LWS), "
+                        "else 0")
     p.add_argument("--coord-dir", default=DEFAULT_COORD_DIR, help="shared barrier dir (multi-node)")
     p.add_argument("--fail-confirm-retries", type=int, default=1)
     p.add_argument("--no-verify-good", action="store_true")
@@ -302,8 +306,41 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+# Default config dirs for multi-node, used to locate the yaml when deriving
+# num_nodes (mirrors the internal/external DP loaders).
+_MULTI_CONFIG_BASES = (
+    "tests/e2e/nightly/multi_node/internal_dp/config",
+    "tests/e2e/nightly/multi_node/external_dp/config",
+)
+
+
+def _resolve_num_nodes(args: argparse.Namespace, repo_dir: Path) -> int:
+    """Node count: explicit --num-nodes, else the yaml's num_nodes (multi), else 1."""
+    if args.num_nodes is not None:
+        return args.num_nodes
+    if args.scene != SCENE_MULTI:
+        return 1
+    import yaml  # local import: only needed for multi-node
+
+    bases = [args.config_base_path] if args.config_base_path else list(_MULTI_CONFIG_BASES)
+    for base in bases:
+        path = repo_dir / base / args.config_yaml
+        if path.exists():
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            n = int(data.get("num_nodes", 0))
+            if n:
+                logger.info("Resolved num_nodes=%d from %s", n, path)
+                return n
+    raise SystemExit(
+        "Could not determine --num-nodes: not provided and no 'num_nodes' found in "
+        f"the multi-node config yaml {args.config_yaml!r}. Pass --num-nodes explicitly."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    repo_dir = Path(args.repo_dir)
+    num_nodes = _resolve_num_nodes(args, repo_dir)
     inp = BisectInput(
         scene=args.scene,
         config_yaml=args.config_yaml,
@@ -313,14 +350,14 @@ def main(argv: list[str] | None = None) -> int:
         good_commit=args.good_commit,
     )
     opt = BisectOptions(
-        repo_dir=Path(args.repo_dir),
+        repo_dir=repo_dir,
         work_dir=args.work_dir,
         coord_dir=args.coord_dir,
         good_table_path=args.good_table,
         fail_confirm_retries=args.fail_confirm_retries,
         verify_good=not args.no_verify_good,
         verify_bad=not args.no_verify_bad,
-        num_nodes=args.num_nodes,
+        num_nodes=num_nodes,
         node_index=args.node_index,
         trial_timeout_s=args.trial_timeout_s,
         assume_built_head=not args.no_assume_built_head,

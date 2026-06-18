@@ -83,7 +83,8 @@ python -m tests.e2e.nightly.bisect.auto_bisect \
     --coord-dir /shared/nightly_bisect/coord
 ```
 
-- `--num-nodes` / `--node-index` 默认读 `LWS_GROUP_SIZE` / `LWS_WORKER_INDEX`(LWS 编排下一般无需手填)。
+- `--num-nodes` 不填则自动从配置 YAML 的 `num_nodes` 字段读取;`--node-index` 不填则读 `LWS_WORKER_INDEX`(LWS 自动注入)。LWS 编排下这两个都无需手填。
+- `--coord-dir` 不填时默认 `/root/.cache/nightly_bisect/coord`;LWS 下 `/root/.cache` 是共享 PVC,各节点天然共享,可不填。非 LWS 环境需手动指定共享路径。
 - internal / external DP 通过 `--config-base-path`(或 yaml 路径含 `external_dp/config`)自动区分。
 - 所有节点切到同一 commit 后才会开跑(屏障同步)。
 
@@ -229,17 +230,20 @@ python -m tests.e2e.nightly.bisect.auto_bisect \
 
 #### `--num-nodes`
 - **作用**:集群节点总数;master 用它做屏障(等齐所有节点就绪才开跑)。
-- **默认**:环境变量 `LWS_GROUP_SIZE`,没有则 `1`。
+- **默认**:**不填则自动从多机配置 YAML 的 `num_nodes` 字段读取**(在 `internal_dp/config` 或 `external_dp/config`,或 `--config-base-path` 指定的目录里按 `--config-yaml` 找该文件)。
+- **何时手填**:配置文件里没有 `num_nodes`、或你想覆盖时。单机场景固定为 1。
+- **注意**:这里**不依赖** `LWS_GROUP_SIZE` 之类的环境变量(节点数的权威来源就是配置 YAML,与现有 nightly 多机逻辑一致)。
 
 #### `--node-index`
 - **作用**:当前节点编号;`0` 为 master(驱动二分),其余为 worker(进入受控循环)。
-- **默认**:环境变量 `LWS_WORKER_INDEX`,没有则 `0`。
-- **注意**:LWS 编排下一般自动注入,无需手填。
+- **默认**:**不填则读环境变量 `LWS_WORKER_INDEX`(LWS 编排自动注入),没有则 `0`**。
+- **何时手填**:**非 LWS 环境**(没有 `LWS_WORKER_INDEX`)时必须在每个节点上手动指定各自的索引;LWS 下无需填。
 
 #### `--coord-dir`
 - **作用**:多机共享屏障目录,各节点通过它同步"切到哪个 commit、是否就绪、本轮结束"。
 - **默认**:环境变量 `BISECT_COORD_DIR`,再没有则 `/root/.cache/nightly_bisect/coord`。
-- **关键**:**必须是所有节点都能读写的同一个网络盘/PVC**,否则多机协调失效。
+- **能不能不填**:**在 LWS 环境下可以不填**——`/root/.cache` 正是各节点挂载的同一块共享 PVC(`shared-volume`,nightly 的结果也写在这里),所以默认值天然各节点共享。
+- **何时必须填**:**非 LWS、或 `/root/.cache` 不是共享挂载**时,必须显式指定为一个所有节点都能读写的同一共享路径(网络盘/PVC),否则屏障同步失效。
 
 ### 9.7 路径与输出
 
