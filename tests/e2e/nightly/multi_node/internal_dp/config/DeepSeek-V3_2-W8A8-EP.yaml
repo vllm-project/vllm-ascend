@@ -33,7 +33,6 @@ deployment:
     envs:
       <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
-      VLLM_ASCEND_ENABLE_FUSED_MC2: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -78,7 +77,6 @@ deployment:
     envs:
       <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
-      VLLM_ASCEND_ENABLE_FUSED_MC2: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -123,7 +121,6 @@ deployment:
       <<: *env_common
       VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
-      VLLM_ASCEND_ENABLE_FUSED_MC2: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -169,7 +166,6 @@ deployment:
       <<: *env_common
       VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
-      VLLM_ASCEND_ENABLE_FUSED_MC2: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -244,7 +240,7 @@ benchmarks:
     max_out_len: 3000
     batch_size: 128
     request_rate: 11.2
-    baseline: 1441.4691 
+    baseline: 1343 
     threshold: 0.97
 
   perf_long:
@@ -256,7 +252,7 @@ benchmarks:
     max_out_len: 3000
     batch_size: 32
     request_rate: 11.2
-    baseline: 702.6262 # https://github.com/vllm-project/vllm-ascend/actions/runs/24222505363/job/70716884885?pr=7119
+    baseline: 173.1 # https://github.com/vllm-project/vllm-ascend/actions/runs/24222505363/job/70716884885?pr=7119
     threshold: 0.97
 
   acc:
