@@ -567,8 +567,7 @@ class KVCacheRecvingThread(threading.Thread):
     def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            for group_ids in local_block_ids:
-                self.invalid_block_ids.update(group_ids)
+            self.invalid_block_ids.update(local_block_ids[0])
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -1186,8 +1185,6 @@ class KVCacheRecvingThread(threading.Thread):
             assert engine_id != self.local_engine_id, (
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
             )
-            # In PD+PP mode, layer indices naturally differ between P and D nodes,
-            # so we skip kv_group2layeridx consistency check here.
             if agent_meta.kv_group2layeridx != self.kv_group2layeridx:
                 logger.warning(
                     "Remote kv_group2layeridx is inconsistent with local. remote=%s, local=%s. ",
@@ -1417,12 +1414,6 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def set_xfer_handshake_metadata_pp_aware(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        """Set handshake metadata keyed by ``(pp_rank, tp_rank)``.
-
-        Flattens the ``(pp_rank, tp_rank)`` tuple keys into unique integer
-        keys to match the port-offset-based lookup used by
-        ``_get_remote_host_info_by_port`` and ``get_remote_port_send_num``.
-        """
         tp_size = max(tp_rank for (_, tp_rank) in metadata) + 1
         flat_metadata: dict[int, KVConnectorHandshakeMetadata] = {
             pp_rank * tp_size + tp_rank: meta
@@ -1763,15 +1754,7 @@ class MooncakeConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
-        # Use global hidden layer count (not PP-sliced) for MTP index assignment,
-        # ensuring consistent MTP layer indices between P and D nodes in PD+PP mode.
-        try:
-            hf_text_config = vllm_config.model_config.hf_text_config
-            if hf_text_config is None:
-                raise AttributeError
-        except AttributeError:
-            hf_text_config = vllm_config.model_config.hf_config
-        self.total_layers = hf_text_config.num_hidden_layers
+        self.total_layers = vllm_config.model_config.get_total_num_hidden_layers()
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
