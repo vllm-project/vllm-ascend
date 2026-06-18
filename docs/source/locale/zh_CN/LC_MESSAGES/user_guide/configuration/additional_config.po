@@ -464,8 +464,8 @@ msgstr "`enable_sparse_c8`"
 #: ../../source/user_guide/configuration/additional_config.md
 msgid ""
 "Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and "
-"GLM5). Not supported on A5 devices now"
-msgstr "是否在 DSA 模型中启用 KV 缓存 C8（例如 DeepSeekV3.2 和 GLM5）。目前 A5 设备不支持。"
+"GLM5). Not supported on Ascend 950 devices now"
+msgstr "是否在 DSA 模型中启用 KV 缓存 C8（例如 DeepSeekV3.2 和 GLM5）。目前 Ascend 950 设备不支持。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_mc2_hierarchy_comm`"
