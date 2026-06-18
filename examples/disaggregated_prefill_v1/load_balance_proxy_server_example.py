@@ -1092,12 +1092,16 @@ async def handle_completions_impl(api: str, request: Request):
                             final_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
                             released_kv = False
                             break
+                        chunk_updated = False
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
                                 choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
+                            chunk_updated = True
                         if update_cached_tokens_in_chunk(chunk_json, final_prefiller_cached_tokens):
+                            chunk_updated = True
+                        if chunk_updated:
                             chunk = encode_response_chunk(chunk_json, is_sse)
                         yield chunk
             except asyncio.CancelledError:
