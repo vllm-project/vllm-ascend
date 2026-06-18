@@ -103,7 +103,7 @@ except ImportError:
 
     logger = logging.getLogger(__name__)
 
-# 如果可用，引入 uvloop 以获得更快的事件循环（event loop）
+# Use uvloop for a faster event loop if available
 try:
     import uvloop
 
@@ -123,7 +123,7 @@ class ServerState:
             limits=httpx.Limits(max_connections=100000, max_keepalive_connections=100000),
         )
         self.active_tokens = 0
-        self.aborted_requests = set()  # 记录已中止（aborted）的请求
+        self.aborted_requests = set()
 
     def __eq__(self, other):
         self_host = self.host.replace("localhost", "0.0.0.0").replace("127.0.0.1", "0.0.0.0")
@@ -150,32 +150,29 @@ class ProxyState:
         self.infer_servers: list[ServerState] = [ServerState(h, p) for h, p in server_instances]
         self.req_id_lock = asyncio.Lock()
 
-        # 动态分桶负载均衡器
+        # Dynamic bucket load balancer
         self.bucket_load_balancer = None
 
         if global_args.enable_dynamic_bucket:
-            self.num_buckets = 2  # 启用动态分桶时的分长短两个桶
+            self.num_buckets = 2  # Two buckets (short/long) when dynamic bucketing is enabled
             self.server_group_threshold = global_args.server_group_threshold
             buckets = [(0, self.server_group_threshold), (self.server_group_threshold, global_args.max_request_tokens)]
 
             self.bucket_load_balancer = DynamicBucketLoadBalancer(buckets=buckets)
         else:
-            self.num_buckets = 1  # 默认不分桶
+            self.num_buckets = 1  # No bucketing by default
 
-        # 初始化优先级队列以高效地选择 server, 每个元素为 (优先级分数, server 索引, server 引用)
-        # 优先级分数越小 = 优先级越高（负载越低）
+        # Priority queue per group; smaller score = higher priority (lower load)
         server_heap_items = [ServerHeapItem(0.0, i, server) for i, server in enumerate(self.infer_servers)]
-        # 对Server进行分组
         self.server_heaps: list[list[ServerHeapItem]] = self._group_servers(server_heap_items, self.num_buckets)
         self.server_idx_to_group_idx = {}
 
-        # 堆化每一分组
+        # Heapify each group
         for idx, cur_heap in enumerate(self.server_heaps):
             for server_item in cur_heap:
                 self.server_idx_to_group_idx[server_item.server_idx] = idx
             heapq.heapify(cur_heap)
 
-        # 记录动态分桶状态、分组数量及各分组完整实例信息
         logger.info(
             "Dynamic bucket enabled: %s, number of groups: %s",
             global_args.enable_dynamic_bucket,
@@ -187,17 +184,17 @@ class ProxyState:
     @staticmethod
     def _group_servers(servers: list[ServerHeapItem], num_groups: int):
         """
-        将 servers 划分为 num_groups 个分组。
+        Split servers into num_groups groups.
 
         Args:
-            servers (list): 待分组的 server 列表。
-            num_groups (int): 分组数量。
+            servers (list): the server list to group.
+            num_groups (int): the number of groups.
 
         Returns:
-            list[list]: 分组后的 server 列表。
+            list[list]: the grouped server list.
 
         Raises:
-            ValueError: 当 num_groups <= 0 时抛出。
+            ValueError: when num_groups <= 0.
         """
         if num_groups <= 0:
             raise ValueError("Num of group is illegal")
@@ -225,10 +222,10 @@ class ProxyState:
         return groups
 
     def _update_server_priority(self, server_idx: int):
-        """更新堆中某个 server 的优先级。"""
+        """Update the priority of a server in the heap."""
         server = self.infer_servers[server_idx]
         priority = server.active_tokens
-        # 先移除旧条目，再加入新条目
+        # Remove the old entry, then add the new one
         group_idx = self.server_idx_to_group_idx[server_idx]
 
         self.server_heaps[group_idx] = [
@@ -250,10 +247,10 @@ class ProxyState:
         server_heap_item: ServerHeapItem = heapq.heappop(self.server_heaps[group_idx])
         chosen_server_idx = server_heap_item.server_idx
 
-        # 更新被选中的 server（累加负载）
+        # Update the chosen server (accumulate load)
         self.infer_servers[chosen_server_idx].active_tokens += token_count
 
-        # 更新优先级并重新加入堆
+        # Update priority and re-add to the heap
         self._update_server_priority(chosen_server_idx)
 
         return chosen_server_idx
@@ -262,7 +259,7 @@ class ProxyState:
         self.infer_servers[idx].active_tokens -= token_count
         if global_args.enable_dynamic_bucket and req_id is not None and self.bucket_load_balancer is not None:
             self.bucket_load_balancer.release_task(req_id)
-        # 释放后更新优先级队列
+        # Update the priority queue after release
         self._update_server_priority(idx)
 
     def calculate_request_score(self, request_length: int, max_tokens: int = 16, ignore_eos: bool = False) -> float:
@@ -277,7 +274,7 @@ class ProxyState:
         return request_length / 4.0
 
     def select_server_group(self, req_id: str, request_tokens, priority_score) -> tuple[int, Task | None]:
-        """根据请求长度与各分组当前负载，选择最优分组。"""
+        """Pick the best group given the request length and the current load of each group."""
         if global_args.enable_dynamic_bucket and self.bucket_load_balancer is not None:
             group_idx, task = self.bucket_load_balancer.dispatch_single_task(req_id, request_tokens, priority_score)
             return group_idx, task
@@ -323,7 +320,7 @@ async def lifespan(app: FastAPI):
 
 
 async def listen_for_disconnect(request: Request) -> None:
-    """收到 disconnect 消息时返回。"""
+    """Return when a disconnect message is received."""
     while True:
         message = await request.receive()
         if message["type"] == "http.disconnect":
@@ -359,7 +356,7 @@ async def stream_service_response_with_retry(
 ):
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
     for attempt in range(1, max_retries + 1):
-        # 每次重试都重置，避免上一次迭代遗留的 True 跨重试泄漏
+        # Reset per retry to avoid leaking a stale True from a previous iteration
         first_chunk_sent = False
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
@@ -367,9 +364,9 @@ async def stream_service_response_with_retry(
                 async for chunk in response.aiter_bytes():
                     first_chunk_sent = True
                     yield chunk
-                return  # 成功，流式结束后退出
+                return  # Success; exit after streaming completes
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            # 一旦已经向客户端转发过任何 chunk，就不能再重试，否则客户端会收到重复/损坏的流。
+            # After the first chunk is forwarded, retry is forbidden (would duplicate/corrupt the stream).
             if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", str(e))
                 return
@@ -380,7 +377,7 @@ async def stream_service_response_with_retry(
                 logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                 raise e
         except Exception as e:
-            # 对非 HTTP 异常沿用与上相同的防护
+            # Same guard as above for non-HTTP exceptions
             if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", str(e))
                 return
@@ -448,8 +445,8 @@ class InstanceInfo:
 
 
 async def _handle_completions(api: str, request: Request):
-    # streaming_started 确保 release_server 只执行一次：要么在 generate_stream 的
-    # finally 中（正常路径），要么在流未启动的路径。
+    # streaming_started ensures release_server runs exactly once: in
+    # generate_stream's finally on the normal path, or below if it never started.
     instance_info = None
     streaming_started = False
     try:
@@ -478,7 +475,7 @@ async def _handle_completions(api: str, request: Request):
                     instance_info.request_id,  # type: ignore
                 )
             finally:
-                # 流式结束后，释放负载
+                # Release load after streaming completes
                 proxy_state.release_server(  # type: ignore
                     instance_info.server_idx,  # type: ignore
                     instance_info.priority_score,  # type: ignore
@@ -496,8 +493,9 @@ async def _handle_completions(api: str, request: Request):
         print("".join(traceback.format_exception(*exc_info)))
         raise
     finally:
-        # 流从未启动（例如客户端断连，或实例选择阶段出错）：在这里释放，
-        # 以免 active_tokens 和桶任务泄漏。正常路径下 generate_stream 已释放，故跳过。
+        # If streaming never started (client disconnect or selection error),
+        # release here to avoid leaking active_tokens / the bucket task; the
+        # normal path already released in generate_stream.
         if instance_info is not None and not streaming_started:
             proxy_state.release_server(instance_info.server_idx, instance_info.priority_score, instance_info.request_id)
 
