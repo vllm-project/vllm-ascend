@@ -1071,12 +1071,15 @@ class DeepseekV4Model(nn.Module):
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
         # address (outside the cudagraph pool) so the copy_ in forward()
         # refreshes it correctly across captured shapes.
-        self._mtp_hidden_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            hc_dim,
-            dtype=vllm_config.model_config.dtype,
-            device=self.device,
-        )
+        if get_pp_group().is_last_rank:
+            self._mtp_hidden_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                hc_dim,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+        else:
+            self._mtp_hidden_buffer = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1125,6 +1128,13 @@ class DeepseekV4Model(nn.Module):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
 
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                }
+            )
+
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
         # When FlashComm1 (sequence parallelism) is enabled, tokens are
         # partitioned across TP ranks via reduce_scatter in each layer's
@@ -1145,13 +1155,6 @@ class DeepseekV4Model(nn.Module):
         else:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
-
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                }
-            )
 
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
 

@@ -22,7 +22,12 @@ from typing import Any, cast
 import torch
 import vllm
 from torch.distributed import Backend
-from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    TensorMetadata,
+    _get_unique_name,
+    _register_group,
+)
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgRegistry, make_hccl_pg_key
@@ -97,6 +102,15 @@ def _patch_destroy_distributed_environment():
     vllm.distributed.destroy_distributed_environment = destroy_fn
 
 
+def _is_tensor_dict_metadata(obj: Any) -> bool:
+    return isinstance(obj, list) and any(
+        isinstance(item, tuple)
+        and len(item) == 2
+        and isinstance(item[1], TensorMetadata)
+        for item in obj
+    )
+
+
 class GroupCoordinatorPatch(GroupCoordinator):
     def __init__(
         self,
@@ -124,6 +138,10 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.device = None
         self.use_custom_op_call = True
         self.use_cpu_custom_send_recv = False
+        self._preforward_tensor_dict_metadata = (
+            self.backend == "hccl" and group_name == "pp"
+        )
+        self._preforwarded_tensor_dict_metadata: dict[int, Any] = {}
 
         reuse_domain = _resolve_reuse_domain(group_name)
 
@@ -177,6 +195,29 @@ class GroupCoordinatorPatch(GroupCoordinator):
             except Exception:
                 logger.exception("Failed to clean up partially initialized GroupCoordinatorPatch")
             raise
+
+    def recv_object(self, src: int) -> Any:
+        obj = super().recv_object(src)
+        if (
+            self._preforward_tensor_dict_metadata
+            and not self.is_last_rank
+            and _is_tensor_dict_metadata(obj)
+        ):
+            # HCCL PP P2P needs downstream ranks to post tensor recv before
+            # upstream tensor send starts waiting.
+            dst = (self.rank_in_group + 1) % self.world_size
+            super().send_object(obj, dst=dst)
+            self._preforwarded_tensor_dict_metadata[self.ranks[dst]] = obj
+        return obj
+
+    def send_object(self, obj: Any, dst: int) -> None:
+        dst_global_rank = self.ranks[dst]
+        if (
+            self._preforward_tensor_dict_metadata
+            and self._preforwarded_tensor_dict_metadata.pop(dst_global_rank, None) == obj
+        ):
+            return None
+        return super().send_object(obj, dst)
 
     def destroy(self):
         cpu_group = getattr(self, "cpu_group", None)
