@@ -90,6 +90,8 @@ def _count_reasoning_tokens_for_usage(
 ) -> int | None:
     if reasoning_parser is None:
         return None
+    if not hasattr(reasoning_parser, "count_reasoning_tokens"):
+        return None
     return reasoning_parser.count_reasoning_tokens(token_ids)
 
 
