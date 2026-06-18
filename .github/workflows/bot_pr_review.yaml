@@ -3,6 +3,10 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
 
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 permissions:
   pull-requests: write
   contents: read

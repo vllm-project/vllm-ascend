@@ -225,6 +225,11 @@ def main() -> None:
 
     is_pr = commit_result is not None
 
+    # Always clean up old bot comments first, even if we won't post a new one.
+    # This handles cases where a previous FAIL state becomes PASS (e.g. user
+    # fixes their issue), ensuring stale guidance comments don't persist.
+    delete_old_bot_comments()
+
     if is_pr:
         desc_ok = desc_result.get("ok", True) if desc_result else True
         commit_executed = commit_result.get("executed", False) if commit_result else False
