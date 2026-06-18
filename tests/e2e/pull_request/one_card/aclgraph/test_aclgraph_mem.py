@@ -28,7 +28,7 @@ from tests.e2e.utils import fork_new_process_for_each_test
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 DEEPSEEK_V2_LITE_W8A8_MODEL = os.getenv(
-    "VLLM_ASCEND_TEST_DEEPSEEK_V2_LITE_W8A8_MODEL",
+    "ASCEND_TEST_DEEPSEEK_V2_LITE_W8A8_MODEL",
     "vllm-ascend/DeepSeek-V2-Lite-W8A8",
 )
 MODELS = ["Qwen/Qwen3-0.6B", DEEPSEEK_V2_LITE_W8A8_MODEL]
@@ -85,6 +85,7 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
                 gpu_memory_utilization=0.7,
                 max_model_len=1024,
                 quantization="ascend",
+                additional_config={"ascend_compilation_config": {"fuse_norm_quant": False}},
             ) as vllm_model:
                 _ = vllm_model.generate(prompts, sampling_params)
         else:
