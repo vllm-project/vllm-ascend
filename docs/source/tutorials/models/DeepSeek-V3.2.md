@@ -393,19 +393,10 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 ::::
 :::::
 
-The key parameters are explained as follows:
+**Notice:**
+The parameters are explained as follows:
 
-| Parameter | Description |
-|---|---|
-| `--data-parallel-size` | Total number of data parallel instances |
-| `--data-parallel-size-local` | Number of data parallel instances on this node |
-| `--data-parallel-start-rank` | Starting rank offset for data parallel (set on non-master nodes) |
-| `--data-parallel-address` | IP address of the data parallel master node (Node0) |
-| `--data-parallel-rpc-port` | RPC port for data parallel coordination |
-| `--tensor-parallel-size` | Number of tensor parallelism shards per DP instance |
-| `--headless` | Required on non-master nodes to indicate headless mode |
-| `--enable-expert-parallel` | Enable expert parallelism for MoE models |
-| `--no-enable-prefix-caching` | Disable prefix caching (required for DeepSeek-V3.2) |
+- For multi-node deployment, we recommend using `dp2tp16` (A3) or `dp2tp8` (A2) with expert parallel enabled.
 
 ### Prefill-Decode Disaggregation
 
@@ -849,28 +840,10 @@ Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://doc
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
     ```
 
-The key parameters for `launch_online_dp.py` are explained as follows:
+Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html) to get the detailed boot method.
 
-| Parameter | Description |
-|---|---|
-| `--dp-size` | Total data parallel size across all nodes |
-| `--tp-size` | Tensor parallel size per DP instance |
-| `--dp-size-local` | Number of DP instances on the local node |
-| `--dp-rank-start` | Starting rank for data parallel on this node |
-| `--dp-address` | IP address of the DP master node |
-| `--dp-rpc-port` | RPC port for DP master |
-| `--vllm-start-port` | Starting port for vLLM engine instances |
-
-The key parameters for `vllm serve` in PD deployment are explained as follows:
-
-| Parameter | Description |
-|---|---|
-| `--kv-transfer-config` | KV cache transfer configuration for PD disaggregation |
-| `--kv-connector` | KV connector type (`MooncakeLayerwiseConnector` for layer-wise transfer) |
-| `--kv_role` | Node role: `kv_producer` (Prefill) or `kv_consumer` (Decode) |
-| `--additional-config` | Additional config including `layer_sharding` and `enable_dsa_cp` |
-| `--enforce-eager` | Disable CUDA graph, required on Prefill nodes |
-| `--recompute_scheduler_enable` | Enable recompute scheduler on Decode nodes for better scheduling |
+**Notice:**
+To support a long context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj", "o_proj"]` and `"enable_dsa_cp": true` needs to be added to `--additional-config` on each prefill node.
 
 ### Request Forwarding
 
@@ -1011,14 +984,19 @@ In this chapter, we recommend best practices in prefill-decode disaggregation sc
 
 - Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
-- **Q: Why is prefix caching disabled (`--no-enable-prefix-caching`)?**
-  
-  DeepSeek-V3.2 uses a sparse attention mechanism which is currently incompatible with prefix caching. Enabling it may cause inference errors.
+- **Q: How to resolve empty output or garbled characters in PD separated deployment?**
 
-- **Q: What is the recommended batch size for PD deployment?**
+  A: This is a known issue. Please ensure `--no-enable-prefix-caching` is set and use the latest version of vllm-ascend.
 
-  For Prefill nodes, `max-num-batched-tokens` is typically set to 32560; for Decode nodes, it is set to 12. Adjust based on available memory and latency requirements.
+- **Q: How to enable function call for DeepSeek-V3.2?**
 
-- **Q: How to resolve HCCL communication timeout in multi-node deployment?**
+  A: The function call feature is supported from v0.13.0rc1 on. Please use the latest version and add following configurations in vLLM startup command
 
-  Increase `HCCL_CONNECT_TIMEOUT` (e.g., to 120 or higher) and ensure the network interface (`nic_name`) is correctly configured via `ifconfig`.
+  ```shell
+  --tool-call-parser deepseek_v3 \
+  --enable-auto-tool-choice \
+  ```
+
+- **Q: How to configure the model weight path correctly?**
+
+  A: The model weight path in the deployment commands (e.g., `/root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot`) should be adjusted to your actual download path. Refer to the [Model Weight](#model-weight) section for details.
