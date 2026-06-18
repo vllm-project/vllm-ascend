@@ -18,7 +18,7 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The following model variants are available. It is recommended to download the model weight to a shared directory across multiple nodes (e.g., `/root/.cache/`).
+The following model variants are available. It is recommended to download the model weight to a shared directory accessible to all nodes.
 
 **BF16 Version:**
 
@@ -62,10 +62,6 @@ python3 quant_qwen_moe_w8a8.py --model_path /path/to/your/Qwen3-235B-A22B \
 --trust_remote_code True \
 --rot
 ```
-
-### 3.3 Verify Multi-node Communication
-
-If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
 
 ## 4 Installation
 
@@ -116,11 +112,7 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-The default workdir is `/workspace`. vLLM and vLLM-Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`), so changes take effect immediately without requiring a new installation.
-
-To verify the successful installation of the environment, please refer to [installation](../../installation.md).
-
-If deploying a multi-node environment, set up the environment on each node.
+The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
 Installation Verification:
 After starting the container, run the following command to verify the installation:
@@ -129,7 +121,7 @@ After starting the container, run the following command to verify the installati
 docker ps | grep vllm-ascend-env
 ```
 
-Expected result: The container is listed with status . You can also verify the vllm-ascend version inside the container:Up
+Expected result: The container is listed with status Up. You can also verify the vllm-ascend version inside the container:
 
 ```bash
 pip show vllm-ascend
@@ -141,14 +133,20 @@ Expected result: The version information is displayed, matching the pulled image
 
 If you prefer not to use the Docker image, you can build from source:
 
-1. Clone the repository:
+1. Install vLLM:
+
+    ```bash
+    pip install vllm
+    ```
+
+2. Clone the vLLM-Ascend repository:
 
     ```bash
     git clone https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
     ```
 
-2. Install in development mode:
+3. Install in development mode:
 
     ```bash
     pip install -e .
@@ -163,7 +161,7 @@ pip show vllm-ascend
 Expected result: The version information is displayed, confirming a successful installation.
 
 :::{note}
-If you want to deploy a multi-node environment, you need to set up environment on each node.
+If deploying a multi-node environment, set up the environment on each node.
 :::
 
 ## 5 Online Service Deployment
@@ -173,6 +171,7 @@ If you want to deploy a multi-node environment, you need to set up environment o
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios.
 
 **Start the server:**
+> The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
 ```shell
 export VLLM_USE_MODELSCOPE=True
@@ -201,17 +200,6 @@ vllm serve your_model_path \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --async-scheduling
 ```
-
-:::{note}
-
-- Replace your_model_path with the actual model path (e.g., Modelscope ID or local path).
-
-- --quantization: To enable quantization for Ascend, the quantization method must be `"ascend"`. If the model is not a quantized model, remove the `--quantization ascend` parameter.
-
-- --enable-expert-parallel enables Expert Parallelism, which is required for MoE models. vLLM does not support mixing ETP and EP; MoE layers use either pure EP or pure TP.
-
-- If you are already inside the container (see [Section 4.1](#41-docker-image-installation)), skip the Docker run step and proceed directly to **Start the server**.
-:::
 
 :::{note}
 
@@ -448,7 +436,9 @@ For details, please refer to [Using AISBench](../../developer_guide/evaluation/u
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+The following is an example configuration for the accuracy evaluation config file:
 
 ### Using vLLM Benchmark
 
@@ -491,7 +481,7 @@ After several minutes, you will get the performance evaluation result.
 | Low Latency | Single-Node (TP16) | 16 (A3) | W8A8 | 16-NPU TP minimizes per-token latency with speculative decoding |
 | Long Context | Single-Node (TP8, CP2) | 16 (A3) | W8A8 | 8-NPU TP with Context Parallelism extends context to 135K tokens |
 
-> **Note**: `*Total NPUs` indicates the total number of NPUs used across all nodes.
+> `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
 #### Table 2: Detailed Node Configuration
 
@@ -501,7 +491,7 @@ After several minutes, you will get the performance evaluation result.
 | Low Latency | Single-Node | 16 | 16 | 1 | 1 | 32768 | 3 | Off | On | On | On |
 | Long Context | Single-Node | 16 | 8 | 1 | 1 | 135000 | none | On | On | On | Off |
 
-> **Note**: For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment) 
+> For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment) 
 
 <u>Single-node PD Hybrid — High Throughput (TPOT ~50ms):</u>
 
@@ -651,8 +641,6 @@ vllm serve /mnt/share/weight/Qwen3-235B-A22B-w8a8-rot/ \
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions
-
-This section provides complete, annotated launch commands for representative model variants. These configurations have been validated in production environments and can serve as a starting point for your deployment.
 
 ## 10 FAQ
 

@@ -18,7 +18,7 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The following model variants are available. It is recommended to download the model weight to a shared directory across multiple nodes (e.g., `/root/.cache/`).
+The following model variants are available. It is recommended to download the model weight to a shared directory accessible to all nodes.
 
 **BF16 Versions:**
 
@@ -31,7 +31,7 @@ The following model variants are available. It is recommended to download the mo
 | Qwen3-14B | 1 Atlas 800I A3 (64G × 2) or 2 Atlas 800I A2 (64G × 1) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
 | Qwen3-32B | 2 Atlas 800I A3 (64G × 4) or 4 Atlas 800I A2 (64G × 4) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
 
-**Quantized Versions (Pre-converted):**
+**Quantized Versions:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
@@ -40,10 +40,6 @@ The following model variants are available. It is recommended to download the mo
 | Qwen3-32B-W8A8 | W8A8 | 2 Atlas 800I A3 (64G × 4) or 4 Atlas 800I A2 (64G × 4) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
-
-### 3.2 Verify Multi-node Communication
-
-If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
 
 ## 4 Installation
 
@@ -94,11 +90,7 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-The default workdir is `/workspace`. vLLM and vLLM-Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`), so changes take effect immediately without requiring a new installation.
-
-To verify the successful installation of the environment, please refer to [installation](../../installation.md).
-
-If deploying a multi-node environment, set up the environment on each node.
+The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
 Installation Verification:
 After starting the container, run the following command to verify the installation:
@@ -107,7 +99,7 @@ After starting the container, run the following command to verify the installati
 docker ps | grep vllm-ascend-env
 ```
 
-Expected result: The container is listed with status . You can also verify the vllm-ascend version inside the container:Up
+Expected result: The container is listed with status Up. You can also verify the vllm-ascend version inside the container:
 
 ```bash
 pip show vllm-ascend
@@ -119,14 +111,20 @@ Expected result: The version information is displayed, matching the pulled image
 
 If you prefer not to use the Docker image, you can build from source:
 
-1. Clone the repository:
+1. Install vLLM:
+
+    ```bash
+    pip install vllm
+    ```
+
+2. Clone the vLLM-Ascend repository:
 
     ```bash
     git clone https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
     ```
 
-2. Install in development mode:
+3. Install in development mode:
 
     ```bash
     pip install -e .
@@ -141,7 +139,7 @@ pip show vllm-ascend
 Expected result: The version information is displayed, confirming a successful installation.
 
 :::{note}
-If you want to deploy a multi-node environment, you need to set up environment on each node.
+If deploying a multi-node environment, set up the environment on each node.
 :::
 
 ## 5 Online Service Deployment
@@ -151,7 +149,9 @@ If you want to deploy a multi-node environment, you need to set up environment o
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios.
 
 **Start the server:**
+> The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
+Qwen3-32B-W8A8:
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -173,18 +173,41 @@ vllm serve your_model_path \
     --gpu-memory-utilization 0.9
 ```
 
+Qwen3-32B-W4A4:
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1
+export VLLM_USE_V1=1
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export HCCL_BUFFSIZE=1024
+vllm serve /data/weights/Qwen3-32B-w4a4-vllm \
+    --port 8004 \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 2 \
+    --served-model-name Qwen3-32B-w4a4-vllm \
+    --distributed_executor_backend "mp" \
+    --max-model-len 40960 \
+    --max-num-batched-tokens 16384 \
+    --max-num-seqs 64 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.9 \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_capture_sizes": [64]}'
+```
+Qwen3-8B-W4A8:  
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=8,9
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+vllm serve /mnt/share/d30064004/qwen-doc-check/weights/qwen3-8b-w4a8 \
+    --served-model-name "qwen3-8b-w4a8" \
+    --max-model-len 4096 \
+    --port 20001 \
+    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}' \
+    --quantization ascend
+```
+
 :::{note}
-
-- Replace your_model_path with the actual model path (e.g., Modelscope ID or local path).
-
-- --quantization: To enable quantization for Ascend, the quantization method must be `"ascend"`. If the model is not a quantized model, remove the `--quantization ascend` parameter.
-
-- If you are already inside the container (see [Section 4.1](#41-docker-image-installation)), skip the Docker run step and proceed directly to **Start the server**.
-:::
-
-:::{note}
-
-- For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
+For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
 :::
 
 **Service Verification:**
@@ -200,21 +223,6 @@ If the service starts successfully, the following startup log will be displayed:
 ## 6 Functional Verification
 
 After the service is started, the model can be invoked by sending a prompt.
-
-**Completions API:**
-
-```bash
-curl http://localhost:<port>/v1/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "qwen3",
-        "prompt": "what is large language model?",
-        "max_completion_tokens": 128,
-        "top_p": 0.95,
-        "top_k": 40,
-        "temperature": 0.0
-    }'
-```
 
 **Chat Completions API:**
 
@@ -240,12 +248,75 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 ### Using AISBench
 
 For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
+The following is an example configuration for the accuracy evaluation config file:
+
+**Start the server:**
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+vllm serve /mnt/share/d30064004/vllm/weights/Qwen3-32B-W8A8 \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --distributed-executor-backend mp \
+  --tensor-parallel-size 4 \
+  --max-model-len 36864 \
+  --max-num-batched-tokens 40960 \
+  --async-scheduling \
+  --quantization ascend \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}' \
+  --additional-config '{"weight_prefetch_config": {"enabled": true}, "pa_shape_list":[32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256]}'\
+  --speculative_config '{"method": "eagle3", "model":"/mnt/share/weights/qwen-eagle3/qwen3_32B_rot/", "enforce_eager": true, "num_speculative_tokens": 3}' \
+  --port 2001 \
+  --block-size 128 \
+  --gpu-memory-utilization 0.9
+```
+**Accuracy Evaluation Config File:**
+```bash
+# Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
+from ais_bench.benchmark.models import VLLMCustomAPIChat
+from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
+
+models = [
+    dict(
+        attr="service",
+        type=VLLMCustomAPIChat,
+        abbr='vllm-api-general-chat',
+        path="/mnt/share/d30064004/vllm/weights/Qwen3-32B-W8A8",
+        model="qwen3",
+        request_rate = 0,
+        retry = 2,
+        host_ip = "127.0.0.1",
+        host_port = 2001,
+        max_out_len = 32768,
+        batch_size = 32,
+        trust_remote_code=False,
+        generation_kwargs = dict(
+            temperature = 0.6,
+            top_k = 20,
+            top_p = 0.95,
+        ),
+        pred_postprocessor=dict(type=extract_non_reasoning_content)
+    )
+]
+```
+**Run the accuracy evaluation using the aime2025 dataset as an example:**
+
+```bash
+ais_bench --models vllm_api_general_chat --datasets aime2025_gen_0_shot_chat_prompt --debug
+```
+> The --models parameter value corresponds to the abbr field in the configuration file above. Adjust max_out_len, batch_size, and dataset tasks based on your scenario.
 
 ## 8 Performance
 
 ### Using AISBench
 
-Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+The following is an example configuration for the accuracy evaluation config file:
 
 ### Using vLLM Benchmark
 
@@ -288,19 +359,17 @@ After several minutes, you will get the performance evaluation result.
 | Long Context | Single-Node (TP4) | 4 (A3) | W8A8 | 4-card TP extends context window for long sequences |
 | Low Latency | Single-Node (TP8) | 8 (A3) | W8A8 | 8-card TP reduces per-token latency for interactive responses |
 
-> **Note**: `*Total NPUs` indicates the total number of NPUs used across all nodes.
+> `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|----|-------------|--------------------|-----------|-----------|--------------|--------------|------------------|
-| High Throughput | Single-Node | 4 | 4 | 1 | 90 | 5500 | 3 | Off | Off | On | On |
-| Long Context | Single-Node | 4 | 4 | 1 | 2 | 135000 | 3 | Off | Off | On | On |
-| Low Latency | Single-Node | 8 | 8 | 1 | 4 | 5500 | 3 | Off | Off | Off | On |
+| Scenario | Configuration | #NPUs | TP | DP | FUSED_MC2 | EP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|-------------|--------------|--------------|
+| High Throughput | Single-Node | 4 | 4 | 1 | Off | Off | On |
+| Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |
+| Low Latency | Single-Node | 8 | 8 | 1 | Off | Off | On |
 
-> **Note**: BS (Batch Size) and Concurrency values depend on the specific workload and request pattern. Refer to the reference configurations below for detailed `cudagraph_capture_sizes` and `pa_shape_list` settings.
-
-For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment) 
+For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment) 
 
 <u>High Throughput Configuration:</u>
 
@@ -321,9 +390,8 @@ vllm serve /mnt/share/qwen3-32b-pdmix \
   --no-enable-prefix-caching \
   --async-scheduling \
   --quantization ascend \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600,640,660,680,700,720]}' \
-  --additional-config '{"weight_prefetch_config":{"enabled":true}, "pa_shape_list":[32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256]}'\
-  --speculative-config '{"method": "eagle3", "model":"/mnt/share/weights/qwen-eagle3/qwen3_32B_rot/", "enforce_eager": true, "num_speculative_tokens": 3}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}' \
+  --additional-config '{"weight_prefetch_config":{"enabled":true}, "pa_shape_list":[32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256]}' \
   --host <host_ip> \
   --port <port> \
   --block-size 128 \
@@ -389,8 +457,6 @@ vllm serve /mnt/share/qwen3-32b-pdmix \
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions
-
-This section provides complete, annotated launch commands for representative model variants. These configurations have been validated in production environments and can serve as a starting point for your deployment.
 
 ## 10 FAQ
 
