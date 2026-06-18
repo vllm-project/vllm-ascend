@@ -1,6 +1,6 @@
 # Qwen3-Next
 
-## 1 Introduction
+## Introduction
 
 The Qwen3-Next model is a sparse MoE (Mixture of Experts) model with high sparsity. Compared to the MoE architecture of Qwen3, it has introduced key improvements in aspects such as the hybrid attention mechanism and multi-token prediction mechanism, enhancing the training and inference efficiency of the model under long contexts and large total parameter scales.
 
@@ -8,30 +8,24 @@ This document will present the core verification steps of the model, including s
 
 The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1`.
 
-## 2 Supported Features
+## Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## 3 Prerequisites
+## Weight Preparation
 
-### 3.1 Model Weight
+ Download Link for the `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
 
- - `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
+## Deployment
 
-## 4 Installation
+If the machine environment is an Atlas 800I A3(64G*16), the deployment approach stays identical.
 
-### 4.1 Docker Image Installation
+### Run docker container
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
-
-**A3 series**
-
-Start the docker image on your each node.
-
-```bash
-#!/bin/sh
+```{code-block} bash
+   :substitutions:
 # Update the vllm-ascend image
 # For Atlas A2 machines:
 # export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
@@ -59,38 +53,22 @@ docker run --rm \
 
 The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
 
-### 4.2 Source Code Installation
-
-If you don't want to use the docker image as above, you can also build all from source:
-
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
-
-If you want to deploy multi-node environment, you need to set up environment on each node.
-
-To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
-
-
-## 5 Online Service Deployment
-
-### 5.1 Single-Node Online Deployment
-
 ### Inference
 
-Single-node deployment completes both Prefill and Decode within the same node. The model `Qwen3-Next-80B-A3B-Instruct` can be deployed on 1 Atlas 800 A3 (64G × 16).
+:::::{tab-set}
+::::{tab-item} Online Inference
 
-While a single-node setup supports all input/output scenarios, consider deploying multinodes for optimal performance.
-
-Startup Command:
+Run the following script to start the vLLM server on multi-NPU:
 
 ```bash
-vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --served-model-name qwen3_next --tensor-parallel-size 4 --max-model-len 32768 --gpu-memory-utilization 0.8 --max-num-batched-tokens 4096 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --tensor-parallel-size 4 --max-model-len 32768 --gpu-memory-utilization 0.8 --max-num-batched-tokens 4096 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
-Service Verification:
+Once your server is started, you can query the model with input prompts.
 
 ```bash
 curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
-  "model": "qwen3_next",
+  "model": "Qwen/Qwen3-Next-80B-A3B-Instruct",
   "messages": [
     {"role": "user", "content": "Who are you?"}
   ],
@@ -101,43 +79,58 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
 }'
 ```
 
-Expected Result:
+::::
 
-The service returns HTTP 200 OK with a JSON response containing the `choices` field. Example output (content truncated for brevity):
+::::{tab-item} Offline Inference
 
-```json
-{
-    "id": "chatcmpl-9df13fd5e539af93",
-    "object": "chat.completion",
-    "created": 1780971952,
-    "model": "qwen3_next",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "What do you know about me?\n\nHello! I am Qwen, a large-scale language model independently developed by the Tongyi Lab under Alibaba Group. I am...",
-                "reasoning": "The user is asking for my thoughts on \"Who are you?\"...",
-                "refusal": null,
-                "annotations": null,
-                "audio": null,
-                "function_call": null
-            },
-            "logprobs": null,
-            "finish_reason": "length",
-            "stop_reason": null,
-            "token_ids": null
-        }
+Run the following script to execute offline inference on multi-NPU:
+
+```python
+import gc
+import torch
+
+from vllm import LLM, SamplingParams
+from vllm.distributed.parallel_state import (destroy_distributed_environment,
+                                             destroy_model_parallel)
+
+def clean_up():
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    gc.collect()
+    torch.npu.empty_cache()
+
+if __name__ == '__main__':
+    prompts = [
+        "Who are you?",
     ]
-}
+    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_tokens=32)
+    llm = LLM(model="Qwen/Qwen3-Next-80B-A3B-Instruct",
+              tensor_parallel_size=4,
+              enforce_eager=True,
+              distributed_executor_backend="mp",
+              gpu_memory_utilization=0.7,
+              max_model_len=4096)
+
+    outputs = llm.generate(prompts, sampling_params)
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+    del llm
+    clean_up()
 ```
 
-### 5.2 Multi-Node PD Separation Deployment
+If you run this script successfully, you can see the info shown below:
 
+```bash
+Prompt: 'Who are you?', Generated text: ' What do you know about me?\n\nHello! I am Qwen, a large-scale language model independently developed by the Tongyi Lab under Alibaba Group. I am'
+```
 
-## 6 Functional Verification
+::::
+:::::
 
-## 7 Accuracy Evaluation
+## Accuracy Evaluation
 
 ### Using AISBench
 
@@ -149,7 +142,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 |----- | ----- | ----- | ----- | -----|
 | gsm8k | - | accuracy | gen | 95.53 |
 
-## 8 Performance Evaluation
+## Performance
 
 ### Using AISBench
 
@@ -188,8 +181,6 @@ The performance result is:
 
 **Performance**: 580tps, TPOT 54ms
 
-## 9 Performance Tuning
-
-## 10 FAQ
+## FAQ
 
 1. Qwen3-Next does not support TP>=16 now. Since this model has 16 query heads but only 2 key and value heads, GQA degenerates into MHA when TP >= 16. However, the FIA operator currently fails to function in MHA scenarios with a head dimension of 256 (which is the case for this model).
