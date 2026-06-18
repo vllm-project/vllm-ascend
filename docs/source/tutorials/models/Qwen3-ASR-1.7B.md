@@ -99,28 +99,6 @@ After all samples were processed, transcription quality was measured using:
 - WER (Word Error Rate) for word-level recognition accuracy
 - CER (Character Error Rate) for character-level recognition accuracy
 
-The current evaluation results are:
-
-|NPU| Category | Dataset | Metric | Result |
-|----------|----------|---------|--------|--------|
-|Atlas 300I A2 2UP| Accuracy | librispeech_asr / clean / test | Total Samples | 500 |
-|Atlas 300I A2 2UP| Accuracy | librispeech_asr / clean / test | Success | 500 |
-|Atlas 300I A2 2UP| Accuracy | librispeech_asr / clean / test | Failure | 0 |
-|Atlas 300I A2 2UP| Accuracy | librispeech_asr / clean / test | WER | 0.035 |
-|Atlas 300I DUO| Accuracy | ai-shell1 / wav / test | CER | 0.0272 |
-
-## Performance
-
-### Baseline Result
-
-In the current evaluation, **Qwen3-ASR-1.7B** processed **100 samples** in approximately **57 seconds**, achieving an average throughput of **1.73 samples/s** under the current online serving setup.
-
-|NPU| Category | Dataset | Metric | Result |
-|----------|----------|---------|--------|--------|
-|Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Total Samples | 100 |
-|Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Total Runtime | 57 s |
-|Atlas 300I A2 2UP| Performance | LibriSpeech test/clean (100 samples) | Average Throughput | 1.73 samples/s |
-|Atlas 300I DUO| Performance | ai-shell1 wav/test (7176 samples) | Total Runtime | 3182 s |
 
 ### Remarks
 
