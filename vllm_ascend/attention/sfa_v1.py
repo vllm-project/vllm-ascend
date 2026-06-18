@@ -479,9 +479,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # dsa c8
         self.use_sparse_c8_indexer = ascend_config.is_sparse_c8_layer(self.layer_name)
-        self.use_a5_sparse_c8_indexer = self.use_sparse_c8_indexer and (
-            get_ascend_device_type() == AscendDeviceType.A5
-        )
+        self.use_a5_sparse_c8_indexer = self.use_sparse_c8_indexer and (get_ascend_device_type() == AscendDeviceType.A5)
         if self.use_sparse_c8_indexer:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
@@ -1209,7 +1207,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             if self.enable_dsa_cp:
                 assert slot_mapping_cp is not None
-                k_pe, k_nope, knope_scale = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata)
+                k_pe, k_nope, knope_scale = self.exec_kv(
+                    kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata
+                )
             else:
                 k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, attn_metadata)
 
