@@ -43,7 +43,24 @@ import vllm_ascend.envs as envs_ascend
 
 _OPS_DIR = os.path.dirname(os.path.abspath(__file__))
 _KERNEL_SRC = os.path.join(_OPS_DIR, "mega_moe_w4a4_pto-isa.cpp")
-_KERNEL_LIB = envs_ascend.VLLM_ASCEND_MEGA_MOE_SO or os.path.join(_OPS_DIR, "mega_moe_w4a4_jit.so")
+
+
+def _default_kernel_lib() -> str:
+    """Path for the JIT-built .so. compile_kernel() writes the .so/.lock/.defines here, so
+    it must be WRITABLE — the installed package dir (``_OPS_DIR``) is read-only in a wheel
+    deploy (root-installed, non-root served), which would make W4A4 fail at first use. Use
+    vLLM's per-user cache root (falls back to ``$XDG_CACHE_HOME``/``~/.cache``), namespaced
+    for ascend. Overridable via ``VLLM_ASCEND_MEGA_MOE_SO``. (Path only — the dir is created
+    lazily in compile_kernel so importing this module stays side-effect-free.)"""
+    # Mirror vLLM's cache-root resolution via env (no hard vllm.envs import):
+    # $VLLM_CACHE_ROOT, else $XDG_CACHE_HOME (or ~/.cache) + "/vllm".
+    cache_root = os.environ.get("VLLM_CACHE_ROOT") or os.path.join(
+        os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "vllm"
+    )
+    return os.path.join(cache_root, "vllm_ascend", "mega_moe_w4a4_jit.so")
+
+
+_KERNEL_LIB = envs_ascend.VLLM_ASCEND_MEGA_MOE_SO or _default_kernel_lib()
 # Every source the .so is built from — the staleness check must compare against all of them
 # (the kernel `#include`s int4_cvt.hpp).
 _KERNEL_DEPS = [
@@ -119,6 +136,9 @@ def compile_kernel(verbose: bool = False) -> str:
     the shared ``-o`` target (a half-written .so would fail to load)."""
     if _is_lib_fresh():
         return _KERNEL_LIB
+    # Create the (cache) dir lazily here, not at import — the .so/.lock/.defines all live
+    # alongside _KERNEL_LIB and the default is a per-user cache dir that may not exist yet.
+    os.makedirs(os.path.dirname(_KERNEL_LIB), exist_ok=True)
     lock_path = _KERNEL_LIB + ".lock"
     with open(lock_path, "w") as lock_f:
         fcntl.flock(lock_f, fcntl.LOCK_EX)
