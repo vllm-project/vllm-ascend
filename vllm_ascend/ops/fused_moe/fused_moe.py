@@ -444,10 +444,7 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
         self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
-        swiglu_limit_raw = getattr(self.vllm_config.model_config.hf_config, "swiglu_limit", 0)
-        # The operator requires clamp_limit > 0.  Use a large value as "no
-        # clamping" when the model config does not specify a real limit.
-        self.swiglu_limit = swiglu_limit_raw if swiglu_limit_raw > 0 else 1_000_000
+        self.swiglu_limit = getattr(self.vllm_config.model_config.hf_config, "swiglu_limit", 0)
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
