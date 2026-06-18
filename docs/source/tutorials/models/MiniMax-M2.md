@@ -185,6 +185,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --trust-remote-code \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --async-scheduling \
     --additional-config '{"enable_cpu_binding":true}' \
     --enable-expert-parallel \
     --tensor-parallel-size 4 \
