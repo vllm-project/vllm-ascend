@@ -86,6 +86,9 @@ jobs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
       ref: ${{ steps.parse.outputs.ref }}
+      request_id: ${{ steps.parse.outputs.request_id }}
+      vllm_ascend_branch: ${{ steps.parse.outputs.vllm_ascend_branch }}
+      is_pr_event: ${{ steps.parse.outputs.is_pr_event }}
     steps:
       - name: Parse trigger
         id: parse
@@ -93,22 +96,95 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            const testCases = '${{ inputs.test_cases }}'.trim();
 
-            core.setOutput('ref', context.sha || 'unknown');
-
-            if (testCases) {
-              core.setOutput('run', 'true');
-              if (testCases === 'all') {
-                core.setOutput('filter', 'all');
+            // workflow_dispatch: use input values with test_cases filtering
+            if (eventName === 'workflow_dispatch') {
+              const inputs = context.payload.inputs || {};
+              const testCases = (inputs.test_cases || '').trim();
+              core.setOutput('ref', inputs.vllm_ascend_ref || context.sha || '');
+              core.setOutput('request_id', inputs.request_id || '');
+              core.setOutput('vllm_ascend_branch', inputs.vllm_ascend_branch || 'main');
+              core.setOutput('is_pr_event', 'false');
+              if (testCases) {
+                core.setOutput('run', 'true');
+                if (testCases === 'all') {
+                  core.setOutput('filter', 'all');
+                } else {
+                  core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
+                }
               } else {
-                core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
+                core.setOutput('run', 'false');
+                core.setOutput('filter', '');
               }
               return;
             }
 
+            // pull_request (labeled / synchronize)
+            if (eventName === 'pull_request') {
+              const labels = context.payload.pull_request.labels.map(l => l.name);
+              const prNumber = context.payload.pull_request.number;
+              core.setOutput('ref', context.payload.pull_request.head.sha);
+              core.setOutput('request_id', 'pr-' + prNumber);
+              core.setOutput('vllm_ascend_branch', 'main');
+              core.setOutput('is_pr_event', 'true');
+
+              if (!labels.includes('nightly-test')) {
+                core.info('nightly-test label not found; skipping.');
+                core.setOutput('run', 'false');
+                core.setOutput('filter', '');
+                return;
+              }
+
+              // Search comments for latest /nightly-pr command
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100,
+              });
+
+              let testFilter = null;
+              for (let i = comments.length - 1; i >= 0; i--) {
+                const body = comments[i].body;
+                if (!body) continue;
+                const match = body.trim().match(/^\/nightly-pr(?:\s+(.+))?$/m);
+                if (match) {
+                  const args = (match[1] || '').trim();
+                  if (!args) {
+                    core.info('/nightly-pr without arguments; skipping all tests.');
+                    testFilter = 'none';
+                  } else {
+                    testFilter = ',' + args.split(/\s+/).join(',') + ',';
+                  }
+                  break;
+                }
+              }
+
+              if (testFilter === null) {
+                core.info('nightly-test label present but no /nightly-pr comment found; skipping.');
+                core.setOutput('run', 'false');
+                core.setOutput('filter', '');
+                return;
+              }
+
+              if (testFilter === 'none') {
+                core.setOutput('run', 'false');
+                core.setOutput('filter', '');
+                return;
+              }
+
+              core.setOutput('run', 'true');
+              core.setOutput('filter', testFilter);
+              return;
+            }
+
+            // Fallback (should not reach here due to job if condition)
             core.setOutput('run', 'false');
             core.setOutput('filter', '');
+            core.setOutput('ref', '');
+            core.setOutput('request_id', '');
+            core.setOutput('vllm_ascend_branch', 'main');
+            core.setOutput('is_pr_event', 'false');
 
   setup-vars:
     name: Export global env vars as job outputs
@@ -126,7 +202,7 @@ jobs:
         run: |
           {
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            input_branch="${{ inputs.vllm_ascend_branch }}"
+            input_branch="${{ needs.parse-trigger.outputs.vllm_ascend_branch }}"
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
@@ -161,11 +237,11 @@ jobs:
   build-image:
     name: Build nightly-a3 image
     if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.skip_build_image || 'false') != 'true')
     strategy:
       matrix:
         vllm_ascend_branch: >-
-          ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
+          ${{ fromJSON(format('["{0}"]', github.event.inputs.vllm_ascend_branch || 'main')) }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
