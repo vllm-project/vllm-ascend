@@ -656,7 +656,7 @@ class TestAscendFusedMoE:
                 in_profile_run=True,
                 moe_comm_method=moe_comm_method,
                 flash_comm_v1_enabled=True,
-                eplb_heat_collection_status=False,
+                eplb_heat_collection_status=True,
             ),
         )
 
