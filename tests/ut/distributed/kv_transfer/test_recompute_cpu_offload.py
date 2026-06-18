@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.outputs import KVConnectorOutput
@@ -245,6 +245,137 @@ def test_recompute_cpu_offload_scheduler_update_connector_output_marks_store_rea
     scheduler._process_preempt_store_event.assert_called_once_with(5)
 
 
+def test_recompute_cpu_offload_scheduler_request_finished_ready_and_pending():
+    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+    scheduler._preempted_req_states = {
+        "ready": PreemptedRequestState(
+            req_id="ready",
+            cpu_block_ids=([1],),
+            num_computed_tokens=8,
+            store_transfer_meta=TransferMeta([11], [1]),
+            ready=True,
+        ),
+        "pending": PreemptedRequestState(
+            req_id="pending",
+            cpu_block_ids=([2],),
+            num_computed_tokens=8,
+            store_transfer_meta=TransferMeta([12], [2]),
+            ready=False,
+        ),
+        "loading": PreemptedRequestState(
+            req_id="loading",
+            cpu_block_ids=([3],),
+            num_computed_tokens=8,
+            store_transfer_meta=TransferMeta([13], [3]),
+            load_event=5,
+            ready=True,
+        ),
+    }
+    scheduler._cleanup_preempt_cache_request = MagicMock()
+
+    assert scheduler.request_finished(SimpleNamespace(request_id="ready"), []) == (
+        False,
+        None,
+    )
+    assert scheduler.request_finished(
+        SimpleNamespace(request_id="pending"), []
+    ) == (False, None)
+    assert scheduler.request_finished(
+        SimpleNamespace(request_id="loading"), []
+    ) == (False, None)
+
+    scheduler._cleanup_preempt_cache_request.assert_called_once_with("ready")
+    assert scheduler._preempted_req_states["pending"].finished is True
+    assert scheduler._preempted_req_states["loading"].finished is False
+
+
+def test_recompute_cpu_offload_scheduler_process_store_event_finishes_pending_req():
+    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+    cpu_block = MagicMock()
+    cpu_block.block_hash = None
+    scheduler.cpu_block_pool = SimpleNamespace(blocks={4: cpu_block})
+    scheduler._preempt_store_event_to_blocks = {7: TransferMeta([1], [4])}
+    scheduler._preempt_store_event_to_reqs = {7: ["req-1"]}
+    scheduler._preempted_req_states = {
+        "req-1": PreemptedRequestState(
+            req_id="req-1",
+            cpu_block_ids=([4],),
+            num_computed_tokens=8,
+            store_transfer_meta=TransferMeta([1], [4]),
+            ready=False,
+            finished=True,
+        )
+    }
+    scheduler._cleanup_preempt_cache_request = MagicMock()
+
+    scheduler._process_preempt_store_event(7)
+
+    assert scheduler._preempted_req_states["req-1"].ready is True
+    scheduler._cleanup_preempt_cache_request.assert_called_once_with("req-1")
+    assert scheduler._preempt_store_event_to_blocks == {}
+    assert scheduler._preempt_store_event_to_reqs == {}
+
+
+def test_recompute_cpu_offload_scheduler_pending_and_reset_cache_paths():
+    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+    scheduler._store_event_pending_counts = {}
+    scheduler._preempt_store_event_to_blocks = {}
+    scheduler._preempted_req_states = {}
+
+    assert scheduler.has_pending_transfers() is False
+
+    scheduler._preempted_req_states["not-ready"] = PreemptedRequestState(
+        req_id="not-ready",
+        cpu_block_ids=([1],),
+        num_computed_tokens=8,
+        store_transfer_meta=TransferMeta([11], [1]),
+        ready=False,
+    )
+    assert scheduler.has_pending_transfers() is True
+
+    scheduler._preempted_req_states.clear()
+    scheduler._preempt_store_event_to_reqs = {"unused": []}
+    scheduler._preempt_load_event_to_reqs = {1: ["req-1"]}
+    scheduler._pending_hash_blocks = {"hash": MagicMock()}
+    scheduler.cpu_block_pool = MagicMock()
+    scheduler.cpu_block_pool.reset_prefix_cache.return_value = True
+    scheduler._cleanup_preempt_cache_request = MagicMock()
+
+    assert scheduler.reset_cache() is True
+    scheduler.cpu_block_pool.reset_prefix_cache.assert_called_once_with()
+    assert scheduler._preempt_store_event_to_reqs == {}
+    assert scheduler._preempt_load_event_to_reqs == {}
+    assert scheduler._pending_hash_blocks == {}
+
+
+def test_recompute_cpu_offload_scheduler_cleanup_preempt_load_request():
+    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+    scheduler._preempt_load_event_to_reqs = {2: ["req-1"]}
+    scheduler._preempted_req_states = {
+        "req-1": PreemptedRequestState(
+            req_id="req-1",
+            cpu_block_ids=([4],),
+            num_computed_tokens=8,
+            store_transfer_meta=TransferMeta([1], [4]),
+            load_event=2,
+            load_transfer_meta=TransferMeta([10, 11], [4, 5]),
+            ready=True,
+        )
+    }
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={10: "gpu10", 11: "gpu11"},
+        free_blocks=MagicMock(),
+    )
+    scheduler._cleanup_preempt_cache_request = MagicMock()
+
+    scheduler._cleanup_preempt_load_request("req-1")
+
+    assert scheduler._preempt_load_event_to_reqs == {}
+    freed = list(scheduler._gpu_block_pool.free_blocks.call_args.args[0])
+    assert freed == ["gpu10", "gpu11"]
+    scheduler._cleanup_preempt_cache_request.assert_called_once_with("req-1")
+
+
 def test_recompute_cpu_offload_worker_metadata_and_empty_transfers():
     worker = RecomputeCPUOffloadWorker.__new__(RecomputeCPUOffloadWorker)
     worker._connector_metadata = None
@@ -275,6 +406,66 @@ def test_recompute_cpu_offload_worker_metadata_and_empty_transfers():
 
     worker.clear_connector_metadata()
     assert worker._connector_metadata is None
+
+
+def test_recompute_cpu_offload_worker_preempt_and_load_entrypoints():
+    worker = RecomputeCPUOffloadWorker.__new__(RecomputeCPUOffloadWorker)
+    worker._submit_transfer = MagicMock()
+    worker._flush_and_sync_all = MagicMock()
+    worker._connector_metadata = None
+    metadata = RecomputeCPUOffloadMetadata(
+        need_flush=True,
+        preempt_store_event=3,
+        preempt_store_gpu_blocks=[1],
+        preempt_store_cpu_blocks=[2],
+        preempt_load_event=4,
+        preempt_load_gpu_blocks=[5],
+        preempt_load_cpu_blocks=[6],
+    )
+
+    worker.handle_preemptions(metadata)
+
+    worker._flush_and_sync_all.assert_called_once_with()
+    worker._submit_transfer.assert_called_once_with(
+        [1],
+        [2],
+        3,
+        is_store=True,
+        sync=True,
+    )
+
+    worker._submit_transfer.reset_mock()
+    worker.start_load_kv()
+    worker._submit_transfer.assert_not_called()
+
+    worker._connector_metadata = metadata
+    worker.start_load_kv()
+    worker._submit_transfer.assert_called_once_with(
+        [6],
+        [5],
+        4,
+        is_store=False,
+        sync=True,
+    )
+
+
+def test_recompute_cpu_offload_worker_wait_for_layer_load_once():
+    worker = RecomputeCPUOffloadWorker.__new__(RecomputeCPUOffloadWorker)
+    stream = MagicMock()
+    current_stream = MagicMock()
+    worker.load_stream = stream
+    worker._connector_metadata = RecomputeCPUOffloadMetadata(preempt_load_event=1)
+    worker._load_stream_waited = False
+
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.worker.torch.npu.current_stream",
+        return_value=current_stream,
+    ):
+        worker.wait_for_layer_load()
+        worker.wait_for_layer_load()
+
+    current_stream.wait_stream.assert_called_once_with(stream)
+    assert worker._load_stream_waited is True
 
 
 def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
