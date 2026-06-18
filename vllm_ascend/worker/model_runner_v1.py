@@ -36,17 +36,24 @@ import torch.distributed as dist
 import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
-from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
+from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config)
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
-from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
-from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.distributed.parallel_state import (get_dcp_group, get_dp_group,
+                                             get_pcp_group, get_pp_group,
+                                             get_tp_group)
+from vllm.forward_context import (BatchDescriptor, ForwardContext,
+                                  get_forward_context)
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
+from vllm.model_executor.models.extract_hidden_states import \
+    CacheOnlyAttentionLayer
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
@@ -57,100 +64,81 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    EncoderOnlyAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
-)
-from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
-    AsyncModelRunnerOutput,
-    ECConnectorOutput,
-    LogprobsLists,
-    LogprobsTensors,
-    ModelRunnerOutput,
-    RoutedExpertsLists,
-    SamplerOutput,
-    make_empty_encoder_model_runner_output,
-    RoutedExpertsTensors,
-)
+from vllm.v1.kv_cache_interface import (AttentionSpec,
+                                        EncoderOnlyAttentionSpec,
+                                        KVCacheConfig, KVCacheGroupSpec,
+                                        KVCacheSpec, MambaSpec,
+                                        MLAAttentionSpec, SlidingWindowMLASpec,
+                                        UniformTypeKVCacheSpecs)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
+                             ECConnectorOutput, LogprobsLists, LogprobsTensors,
+                             ModelRunnerOutput, RoutedExpertsLists,
+                             RoutedExpertsTensors, SamplerOutput,
+                             make_empty_encoder_model_runner_output)
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSampler
+from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
+                                              RejectionSampler)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.cp_utils import (
-    get_total_cp_world_size,
-)
-from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
-from vllm.v1.worker.ubatch_utils import (
-    UBatchSlices,
-    maybe_create_ubatch_slices,
-)
+from vllm.v1.worker.cp_utils import get_total_cp_world_size
+from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
+                                             GPUModelRunner)
+from vllm.v1.worker.ubatch_utils import (UBatchSlices,
+                                         maybe_create_ubatch_slices)
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
+from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
+                                                AscendAttentionState)
+from vllm_ascend.attention.context_parallel.dsa_cp import \
+    AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
-
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         using_paged_attention)
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm_ascend.compilation.acl_graph import (
-    ACLGraphWrapper,
-    reset_graph_params,
-    set_draft_graph_params,
-    set_graph_params,
-    update_full_graph_params,
-)
+from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
+                                               reset_graph_params,
+                                               set_draft_graph_params,
+                                               set_graph_params,
+                                               update_full_graph_params)
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
+    D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
+from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
-    AscendExtractHiddenStatesProposer,
-)
+from vllm_ascend.spec_decode.extract_hidden_states_proposer import \
+    AscendExtractHiddenStatesProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
-from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    calc_split_factor,
-    check_gdn_layer,
-    enable_sp,
-    enable_sp_by_pass,
-    get_ascend_device_type,
-    get_c_env,
-    get_compressed_pos_and_indices,
-    global_stream,
-    kv_cache_spec_uses_sparse_c8,
-    lmhead_tp_enable,
-    set_weight_prefetch_method,
-    should_skip_allreduce_across_dp_group,
-)
+from vllm_ascend.spec_decode.suffix_proposer import \
+    AscendSuffixDecodingProposer
+from vllm_ascend.spec_decode.utils import \
+    update_num_computed_tokens_for_batch_change
+from vllm_ascend.utils import (AscendDeviceType, calc_split_factor,
+                               check_gdn_layer, enable_sp, enable_sp_by_pass,
+                               get_ascend_device_type, get_c_env,
+                               get_compressed_pos_and_indices, global_stream,
+                               kv_cache_spec_uses_sparse_c8, lmhead_tp_enable,
+                               set_weight_prefetch_method,
+                               should_skip_allreduce_across_dp_group)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
@@ -164,7 +152,6 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_tokens_capacity,
 )
 
-from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -273,7 +260,8 @@ class NPUModelRunner(GPUModelRunner):
                 and getattr(offload_cfg.prefetch, "offload_group_size", 0) > 0):
             from vllm.model_executor.offloader.base import set_offloader
 
-            from vllm_ascend.model_executor.offloader.prefetch import NPUPrefetchOffloader
+            from vllm_ascend.model_executor.offloader.prefetch import \
+                NPUPrefetchOffloader
             set_offloader(NPUPrefetchOffloader(
                 group_size=offload_cfg.prefetch.offload_group_size,
                 num_in_group=offload_cfg.prefetch.offload_num_in_group,
@@ -560,7 +548,8 @@ class NPUModelRunner(GPUModelRunner):
         self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
         self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
         if self.enable_hamming_sparse is True:
-            from vllm_ascend.worker.kvcomp_utils import initialize_kvcomp_metadata
+            from vllm_ascend.worker.kvcomp_utils import \
+                initialize_kvcomp_metadata
             self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
                 parallel_config=self.parallel_config, dtype=self.dtype)
@@ -2485,7 +2474,7 @@ class NPUModelRunner(GPUModelRunner):
                 # synchronized by ``_to_list``'s event.synchronize(), so
                 # the pinned buffers are ready to be wrapped as numpy.
                 total = scheduler_output.total_num_scheduled_tokens
-                output.routed_experts = RoutedExpertsLists(
+                model_runner_output.routed_experts = RoutedExpertsLists(
                     routing_data=self.routed_experts_cpu[:total].numpy(),
                     slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
                 )
@@ -3240,7 +3229,8 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     spec_decode_common_attn_metadata = cm
             if self.enable_hamming_sparse is True:
-                from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
+                from vllm_ascend.attention.kvcomp_attn.attention_utils import \
+                    build_kvcomp_metadata
                 build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 _build_attn_group_metadata(
@@ -3624,7 +3614,8 @@ class NPUModelRunner(GPUModelRunner):
             if self.eplb_enable:
                 def mock_pass(param1, param2):
                     return
-                from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+                from vllm.model_executor.model_loader.default_loader import \
+                    DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
             for name, _ in self.model.named_parameters():
@@ -3643,7 +3634,8 @@ class NPUModelRunner(GPUModelRunner):
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
-                    from vllm.model_executor.models.interfaces import supports_eagle3
+                    from vllm.model_executor.models.interfaces import \
+                        supports_eagle3
                     if not supports_eagle3(self.model):
                         raise RuntimeError(
                             "Model does not support EAGLE3 interface but "
@@ -3791,7 +3783,8 @@ class NPUModelRunner(GPUModelRunner):
             bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches, num_attn_module)
 
         if self.enable_hamming_sparse is True:
-            from vllm_ascend.worker.kvcomp_utils import init_and_bind_hashk_cache
+            from vllm_ascend.worker.kvcomp_utils import \
+                init_and_bind_hashk_cache
             init_and_bind_hashk_cache(
                 kv_caches=kv_caches,
                 num_attn_module=num_attn_module,
@@ -4690,7 +4683,9 @@ class NPUModelRunner(GPUModelRunner):
                     # `MLAAttentionSpec` is temporarily patched to `AscendMLAAttentionSpec`.
                     # Re-importing it at runtime will therefore resolve to the patched class.
                     # Rename it here to make this behavior explicit.
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
+                    from vllm.v1.kv_cache_interface import \
+                        MLAAttentionSpec as AscendMLAAttentionSpec
+
                     # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
                     # implement it by creating a new kv_cache_spec class
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
@@ -4703,7 +4698,8 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
+                    from vllm.v1.kv_cache_interface import \
+                        MLAAttentionSpec as AscendMLAAttentionSpec
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
@@ -4734,7 +4730,8 @@ class NPUModelRunner(GPUModelRunner):
                     # with the patched AscendMLAAttentionSpec makes the spec
                     # picklable and keeps this branch consistent with the
                     # MLAAttention branch above.
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
+                    from vllm.v1.kv_cache_interface import \
+                        MLAAttentionSpec as AscendMLAAttentionSpec
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=spec.block_size,
                         num_kv_heads=spec.num_kv_heads,
