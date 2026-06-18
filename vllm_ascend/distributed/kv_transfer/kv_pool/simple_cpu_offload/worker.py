@@ -212,7 +212,7 @@ class SimpleCPUOffloadWorker:
         assert stream is not None
 
         if is_store:
-            stream.wait_stream(torch.npu.current_stream())
+            torch.npu.synchronize()
 
         with torch.npu.stream(stream):
             for src_block_id, dst_block_id in zip(src_block_ids, dst_block_ids):
