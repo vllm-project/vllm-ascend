@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
-"""End-to-end test for the Issue Description Completeness Check bot.
+"""End-to-end test for the Issue/PR Description & Commit Check bots.
 
-Supports two modes:
-  1. Default: load test cases from CSV, create issues, verify results
-  2. --demo: run the 3 built-in demo tests (no CSV needed)
+Supports three modes:
+  1. Default (csv): load test cases from CSV, create issues, verify results
+  2. --demo: run built-in issue demo tests
+  3. --mode pr: run PR tests using git worktrees
 
 Usage:
-    # Run with default CSV
     export GITHUB_TOKEN=$(gh auth token)
-    python test_description_check.py --repo ai-infra-develop/vllm-ascend
 
-    # Run with custom CSV
-    python test_description_check.py --repo owner/repo --csv my_cases.csv
+    # Issue tests from CSV
+    python test_description_check.py --repo owner/repo
 
-    # Run 3 built-in demo tests (no CSV required)
+    # Issue demo tests
     python test_description_check.py --repo owner/repo --demo
+
+    # PR tests via worktrees
+    python test_description_check.py --repo owner/repo --mode pr
 """
 
 import argparse
 import csv
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 import requests
 
@@ -35,11 +38,12 @@ HEADERS = {
 }
 
 LABEL_NAME = "need-detail-desc"
+NEED_COMMIT_FIX_LABEL = "need-commit-fix"
 POLL_INTERVAL = 15
 MAX_WAIT = 180
 DEFAULT_CSV = Path(__file__).resolve().parent / "description_check_cases.csv"
-MAX_RETRIES = 3
-RETRY_DELAY = 5
+
+WORKTREE_BASE = Path("/tmp/opencode/pr-tests")
 
 
 class Result:
@@ -57,19 +61,17 @@ class Result:
         self.details = msg
 
 
-def api_request(method: str, url: str, **kwargs) -> requests.Response:
-    """HTTP request with retry on network errors."""
+def api_request(method: str, url: str, **kwargs):
     last_error = None
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(3):
         try:
             resp = requests.request(method, url, headers=HEADERS, timeout=30, **kwargs)
             resp.raise_for_status()
             return resp
         except (requests.ConnectionError, requests.Timeout) as e:
             last_error = e
-            if attempt < MAX_RETRIES - 1:
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after: {e}")
-                time.sleep(RETRY_DELAY * (attempt + 1))
+            if attempt < 2:
+                time.sleep(5 * (attempt + 1))
         except requests.HTTPError:
             raise
     raise last_error
@@ -91,8 +93,8 @@ def api_delete(url: str) -> None:
     api_request("DELETE", url)
 
 
-def api_close_issue(api_base: str, issue_number: int):
-    api_patch(f"{api_base}/issues/{issue_number}", {"state": "closed"})
+def api_close_issue(api_base: str, number: int):
+    api_patch(f"{api_base}/issues/{number}", {"state": "closed"})
 
 
 def create_issue(api_base: str, title: str, body: str) -> int:
@@ -100,54 +102,49 @@ def create_issue(api_base: str, title: str, body: str) -> int:
     return data["number"]
 
 
-def edit_issue(api_base: str, issue_number: int, title: str, body: str):
-    api_patch(f"{api_base}/issues/{issue_number}", {"title": title, "body": body})
+def edit_issue(api_base: str, number: int, title: str, body: str):
+    api_patch(f"{api_base}/issues/{number}", {"title": title, "body": body})
 
 
-def get_labels(api_base: str, issue_number: int) -> list[str]:
-    data = api_get(f"{api_base}/issues/{issue_number}")
+def get_labels(api_base: str, number: int) -> list[str]:
+    data = api_get(f"{api_base}/issues/{number}")
     return [lb["name"] for lb in data.get("labels", [])]
 
 
-def get_comments(api_base: str, issue_number: int) -> list[dict]:
-    return api_get(f"{api_base}/issues/{issue_number}/comments")
-
-
-def get_bot_comments(api_base: str, issue_number: int) -> list[dict]:
-    comments = get_comments(api_base, issue_number)
+def get_bot_comments(api_base: str, number: int) -> list[dict]:
+    comments = api_get(f"{api_base}/issues/{number}/comments")
     return [c for c in comments if c.get("user", {}).get("login", "").endswith("[bot]")]
 
 
-def remove_label(api_base: str, issue_number: int, label: str):
+def remove_label(api_base: str, number: int, label: str):
     try:
-        api_delete(f"{api_base}/issues/{issue_number}/labels/{label}")
+        api_delete(f"{api_base}/issues/{number}/labels/{label}")
     except requests.HTTPError:
         pass
 
 
-def wait_for_bot_comment(api_base: str, issue_number: int, max_wait: int = MAX_WAIT) -> tuple[list[str], list[dict]]:
-    """Poll until bot posts a comment. Returns (labels, bot_comments)."""
+def wait_for_bot_comment(api_base: str, number: int, max_wait: int = MAX_WAIT) -> tuple[list[str], list[dict]]:
     start = time.time()
     while time.time() - start < max_wait:
-        labels = get_labels(api_base, issue_number)
-        bot_comments = get_bot_comments(api_base, issue_number)
+        labels = get_labels(api_base, number)
+        bot_comments = get_bot_comments(api_base, number)
         if bot_comments:
             return labels, bot_comments
         elapsed = int(time.time() - start)
         print(f"  Waiting for bot comment... ({elapsed}s elapsed)")
         time.sleep(POLL_INTERVAL)
-    return get_labels(api_base, issue_number), get_bot_comments(api_base, issue_number)
+    return get_labels(api_base, number), get_bot_comments(api_base, number)
 
 
-def wait_then_check(api_base: str, issue_number: int, wait_sec: int = 90) -> tuple[list[str], list[dict]]:
-    """Wait a fixed time, then check labels and comments."""
+def wait_then_check(api_base: str, number: int, wait_sec: int = 90) -> tuple[list[str], list[dict]]:
     for remaining in range(wait_sec, 0, -POLL_INTERVAL):
-        print(f"  Waiting for bot to process... ({wait_sec - remaining}s elapsed)")
+        elapsed = wait_sec - remaining
+        print(f"  Waiting for bot to process... ({elapsed}s elapsed)")
         time.sleep(min(POLL_INTERVAL, remaining))
-    labels = get_labels(api_base, issue_number)
-    bot_comments = get_bot_comments(api_base, issue_number)
-    return labels, bot_comments
+    return get_labels(api_base, number), get_bot_comments(api_base, number)
 
+
+# ── Issue Tests ──────────────────────────────────────────────
 
 def load_csv_cases(csv_path: str) -> list[dict]:
     cases = []
@@ -162,10 +159,9 @@ def load_csv_cases(csv_path: str) -> list[dict]:
     return cases
 
 
-def verify_case(api_base: str, case: dict) -> Result:
+def verify_issue_case(api_base: str, case: dict) -> Result:
     title = case["title"]
     body = case.get("body", "")
-    expect_ok = case.get("expect_ok", True)
     expect_label = case.get("expect_label", False)
     expect_comment = case.get("expect_comment", False)
     notes = case.get("notes", "")
@@ -191,10 +187,6 @@ def verify_case(api_base: str, case: dict) -> Result:
         if has_comment != expect_comment:
             checks.append(f"comment: expected={expect_comment} got={has_comment}")
 
-        if has_comment and not expect_comment:
-            body_text = bot_comments[0]["body"][:200]
-            checks.append(f"unexpected comment: {body_text}")
-
         if checks:
             r.fail("; ".join(checks))
         else:
@@ -212,7 +204,7 @@ def verify_case(api_base: str, case: dict) -> Result:
                 pass
 
 
-def run_csv_tests(api_base: str, csv_path: str):
+def run_issue_csv_tests(api_base: str, csv_path: str):
     cases = load_csv_cases(csv_path)
     print(f"Loaded {len(cases)} test cases from {csv_path}")
     print()
@@ -223,104 +215,97 @@ def run_csv_tests(api_base: str, csv_path: str):
         print(f"{label} {case['title']}")
         if case.get("notes"):
             print(f"     Notes: {case['notes']}")
-        result = verify_case(api_base, case)
+        result = verify_issue_case(api_base, case)
         results.append(result)
         status = "PASS" if result.passed else f"FAIL: {result.error}"
         print(f"     {status}")
         print()
-
     return results
 
 
-def run_demo_tests(api_base: str) -> list[Result]:
-    """3 built-in demo tests."""
-
-    def test_incomplete_bug() -> Result:
-        r = Result("Demo: Incomplete bug → label + comment")
-        issue_number = None
+def run_issue_demo_tests(api_base: str) -> list[Result]:
+    def test_incomplete() -> Result:
+        r = Result("Demo: Incomplete bug -> label + comment")
+        n = None
         try:
-            issue_number = create_issue(api_base, "[Bug]: 调用接口报错", "有个错误，帮忙看看")
-            print(f"  Created issue #{issue_number}")
-            labels, comments = wait_for_bot_comment(api_base, issue_number)
+            n = create_issue(api_base, "[Bug]: 调用接口报错", "有个错误，帮忙看看")
+            print(f"  Created issue #{n}")
+            labels, comments = wait_for_bot_comment(api_base, n)
             if LABEL_NAME not in labels:
-                r.fail(f"Expected label '{LABEL_NAME}' not found. Labels: {labels}")
+                r.fail(f"Expected label not found. Labels: {labels}")
             elif not comments:
                 r.fail("Expected bot comment but none found")
             else:
-                r.ok(f"Issue #{issue_number}: label added, comment posted")
+                r.ok(f"Issue #{n}: label added, comment posted")
             return r
         except Exception as e:
             r.fail(str(e))
             return r
         finally:
-            if issue_number:
+            if n:
                 try:
-                    api_close_issue(api_base, issue_number)
+                    api_close_issue(api_base, n)
                 except Exception:
                     pass
 
-    def test_complete_bug() -> Result:
-        r = Result("Demo: Complete bug → no label, no comment")
-        issue_number = None
+    def test_complete() -> Result:
+        r = Result("Demo: Complete bug -> no label, no comment")
+        n = None
         try:
-            issue_number = create_issue(
+            n = create_issue(
                 api_base,
                 "[Bug]: A5 CANN 8.2 conv2d 算子报错",
-                "### 环境信息\n- Ubuntu 22.04\n- A5\n- CANN 8.2.0\n### 问题描述\nconv2d RuntimeError: conv2d forward failed\n复现: shape=(1,3,224,224)",
+                "### 环境信息\n- Ubuntu 22.04\n- A5\n- CANN 8.2.0\n### 问题描述\nconv2d RuntimeError",
             )
-            print(f"  Created issue #{issue_number}")
-            labels, comments = wait_then_check(api_base, issue_number)
+            print(f"  Created issue #{n}")
+            labels, comments = wait_then_check(api_base, n)
             if comments:
                 r.fail(f"Unexpected bot comment: {comments[0]['body'][:200]}")
             else:
-                r.ok(f"Issue #{issue_number}: clean pass")
+                r.ok(f"Issue #{n}: clean pass")
             return r
         except Exception as e:
             r.fail(str(e))
             return r
         finally:
-            if issue_number:
+            if n:
                 try:
-                    api_close_issue(api_base, issue_number)
+                    api_close_issue(api_base, n)
                 except Exception:
                     pass
 
     def test_edit() -> Result:
-        r = Result("Demo: Edit vague→complete → label removed")
-        issue_number = None
+        r = Result("Demo: Edit vague->complete -> label removed")
+        n = None
         try:
-            issue_number = create_issue(api_base, "[Bug]: 安装失败", "装不上，报错了")
-            print(f"  Created issue #{issue_number}")
-            labels, _ = wait_for_bot_comment(api_base, issue_number)
+            n = create_issue(api_base, "[Bug]: 安装失败", "装不上，报错了")
+            print(f"  Created issue #{n}")
+            labels, _ = wait_for_bot_comment(api_base, n)
             if LABEL_NAME not in labels:
                 r.fail(f"Phase 1: Expected label not found. Labels: {labels}")
                 return r
-            print(f"  Phase 1: label added")
+            print("  Phase 1: label added")
             time.sleep(5)
-            edit_issue(
-                api_base,
-                issue_number,
-                "[Bug]: Ubuntu 22.04 CANN 8.2 安装失败",
-                "### 环境信息\n- Ubuntu 22.04\n- CANN 8.2.0\n### 问题描述\npip install ERROR: No matching distribution",
-            )
-            print(f"  Edited issue #{issue_number}")
-            labels2, _ = wait_for_bot_comment(api_base, issue_number, max_wait=120)
+            edit_issue(api_base, n, "[Bug]: Ubuntu 22.04 CANN 8.2 安装失败",
+                       "### 环境信息\n- Ubuntu 22.04\n- CANN 8.2.0\n### 问题描述\npip install ERROR")
+            print(f"  Edited issue #{n}")
+            labels2, _ = wait_for_bot_comment(api_base, n, max_wait=120)
             if LABEL_NAME in labels2:
                 r.fail(f"Phase 2: Label should be removed. Labels: {labels2}")
             else:
-                r.ok(f"Issue #{issue_number}: label added then removed")
+                r.ok(f"Issue #{n}: label added then removed")
             return r
         except Exception as e:
             r.fail(str(e))
             return r
         finally:
-            if issue_number:
+            if n:
                 try:
-                    api_close_issue(api_base, issue_number)
+                    api_close_issue(api_base, n)
                 except Exception:
                     pass
 
-    tests = [test_incomplete_bug, test_complete_bug, test_edit]
+    tests = [test_incomplete, test_complete, test_edit]
     results = []
     for i, fn in enumerate(tests):
         print(f"[{i + 1}/3] {fn.__doc__}")
@@ -330,6 +315,191 @@ def run_demo_tests(api_base: str) -> list[Result]:
         print()
     return results
 
+
+# ── PR Tests (via git worktree) ──────────────────────────────
+
+def run_cmd(cmd: list[str], cwd: str | None = None) -> str:
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    if result.returncode != 0:
+        raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{result.stderr}")
+    return result.stdout.strip()
+
+
+def create_pr_via_worktree(api_base: str, repo: str, case_name: str, title: str, body: str,
+                           commits: list[tuple[str, str, bool]]) -> int:
+    """Create a worktree, make commits, push branch, create PR. Returns PR number."""
+    branch_name = f"test/bot-{case_name.replace(' ', '-').replace('_', '-')[:30]}"
+    worktree_path = WORKTREE_BASE / branch_name
+
+    if worktree_path.exists():
+        shutil.rmtree(worktree_path)
+
+    run_cmd(["git", "worktree", "add", str(worktree_path), "main"])
+    print(f"  Worktree created: {worktree_path}")
+
+    commit_shas = []
+    for subject, commit_body, signed_off in commits:
+        run_cmd(["git", "commit", "--allow-empty", "-m", subject, "-m", commit_body], cwd=str(worktree_path))
+        if signed_off:
+            run_cmd(["git", "commit", "--amend", "--no-edit", "-s"], cwd=str(worktree_path))
+        sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=str(worktree_path))[:7]
+        sig = "(signed)" if signed_off else "(unsigned)"
+        print(f"    Commit {sha} {sig}: {subject}")
+        commit_shas.append(sha)
+
+    run_cmd(["git", "push", "origin", f"HEAD:{branch_name}", "--force"], cwd=str(worktree_path))
+    print(f"  Push to {branch_name}")
+
+    pr_data = api_post(f"{api_base}/pulls", {
+        "title": title,
+        "body": body,
+        "head": branch_name,
+        "base": "main",
+    })
+    pr_number = pr_data["number"]
+    print(f"  PR created: #{pr_number}")
+    return pr_number
+
+
+def cleanup_worktree(branch_name: str, pr_number: int, api_base: str):
+    worktree_path = WORKTREE_BASE / branch_name
+    if worktree_path.exists():
+        shutil.rmtree(worktree_path)
+    try:
+        run_cmd(["git", "worktree", "prune"])
+    except Exception:
+        pass
+    try:
+        api_close_issue(api_base, pr_number)
+    except Exception:
+        pass
+    try:
+        run_cmd(["git", "push", "origin", "--delete", branch_name])
+    except Exception:
+        pass
+
+
+def verify_pr(api_base: str, repo: str, case_name: str, title: str, body: str,
+              commits: list[tuple[str, str, bool]],
+              expect_desc_ok: bool, expect_commit_ok: bool) -> Result:
+    r = Result(f"PR: {case_name}")
+    branch_name = f"test/bot-{case_name.replace(' ', '-').replace('_', '-')[:30]}"
+    pr_number = None
+
+    try:
+        pr_number = create_pr_via_worktree(api_base, repo, case_name, title, body, commits)
+
+        labels, bot_comments = wait_for_bot_comment(api_base, pr_number, max_wait=240)
+        has_comment = len(bot_comments) > 0
+
+        has_desc_label = LABEL_NAME in labels
+        has_commit_label = NEED_COMMIT_FIX_LABEL in labels
+
+        checks = []
+        if has_desc_label != (not expect_desc_ok):
+            checks.append(f"desc label: expected={not expect_desc_ok} got={has_desc_label}")
+        if has_commit_label != (not expect_commit_ok):
+            checks.append(f"commit label: expected={not expect_commit_ok} got={has_commit_label}")
+
+        should_comment = (not expect_desc_ok) or (not expect_commit_ok)
+        if has_comment != should_comment:
+            checks.append(f"comment: expected={should_comment} got={has_comment}")
+
+        if has_comment and bot_comments:
+            body_text = bot_comments[0]["body"]
+            if expect_commit_ok is False and "Commit" not in body_text:
+                checks.append("comment missing commit check section")
+            if expect_desc_ok is False and "描述" not in body_text:
+                checks.append("comment missing description check section")
+
+        if checks:
+            r.fail("; ".join(checks))
+        else:
+            detail = f"#{pr_number} labels={labels} comment={has_comment}"
+            r.ok(detail)
+
+        return r
+    except Exception as e:
+        r.fail(str(e))
+        return r
+    finally:
+        if pr_number:
+            try:
+                cleanup_worktree(branch_name, pr_number, api_base)
+            except Exception:
+                pass
+
+
+def run_pr_tests(api_base: str, repo: str) -> list[Result]:
+    """Run PR bot test cases."""
+    print("Running PR review bot tests (via git worktrees)")
+    print(f"Worktree dir: {WORKTREE_BASE}")
+    print()
+
+    tests = []
+
+    # Test 1: All commits ok, desc ok → everything passes
+    tests.append({
+        "case_name": "all-good",
+        "title": "[Feat] add new feature: optimised memory allocator",
+        "body": "## Summary\n\nImplements a new memory allocator that reduces fragmentation by 40%.\n\n## Test plan\n- Unit tests added\n- Tested on A5",
+        "commits": [
+            ("feat(npu): add optimised memory allocator", "Reduces fragmentation by 40%\n\nSigned-off-by: Dev <dev@test.com>", True),
+            ("test: add unit tests for memory allocator", "Covers allocation and deallocation paths\n\nSigned-off-by: Dev <dev@test.com>", True),
+        ],
+        "expect_desc_ok": True,
+        "expect_commit_ok": True,
+    })
+
+    # Test 2: Bad commits → commit-fix label only
+    tests.append({
+        "case_name": "bad-commits",
+        "title": "[BugFix] resolve memory leak in tensor pool",
+        "body": "## Summary\n\nFixes a memory leak in the tensor pool manager.\n\n## Test plan\n- Verified with valgrind\n- Tested on A5 with 1000 iterations",
+        "commits": [
+            ("fix: resolve memory leak in tensor pool manager", "The tensor pool was not releasing freed blocks.\n\nSigned-off-by: Dev <dev@test.com>", True),
+            ("fix bug", "", False),
+            ("update", "", False),
+        ],
+        "expect_desc_ok": True,
+        "expect_commit_ok": False,
+    })
+
+    # Test 3: Bad desc + bad commits → both labels
+    tests.append({
+        "case_name": "bad-desc-and-commits",
+        "title": "[Bug]: 修复问题",
+        "body": "修了个bug",
+        "commits": [
+            ("wip", "", False),
+        ],
+        "expect_desc_ok": False,
+        "expect_commit_ok": False,
+    })
+
+    results = []
+    for i, tc in enumerate(tests):
+        case_name = tc["case_name"]
+        print(f"[{i + 1}/{len(tests)}] {case_name}")
+        print(f"  Title: {tc['title']}")
+        print(f"  Commits: {len(tc['commits'])}")
+        print(f"  Expect: desc_ok={tc['expect_desc_ok']} commit_ok={tc['expect_commit_ok']}")
+
+        result = verify_pr(
+            api_base, repo, case_name,
+            tc["title"], tc["body"], tc["commits"],
+            tc["expect_desc_ok"], tc["expect_commit_ok"],
+        )
+        results.append(result)
+        status = "PASS" if result.passed else f"FAIL: {result.error}"
+        print(f"  {status}")
+        print()
+        time.sleep(5)
+
+    return results
+
+
+# ── Main ─────────────────────────────────────────────────────
 
 def print_summary(results: list[Result]):
     print("=" * 60)
@@ -347,10 +517,11 @@ def print_summary(results: list[Result]):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test Issue Description Completeness Check bot")
+    parser = argparse.ArgumentParser(description="Test Issue/PR Description & Commit Check bots")
     parser.add_argument("--repo", default="ai-infra-develop/vllm-ascend", help="GitHub repo (owner/name)")
-    parser.add_argument("--csv", default=None, help="Path to CSV test cases (default: description_check_cases.csv)")
-    parser.add_argument("--demo", action="store_true", help="Run 3 built-in demo tests instead of CSV")
+    parser.add_argument("--csv", default=None, help="Path to CSV test cases (issue mode)")
+    parser.add_argument("--demo", action="store_true", help="Run built-in issue demo tests")
+    parser.add_argument("--mode", default="issue", choices=["issue", "pr"], help="Test mode: issue or pr")
     args = parser.parse_args()
 
     if not GITHUB_TOKEN:
@@ -359,19 +530,20 @@ def main():
 
     api_base = f"https://api.github.com/repos/{args.repo}"
     print(f"Repo: {args.repo}")
-    print(f"Label: {LABEL_NAME}")
-    print(f"Poll: {POLL_INTERVAL}s interval, {MAX_WAIT}s max wait")
+    print(f"Mode: {args.mode}")
     print()
 
-    if args.demo:
-        results = run_demo_tests(api_base)
+    if args.mode == "pr":
+        WORKTREE_BASE.mkdir(parents=True, exist_ok=True)
+        results = run_pr_tests(api_base, args.repo)
+    elif args.demo:
+        results = run_issue_demo_tests(api_base)
     else:
         csv_path = args.csv or str(DEFAULT_CSV)
         if not Path(csv_path).exists():
             print(f"ERROR: CSV not found: {csv_path}")
-            print("Use --csv to specify a path or --demo for built-in tests")
             sys.exit(1)
-        results = run_csv_tests(api_base, csv_path)
+        results = run_issue_csv_tests(api_base, csv_path)
 
     print_summary(results)
 
