@@ -18,7 +18,6 @@
 
 import math
 import sys
-from collections.abc import Callable
 from unittest.mock import MagicMock
 
 import pytest
@@ -272,117 +271,15 @@ def _build_cp_paged_kv_cache(
     )
 
 
-def _build_cp_prefill_compact_metadata(
-    prefill_full_block_table: torch.Tensor,
-    full_k_nope_cache: torch.Tensor,
-    full_k_rope_cache: torch.Tensor,
-    cp_size: int,
-    block_size: int,
-    seq_lens: list[int],
-    kv_lora_rank: int,
-    qk_rope_head_dim: int,
-    dtype: torch.dtype,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build the prefill compact metadata + matching gathered KV view.
-
-    Reproduces the production
-    ``AscendSFACPMetadataBuilder.build_prefill_compact_block_metadata``
-    formula: ``block_table_cp[r, b*cp_size + i] = new_block_table[r, b] + i*M``
-    where ``M = num_unique_local_blocks``. Then materialises the
-    ``gathered_compact`` tensor that ``gather_kv_cross_cp_compact`` would
-    produce so that the kernel, when walking ``block_table_cp[r, :]``,
-    sees the contiguous K context of request ``r`` block-by-block.
-
-    Inputs
-    ------
-    prefill_full_block_table:
-        Shape ``(num_prefill_reqs, L * cp_size)``. The "full" (logical)
-        block table for prefill requests as built by
-        ``_build_cp_paged_kv_cache``. Entry ``[r, p]`` holds the physical
-        block id that owns logical position ``p`` of request ``r``.
-
-    The "local" (rank-0) prefill block table -- which the production code
-    actually receives in ``attn_metadata.block_table[num_decodes:]`` -- is
-    derived as ``prefill_full_block_table[:, :L]``. This matches the
-    convention used by ``_build_cp_paged_kv_cache`` for the decode path.
-    """
-    num_prefill_reqs, total_blocks_per_req = prefill_full_block_table.shape
-    assert total_blocks_per_req % cp_size == 0, (
-        f"prefill_full_block_table has {total_blocks_per_req} columns, which is not divisible by cp_size={cp_size}"
-    )
-    L = total_blocks_per_req // cp_size
-
-    prefill_local_block_table = prefill_full_block_table[:, :L].contiguous()
-
-    block_arange = torch.arange(cp_size, dtype=prefill_local_block_table.dtype, device=device)
-    valid_block_ids, new_block_table_flat = prefill_local_block_table.flatten().unique(return_inverse=True)
-    num_blocks = valid_block_ids.shape[0]
-    block_table_cp = (
-        new_block_table_flat.unsqueeze(-1).to(prefill_local_block_table)
-        + (block_arange * num_blocks).view(1, 1, -1).to(prefill_local_block_table)
-    ).reshape(prefill_local_block_table.shape[0], -1)
-
-    new_block_table_2d = new_block_table_flat.view(prefill_local_block_table.shape)
-
-    M = int(num_blocks)
-    gathered_compact_nope = torch.zeros(cp_size * M, block_size, 1, kv_lora_rank, dtype=dtype, device=device)
-    gathered_compact_rope = torch.zeros(cp_size * M, block_size, 1, qk_rope_head_dim, dtype=dtype, device=device)
-
-    for r in range(num_prefill_reqs):
-        s_len = seq_lens[r]
-        for b_local in range(L):
-            for i in range(cp_size):
-                p_logical = b_local * cp_size + i
-                tok_start = p_logical * block_size
-                tok_end = min(tok_start + block_size, s_len)
-                length = max(tok_end - tok_start, 0)
-                if length <= 0:
-                    continue
-                src_block = int(prefill_full_block_table[r, p_logical].item())
-                dst = int(new_block_table_2d[r, b_local].item()) + i * M
-                gathered_compact_nope[dst, :length, 0, :] = full_k_nope_cache[src_block, :length, 0, :]
-                gathered_compact_rope[dst, :length, 0, :] = full_k_rope_cache[src_block, :length, 0, :]
-
-    return valid_block_ids, block_table_cp, gathered_compact_nope, gathered_compact_rope
-
-
-def _make_fake_self(
-    *,
-    scale: float,
-    pcp_size: int,
-    dcp_size: int,
-    gather_kv_cross_cp_fn: Callable | None = None,
-    gather_kv_cross_cp_compact_fn: Callable | None = None,
-) -> MagicMock:
-    """Construct a ``MagicMock`` matching the slice of ``AscendSFACPImpl``
-    that ``_execute_sparse_flash_attention_process`` reads.
-
-    Bound methods that don't depend on init-time state
-    (``gather_block_table``, ``_execute_sparse_flash_attention``) are
-    delegated to the real (unbound) implementations so the production
-    kernel call stays under test. The collective gathers
-    (``gather_kv_cross_cp`` / ``gather_kv_cross_cp_compact``) are mocked
-    via ``side_effect`` because they require an initialised PCP / DCP
-    ``ProcessGroupHCCL``, which can't be created on a single rank.
+def _make_fake_self(*, scale: float) -> MagicMock:
+    """Construct a minimal ``MagicMock`` providing ``scale``.
+    ``AscendSFACPImpl._execute_sparse_flash_attention_process`` is the
+    parent ``AscendSFAImpl`` method; it only reads ``self.scale`` and
+    delegates to ``DeviceOperator.execute_sparse_flash_attention_process``.
+    No CP-specific mocking is needed.
     """
     fake_self = MagicMock()
     fake_self.scale = scale
-    fake_self.pcp_size = pcp_size
-    fake_self.dcp_size = dcp_size
-
-    if gather_kv_cross_cp_fn is not None:
-        fake_self.gather_kv_cross_cp = MagicMock(side_effect=gather_kv_cross_cp_fn)
-    if gather_kv_cross_cp_compact_fn is not None:
-        fake_self.gather_kv_cross_cp_compact = MagicMock(side_effect=gather_kv_cross_cp_compact_fn)
-
-    fake_self.gather_block_table = lambda block_num, block_tables, block_arange: (
-        AscendSFACPImpl.gather_block_table(fake_self, block_num, block_tables, block_arange)
-    )
-    fake_self._execute_sparse_flash_attention = lambda *args, **kwargs: (
-        AscendSFACPImpl._execute_sparse_flash_attention(fake_self, *args, **kwargs)
-    )
-    fake_self._align_to_graph_bucket_tokens = lambda x, m: x
     return fake_self
 
 
@@ -392,91 +289,24 @@ def _run_sfa_cp_kernel(
     q_pe: torch.Tensor,
     full_k_nope_cache: torch.Tensor,
     full_k_rope_cache: torch.Tensor,
-    local_block_table: torch.Tensor,
+    full_block_table: torch.Tensor,
     topk_indices: torch.Tensor,
     cum_query_lens: torch.Tensor,
     seq_lens_tensor: torch.Tensor,
     scale: float,
-    pcp_size: int,
-    dcp_size: int,
-    num_decodes: int,
-    num_decode_tokens: int,
-    num_prefills: int,
     device: torch.device,
-    gathered_k_nope: torch.Tensor | None = None,
-    gathered_k_rope: torch.Tensor | None = None,
-    valid_block_ids: torch.Tensor | None = None,
-    block_table_cp: torch.Tensor | None = None,
-    gathered_compact_nope: torch.Tensor | None = None,
-    gathered_compact_rope: torch.Tensor | None = None,
-    prefill_q_cum_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Run the SFA-CP kernel with mocked CP collectives."""
-    cp_size = pcp_size * dcp_size
+    """Run the SFA-CP kernel via the parent ``_execute_sparse_flash_attention_process``.
 
-    gather_kv_cross_cp_fn = None
-    gather_kv_cross_cp_compact_fn = None
-
-    if num_decode_tokens > 0:
-        assert gathered_k_nope is not None and gathered_k_rope is not None, (
-            "decode branch requires gathered_k_nope/gathered_k_rope"
-        )
-        gathered_lookup = {
-            id(full_k_nope_cache): gathered_k_nope,
-            id(full_k_rope_cache): gathered_k_rope,
-        }
-
-        def gather_kv_cross_cp_fn(kv: torch.Tensor, block_tables: torch.Tensor):
-            gathered = gathered_lookup.get(id(kv))
-            assert gathered is not None, "gather_kv_cross_cp called with an unexpected kv tensor"
-
-            return gathered, block_tables.numel()
-
-    if num_prefills > 0:
-        assert (
-            valid_block_ids is not None
-            and block_table_cp is not None
-            and gathered_compact_nope is not None
-            and gathered_compact_rope is not None
-            and prefill_q_cum_seqlens is not None
-        ), (
-            "prefill branch requires valid_block_ids / block_table_cp / "
-            "gathered_compact_{nope,rope} / prefill_q_cum_seqlens"
-        )
-        gathered_compact_lookup = {
-            id(full_k_nope_cache): gathered_compact_nope,
-            id(full_k_rope_cache): gathered_compact_rope,
-        }
-
-        def gather_kv_cross_cp_compact_fn(kv: torch.Tensor, vbid: torch.Tensor):
-            gathered = gathered_compact_lookup.get(id(kv))
-            assert gathered is not None, "gather_kv_cross_cp_compact called with an unexpected kv tensor"
-
-            return gathered
-
-    fake_self = _make_fake_self(
-        scale=scale,
-        pcp_size=pcp_size,
-        dcp_size=dcp_size,
-        gather_kv_cross_cp_fn=gather_kv_cross_cp_fn,
-        gather_kv_cross_cp_compact_fn=gather_kv_cross_cp_compact_fn,
-    )
+    The parent method (``AscendSFAImpl._execute_sparse_flash_attention_process``)
+    delegates to ``DeviceOperator.execute_sparse_flash_attention_process``,
+    which directly calls ``npu_sparse_flash_attention`` with the full KV
+    cache and block table.  No CP gather / prefill splitting is needed here.
+    """
+    fake_self = _make_fake_self(scale=scale)
 
     fake_attn_metadata = MagicMock()
-    fake_attn_metadata.block_table = local_block_table
-    fake_attn_metadata.num_decodes = num_decodes
-    fake_attn_metadata.num_decode_tokens = num_decode_tokens
-    fake_attn_metadata.num_prefills = num_prefills
-
-    fake_sfa_cp_metadata = MagicMock()
-    fake_sfa_cp_metadata.block_arange = torch.arange(cp_size, dtype=torch.int32, device=device)
-    if num_prefills > 0:
-        fake_sfa_cp_metadata.valid_block_ids = valid_block_ids
-        fake_sfa_cp_metadata.block_table_cp = block_table_cp
-        fake_sfa_cp_metadata.prefill_q_cum_seqlens = prefill_q_cum_seqlens
-    fake_attn_metadata.sfa_cp_metadata = fake_sfa_cp_metadata
-
-    cum_lens_arg = cum_query_lens if num_decode_tokens > 0 else prefill_q_cum_seqlens
+    fake_attn_metadata.block_table = full_block_table
 
     return AscendSFACPImpl._execute_sparse_flash_attention_process(
         fake_self,
@@ -485,7 +315,7 @@ def _run_sfa_cp_kernel(
         (full_k_nope_cache, full_k_rope_cache),
         topk_indices,
         fake_attn_metadata,
-        cum_lens_arg,
+        cum_query_lens,
         seq_lens_tensor,
     )
 
@@ -599,7 +429,6 @@ def _test_sfa_cp_correctness(
 
     seq_lens = list(batch_spec.seq_lens)
     query_lens = list(batch_spec.query_lens)
-    batch_size = batch_spec.batch_size
     num_tokens = batch_spec.compute_num_tokens()
     cp_size = pcp_size * dcp_size
 
@@ -630,10 +459,7 @@ def _test_sfa_cp_correctness(
         full_k_nope_cache,
         full_k_rope_cache,
         full_block_table,
-        local_block_table,
-        gathered_k_nope,
-        gathered_k_rope,
-        _L,
+        *_,
     ) = _build_cp_paged_kv_cache(
         seq_lens=seq_lens,
         k_nope_contexts=k_nope_contexts,
@@ -671,87 +497,10 @@ def _test_sfa_cp_correctness(
     cum_query_lens = common_attn_metadata.query_start_loc[1:].to(torch.int32)
     seq_lens_tensor = common_attn_metadata.seq_lens.to(torch.int32)
 
-    decode_gathered_k_nope: torch.Tensor | None = None
-    decode_gathered_k_rope: torch.Tensor | None = None
-    prefill_full_block_table: torch.Tensor | None = None
-
-    if mode in ("decode", "mtp"):
-        num_decodes = batch_size
-        num_decode_tokens = num_tokens
-        num_prefills = 0
-        decode_gathered_k_nope = gathered_k_nope
-        decode_gathered_k_rope = gathered_k_rope
-        n_decode_reqs = batch_size
-    elif mode == "prefill":
-        num_decodes = 0
-        num_decode_tokens = 0
-        num_prefills = batch_size
-        prefill_full_block_table = full_block_table
-        n_decode_reqs = 0
-    else:  # mixed (chunked-prefill)
-        n_decode_reqs = sum(1 for q in query_lens if q == 1)
-        assert all(q == 1 for q in query_lens[:n_decode_reqs]), (
-            f"mixed spec {batch_spec.name}: decode requests must come first"
-        )
-        assert all(q > 1 for q in query_lens[n_decode_reqs:]), (
-            f"mixed spec {batch_spec.name}: prefill requests must come after decode"
-        )
-        num_decodes = n_decode_reqs
-        num_decode_tokens = n_decode_reqs
-        num_prefills = batch_size - n_decode_reqs
-        prefill_full_block_table = full_block_table[n_decode_reqs:]
-
-        L_decode = local_block_table[:n_decode_reqs].shape[1]
-        N_decode = n_decode_reqs * L_decode
-        decode_gathered_k_nope = torch.zeros(
-            cp_size * N_decode,
-            block_size,
-            1,
-            kv_lora_rank,
-            dtype=dtype,
-            device=device,
-        )
-        decode_gathered_k_rope = torch.zeros(
-            cp_size * N_decode,
-            block_size,
-            1,
-            qk_rope_head_dim,
-            dtype=dtype,
-            device=device,
-        )
-        for i in range(cp_size):
-            for r in range(n_decode_reqs):
-                for b in range(L_decode):
-                    p_logical = b * cp_size + i
-                    phys_block = int(full_block_table[r, p_logical].item())
-                    dst = i * N_decode + r * L_decode + b
-                    decode_gathered_k_nope[dst] = full_k_nope_cache[phys_block]
-                    decode_gathered_k_rope[dst] = full_k_rope_cache[phys_block]
-
-    valid_block_ids = None
-    block_table_cp = None
-    gathered_compact_nope = None
-    gathered_compact_rope = None
-    prefill_q_cum_seqlens = None
-    if num_prefills > 0:
-        valid_block_ids, block_table_cp, gathered_compact_nope, gathered_compact_rope = (
-            _build_cp_prefill_compact_metadata(
-                prefill_full_block_table=prefill_full_block_table,
-                full_k_nope_cache=full_k_nope_cache,
-                full_k_rope_cache=full_k_rope_cache,
-                cp_size=cp_size,
-                block_size=block_size,
-                seq_lens=seq_lens[n_decode_reqs:],
-                kv_lora_rank=kv_lora_rank,
-                qk_rope_head_dim=qk_rope_head_dim,
-                dtype=dtype,
-                device=device,
-            )
-        )
-        if n_decode_reqs > 0:
-            prefill_q_cum_seqlens = cum_query_lens[n_decode_reqs:] - cum_query_lens[n_decode_reqs - 1]
-        else:
-            prefill_q_cum_seqlens = cum_query_lens
+    # The parent _execute_sparse_flash_attention_process delegates to
+    # DeviceOperator which uses the full block table directly — no
+    # CP-local subset, no gather mocking, no prefill compact metadata
+    # is needed.
 
     with set_forward_context(attn_metadata=None, vllm_config=vllm_config):
         backend_output = _run_sfa_cp_kernel(
@@ -759,24 +508,12 @@ def _test_sfa_cp_correctness(
             q_pe=q_pe,
             full_k_nope_cache=full_k_nope_cache,
             full_k_rope_cache=full_k_rope_cache,
-            local_block_table=local_block_table,
+            full_block_table=full_block_table,
             topk_indices=topk_indices,
             cum_query_lens=cum_query_lens,
             seq_lens_tensor=seq_lens_tensor,
             scale=scale,
-            pcp_size=pcp_size,
-            dcp_size=dcp_size,
-            num_decodes=num_decodes,
-            num_decode_tokens=num_decode_tokens,
-            num_prefills=num_prefills,
             device=device,
-            gathered_k_nope=decode_gathered_k_nope,
-            gathered_k_rope=decode_gathered_k_rope,
-            valid_block_ids=valid_block_ids,
-            block_table_cp=block_table_cp,
-            gathered_compact_nope=gathered_compact_nope,
-            gathered_compact_rope=gathered_compact_rope,
-            prefill_q_cum_seqlens=prefill_q_cum_seqlens,
         )
     reference_output = _reference_sparse_attention(
         ql_nope=ql_nope,
