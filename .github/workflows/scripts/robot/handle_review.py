@@ -187,21 +187,24 @@ def build_pr_combined_comment(desc_result: dict | None, commit_result: dict | No
 
 
 def compute_label_actions(desc_result: dict | None, commit_result: dict | None) -> dict:
-    desc_ok = desc_result.get("ok", True) if desc_result else True
-    commit_ok = commit_result.get("overall_ok", True) if (commit_result and commit_result.get("executed")) else True
-
     add_labels = []
     remove_labels = []
 
-    if desc_ok:
-        remove_labels.append(NEED_DETAIL_LABEL)
-    else:
-        add_labels.append(NEED_DETAIL_LABEL)
+    if desc_result:
+        desc_executed = desc_result.get("executed", True)
+        if desc_executed:
+            if desc_result.get("ok", False):
+                remove_labels.append(NEED_DETAIL_LABEL)
+            else:
+                add_labels.append(NEED_DETAIL_LABEL)
 
-    if commit_ok:
-        remove_labels.append(NEED_COMMIT_FIX_LABEL)
-    else:
-        add_labels.append(NEED_COMMIT_FIX_LABEL)
+    if commit_result:
+        commit_executed = commit_result.get("executed", False)
+        if commit_executed:
+            if commit_result.get("overall_ok", False):
+                remove_labels.append(NEED_COMMIT_FIX_LABEL)
+            else:
+                add_labels.append(NEED_COMMIT_FIX_LABEL)
 
     return {"add": add_labels, "remove": remove_labels}
 
