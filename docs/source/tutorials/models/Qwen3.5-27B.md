@@ -10,9 +10,9 @@ The `Qwen3.5-27B` model is first supported in `vllm-ascend:v0.17.0rc1`. This doc
 
 ## 2 Supported Features
 
-Please refer to the [Supported Features List](../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Please refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
-Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for feature configuration information.
+Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
 
 ## 3 Prerequisites
 
