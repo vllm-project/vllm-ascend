@@ -2183,9 +2183,7 @@ class NPUModelRunner(GPUModelRunner):
                 ec_connector_output,
             ) = self._preprocess(
                 scheduler_output,
-                num_tokens_padded
-                if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
-                else total_num_scheduled_tokens,
+                num_tokens_padded,
                 intermediate_tensors,
             )
 
