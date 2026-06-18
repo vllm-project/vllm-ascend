@@ -70,7 +70,6 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     register_ascend_customop,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -160,9 +159,6 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
-        if self.use_v2_model_runner and vllm_version_is("0.22.1"):
-            logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.22.1; falling back to v1 model runner.")
-            self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -575,8 +571,8 @@ class NPUWorker(WorkerBase):
             if envs_vllm.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
                 equiv_util = round(current_util - ng_util_delta, 4)
                 logger.info(
-                    "ACL graph memory profiling is enabled (default since "
-                    "v0.22.1). The current --gpu-memory-utilization=%.4f is "
+                    "ACL graph memory profiling is enabled (default). "
+                    "The current --gpu-memory-utilization=%.4f is "
                     "equivalent to --gpu-memory-utilization=%.4f without "
                     "ACL graph memory profiling. To maintain the same "
                     "effective KV cache size as before, increase "
@@ -593,7 +589,7 @@ class NPUWorker(WorkerBase):
                     "Without it, ACL graph memory is not accounted for "
                     "during KV cache allocation, which may require lowering "
                     "--gpu-memory-utilization to avoid OOM. Consider "
-                    "re-enabling it (the default as of v0.22.1) and increasing "
+                    "re-enabling it (the default) and increasing "
                     "--gpu-memory-utilization from %.4f to %.4f.",
                     current_util,
                     suggested_util,
@@ -896,9 +892,6 @@ class NPUWorker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
         tp_rank = get_tp_group().rank_in_group
-        if vllm_version_is("0.22.1"):
-            return {tp_rank: metadata}
-
         pp_rank = get_pp_group().rank_in_group
         return {(pp_rank, tp_rank): metadata}
 

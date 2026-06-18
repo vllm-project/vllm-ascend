@@ -24,7 +24,6 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_NUM_BUFFERS,
     packed_broadcast_consumer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
@@ -128,12 +127,8 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
             model: The local model instance which will receive the weights.
-                   Not available on v0.21.0 (base class does not accept it).
         """
-        if vllm_version_is("0.21.0"):
-            super().__init__(config, parallel_config)
-        else:
-            super().__init__(config, parallel_config, model)
+        super().__init__(config, parallel_config, model)
         self.model_update_group: PyHcclCommunicator | None = None
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:

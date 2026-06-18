@@ -59,13 +59,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The path for HCCL library, it's used by pyhccl communicator backend. If
     # not set, the default value is libhccl.so.
     "HCCL_SO_PATH": lambda: os.getenv("HCCL_SO_PATH", None),
-    # The version of vllm is installed. This value is used for developers who
-    # installed vllm from source locally. In this case, the version of vllm is
-    # usually changed. For example, if the version of vllm is "0.9.0", but when
-    # it's installed from source, the version of vllm is usually set to "0.9.1".
-    # In this case, developers need to set this value to "0.9.0" to make sure
-    # that the correct package is installed.
-    "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))),

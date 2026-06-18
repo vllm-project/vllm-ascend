@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-import functools
 import json
 import math
 import os
@@ -32,7 +31,6 @@ import numpy as np
 import regex as re
 import torch
 import torch_npu  # noqa: F401
-from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -552,25 +550,6 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
         raise ValueError(f"Failed to parse endpoint config file: {local_comm_res_file}") from e
 
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-
-
-@functools.cache
-def vllm_version_is(target_vllm_version: str):
-    if envs_ascend.VLLM_VERSION is not None:
-        vllm_version = envs_ascend.VLLM_VERSION
-    else:
-        import vllm
-
-        vllm_version = vllm.__version__
-    try:
-        return Version(vllm_version) == Version(target_vllm_version)
-    except InvalidVersion:
-        raise ValueError(
-            f"Invalid vllm version {vllm_version} found. A dev version of vllm "
-            "is installed probably. Set the environment variable VLLM_VERSION "
-            "to control it by hand. And please make sure the value follows the "
-            "format of x.y.z."
-        )
 
 
 def get_max_hidden_layers(hf_config) -> int:
