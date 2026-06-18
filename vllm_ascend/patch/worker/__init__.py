@@ -37,6 +37,7 @@ if HAS_TRITON:
         import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
+import vllm_ascend.patch.worker.patch_process_weights_after_loading  # noqa
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
