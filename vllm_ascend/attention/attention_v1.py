@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
@@ -106,6 +107,21 @@ class AscendAttentionBackend(AttentionBackend):
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+    
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        cache_layout = get_kv_cache_layout()
+        if cache_layout == "NHD" and include_num_layers_dimension:
+            return (2, 0, 1, 3, 4, 5)
+        if cache_layout == "NHD":
+            return (0, 1, 2, 3, 4)
+        if cache_layout == "HND" and include_num_layers_dimension:
+            return (2, 4, 0, 1, 3, 5)
+        if cache_layout == "HND":
+            return (0, 1, 3, 2, 4)
+        raise ValueError(f"Unknown cache layout format {cache_layout}.")
 
     @staticmethod
     def swap_blocks(
@@ -985,6 +1001,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
         # PrefillNoCache doesn't need key_cache, but other modes do
         # Only initialize/require cache for modes that actually use it
+
+        def get_paged_cache_params() -> tuple[torch.Tensor, torch.Tensor, int]:
+            assert self.key_cache is not None
+            assert self.value_cache is not None
+            num_block, block_size, _, _ = self.key_cache.shape
+            is_hnd_physical_cache = (
+                get_kv_cache_layout() == "HND" and self.key_cache.stride(2) == block_size * self.key_cache.shape[-1]
+            )
+            if is_hnd_physical_cache:
+                key = self.key_cache.permute(0, 2, 1, 3)
+                value = self.value_cache.permute(0, 2, 1, 3)
+                return key, value, block_size
+            key = self.key_cache.view(num_block, block_size, -1)
+            value = self.value_cache.view(num_block, block_size, -1)
+            return key, value, block_size
+        
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:
@@ -1011,33 +1043,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.seq_lens.shape[0]
             block_table = attn_metadata.block_tables[:batch_size, :]
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+            key, value, block_size = get_paged_cache_params()
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+            key, value, block_size = get_paged_cache_params()
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         # chunked prefill.
         else:
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+            key, value, block_size = get_paged_cache_params()
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
