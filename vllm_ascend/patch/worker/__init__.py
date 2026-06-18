@@ -37,7 +37,6 @@ if HAS_TRITON:
         import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
-import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
@@ -65,7 +64,6 @@ import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
-import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 
 if not vllm_version_is("0.23.0"):
     import vllm_ascend.patch.worker.patch_fused_moe  # noqa
