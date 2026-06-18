@@ -31,7 +31,7 @@ HARD_PASS = "hard_pass"
 
 
 def run_git_log(base_sha: str, head_sha: str) -> list[dict]:
-    cmd = ["git", "log", f"{base_sha}..{head_sha}", "--format=%H|||%s|||%b"]
+    cmd = ["git", "log", f"{base_sha}..{head_sha}", "--format=%H|||%s|||%B"]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     commits = []
     for line in result.stdout.strip().split("\n"):

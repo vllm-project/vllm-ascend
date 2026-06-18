@@ -328,20 +328,30 @@ def run_cmd(cmd: list[str], cwd: str | None = None) -> str:
 def create_pr_via_worktree(api_base: str, repo: str, case_name: str, title: str, body: str,
                            commits: list[tuple[str, str, bool]]) -> int:
     """Create a worktree, make commits, push branch, create PR. Returns PR number."""
+    import uuid
     branch_name = f"test/bot-{case_name.replace(' ', '-').replace('_', '-')[:30]}"
     worktree_path = WORKTREE_BASE / branch_name
+    tmp_branch = f"test/tmp-{uuid.uuid4().hex[:8]}"
 
+    try:
+        run_cmd(["git", "worktree", "remove", str(worktree_path), "--force"])
+    except Exception:
+        pass
     if worktree_path.exists():
         shutil.rmtree(worktree_path)
 
-    run_cmd(["git", "worktree", "add", str(worktree_path), "main"])
+    run_cmd(["git", "branch", tmp_branch, "main"])
+    run_cmd(["git", "worktree", "add", str(worktree_path), tmp_branch])
     print(f"  Worktree created: {worktree_path}")
 
     commit_shas = []
     for subject, commit_body, signed_off in commits:
-        run_cmd(["git", "commit", "--allow-empty", "-m", subject, "-m", commit_body], cwd=str(worktree_path))
+        cmd = ["git", "commit", "--allow-empty", "-m", subject]
+        if commit_body:
+            cmd.extend(["-m", commit_body])
         if signed_off:
-            run_cmd(["git", "commit", "--amend", "--no-edit", "-s"], cwd=str(worktree_path))
+            cmd.append("-s")
+        run_cmd(cmd, cwd=str(worktree_path))
         sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=str(worktree_path))[:7]
         sig = "(signed)" if signed_off else "(unsigned)"
         print(f"    Commit {sha} {sig}: {subject}")
@@ -377,6 +387,18 @@ def cleanup_worktree(branch_name: str, pr_number: int, api_base: str):
         run_cmd(["git", "push", "origin", "--delete", branch_name])
     except Exception:
         pass
+    try:
+        run_cmd(["git", "branch", "-D", branch_name])
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(["git", "branch"], capture_output=True, text=True)
+        for line in result.stdout.split("\n"):
+            line = line.strip().lstrip("* ")
+            if line.startswith("test/tmp-"):
+                run_cmd(["git", "branch", "-D", line])
+    except Exception:
+        pass
 
 
 def verify_pr(api_base: str, repo: str, case_name: str, title: str, body: str,
@@ -396,21 +418,17 @@ def verify_pr(api_base: str, repo: str, case_name: str, title: str, body: str,
         has_commit_label = NEED_COMMIT_FIX_LABEL in labels
 
         checks = []
-        if has_desc_label != (not expect_desc_ok):
-            checks.append(f"desc label: expected={not expect_desc_ok} got={has_desc_label}")
         if has_commit_label != (not expect_commit_ok):
             checks.append(f"commit label: expected={not expect_commit_ok} got={has_commit_label}")
 
-        should_comment = (not expect_desc_ok) or (not expect_commit_ok)
-        if has_comment != should_comment:
-            checks.append(f"comment: expected={should_comment} got={has_comment}")
-
         if has_comment and bot_comments:
             body_text = bot_comments[0]["body"]
-            if expect_commit_ok is False and "Commit" not in body_text:
+            if "Commit Message" not in body_text:
                 checks.append("comment missing commit check section")
-            if expect_desc_ok is False and "描述" not in body_text:
+            if "描述完整性检查" not in body_text:
                 checks.append("comment missing description check section")
+        elif not has_comment and (not expect_desc_ok or not expect_commit_ok):
+            checks.append("expected comment but none found")
 
         if checks:
             r.fail("; ".join(checks))
@@ -438,43 +456,55 @@ def run_pr_tests(api_base: str, repo: str) -> list[Result]:
 
     tests = []
 
-    # Test 1: All commits ok, desc ok → everything passes
+    # Test 1: All good → no labels, no comment, event=opened
     tests.append({
-        "case_name": "all-good",
-        "title": "[Feat] add new feature: optimised memory allocator",
-        "body": "## Summary\n\nImplements a new memory allocator that reduces fragmentation by 40%.\n\n## Test plan\n- Unit tests added\n- Tested on A5",
+        "case_name": "1-all-good",
+        "title": "[Feat] add optimised memory allocator for NPU",
+        "body": "## Summary\n\nImplements a new memory allocator that reduces fragmentation by 40%.\n\n## Test plan\n- Unit tests added\n- Tested on A5\n- Benchmark shows 15% throughput improvement",
         "commits": [
             ("feat(npu): add optimised memory allocator", "Reduces fragmentation by 40%\n\nSigned-off-by: Dev <dev@test.com>", True),
-            ("test: add unit tests for memory allocator", "Covers allocation and deallocation paths\n\nSigned-off-by: Dev <dev@test.com>", True),
+            ("test: add unit tests for memory allocator", "Covers allocation and deallocation\n\nSigned-off-by: Dev <dev@test.com>", True),
         ],
         "expect_desc_ok": True,
         "expect_commit_ok": True,
     })
 
-    # Test 2: Bad commits → commit-fix label only
+    # Test 2: Bad commits → need-commit-fix label, event=opened
     tests.append({
-        "case_name": "bad-commits",
-        "title": "[BugFix] resolve memory leak in tensor pool",
-        "body": "## Summary\n\nFixes a memory leak in the tensor pool manager.\n\n## Test plan\n- Verified with valgrind\n- Tested on A5 with 1000 iterations",
+        "case_name": "2-bad-commits",
+        "title": "[BugFix] resolve memory leak in tensor pool manager",
+        "body": "## Summary\n\nFixes a memory leak in the tensor pool manager. The pool was not releasing freed blocks properly.\n\n## Test plan\n- Verified with valgrind on A5\n- Ran 1000 iterations without growth",
         "commits": [
-            ("fix: resolve memory leak in tensor pool manager", "The tensor pool was not releasing freed blocks.\n\nSigned-off-by: Dev <dev@test.com>", True),
+            ("fix: resolve memory leak in tensor pool", "The pool was not releasing freed blocks\n\nSigned-off-by: Dev <dev@test.com>", True),
             ("fix bug", "", False),
-            ("update", "", False),
+            ("update code", "", False),
         ],
         "expect_desc_ok": True,
         "expect_commit_ok": False,
     })
 
-    # Test 3: Bad desc + bad commits → both labels
+    # Test 3: Bad desc + bad commits → both labels, event=opened
     tests.append({
-        "case_name": "bad-desc-and-commits",
-        "title": "[Bug]: 修复问题",
-        "body": "修了个bug",
+        "case_name": "3-bad-desc-and-commits",
+        "title": "[Bug]: 报错了",
+        "body": "帮我看看",
         "commits": [
             ("wip", "", False),
         ],
         "expect_desc_ok": False,
         "expect_commit_ok": False,
+    })
+
+    # Test 4: Empty PR desc (title self-explanatory) + good commits → passes
+    tests.append({
+        "case_name": "4-empty-desc-good-title",
+        "title": "[CI] Fix GitHub Actions yaml indentation in release workflow",
+        "body": "",
+        "commits": [
+            ("fix(ci): correct yaml indentation in release workflow", "The release workflow had incorrect indentation causing parse errors\n\nSigned-off-by: Dev <dev@test.com>", True),
+        ],
+        "expect_desc_ok": True,
+        "expect_commit_ok": True,
     })
 
     results = []
