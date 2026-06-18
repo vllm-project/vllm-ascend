@@ -101,14 +101,21 @@ def _apply_patch() -> None:
         # Skip the utils module itself; we already replaced it above.
         if mod is utils_mod:
             continue
-        if getattr(mod, "_merge_multimodal_embeddings", None) is orig_merge_mm:
-            # mypy can't see the dynamically-assigned attribute on a generic
-            # ModuleType obtained from sys.modules; this monkey patch is
-            # intentional and the attribute is guaranteed to exist by the
-            # getattr check above.
-            mod._merge_multimodal_embeddings = (  # type: ignore[attr-defined]
-                _merge_multimodal_embeddings
-            )
+        # Accessing or assigning attributes on arbitrary modules can raise
+        # (e.g. lazy-loaded or partially initialized modules). Guard the whole
+        # check-and-assign so a single misbehaving module never crashes worker
+        # startup.
+        try:
+            if getattr(mod, "_merge_multimodal_embeddings", None) is orig_merge_mm:
+                # mypy can't see the dynamically-assigned attribute on a generic
+                # ModuleType obtained from sys.modules; this monkey patch is
+                # intentional and the attribute is guaranteed to exist by the
+                # getattr check above.
+                mod._merge_multimodal_embeddings = (  # type: ignore[attr-defined]
+                    _merge_multimodal_embeddings
+                )
+        except Exception:
+            pass
 
 
 _apply_patch()
