@@ -1,4 +1,12 @@
-# Ascend Store Deployment Guide
+# KV Cache Pool（Ascend Store）Deployment Guide
+
+## Contents
+
+* [Environmental Dependencies](#environmental-dependencies)
+* [Example of using Mooncake as a KV Pool backend](#example-of-using-mooncake-as-a-kv-pool-backend)
+* [Example of using Memcache as a KV Pool backend](#example-of-using-memcache-as-a-kv-pool-backend)
+* [Example of using Yuanrong as a KV Pool backend](#example-of-using-yuanrong-as-a-kv-pool-backend)
+* [FAQ](#faq)
 
 ## Environmental Dependencies
 
@@ -14,7 +22,7 @@
 
 `kv_load_failure_policy` is a top-level field in `kv-transfer-config`.
 
-* `recompute`: When KV loading fails, vLLM rolls the request back to the last valid prefix and reschedules it to recompute the failed KV blocks.
+* `recompute`: When KV loading fails, vLLM rolls the request back to the last valid prefix and reschedules it to recompute the failed KV blocks. Hybrid attention models (e.g. DeepSeekV4, Qwen 3.5) are not supported yet.
 * `fail`: When KV loading fails, the affected request is terminated directly with an error.
 
 The default value in vLLM is `fail`. If you want the request to fall back to recomputation after a KV load failure, set it to `recompute`.
@@ -104,80 +112,11 @@ export PYTHONHASHSEED=0
 
 ### Environment Variables Description
 
-| Hardware | HDK & CANN versions | Export Command | Description |
+| Hardware | Dependencies | Export Command | Description |
 | :--- | :--- | :--- | :--- |
-| 800 I/T A3 series | HDK >= 25.5<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. |
-| 800 I/T A3 series | 25.5.0<=HDK<26.0.0 | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
-| 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
-
-### Embedded Real Client Mode（Mooncake ssd-offload.md Step 3A）
-
-* Software:
-    * mooncake >= v0.3.11
-
-#### Start the master
-
-```bash
-mooncake_master --rpc_port=50051 --enable_offload=true
-```
-
-| Field | Description |
-| :--- | :--- |
-| `enable_offload` | Set `true` to enable SSD offload. |
-
-#### Configuration
-
-Add the following fields to your `mooncake.json`:
-
-```json
-{
-    "local_hostname": "xx.xx.xx.xx",
-    "metadata_server": "P2PHANDSHAKE",
-    "protocol": "ascend",
-    "use_ascend_direct": true,
-    "device_name": "",
-    "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": "1GB",
-    "enable_ssd_offload": true,
-    "ssd_offload_path": "/nvme/mooncake_offload"
-}
-```
-
-| Field | Description |
-| :--- | :--- |
-| `enable_ssd_offload` | Set to `true` to enable SSD offload. Environment variables are not supported. |
-| `ssd_offload_path` | **Required when `enable_ssd_offload` is `true`.** Absolute path to a local directory where Mooncake stores offloaded KV data (for example, `/nvme/mooncake_offload`). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symbolic links, and paths containing `..` are rejected by Mooncake. Passed to `MooncakeDistributedStore.setup()` as the SSD storage root (equivalent to `MOONCAKE_OFFLOAD_FILE_STORAGE_PATH` in standalone clients). Configure this field in `mooncake.json` only; environment variables are not supported. |
-
-#### Running the Embedded Real Client
-
-With Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When the vLLM service starts, `AscendStoreConnector` / `MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json` (including `enable_ssd_offload` and `ssd_offload_path` when SSD offload is enabled). No separate `mooncake_client` process is required.
-
-#### SSD Disk Usage Control
-
-The following environment variables control disk space usage for SSD offload (bucket backend):
-
-| Environment Variable | Default | Description |
-| :--- | :--- | :--- |
-| `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` | `0` | Eviction threshold in bytes. When set to `0`, the backend uses **90% of the physical disk capacity** as the quota. Set an explicit value to control disk usage precisely. |
-| `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY` | `none` | Eviction policy: `none` (writes fail when full), `fifo`, or `lru`. |
-| `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | `2199023255552` (2 TB) | Global maximum disk usage limit. |
-
-Since each TP rank uses an independent SSD subdirectory (`rank_0/`, `rank_1/`, ...) under `ssd_offload_path`, all ranks share the same physical disk. To prevent a single rank from consuming excessive space, set an explicit per-rank quota. For example, with an 800 GB disk and 8 TP ranks:
-
-```bash
-# 800 GB total disk, 8 ranks, ~100 GB per rank
-export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((100 * 1024 * 1024 * 1024))
-export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
-```
-
-#### Notes
-
-* This feature requires mooncake >= v0.3.11.
-
-### FAQ for HIXL (ascend_direct) backend
-
-For common troubleshooting and issue localization guidance for HIXL (ascend_direct), see:
-<https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md>
+| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. |
+| 800 I/T A3 series | If any dependency above is not met | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
+| 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
 ### Run Mooncake Master
 
@@ -485,6 +424,60 @@ Note: For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, it is recommended to 
 This is because HCCL one-sided communication connections are created lazily after the instance is launched when Device-to-Device communication is involved. Currently, full-mesh connections between all devices are required. Establishing these connections introduces a one-time time overhead and persistent device memory consumption (4 MB of device memory per connection).
 
 **For warm-up, it is recommended to issue requests with an input sequence length of 8K and an output sequence length of 1, with the total number of requests being 2–3× the number of devices (cards/dies).**
+
+### Enable MooncakeStore SSD Offload with Embedded Real Client Mode
+
+* Requires mooncake >= v0.3.11.
+
+#### Start the master
+
+Start Mooncake master as described in [Run Mooncake Master](#run-mooncake-master). To enable SSD offload, add `--enable_offload=true` to the same master startup command. For example:
+
+```shell
+mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000 --enable_offload=true
+```
+
+| Field | Description |
+| :--- | :--- |
+| `enable_offload` | Set to `true` to enable SSD offload in Mooncake master. Keep the master port aligned with `master_server_address` in `mooncake.json`. |
+
+#### Configuration
+
+Starting from the `mooncake.json` configured in [Run Mooncake Master](#run-mooncake-master), add the following SSD offload fields:
+
+```json
+{
+    "enable_ssd_offload": true,
+    "ssd_offload_path": "/nvme/mooncake_offload"
+}
+```
+
+| Field | Description |
+| :--- | :--- |
+| `enable_ssd_offload` | Set to `true` to enable SSD offload. Environment variables are not supported. |
+| `ssd_offload_path` | **Required when `enable_ssd_offload` is `true`.** Absolute path to a local directory where Mooncake stores offloaded KV data (for example, `/nvme/mooncake_offload`). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symbolic links, and paths containing `..` are rejected by Mooncake. Passed to `MooncakeDistributedStore.setup()` as the SSD storage root (equivalent to `MOONCAKE_OFFLOAD_FILE_STORAGE_PATH` in standalone clients). Configure this field in `mooncake.json` only; environment variables are not supported. |
+
+#### Running the Embedded Real Client
+
+With Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When the vLLM service starts, `AscendStoreConnector` / `MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json` (including `enable_ssd_offload` and `ssd_offload_path` when SSD offload is enabled). No separate `mooncake_client` process is required.
+
+#### SSD Disk Usage Control
+
+The following environment variables control disk space usage for SSD offload (bucket backend):
+
+| Environment Variable | Default | Description |
+| :--- | :--- | :--- |
+| `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` | `0` | Eviction threshold in bytes. When set to `0`, the backend uses **90% of the physical disk capacity** as the quota. Set an explicit value to control disk usage precisely. |
+| `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY` | `none` | Eviction policy: `none` (writes fail when full), `fifo`, or `lru`. |
+| `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | `2199023255552` (2 TB) | Global maximum disk usage limit. |
+
+Since each TP rank uses an independent SSD subdirectory (`rank_0/`, `rank_1/`, ...) under `ssd_offload_path`, all ranks share the same physical disk. To prevent a single rank from consuming excessive space, set an explicit per-rank quota. For example, with an 800 GB disk and 8 TP ranks:
+
+```shell
+# 800 GB total disk, 8 ranks, ~100 GB per rank
+export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((100 * 1024 * 1024 * 1024))
+export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
+```
 
 ## Example of using Memcache as a KV Pool backend
 
@@ -936,3 +929,27 @@ and the worker process. Each instance must use a unique port value.
   uses device pointers directly when building blob lists.
 
 #### [2. Run Inference](#2-run-inference)
+
+## FAQ
+
+### 1. Mooncake failed to put/get key
+
+When vLLM reports failed `put` or `get` operations, first check whether the error is reported by Mooncake itself.
+
+* If the error is reported by Mooncake:
+    * For `put` failures, check whether the Mooncake log contains `NO_AVAILABLE_HANDLE` or `BatchPut failed ... due to insufficient space`. This usually means the remaining space after eviction is not enough for one `BatchPut` request. Ensure the space left by the eviction policy (for example, the capacity implied by `1 - eviction_ratio`) can hold one batch put, or consider increasing the available capacity, increasing eviction headroom, or reducing the batch size.
+    * For `get` failures, check whether the Mooncake log contains `lease_expired_before_data_transfer_completed key=...` or returns `LEASE_EXPIRED`. This means the KV object lease expired before the data transfer completed. Increase `--default_kv_lease_ttl` for `mooncake_master` as needed, and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
+* If the error is not reported by Mooncake, it is likely an HIXL (ascend_direct) transfer-layer issue. Collect plog files under `/root/ascend/log/debug/plog` and check whether the issue matches a known HIXL problem.
+
+For common troubleshooting and issue localization guidance for HIXL (ascend_direct), see:
+<https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md>
+
+### 2. Memcache FAQ
+
+For Memcache troubleshooting, see:
+<https://gitcode.com/Ascend/memcache/wiki/FAQ.md>
+
+### 3. DSv4 known issue (temporary)
+
+For the temporary DSv4 known issue, see:
+<https://github.com/vllm-project/vllm-ascend/issues/9975>
