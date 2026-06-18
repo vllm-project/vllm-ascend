@@ -891,7 +891,16 @@ def is_drafter_moe_model(vllm_config: VllmConfig):
     """Checks if the drafter model is a MoE model by config"""
     global _IS_DRAFTER_MOE_MODEL
     if _IS_DRAFTER_MOE_MODEL is None:
-        model_configs = vllm_config.speculative_config.draft_model_config.hf_text_config.to_dict()
+        speculative_config = vllm_config.speculative_config
+        if speculative_config.method == "extract_hidden_states":
+            # The extract_hidden_states drafter is a cache-only attention layer
+            # (never MoE), but its hf_config is copied from the possibly-MoE
+            # target, so the expert-key scan below would misclassify it. Skip
+            # the scan to keep the drafter DP sync free of a spurious
+            # all_reduce that idle DP ranks never match.
+            _IS_DRAFTER_MOE_MODEL = False
+            return _IS_DRAFTER_MOE_MODEL
+        model_configs = speculative_config.draft_model_config.hf_text_config.to_dict()
         _IS_DRAFTER_MOE_MODEL = _is_contain_expert(model_configs)
         if not model_configs or not model_configs.get("architectures"):
             return _IS_DRAFTER_MOE_MODEL

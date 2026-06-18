@@ -274,6 +274,34 @@ class TestUtils(TestBase):
             utils.get_max_hidden_layers(NoLayerConfig())
         self.assertIn("num_hidden_layers", str(context.exception))
 
+    def test_is_drafter_moe_model_extract_hidden_states_is_never_moe(self):
+        """The extract_hidden_states drafter is a cache-only attention layer
+        with no MoE layers, but its hf_config copies the (possibly MoE) target
+        hf_config. The expert-key scan must not misclassify it as MoE,
+        otherwise _sync_metadata_across_dp(is_draft_model=True) performs a DP
+        all_reduce that idle DP ranks never match (DP deadlock)."""
+        vllm_config = mock.MagicMock()
+        vllm_config.speculative_config.method = "extract_hidden_states"
+        # Inherited MoE keys from the target model (e.g. MiniMax-M2)
+        vllm_config.speculative_config.draft_model_config.hf_text_config.to_dict.return_value = {
+            "num_local_experts": 256,
+            "num_experts_per_tok": 8,
+        }
+
+        with mock.patch("vllm_ascend.utils._IS_DRAFTER_MOE_MODEL", None):
+            self.assertFalse(utils.is_drafter_moe_model(vllm_config))
+
+    def test_is_drafter_moe_model_eagle_moe_drafter_detected(self):
+        """Non-extract_hidden_states drafters keep the expert-key detection."""
+        vllm_config = mock.MagicMock()
+        vllm_config.speculative_config.method = "eagle3"
+        vllm_config.speculative_config.draft_model_config.hf_text_config.to_dict.return_value = {
+            "num_experts_per_tok": 8,
+        }
+
+        with mock.patch("vllm_ascend.utils._IS_DRAFTER_MOE_MODEL", None):
+            self.assertTrue(utils.is_drafter_moe_model(vllm_config))
+
     @mock.patch("vllm.model_executor.custom_op.CustomOp")
     @mock.patch("vllm_ascend.ops.activation.AscendQuickGELU")
     @mock.patch("vllm_ascend.ops.activation.AscendSiluAndMul")
