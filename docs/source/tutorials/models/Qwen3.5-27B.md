@@ -12,9 +12,9 @@ The `Qwen3.5-27B` model is first supported in `vllm-ascend:v0.17.0rc1`. This doc
 
 This section introduces the features supported by the `Qwen3.5-27B` model, including supported hardware, quantization methods, data parallelism, long-sequence features, and more.
 
-For the full feature support matrix of `Qwen3.5-27B` (e.g., BF16/W8A8 support, Chunked Prefill, LoRA, Speculative Decoding, Parallelism, Max Model Length, etc.), refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) list.
+Please refer to the [Supported Features List](../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
-For the detailed configuration of each feature (e.g., how to enable Chunked Prefill, Speculative Decoding, PD separation, etc.), refer to the [Feature Guide](../../user_guide/feature_guide/index.md).
+Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for feature configuration information.
 
 ## 3 Prerequisites
 
@@ -574,7 +574,8 @@ After about several minutes, you can get the performance evaluation result.
 
 #### 9.2.1 General Tuning Reference
 
-Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods. Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
