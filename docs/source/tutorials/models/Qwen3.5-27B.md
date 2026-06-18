@@ -10,9 +10,11 @@ The `Qwen3.5-27B` model is first supported in `vllm-ascend:v0.17.0rc1`. This doc
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+This section introduces the features supported by the `Qwen3.5-27B` model, including supported hardware, quantization methods, data parallelism, long-sequence features, and more.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+For the full feature support matrix of `Qwen3.5-27B` (e.g., BF16/W8A8 support, Chunked Prefill, LoRA, Speculative Decoding, Parallelism, Max Model Length, etc.), refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) list.
+
+For the detailed configuration of each feature (e.g., how to enable Chunked Prefill, Speculative Decoding, PD separation, etc.), refer to the [Feature Guide](../../user_guide/feature_guide/index.md).
 
 ## 3 Prerequisites
 
@@ -23,7 +25,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### 3.2 Verify Multi-node Communication (Optional)
+### 3.2 Verify Multi-node Communication
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
@@ -542,13 +544,11 @@ After about several minutes, you can get the performance evaluation result.
 
 ### 9.1 Recommended Configurations
 
-> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to [Section 9.2](#92-tuning-guidelines) for tuning based on actual conditions.
 >
 > **Parallelism Strategy**: `Qwen3.5-27B-w8a8` is only ~30 GB and easily fits in a single NPU (64 GB HBM per NPU). Following the **DP-first** principle, **TP=2 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. **TP=8 is only recommended for ultra-long context (256K+) scenarios**, where it shards the KV cache across 8 NPUs to maximize the available context window per rank.
 
 #### Table 1: Scenario Overview
-
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 Atlas 800 A3 node = 16 NPUs, 1 Atlas 800 A2 node = 8 NPUs.
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|-------------|----------------|---------------------|
@@ -556,6 +556,8 @@ After about several minutes, you can get the performance evaluation result.
 | High Throughput<br>(128K context) | Single-Node (A3) | 16 (A3) | Qwen3.5-27B-w8a8 | TP=2 + DP=8 fully utilizes all 16 NPUs for parallel request batches |
 | Low Latency<br>(128K context) | Single-Node (A3) | 16 (A3) | Qwen3.5-27B-w8a8 | TP=2 + DP=8 reduces per-layer Allreduce overhead for small interactive batches |
 | Long Context<br>(256K+ context) | Single-Node (A3) | 16 (A3) | Qwen3.5-27B-w8a8 | TP=8 + DP=2 shards the KV cache across 8 NPUs to maximize the available context window |
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 Atlas 800 A3 node = 16 NPUs, 1 Atlas 800 A2 node = 8 NPUs.
 
 #### Table 2: Detailed Node Configuration
 
@@ -572,18 +574,8 @@ After about several minutes, you can get the performance evaluation result.
 
 #### 9.2.1 General Tuning Reference
 
-Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods. Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section only covers issues specific to Qwen3.5-27B models.
-
-<!--
-TODO: Add model-specific FAQ items here as community questions arise.
-Common candidates include:
-- Mamba-Transformer hybrid prefix caching behavior
-- Block_size tuning with `--enable-prefix-caching`
-- MTP speculative decoding specific issues
--->
+For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
