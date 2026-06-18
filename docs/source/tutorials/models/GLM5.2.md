@@ -133,7 +133,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_VERSION=0.21.0
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5.2-w8a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --data-parallel-size 2 \
@@ -200,7 +200,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export ASCEND_LAUNCH_BLOCKING=0
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5.2-w8a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --data-parallel-size 2 \
@@ -250,7 +250,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export ASCEND_LAUNCH_BLOCKING=0
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5.2-w8a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --headless \
@@ -314,7 +314,7 @@ export CPU_AFFINITY_CONF=1
 export VLLM_ENGINE_READY_TIMEOUT_S=1200
 
 export VLLM_VERSION=0.21.0
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5.2-w8a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --max_model_len 40000 \
 --max-num-batched-tokens 4096 \
 --served-model-name glm-52 \
@@ -371,7 +371,7 @@ export CPU_AFFINITY_CONF=1
 export VLLM_ENGINE_READY_TIMEOUT_S=1200
 
 export VLLM_VERSION=0.21.0
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5.2-w8a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --max_model_len 40000 \
 --max-num-batched-tokens 4096 \
 --served-model-name glm-52 \
@@ -661,7 +661,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5.2-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -730,7 +730,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5.2-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -799,7 +799,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_ASCEND_ENABLE_MLAPO=1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5.2-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
