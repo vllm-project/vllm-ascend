@@ -43,7 +43,7 @@ def _launch_pytest(inp: BisectInput, opt: BisectOptions, log_path: Path) -> int:
     env["CONFIG_YAML_PATH"] = inp.config_yaml
     if inp.config_base_path:
         env["CONFIG_BASE_PATH"] = inp.config_base_path
-    env["BENCHMARK_JOB_NAME"] = runner._safe_name(inp.case_name or inp.config_yaml)
+    env["BENCHMARK_JOB_NAME"] = runner._safe_name(inp.config_yaml)
     env.setdefault("BENCHMARK_HOME", str(opt.repo_dir / "benchmark"))
     env["LWS_WORKER_INDEX"] = str(opt.node_index)
 

@@ -35,19 +35,36 @@ class RunOutcome:
     """Raw signals produced by a runner for one trial."""
 
     exit_code: int
-    results_json: Path | None  # benchmark results file, if the case writes one
+    # Directory holding this trial's benchmark JSON(s). A whole-YAML run writes
+    # one file per case, so we scan the directory rather than a single file.
+    results_dir: Path | None = None
     infra_error: bool = False  # set when the failure is environmental (-> SKIP)
 
 
-def _read_pass_fail(path: Path | None) -> str | None:
-    if not path or not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Could not read results json %s: %s", path, exc)
-        return None
-    return data.get("pass_fail")
+def _any_benchmark_failed(results_dir: Path | None) -> bool:
+    """True if any benchmark JSON in ``results_dir`` reports pass_fail=fail."""
+    if not results_dir or not results_dir.exists():
+        return False
+    for path in results_dir.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read results json %s: %s", path, exc)
+            continue
+        if data.get("pass_fail") == "fail":
+            logger.info("Benchmark regression in %s (pass_fail=fail)", path.name)
+            return True
+    return False
+
+
+# pytest exit codes that mean "the test never actually ran" rather than a
+# genuine functional pass/fail. These are NOT a clean bisect signal, so they map
+# to SKIP (like ``git bisect skip``):
+#   2 = interrupted, 3 = internal error, 4 = usage/collection error
+#       (e.g. a conftest ImportError -> vllm/vllm-ascend version mismatch),
+#   5 = no tests collected (e.g. -k matched nothing).
+# 124 is our own timeout sentinel (see runner) -> also unjudgeable.
+_INFRA_EXIT_CODES = {2, 3, 4, 5, 124}
 
 
 def evaluate(outcome: RunOutcome) -> tuple[Verdict, str]:
@@ -55,13 +72,20 @@ def evaluate(outcome: RunOutcome) -> tuple[Verdict, str]:
     if outcome.infra_error:
         return "SKIP", "infra/environment error - cannot judge this commit"
 
-    if outcome.exit_code != 0:
-        return "FAIL", f"pytest exited non-zero (rc={outcome.exit_code})"
+    rc = outcome.exit_code
+    if rc in _INFRA_EXIT_CODES:
+        if rc == 124:
+            return "SKIP", "trial timed out - cannot judge this commit"
+        return "SKIP", (
+            f"pytest could not collect/run the test (rc={rc}); likely an "
+            "environment issue such as a conftest ImportError / vllm mismatch"
+        )
+    if rc != 0:
+        # A real crash during a running test (assertion, segfault, ...) -> FAIL.
+        return "FAIL", f"pytest exited non-zero (rc={rc})"
 
-    # Exit code 0: still inspect the benchmark verdict for silent regressions.
-    pass_fail = _read_pass_fail(outcome.results_json)
-    if pass_fail == "fail":
+    # Exit code 0: still inspect the benchmark verdicts for silent regressions
+    # (a baseline/threshold miss is recorded in JSON without failing pytest).
+    if _any_benchmark_failed(outcome.results_dir):
         return "FAIL", "benchmark pass_fail=fail (baseline/threshold miss)"
-    if pass_fail == "pass":
-        return "PASS", "pytest ok and benchmark pass_fail=pass"
-    return "PASS", "pytest ok (no benchmark verdict file)"
+    return "PASS", "pytest ok (no benchmark regression)"

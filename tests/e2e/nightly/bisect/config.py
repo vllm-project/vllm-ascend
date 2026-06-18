@@ -136,19 +136,26 @@ class TrialResult:
 
 @dataclass
 class BisectInput:
-    """Everything needed to start a bisect run, assembled by the CLI."""
+    """Everything needed to start a bisect run, assembled by the CLI.
+
+    A nightly trial runs at *whole-YAML* granularity (all ``test_cases`` in the
+    file) -- nightly cannot select a single case -- so there is no per-case
+    field. ``config_yaml`` both selects the failing file (CONFIG_YAML_PATH) and
+    is the unit a trial runs and judges.
+    """
 
     scene: str  # SCENE_SINGLE | SCENE_MULTI
-    config_yaml: str  # CONFIG_YAML_PATH value (selects the failing case file)
-    case_name: str  # pytest -k filter; "" for multi-node single-case files
+    config_yaml: str  # CONFIG_YAML_PATH value: the whole failing case file
     bad_commit: str  # current failing commit (resolved to full sha later)
+    name: str | None = None  # nightly case name, to match the good-table 'name'
     config_base_path: str | None = None  # CONFIG_BASE_PATH override (multi/ext dp)
     good_commit: str | None = None  # explicit good; else looked up in the table
+    good_vllm_commit: str | None = None  # paired vLLM commit of the good row
 
     @property
     def case_key(self) -> str:
-        """Stable key joining scene + yaml + case used to index the good table."""
-        return f"{self.scene}::{self.config_yaml}::{self.case_name}"
+        """Stable key (scene + whole yaml) for state/work-dir/report."""
+        return f"{self.scene}::{self.config_yaml}"
 
 
 @dataclass

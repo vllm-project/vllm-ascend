@@ -17,7 +17,8 @@
 Both runners reuse the *existing* nightly entries so the bisect reproduces the
 real nightly environment:
 
-* single-node -> ``pytest test_single_node.py -k <case>`` (CONFIG_YAML_PATH).
+* single-node -> ``pytest test_single_node.py`` over the whole CONFIG_YAML_PATH
+  file (all test_cases; nightly cannot select a single case).
 * multi-node  -> ``pytest test_multi_node.py`` after sourcing the Ascend env,
   coordinated across nodes by ``Coordinator``.
 
@@ -28,6 +29,7 @@ which scene it is driving.
 import contextlib
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -96,8 +98,15 @@ class BaseRunner:
         env["CONFIG_YAML_PATH"] = self.inp.config_yaml
         if self.inp.config_base_path:
             env["CONFIG_BASE_PATH"] = self.inp.config_base_path
-        env["BENCHMARK_JOB_NAME"] = _safe_name(self.inp.case_name or self.inp.config_yaml)
         return env
+
+    @staticmethod
+    def _reset_dir(path: Path) -> Path:
+        """Empty ``path`` so a trial only sees its own benchmark outputs."""
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         raise NotImplementedError
@@ -114,17 +123,16 @@ class SingleNodeRunner(BaseRunner):
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
         decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
 
+        # Run the WHOLE yaml (all test_cases): nightly cannot select a single
+        # case, so we don't pass -k. Each case writes its own benchmark JSON
+        # under benchmark_results/; reset the dir first so the verdict only sees
+        # this trial's files.
+        results_dir = self._reset_dir(self.repo / "benchmark_results")
         env = self._base_env()
-        cmd = [
-            "python", "-m", "pytest", "-sv", "--show-capture=no", SINGLE_NODE_TEST_PATH,
-        ]
-        if self.inp.case_name:
-            cmd += ["-k", self.inp.case_name]
+        cmd = ["python", "-m", "pytest", "-sv", "--show-capture=no", SINGLE_NODE_TEST_PATH]
 
         rc = self._run_pytest(cmd, env, log_path)
-        job = env["BENCHMARK_JOB_NAME"]
-        results_json = self.repo / "benchmark_results" / f"{job}.json"
-        outcome = RunOutcome(exit_code=rc, results_json=results_json if results_json.exists() else None)
+        outcome = RunOutcome(exit_code=rc, results_dir=results_dir if results_dir.exists() else None)
         outcome.rebuilt = decision.rebuild  # type: ignore[attr-defined]
         return outcome
 
@@ -171,10 +179,10 @@ class MultiNodeRunner(BaseRunner):
         self.coord.wait_all_ready(round_idx, candidate.commit, self.opt.barrier_timeout_s)
 
         # 4) launch the multi-node pytest on master and read the verdict
-        rc = self._run_multi_pytest(log_path)
-        job = self._base_env()["BENCHMARK_JOB_NAME"]
-        results_json = Path("/root/.cache/benchmark_results") / job / f"{job}.json"
-        outcome = RunOutcome(exit_code=rc, results_json=results_json if results_json.exists() else None)
+        job = _safe_name(self.inp.config_yaml)
+        results_dir = self._reset_dir(Path("/root/.cache/benchmark_results") / job)
+        rc = self._run_multi_pytest(log_path, job)
+        outcome = RunOutcome(exit_code=rc, results_dir=results_dir if results_dir.exists() else None)
         outcome.rebuilt = decision.rebuild  # type: ignore[attr-defined]
         return outcome
 
@@ -187,8 +195,9 @@ class MultiNodeRunner(BaseRunner):
             return _EXTERNAL_DP_TEST
         return _INTERNAL_DP_TEST
 
-    def _run_multi_pytest(self, log_path: Path) -> int:
+    def _run_multi_pytest(self, log_path: Path, job: str) -> int:
         env = self._base_env()
+        env["BENCHMARK_JOB_NAME"] = job
         env.setdefault("BENCHMARK_HOME", str(self.repo / "benchmark"))
         env.setdefault("LWS_WORKER_INDEX", str(self.opt.node_index))
         # Source the Ascend toolkit env then exec pytest (mirrors run.sh, but

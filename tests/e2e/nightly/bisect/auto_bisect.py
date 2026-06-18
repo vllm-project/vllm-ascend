@@ -19,10 +19,11 @@ Usage (single-node)::
     python -m tests.e2e.nightly.bisect.auto_bisect \
         --scene single_node \
         --config-yaml DeepSeek-R1-0528-W8A8.yaml \
-        --case-name DeepSeek-R1-0528-W8A8-aclgraph \
+        --name DeepSeek-R1-0528-W8A8 \
         --bad-commit HEAD
 
-The good commit is read from the good table unless ``--good-commit`` is given.
+Each trial runs the whole CONFIG_YAML_PATH file (all test_cases). The good
+commit is read from the nightly status table unless ``--good-commit`` is given.
 """
 
 import argparse
@@ -144,6 +145,12 @@ class Bisector:
         if self.opt.verify_bad:
             v = self._judge(bad, state=state)
             report.print_endpoint_check("bad", bad, v, ok=v == "FAIL")
+            if v == "SKIP":
+                logger.error(
+                    "Bad commit could not even run the test (environment error, "
+                    "e.g. vllm/vllm-ascend version mismatch). Fix the environment "
+                    "before bisecting; aborting.")
+                return False
             if v != "FAIL":
                 logger.error("Bad commit did not reproduce the failure (%s); aborting.", v)
                 return False
@@ -153,6 +160,13 @@ class Bisector:
         if self.opt.verify_good:
             v = self._judge(good, state=state)
             report.print_endpoint_check("good", good, v, ok=v == "PASS")
+            if v == "SKIP":
+                logger.error(
+                    "Good baseline could not even run the test (environment error, "
+                    "e.g. vllm/vllm-ascend version mismatch). The whole range is "
+                    "likely unrunnable against the installed vllm; fix the "
+                    "environment before bisecting; aborting.")
+                return False
             if v != "PASS":
                 logger.error("Good baseline is not actually good (%s); range invalid.", v)
                 return False
@@ -225,7 +239,6 @@ class Bisector:
                     first_bad.short,
                 )
             report.print_conclusion(first_bad, self.trials)
-            self._maybe_update_good_table(candidates, first_bad, good)
         report.write_report_json(self.report_path, inp=self.inp, good=good, bad=bad,
                                  first_bad=first_bad, trials=self.trials)
         return first_bad
@@ -233,28 +246,22 @@ class Bisector:
     def _resolve_good(self) -> str:
         if self.inp.good_commit:
             return self.inp.good_commit
-        table = GoodTable(self.opt.good_table_path)
-        entry = table.lookup(self.inp.case_key)
+        entry = GoodTable(self.opt.good_table_path).lookup_last_good(
+            name=self.inp.name, config_yaml=self.inp.config_yaml
+        )
         if entry is None:
             raise SystemExit(
-                f"No good commit for case {self.inp.case_key!r}: not in table "
-                f"{self.opt.good_table_path} and --good-commit not given."
+                f"No successful good-table row for name={self.inp.name!r} / "
+                f"config_yaml={self.inp.config_yaml!r} in {self.opt.good_table_path}, "
+                "and --good-commit was not given."
             )
-        return entry.last_good_commit
-
-    def _maybe_update_good_table(self, candidates, first_bad, good) -> None:
-        if not os.getenv("BISECT_UPDATE_GOOD_TABLE"):
-            return
-        idx = candidates.index(first_bad)
-        new_good = candidates[idx - 1] if idx > 0 else good
-        GoodTable(self.opt.good_table_path).update(
-            case_key=self.inp.case_key,
-            scene=self.inp.scene,
-            config_yaml=self.inp.config_yaml,
-            case_name=self.inp.case_name,
-            last_good_commit=new_good.commit,
-            last_good_pr=new_good.pr_number or "",
-        )
+        # Record the paired vLLM commit so the env can be kept in sync (the good
+        # row knows which vLLM that vllm-ascend commit was validated against).
+        self.inp.good_vllm_commit = entry.vllm_commit or None
+        if entry.vllm_commit:
+            logger.info("Good row pairs vllm-ascend %s with vLLM %s",
+                        entry.vllm_ascend_commit[:12], entry.vllm_commit[:12])
+        return entry.vllm_ascend_commit
 
 
 # --------------------------------------------------------------------------- #
@@ -263,8 +270,12 @@ class Bisector:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Auto-bisect a nightly test failure to the first bad commit.")
     p.add_argument("--scene", required=True, choices=list(SCENES))
-    p.add_argument("--config-yaml", required=True, help="CONFIG_YAML_PATH of the failing case")
-    p.add_argument("--case-name", default="", help="pytest -k filter (single-node case id)")
+    p.add_argument("--config-yaml", required=True,
+                   help="CONFIG_YAML_PATH of the failing case file; the whole file "
+                        "(all test_cases) is run each trial")
+    p.add_argument("--name", default=None,
+                   help="nightly case name to match the good-table 'name' column "
+                        "(optional; falls back to matching by yaml/path)")
     p.add_argument("--bad-commit", default=os.getenv("VLLM_ASCEND_REF", "HEAD"))
     p.add_argument("--good-commit", default=None, help="override; else read from good table")
     p.add_argument("--config-base-path", default=os.getenv("CONFIG_BASE_PATH"))
@@ -296,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     inp = BisectInput(
         scene=args.scene,
         config_yaml=args.config_yaml,
-        case_name=args.case_name,
+        name=args.name,
         bad_commit=args.bad_commit,
         config_base_path=args.config_base_path,
         good_commit=args.good_commit,

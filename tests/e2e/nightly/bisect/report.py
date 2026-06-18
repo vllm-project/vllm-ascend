@@ -99,7 +99,7 @@ def write_report_json(
         "case_key": inp.case_key,
         "scene": inp.scene,
         "config_yaml": inp.config_yaml,
-        "case_name": inp.case_name,
+        "name": inp.name,
         "good": _cand(good),
         "bad": _cand(bad),
         "first_bad_commit": first_bad.commit if first_bad else None,

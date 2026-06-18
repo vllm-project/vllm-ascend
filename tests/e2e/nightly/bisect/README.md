@@ -5,18 +5,20 @@ case fails, by binary-searching the `vllm-ascend` history between the last
 known-good commit and the failing commit. It reuses the existing nightly launch
 entries so the bisect reproduces the real nightly environment.
 
+> 中文使用指南见 [`USAGE_zh.md`](./USAGE_zh.md)。
+
 ## How it works
 
 ```
 trigger (case FAIL)
-  -> resolve range: bad = current commit, good = good-table lookup
+  -> resolve range: bad = current commit, good = latest success row in the status table
   -> candidate list = git log --first-parent good..bad   (commit-atomic)
   -> verify endpoints (good must PASS, bad must FAIL)
   -> binary search:
        for each midpoint commit:
-         checkout  (+ pip install only if native/build files changed)
-         run the failing case via the nightly entry
-         read pass_fail / exit code -> PASS | FAIL | SKIP
+         checkout  (+ pip install -e . ONLY if that commit touched native/cpp files)
+         run the WHOLE yaml (all test_cases) via the nightly entry
+         verdict from pytest rc + benchmark_results/*.json
          print [PASS]/[FAIL]/[SKIP] <PR/commit>
          shrink window
   -> report first bad commit + PR
@@ -24,25 +26,30 @@ trigger (case FAIL)
 
 * **Commit-atomic**: each candidate is one mainline commit; the PR number is
   parsed from the `(#NNNN)` subject trailer for display.
-* **Compile optimisation**: a rebuild is triggered only when the delta *since
-  the last successfully built commit* touches native/build-definition files
-  (`*.cpp/*.h/CMakeLists.txt/setup.py/...`). Pure `.py`/yaml changes are picked
-  up live by the editable install — checkout only.
-* **Flaky guard / SKIP**: a FAIL is re-confirmed; an unstable commit or a build
-  failure becomes `SKIP` (like `git bisect skip`) instead of a misleading FAIL.
+* **Whole-YAML granularity**: nightly cannot select a single case, so each trial
+  runs the entire `CONFIG_YAML_PATH` file; FAIL if any case fails.
+* **Compile only on C++ changes**: by default (`--native-check per-commit`) a
+  rebuild happens only when that commit's own diff touches
+  `*.cpp/*.cc/*.cu/*.h/*.hpp/*.cuh`, `csrc/**`, `CMakeLists.txt`, or `setup.py`.
+  Pure `.py`/yaml changes are picked up live by the editable install (vLLM is
+  never touched). `--native-check since-build` widens the check to all changes
+  since the last build (safer across bisect jumps).
+* **SKIP semantics**: a flaky/unconfirmed FAIL, a build failure, or a collection
+  error (pytest rc 2/3/4/5, e.g. a conftest ImportError) becomes `SKIP` instead
+  of a misleading FAIL — like `git bisect skip`.
 
-## Good table
+## Status table (good source, read-only)
 
-A plain CSV at `$BISECT_GOOD_TABLE` (default
-`/root/.cache/nightly_bisect/good_table.csv`), designed to be read at a glance.
-See `good_table.sample.csv`:
+The good commit is read from the nightly status CSV (produced by the pipeline):
 
 ```
-case_key,scene,config_yaml,case_name,last_good_commit,last_good_pr,updated_at
-single_node::DeepSeek-R1-0528-W8A8.yaml::DeepSeek-R1-0528-W8A8-aclgraph,single_node,DeepSeek-R1-0528-W8A8.yaml,DeepSeek-R1-0528-W8A8-aclgraph,<sha>,10442,2026-06-15T02:00:00Z
+name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,time
 ```
 
-`case_key = scene::config_yaml::case_name` is the lookup key.
+For the requested case (matched by `--name` or by `--config-yaml` against
+`yaml/path`), the good commit is the `vLLM-Ascend Git information` of the most
+recent row whose `status` is `success`. Point `--good-table` at it (or
+`$BISECT_GOOD_TABLE`). See `good_table.sample.csv`.
 
 ## Usage
 
@@ -52,8 +59,9 @@ Single-node:
 python -m tests.e2e.nightly.bisect.auto_bisect \
     --scene single_node \
     --config-yaml DeepSeek-R1-0528-W8A8.yaml \
-    --case-name DeepSeek-R1-0528-W8A8-aclgraph \
-    --bad-commit HEAD
+    --name DeepSeek-R1-0528-W8A8 \
+    --bad-commit HEAD \
+    --good-table /path/to/nightly_status.csv
 ```
 
 Multi-node — run on **every** node (master + workers) pointing at a shared
@@ -65,17 +73,23 @@ python -m tests.e2e.nightly.bisect.auto_bisect \
     --scene multi_node \
     --config-yaml Qwen3-235B-W8A8.yaml \
     --bad-commit "$VLLM_ASCEND_REF" \
-    --num-nodes 2
+    --num-nodes 2 \
+    --coord-dir /shared/nightly_bisect/coord
 ```
 
 Common flags: `--good-commit` (skip the table), `--config-base-path`
-(internal/external DP configs), `--fail-confirm-retries`, `--no-verify-good`,
-`--no-verify-bad`. Set `BISECT_UPDATE_GOOD_TABLE=1` to write the discovered
-last-good commit back to the table.
+(internal/external DP configs), `--native-check {per-commit,since-build}`,
+`--force-initial-build`, `--fail-confirm-retries`, `--no-verify-good`,
+`--no-verify-bad`, `--trial-timeout-s`. Full reference: see `USAGE_zh.md` §9.
 
 ## Outputs
 
-Per run, under `$BISECT_WORK_DIR/<case_key>/`:
-- `logs/round<N>_<sha>.log` — build + pytest output per trial
-- `state.json` — resumable search window + cached verdicts
+Per run, under `$BISECT_WORK_DIR/<scene>__<config_yaml>/`:
+- `logs/round<N>_<sha>.log` — build + pytest output per trial (`tail -f` for
+  live progress; the build step is silent on the console)
+- `state.json` — resumable search window + cached verdicts (rerun the same
+  command to resume)
 - `report.json` — final result (first bad commit/PR + full trial history)
+
+Exit code: `0` first-bad found; `2` not found (endpoint check failed / invalid
+range / environment error).

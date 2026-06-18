@@ -12,137 +12,135 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Read/update the "last known good" table.
+"""Read the nightly status table to find a case's last-known-good commit.
 
-The table is a small CSV so it can be opened in any editor / spreadsheet and
-read at a glance. One row per nightly case::
+The table is produced by the nightly pipeline (one row per case per run) with
+these columns::
 
-    case_key,scene,config_yaml,case_name,last_good_commit,last_good_pr,updated_at
+    name, yaml/path, link, status, vLLM Git information, vLLM-Ascend Git information, time
 
-``case_key`` is the join of scene + yaml + case (see ``BisectInput.case_key``)
-and is the lookup key. Reads tolerate a missing file (returns no match);
-updates create the file/parent dirs on demand and rewrite atomically.
+Example rows (columns abbreviated)::
+
+    test_custom_op_multi_card, .../multicard_ops_a2/, <link>, success, <vllm>, <vllm_ascend>, <time>
+    Qwen3.5-397B-A17B-w4a8-mtp, .../Qwen3.5-...-A2.yaml, <link>, failure, <vllm>, <vllm_ascend>, <time>
+
+For a given case (matched by ``name`` or by ``yaml/path``) the last-known-good
+vllm-ascend commit is the ``vLLM-Ascend Git information`` of the most recent row
+whose ``status`` is ``success``. That row also records the paired vLLM commit,
+which lets us keep vLLM in sync while bisecting vllm-ascend.
 """
 
 import csv
 import logging
-import os
-import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-
-import filelock
 
 logger = logging.getLogger(__name__)
 
-FIELDNAMES = [
-    "case_key",
-    "scene",
-    "config_yaml",
-    "case_name",
-    "last_good_commit",
-    "last_good_pr",
-    "updated_at",
-]
+# Column headers, kept tolerant of case/whitespace differences on read.
+COL_NAME = "name"
+COL_PATH = "yaml/path"
+COL_LINK = "link"
+COL_STATUS = "status"
+COL_VLLM = "vLLM Git information"
+COL_VLLM_ASCEND = "vLLM-Ascend Git information"
+COL_TIME = "time"
+
+_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S")
 
 
 @dataclass(frozen=True)
 class GoodEntry:
-    case_key: str
-    scene: str
-    config_yaml: str
-    case_name: str
-    last_good_commit: str
-    last_good_pr: str = ""
-    updated_at: str = ""
+    name: str
+    path: str
+    link: str
+    status: str
+    vllm_commit: str
+    vllm_ascend_commit: str
+    time: str
+
+    @property
+    def is_success(self) -> bool:
+        return self.status.strip().lower() in ("success", "pass", "passed", "ok")
+
+
+def _norm(row: dict[str, str]) -> dict[str, str]:
+    """Lower/strip header keys so minor header variations still match."""
+    return {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+
+
+def _parse_time(value: str) -> datetime:
+    for fmt in _TIME_FORMATS:
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    # Unparseable timestamps sort oldest so they never shadow a real success.
+    return datetime.min.replace(tzinfo=None)
 
 
 class GoodTable:
-    """CSV-backed store mapping a case to its last passing commit."""
+    """Read-only accessor over the nightly status CSV."""
 
     def __init__(self, path: str):
         self.path = Path(path)
-        self._lock = filelock.FileLock(str(self.path) + ".lock")
 
-    # ----------------------------------------------------------------- read
-    def _read_all(self) -> dict[str, GoodEntry]:
+    def _read_all(self) -> list[GoodEntry]:
         if not self.path.exists():
             logger.warning("Good table not found at %s", self.path)
-            return {}
-        entries: dict[str, GoodEntry] = {}
+            return []
+        entries: list[GoodEntry] = []
         with self.path.open(newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                key = (row.get("case_key") or "").strip()
-                if not key:
+            for raw in csv.DictReader(f):
+                row = _norm(raw)
+                name = row.get(COL_NAME.lower(), "")
+                if not name and not row.get(COL_PATH.lower()):
                     continue
-                entries[key] = GoodEntry(
-                    case_key=key,
-                    scene=(row.get("scene") or "").strip(),
-                    config_yaml=(row.get("config_yaml") or "").strip(),
-                    case_name=(row.get("case_name") or "").strip(),
-                    last_good_commit=(row.get("last_good_commit") or "").strip(),
-                    last_good_pr=(row.get("last_good_pr") or "").strip(),
-                    updated_at=(row.get("updated_at") or "").strip(),
+                entries.append(
+                    GoodEntry(
+                        name=name,
+                        path=row.get(COL_PATH.lower(), ""),
+                        link=row.get(COL_LINK.lower(), ""),
+                        status=row.get(COL_STATUS.lower(), ""),
+                        vllm_commit=row.get(COL_VLLM.lower(), ""),
+                        vllm_ascend_commit=row.get(COL_VLLM_ASCEND.lower(), ""),
+                        time=row.get(COL_TIME.lower(), ""),
+                    )
                 )
         return entries
 
-    def lookup(self, case_key: str) -> GoodEntry | None:
-        """Return the last-good entry for ``case_key`` or None."""
-        entry = self._read_all().get(case_key)
-        if entry is None:
-            logger.warning("No good-table entry for case_key=%s", case_key)
-        elif not entry.last_good_commit:
-            logger.warning("Good-table entry for %s has empty commit", case_key)
-            return None
-        return entry
+    @staticmethod
+    def _matches(entry: GoodEntry, name: str | None, config_yaml: str | None) -> bool:
+        if name:
+            return entry.name == name
+        if config_yaml:
+            p = entry.path.rstrip("/")
+            q = config_yaml.rstrip("/")
+            return p.endswith(q) or Path(p).name == Path(q).name
+        return False
 
-    # ---------------------------------------------------------------- write
-    def update(
-        self,
-        *,
-        case_key: str,
-        scene: str,
-        config_yaml: str,
-        case_name: str,
-        last_good_commit: str,
-        last_good_pr: str = "",
-    ) -> None:
-        """Insert or replace the row for ``case_key`` (atomic, lock-guarded)."""
-        with self._lock:
-            entries = self._read_all()
-            entries[case_key] = GoodEntry(
-                case_key=case_key,
-                scene=scene,
-                config_yaml=config_yaml,
-                case_name=case_name,
-                last_good_commit=last_good_commit,
-                last_good_pr=last_good_pr,
-                updated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    def lookup_last_good(
+        self, *, name: str | None = None, config_yaml: str | None = None
+    ) -> GoodEntry | None:
+        """Latest ``success`` row for the case, or None.
+
+        Match by ``name`` when given, otherwise by ``yaml/path`` ending with
+        ``config_yaml`` (or its basename). The newest success row by ``time``
+        wins; its ``vllm_ascend_commit`` is the good bisect endpoint.
+        """
+        rows = [
+            e for e in self._read_all()
+            if self._matches(e, name, config_yaml) and e.is_success and e.vllm_ascend_commit
+        ]
+        if not rows:
+            logger.warning(
+                "No successful good-table row for name=%r config_yaml=%r", name, config_yaml
             )
-            self._write_all(entries)
-        logger.info("Updated good table: %s -> %s", case_key, last_good_commit[:12])
-
-    def _write_all(self, entries: dict[str, GoodEntry]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".csv")
-        try:
-            with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-                writer.writeheader()
-                for entry in sorted(entries.values(), key=lambda e: e.case_key):
-                    writer.writerow(
-                        {
-                            "case_key": entry.case_key,
-                            "scene": entry.scene,
-                            "config_yaml": entry.config_yaml,
-                            "case_name": entry.case_name,
-                            "last_good_commit": entry.last_good_commit,
-                            "last_good_pr": entry.last_good_pr,
-                            "updated_at": entry.updated_at,
-                        }
-                    )
-            os.replace(tmp, self.path)
-        finally:
-            if os.path.exists(tmp):
-                os.remove(tmp)
+            return None
+        best = max(rows, key=lambda e: _parse_time(e.time))
+        logger.info(
+            "Good baseline from table: %s @ %s (vllm-ascend=%s, vllm=%s)",
+            best.name, best.time, best.vllm_ascend_commit[:12], best.vllm_commit[:12],
+        )
+        return best
