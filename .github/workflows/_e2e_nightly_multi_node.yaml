@@ -68,6 +68,11 @@ on:
         type: string
         default: ''
         description: non-empty when triggered by PR /nightly command
+      testcase_timeout:
+        required: false
+        default: 120
+        type: string
+        description: test case execution timeout period,default:120 minutes
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -92,7 +97,7 @@ concurrency:
 jobs:
   e2e:
     name: ${{ inputs.config_file_path }}
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}

@@ -59,6 +59,11 @@ on:
         type: string
         default: ''
         description: PR commit SHA for PR-triggered checkout
+      testcase_timeout:
+        required: false
+        default: 120
+        type: string
+        description: test case execution timeout period,default:120 minutes
     secrets:
       OBS_ACCESS_KEY:
         required: false
@@ -83,7 +88,7 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     container:
       image: ${{ inputs.image }}
     env:
