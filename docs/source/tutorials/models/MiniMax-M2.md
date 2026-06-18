@@ -22,7 +22,6 @@ The following model weights and EAGLE3 weights are available on ModelScope. Sear
 
 | Model | Description | Recommended Hardware | Source |
 |-------|-------------|---------------------|--------|
-| `MiniMax-M2.7` / `MiniMax-M2.5` | BF16 checkpoint | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) or 1× Ascend950 Products (experimental) | [ModelScope](https://modelscope.cn/models/MiniMax/MiniMax-M2.7) |
 | `MiniMax-M2.7-w8a8-QuaRot` / `MiniMax-M2.5-w8a8-QuaRot` | W8A8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) or 1× Ascend950 Products (experimental) | [MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) |
 | `MiniMax-M2.7-w8a8c8-QuaRot` | W8A8C8 quantized version | 1× Atlas 800 A3 (64G × 16) or 1× Atlas 800I A2 (64G × 8) or 1× Ascend950 Products (experimental) | [MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8c8-QuaRot) |
 | `Eagle3` (MiniMax-M2.5/M2.7) | Speculative decoding head model | Matches the base model node count | [MiniMax-M2.7-eagle-model](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) |
@@ -194,7 +193,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --additional-config '{"enable_cpu_binding":true,
                           "enable_fused_mc2":true,
                           "enable_flashcomm1":true,
-                          weight_nz_mode":true}' \
+                          "weight_nz_mode":true}' \
     --enable-expert-parallel \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
@@ -269,31 +268,15 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/",  "num_speculative_tokens":3}'
 ```
 
-Remarks:
+> **Note**: The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.
 
-- `--max-num-seqs` parameter can be adjusted according to actual request conditions.
-- `--max-num-batched-tokens 32768` is applicable to input sequence lengths of 32k or longer.
-- `--max-num-batched-tokens 16384` is applicable to input sequence lengths of 16k.
-- `--max-num-batched-tokens 6144` is applicable to short sequence input scenarios such as 2k and 3.5k.
 - If you need to test with `curl` and tool calling, add the following to the startup command:
 
 ```{code-block} bash
     --enable-auto-tool-choice \
     --tool-call-parser minimax_m2 \
     --reasoning-parser minimax_m2_append_think \
-    --enable-force-include-usage \
 ```
-
-#### Key Parameter Reference
-
-| Parameter | Description | Recommended Range |
-|-----------|-------------|-------------------|
-| `--tensor-parallel-size` | Number of NPUs for tensor parallelism | 1–8 |
-| `--data-parallel-size` | Number of data parallel replicas | 1–4 |
-| `--max-num-seqs` | Maximum concurrent sequences | 16–48 |
-| `--max-model-len` | Maximum model context length | up to 204800 (200k) |
-| `--gpu-memory-utilization` | Fraction of NPU memory for KV cache | 0.85–0.92 |
-| `--speculative_config` | EAGLE3 speculative decoding settings | `"num_speculative_tokens": 1–3` |
 
 ### 5.2 Multi-Node PD Separation Deployment
 
@@ -592,6 +575,8 @@ Expected result: HTTP 200 with a JSON response containing a `tool_calls` field w
 
 ## 7 Accuracy Evaluation
 
+> **Note**: Post-processing parameters (e.g., `max_tokens`, `temperature`, `stop` tokens) should match those defined in the model weight's `generation_config.json`. The recommended maximum output length for GPQA-diamond and AIME2025 is 64k (65536 tokens).
+
 Here are two accuracy evaluation methods.
 
 ### 7.1 Using AISBench
@@ -602,7 +587,6 @@ For details, please refer to [Using AISBench](../../developer_guide/evaluation/u
 
 Using the `gsm8k` dataset as an example test dataset, run the accuracy evaluation for `MiniMax-M2.7-W8A8` in online mode.
 
-> **Note**: Post-processing parameters (e.g., `max_tokens`, `temperature`, `stop` tokens) should match those defined in the model weight's `generation_config.json`. The recommended maximum output length for GPQA-diamond and AIME2025 is 64k (65536 tokens).
 
 1. For `lm_eval` installation, please refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md).
 2. Run `lm_eval` to execute the accuracy evaluation:
@@ -648,22 +632,17 @@ vllm bench serve \
 
 ### 9.1 Recommended Configurations
 
-#### Scenario Overview
+The following configurations are validated on the self-test report (AR20260326132822) and are categorized by use case.
 
-| Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
-|----------|----------------|------------|----------------|------------------------|
-| Short Context High Throughput (3.5K → 1.5K) | 1P2D PD separation | 24 (A3) | MiniMax-M2.7-W8A8 | P: DP4TP4EP16, D: DP8TP4EP32 |
-| Long Context (128K → 1K, prefix cache 90%) | 1P1D PD separation | 16 (A3) | MiniMax-M2.7-W8A8 | P: DP2TP8, D: DP2TP8 |
+| Scenario | Input/Output | Deployment | NPUs | P Config | D Config | Max Batched Tokens | Max Seqs (P/D) | Max Model Len | EAGLE3 | FUSED_MC2 | FlashComm1 | Async Scheduling |
+|----------|-------------|------------|------|----------|----------|-------------------|----------------|---------------|--------|-----------|------------|------------------|
+| Short Seq High Throughput | 3.5K → 1.5K | 1P2D PD separation | 24 (A3) | DP8TP2EP16 | DP32TP1EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |
+| Short Seq Low Latency | 3.5K → 1.5K | 1P2D PD separation | 24 (A3) | DP4TP4EP16 | DP8TP4EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |
+| Long Seq High Throughput | 128K → 1K | 1P1D PD separation | 16 (A3) | DP2TP8EP16 | DP2TP8EP16 | 16384 | 64 / 16 | 200k | 3 | On | On | On |
+| Long Seq Low Latency | 128K → 1K | 1P2D PD separation | 24 (A3) | DP2TP8EP16 | DP4TP8EP32 | 16384 | 64 / 16 | 200k | 3 | On | On | On |
+| A2 (8-NPU) | - | A2 Single-node | 8 (A2) | - | - | 16384 | 32 | 32k | 3 | Off | On | On |
 
-#### Detailed Configuration
-
-| Scenario | Configuration | NPUs | TP | DP | EP | Max Num Batched Tokens | Max Num Seqs | Max Model Len | MTP (EAGLE3) | FUSED_MC2 | FlashComm1 | Async Scheduling |
-|----------|---------------|------|----|----|----|--------------------|--------------|---------------|--------------|-----------|------------|------------------|
-| Short Context (3.5K→1.5K) | 1P2D P node | 16 | 4 | 4 | 16 | 16384 | 128 | 32k | 3 | On | On | On |
-| Short Context (3.5K→1.5K) | 1P2D D node | 8 | 4 | 8 | 32 | 16384 | 128 | 32k | 3 | On | On | On |
-| Long Context (128K→1K) | 1P1D P node | 16 | 8 | 2 | 16 | 16384 | 64 | 200k | 3 | On | On | On |
-| Long Context (128K→1K) | 1P1D D node | 16 | 8 | 2 | 16 | 16384 | 16 | 200k | 3 | On | On | On |
-| A2 (8-NPU) | A2 Single-node | 8 | 8 | 1 | 8 | 16384 | 32 | 32k | 3 | Off | On | On |
+> **Note**: The prefix cache hit rate for short-sequence tests is 0%; for long-sequence tests it is 90%. Adjust `max-num-seqs`, `max-model-len`, and `max-num-batched-tokens` based on your actual workload.
 
 ### 9.2 Tuning Guidelines
 
@@ -689,8 +668,8 @@ The following optimizations are enabled by default and require no additional con
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |
-| FlashComm v1 | High-concurrency, TP scenarios | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather | Threshold protection: only takes effect when the actual number of tokens exceeds the threshold |
-| Fused MC2 | TP ≥ 4 scenarios | `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |
+| FlashComm v1 | High-concurrency, TP scenarios | `--additional-config '{"enable_flashcomm1": true}'` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather | Threshold protection: only takes effect when the actual number of tokens exceeds the threshold |
+| Fused MC2 | TP ≥ 4 scenarios | `--additional-config '{"enable_fused_mc2": true}'` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |
 | Balanced Scheduling | High DP scenarios | `export VLLM_ASCEND_BALANCE_SCHEDULING=1` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`0`). Set to `1` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
 | EAGLE3 Speculative Decoding | All scenarios | `--speculative_config '{"method": "eagle3", "model": "/path/to/Eagle3/", "num_speculative_tokens": 3}'` | Uses a draft model to predict future tokens | 1–3 tokens for long context; 3 tokens for short context |
 | jemalloc Preload | All scenarios | `export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2` | Replaces default memory allocator to reduce fragmentation | Ensure jemalloc is installed in the container |
