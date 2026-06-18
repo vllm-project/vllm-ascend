@@ -142,22 +142,19 @@ Expected result: The version information is displayed, matching the pulled image
 
 If you prefer not to use the Docker image, you can build from source:
 
-1. Install vLLM:
+1. Clone and install vLLM:
 
    ```bash
-   pip install vllm
+   git clone https://github.com/vllm-project/vllm.git
+   cd vllm
+   pip install -e .
    ```
 
-2. Clone the vLLM-Ascend repository:
+2. Clone and install the vLLM-Ascend repository:
 
    ```bash
    git clone https://github.com/vllm-project/vllm-ascend.git
    cd vllm-ascend
-   ```
-
-3. Install in development mode:
-
-   ```bash
    pip install -e .
    ```
 
@@ -173,6 +170,8 @@ Expected result: The version information is displayed, confirming a successful i
 If deploying a multi-node environment, set up the environment on each node.
 :::
 
+For more details, please refer to the [Installation Guide](../../installation.md).
+
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
@@ -180,6 +179,8 @@ If deploying a multi-node environment, set up the environment on each node.
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
 
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
+
+**Atlas 800I A2/A3:**
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -207,13 +208,53 @@ vllm serve your_model_path \
     --port 8000
 ```
 
-:::{note}
-This startup command is compatible with Atlas 800I A2, A3, and A5. For A2 and A5, remove the `export HCCL_OP_EXPANSION_MODE="AIV"` line.
+**Atlas 800I A5:**
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=1
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=1024
+export HCCL_CONNECT_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=600
+export HCCL_ALGO=level0:fullmesh
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export CPU_AFFINITY_CONF=2
+export TASK_QUEUE_ENABLE=1
+export TRITON_DISABLE_FFTS=1
+
+vllm serve your_model_path \
+    --host 0.0.0.0 \
+    --served-model-name qwen3 \
+    --trust-remote-code \
+    --max-num-seqs 200 \
+    --max-model-len 40960 \
+    --max-num-batched-tokens 40960 \
+    --tensor-parallel-size 1 \
+    --port 8000 \
+    --distributed_executor_backend "mp" \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --quantization ascend \
+    --gpu-memory-utilization 0.9 \
+    --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config": {"fuse_qknorm_rope": false}}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 9, 18, 27, 54, 108]}' \
+    --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 2}'
+```
+
+:::{tip}
+For parameter details, refer to:
+
+- [vLLM CLI documentation](https://docs.vllm.ai/en/stable/cli/) — standard serve parameters (`--host`, `--port`, `--max-model-len`, etc.)
+- [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`VLLM_ASCEND_ENABLE_NZ`, `HCCL_*`, etc.)
+- [Additional Configuration](../../user_guide/configuration/additional_config.md) — `--additional-config` format and options
 :::
 
 **Service Verification:**
 
-After the service is started, verify it is running by sending a prompt. Refer to Section 6 for a usage example.
+After the service is started, verify it is running by sending a prompt. Refer to [Section 6](#functional-verification) for a usage example.
 
 ## 6 Functional Verification
 
@@ -236,13 +277,22 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
+:::{note}
+Adjust the following fields based on your deployment:
+
+- **URL** (`http://localhost:8000`): Replace `localhost` and `8000` with your server IP and the `--port` value from the `vllm serve` command.
+- **`model`**: Must match the `--served-model-name` value from the `vllm serve` command (e.g., `qwen3`).
+:::
+
 Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
 
 ## 7 Accuracy Evaluation
 
 ### Using AISBench
 
-For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md). AISBench is not available on PyPI — install from source:
+For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
+
+**Install from source:**
 
 ```bash
 git clone https://github.com/AISBench/benchmark.git
@@ -282,36 +332,29 @@ models = [
 Run the accuracy evaluation using the `gsm8k` dataset as an example:
 
 ```shell
-ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_4_shot_cot_str --mode all --dump-eval-details
+ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_4_shot_cot_str --mode all --dump-eval-details --debug
 ```
 
 > The `--models` parameter value corresponds to the `abbr` field in the configuration file above. Adjust `max_out_len`, `batch_size`, and dataset tasks based on your scenario. Since Qwen3 is a thinking model, `max_out_len` should be at least 8192 to avoid truncation during reasoning.
 
-Before running the evaluation, download the GSM8K dataset and place it under the `ais_bench/datasets/gsm8k/` directory:
+For dataset preparation, please refer to the [AISBench Datasets Guide](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/get_started/datasets.md).
 
-```bash
-mkdir -p ais_bench/datasets/gsm8k
-cd ais_bench/datasets/gsm8k
-wget https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl
-wget https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl
-```
+:::{note}
+vLLM-Ascend also supports the following evaluation tools:
 
-<!-- TODO: Add accuracy evaluation results when available -->
+- [lm_eval](../../developer_guide/evaluation/using_lm_eval.md)
+- [OpenCompass](../../developer_guide/evaluation/using_opencompass.md)
+- [EvalScope](../../developer_guide/evaluation/using_evalscope.md)
+:::
 
-### Using Language Model Evaluation Harness
+**Accuracy Results (Atlas 800I A3, vLLM-Ascend v0.21.0, W8A8):**
 
-Using the `gsm8k` dataset as an example, run the accuracy evaluation in online mode:
-
-1. For `lm_eval` installation, please refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md).
-2. Run `lm_eval`:
-
-   ```shell
-   lm_eval \
-     --model local-completions \
-     --model_args model=your_model_path,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
-     --tasks gsm8k \
-     --output_path ./
-   ```
+| Dataset | Metric | Score |
+|---------|--------|-------|
+| GSM8K | accuracy (4-shot CoT) | 92.87% |
+| GPQA-Diamond | accuracy (0-shot CoT) | TBD |
+| LiveCodeBench | pass@1 (0-shot) | TBD |
+| AIME 2024 | accuracy (0-shot) | TBD |
 
 ## 8 Performance
 
@@ -319,7 +362,39 @@ Using the `gsm8k` dataset as an example, run the accuracy evaluation in online m
 
 For setup details, please refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation).
 
-You can use a synthetic dataset to evaluate performance with custom input/output length distributions. First, configure the synthetic dataset distribution file `ais_bench/datasets/synthetic/synthetic_config.py`:
+First, configure the model for streaming performance testing (`ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py`):
+
+```python
+from ais_bench.benchmark.models import VLLMCustomAPIChat
+from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
+
+models = [
+    dict(
+        attr="service",
+        type=VLLMCustomAPIChat,
+        abbr='vllm-api-stream-chat',
+        path="your_model_path",
+        model="qwen3",
+        stream=True,
+        request_rate=0,
+        retry=2,
+        host_ip="localhost",
+        host_port=8000,
+        max_out_len=1500,
+        batch_size=32,
+        trust_remote_code=True,
+        generation_kwargs=dict(
+            temperature=0.01,
+            ignore_eos=True,
+        ),
+        pred_postprocessor=dict(type=extract_non_reasoning_content),
+    )
+]
+```
+
+> Key differences from the accuracy config: `stream=True`, `ignore_eos=True` (ensures output reaches `max_out_len` for consistent TPOT measurement), and `batch_size` controls concurrency.
+
+Then, configure the synthetic dataset distribution (`ais_bench/datasets/synthetic/synthetic_config.py`). Adjust the configuration based on your actual scenario. Note that random synthetic data is not suitable for benchmarking scenarios where prefix caching is enabled, as random inputs produce zero cache hit rate.
 
 ```python
 synthetic_config = {
@@ -328,11 +403,11 @@ synthetic_config = {
     "StringConfig": {
         "Input": {
             "Method": "uniform",
-            "Params": {"MinValue": 200, "MaxValue": 2048}
+            "Params": {"MinValue": 3500, "MaxValue": 3500}
         },
         "Output": {
             "Method": "uniform",
-            "Params": {"MinValue": 128, "MaxValue": 2048}
+            "Params": {"MinValue": 1500, "MaxValue": 1500}
         }
     }
 }
@@ -341,7 +416,7 @@ synthetic_config = {
 Then run the performance evaluation:
 
 ```shell
-ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf
+ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf --debug
 ```
 
 > The `--models` value should match the `abbr` in your model config file. Use `--num-prompts` to limit the number of test requests.
