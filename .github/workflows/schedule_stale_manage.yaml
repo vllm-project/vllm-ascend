@@ -8,7 +8,7 @@ on:
 jobs:
   remove-wait-feedback-on-comment:
     if: ${{ github.event_name == 'issue_comment' && contains(github.event.issue.labels.*.name, 'wait-feedback') }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     permissions:
       issues: write
     steps:
@@ -27,7 +27,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   stale:
     if: ${{ github.event_name == 'schedule' }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     permissions:
       actions: write
       issues: write
