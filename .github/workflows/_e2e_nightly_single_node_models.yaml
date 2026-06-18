@@ -74,6 +74,9 @@ jobs:
     name: ${{inputs.model_list}} accuracy test
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.is_run }}
+    # PR-triggered nightly runs carry a request_id and use a 4-hour timeout;
+    # workflow-triggered nightly runs keep the default 2-hour timeout.
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || 120 }}
     container:
       image: "${{ inputs.image }}"
       env:
