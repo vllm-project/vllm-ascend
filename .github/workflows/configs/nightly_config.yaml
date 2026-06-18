@@ -83,6 +83,10 @@ a2:
         model_list:
           - Qwen2.5-Math-RM-72B
           - Hunyuan-A13B-Instruct
+      - name: pr-accuracy-group-3
+        os: linux-aarch64-a2b3-2
+        model_list:
+          - AI21-Jamba-1.5-Mini
 
 a3:
   multi_node:
