@@ -994,15 +994,18 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 with torch_npu.npu.stream(cp_chunkedprefill_comm_stream()):
                     prefill_query_all = self._prefill_query_all_gather(attn_metadata, prefill_query.clone())
 
+            # Record the compute-stream gate once before any attention phase
+            # starts, so the layerwise transfer thread can overlap H2D copies
+            # with the prefill computation.
+            record_attention_compute_start()
+
             if self.pcp_size > 1:
                 # Scenario of Enabling PCP or PCP&DCP
                 # prepare qkv and compute the head part // overlap the communication of all gather q
                 data_head, data_tail = self._forward_prefill_cp_pre(prefill_query, key, value, attn_metadata)
-                record_attention_compute_start()
                 output_head, lse_head = self._forward_prefill_cp_attn(data_head, True, attn_metadata)
             else:
                 # Scenario of Enabling DCP Individually
-                record_attention_compute_start()
                 attn_output_prefill, attn_lse_prefill = torch.ops.npu.npu_fused_infer_attention_score(
                     prefill_query,
                     key,
@@ -1023,7 +1026,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             if has_chunked_context:
                 torch.npu.current_stream().wait_stream(cp_chunkedprefill_comm_stream())
                 # computation of context
-                record_attention_compute_start()
                 context_output = self._compute_prefill_context(prefill_query_all, kv_cache, attn_metadata)
                 # Note(qcs): (output, lse) -> [Seq, Head_num, Head_dim+1] -> [Head_num, Head_dim+1, Seq]
                 local_context_output = torch.cat(context_output, dim=-1).permute([1, 2, 0]).contiguous()
@@ -1035,7 +1037,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             if self.pcp_size > 1:
                 # compute the tail part and reorg output&lse // overlap the communication of output
-                record_attention_compute_start()
                 output_tail, lse_tail = self._forward_prefill_cp_attn(data_tail, False, attn_metadata)
 
                 attn_output_prefill, attn_lse_prefill = self._forward_prefill_cp_post(
