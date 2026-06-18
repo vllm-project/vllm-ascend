@@ -2,81 +2,8 @@
 
 # SPDX-License-Identifier: Apache-2.0
 #
-# Tutorial: Dynamic Bucketing-Based Hybrid Load Balance Proxy Server
-#
-# This proxy server distributes requests across multiple vLLM servers running
-# for large language model inference. For each request it estimates a load
-# score, picks the least-loaded backend instance, and can optionally split
-# the backend pool into a short-request group and a long-request
-# group (dynamic bucket load balancing).
-#
-# Prerequisites:
-# - Python 3.10+
-# - Install dependencies:
-#     pip install "fastapi<0.124.0" httpx uvicorn
-#
-# Step 1: Start Your Backend Servers
-# ----------------------------------
-# Start at least two vLLM servers , each as a separate process on its own port.
-# The proxy also works with a single backend, but load balancing is only
-# meaningful with two or more.
-#
-#   vllm serve --host 0.0.0.0 --port 8100 ... # vLLM Server0
-#   vllm serve --host 0.0.0.0 --port 8101 ... # vLLM Server1
-#
-# Step 2: Start the Proxy Server
-# ------------------------------
-# From examples/dynamic_bucket_load_balancer/, point the proxy at each backend
-# with --server-hosts / --server-ports:
-#
-#   python hybrid_proxy_server.py \
-#     --host 0.0.0.0 --port 8000 \
-#     --server-hosts 127.0.0.1 127.0.0.1 \
-#     --server-ports 8100 8101
-#
-# This starts the proxy on port 8000 and load balances across the two backends.
-#
-# To enable dynamic bucket load balancing (split the pool into short/long groups),
-# add --enable-dynamic-bucket. The server count must be >= 2 so each bucket has at
-# least one instance:
-#
-#   python hybrid_proxy_server.py \
-#     --host 0.0.0.0 --port 8000 \
-#     --server-hosts 127.0.0.1 127.0.0.1 127.0.0.1 127.0.0.1 \
-#     --server-ports 8100 8101 8102 8103 \
-#     --enable-dynamic-bucket \
-#     --server-group-threshold 32768
-#
-# Step 3: Send a Request to the Proxy
-# -----------------------------------
-# Send OpenAI-compatible requests to the proxy. For example:
-#
-#   curl -X POST http://localhost:8000/v1/completions \
-#     -H "Content-Type: application/json" \
-#     -d '{
-#           "model": "your-model",
-#           "prompt": "The quick brown fox jumps over the lazy dog",
-#           "max_tokens": 16
-#         }'
-#
-# Or for chat completions:
-#
-#   curl -X POST http://localhost:8000/v1/chat/completions \
-#     -H "Content-Type: application/json" \
-#     -d '{
-#           "model": "your-model",
-#           "messages": [{"role": "user", "content": "Hello!"}],
-#           "max_tokens": 16
-#         }'
-#
-# Step 4: Health Check
-# --------------------
-# Check that the proxy is running and how many backends it fronts:
-#
-#   curl http://localhost:8000/healthcheck
-#
-# Returns a JSON object, e.g.:
-#   {"status": "ok", "server_instances": 2}
+# Dynamic bucketing-based hybrid load balance proxy server.
+# See README.md in this directory for the tutorial and usage.
 
 import argparse
 import asyncio
