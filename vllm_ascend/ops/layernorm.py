@@ -22,12 +22,16 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormG
 
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
+from vllm_ascend.utils import HAS_ACLNN_ADD_RMS_NORM_BIAS, enable_custom_op, get_weight_prefetch_method
 
 
 def _is_missing_aclnn_kernel_error(exc: RuntimeError) -> bool:
     msg = str(exc)
     return "not in libopapi.so" in msg or ("libopapi.so" in msg and "not found" in msg)
+
+
+def _can_use_add_rms_norm_bias_custom_op() -> bool:
+    return enable_custom_op() and HAS_ACLNN_ADD_RMS_NORM_BIAS
 
 
 class AscendRMSNorm(RMSNorm):
@@ -74,7 +78,7 @@ class AscendRMSNorm(RMSNorm):
 
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            if enable_custom_op():
+            if _can_use_add_rms_norm_bias_custom_op():
                 try:
                     x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                         x, residual, self.weight, self.bias, self.variance_epsilon
@@ -110,7 +114,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            if enable_custom_op():
+            if _can_use_add_rms_norm_bias_custom_op():
                 try:
                     x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                         x, residual, 1.0 + self.weight, None, self.variance_epsilon

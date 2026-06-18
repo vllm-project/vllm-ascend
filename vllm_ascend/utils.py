@@ -23,6 +23,7 @@ import functools
 import json
 import math
 import os
+import ctypes
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
@@ -125,6 +126,19 @@ def is_310p():
 
 def is_950():
     return get_ascend_device_type() == AscendDeviceType.A5
+
+
+@functools.cache
+def has_aclnn_kernel(kernel_name: str) -> bool:
+    try:
+        libopapi = ctypes.CDLL("libopapi.so")
+    except OSError:
+        return False
+    return hasattr(libopapi, kernel_name) and hasattr(libopapi, f"{kernel_name}GetWorkspaceSize")
+
+
+HAS_ACLNN_ADD_RMS_NORM_BIAS = has_aclnn_kernel("aclnnAddRmsNormBias")
+HAS_ACLNN_MOE_INIT_ROUTING_CUSTOM = has_aclnn_kernel("aclnnMoeInitRoutingCustom")
 
 
 def _mark_op_side_effectful(op: Any) -> None:
