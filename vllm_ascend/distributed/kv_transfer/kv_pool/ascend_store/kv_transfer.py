@@ -962,7 +962,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
                     self.set_finished_request(req_id)
 
         assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
-        logger.debug(">>>>>>>>>>>>>>>>>>>> set key save layer %d", layer_id)
+        logger.debug("Key-based layer save event set: layer %d", layer_id)
         self.layer_save_finished_events[layer_id].set()
         transfer_tasks.clear()
         self.request_queue.task_done()
@@ -1006,7 +1006,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
     def _wait_for_save(self, layer_id: int) -> None:
         while not self.layer_save_finished_events[layer_id].wait(timeout=10):
             logger.info("Layerwise %d save wait timed out, keep waiting before load", layer_id)
-        logger.debug(">>>>>>>>>>>>>>>>>>>> clear key save layer %d", layer_id)
+        logger.debug("Key-based layer save event cleared: layer %d", layer_id)
         self.layer_save_finished_events[layer_id].clear()
 
     def _handle_request(  # type: ignore[override]
@@ -1068,7 +1068,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
                     self.set_finished_request(req_id)
 
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
-        logger.debug(">>>>>>>>>>>>>>>>>>>> set key load layer %d", layer_id)
+        logger.debug("Key-based layer load event set: layer %d", layer_id)
         self.layer_load_finished_events[layer_id].set()
         data.transfer_tasks.clear()
         self.request_queue.task_done()
@@ -1157,7 +1157,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         if shared is None:
             layer_id = task.layer_id
             assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
-            logger.debug(">>>>>>>>>>>>>>>>>>>> set save layer %d", layer_id)
+            logger.debug("Layer save event set: layer %d", layer_id)
             self.layer_save_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
@@ -1184,7 +1184,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             if self.try_finish_and_delete_stored_request(req_id):
                 self.set_finished_request(req_id)
         assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
-        logger.debug(">>>>>>>>>>>>>>>>>>>> set save layer %d", layer_id)
+        logger.debug("Layer save event set: layer %d", layer_id)
         self.layer_save_finished_events[layer_id].set()
         transfer_tasks.clear()
         self.request_queue.task_done()
@@ -1271,10 +1271,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             if wait_for_save is not None:
                 while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
                     logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
-                logger.debug(">>>>>>>>>>>>>>>>>>>> clear save layer %d", wait_for_save)
+                logger.debug("Layer save event cleared: layer %d", wait_for_save)
                 self.layer_save_finished_events[wait_for_save].clear()
             assert not self.layer_load_finished_events[layer_id].is_set()
-            logger.debug(">>>>>>>>>>>>>>>>>>>> set load layer %d", layer_id)
+            logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
@@ -1289,7 +1289,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             req_meta = self.layer_batch_builder.build(task)
         if req_meta is None:
             assert not self.layer_load_finished_events[layer_id].is_set()
-            logger.debug(">>>>>>>>>>>>>>>>>>>> set load layer %d", layer_id)
+            logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
@@ -1298,7 +1298,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         if wait_for_save is not None:
             while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
                 logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
-            logger.debug(">>>>>>>>>>>>>>>>>>>> clear save layer %d", wait_for_save)
+            logger.debug("Layer save event cleared: layer %d", wait_for_save)
             self.layer_save_finished_events[wait_for_save].clear()
 
         if attention_start_gate is not None:
@@ -1333,7 +1333,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 if is_last_chunk:
                     self.set_finished_request(req_id)
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
-        logger.debug(">>>>>>>>>>>>>>>>>>>> set load layer %d", layer_id)
+        logger.debug("Layer load event set: layer %d", layer_id)
         self.layer_load_finished_events[layer_id].set()
         transfer_tasks.clear()
         self.request_queue.task_done()
