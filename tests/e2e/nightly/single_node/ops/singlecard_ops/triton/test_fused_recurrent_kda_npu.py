@@ -15,7 +15,6 @@ import torch.nn.functional as F
 import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.triton.kda.kda import fused_recurrent_kda
-from vllm_ascend.ops.triton.kda.l2norm import l2norm_fwd
 
 DEVICE = "npu"
 
@@ -23,6 +22,12 @@ DEVICE = "npu"
 # FP accumulation differences on NPU triton-ascend.
 NPU_RMSE_RATIO_O = 0.005
 NPU_RMSE_RATIO_HT = 0.005
+
+
+def reference_l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    dtype = x.dtype
+    x = x.to(torch.float32)
+    return (x * torch.rsqrt(torch.sum(x * x, dim=-1, keepdim=True) + eps)).to(dtype)
 
 
 def naive_recurrent_kda(
@@ -143,8 +148,8 @@ def test_fused_recurrent_kda(
     ref_states = []
     for i in range(N):
         s, e = cu_seqlens[i], cu_seqlens[i + 1]
-        q_i = l2norm_fwd(q[:, s:e].contiguous())
-        k_i = l2norm_fwd(k[:, s:e].contiguous())
+        q_i = reference_l2norm(q[:, s:e].contiguous())
+        k_i = reference_l2norm(k[:, s:e].contiguous())
         # Kernel state [H, V, K] -> naive [H, K, V]
         init_state_i = h0[s].transpose(-1, -2).unsqueeze(0)
         o_i, ht_i = naive_recurrent_kda(
@@ -238,8 +243,8 @@ def test_fused_recurrent_kda_decode_inplace(
     ref_states = []
     for i in range(N):
         slot = i + 1
-        q_i = l2norm_fwd(q[:, i : i + 1].contiguous())
-        k_i = l2norm_fwd(k[:, i : i + 1].contiguous())
+        q_i = reference_l2norm(q[:, i : i + 1].contiguous())
+        k_i = reference_l2norm(k[:, i : i + 1].contiguous())
         init_state_i = state_buf[slot].transpose(-1, -2).unsqueeze(0)
         o_i, ht_i = naive_recurrent_kda(
             q_i,
@@ -326,8 +331,8 @@ def test_fused_recurrent_kda_fp32(
     ref_states = []
     for i in range(N):
         s, e = cu_seqlens[i], cu_seqlens[i + 1]
-        q_i = l2norm_fwd(q[:, s:e].contiguous())
-        k_i = l2norm_fwd(k[:, s:e].contiguous())
+        q_i = reference_l2norm(q[:, s:e].contiguous())
+        k_i = reference_l2norm(k[:, s:e].contiguous())
         init_state_i = h0[s].transpose(-1, -2).unsqueeze(0)
         o_i, ht_i = naive_recurrent_kda(
             q_i,
