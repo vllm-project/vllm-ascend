@@ -808,6 +808,7 @@ class MooncakeLayerwiseConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int], list[list[int]]]] = {}
         self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
+        self.need_truncate = self._has_attn_mamba_hybrid_cache(kv_cache_config)
         self.executor = ThreadPoolExecutor(32)
         tls_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("tls_config", {})
         ssl_keyfile = tls_config.get("ssl_keyfile")
@@ -823,6 +824,63 @@ class MooncakeLayerwiseConnectorScheduler:
             )
         else:
             self.metaserver_client = httpx.Client(limits=httpx.Limits(max_connections=100000), timeout=None)
+
+    @staticmethod
+    def _iter_kv_cache_specs(kv_cache_config: KVCacheConfig):
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                yield from kv_cache_spec.kv_cache_specs.values()
+            else:
+                yield kv_cache_spec
+
+    @classmethod
+    def _has_attn_mamba_hybrid_cache(cls, kv_cache_config: KVCacheConfig) -> bool:
+        has_attn = False
+        has_mamba = False
+        for kv_cache_spec in cls._iter_kv_cache_specs(kv_cache_config):
+            has_attn = has_attn or isinstance(kv_cache_spec, AttentionSpec)
+            has_mamba = has_mamba or isinstance(kv_cache_spec, MambaSpec)
+        return has_attn and has_mamba
+
+    def _hybrid_prefill_token_count(self, num_prompt_tokens: int) -> int:
+        if self.need_truncate and num_prompt_tokens > 1:
+            return num_prompt_tokens - 1
+        return num_prompt_tokens
+
+    def _truncate_request_for_hybrid_prefill(self, request: "Request") -> None:
+        params = request.kv_transfer_params
+        if (
+            params is None
+            or not self.need_truncate
+            or params.get("_p_side_truncated")
+            or getattr(request, "num_prompt_tokens", len(request.prompt_token_ids or [])) <= 1
+        ):
+            return
+
+        if request.prompt_token_ids is not None:
+            request.prompt_token_ids.pop()
+        elif request.prompt_embeds is not None:
+            request.prompt_embeds = request.prompt_embeds[:-1]
+        else:
+            return
+
+        request._all_token_ids.pop()
+        request.num_prompt_tokens -= 1
+        request.max_tokens = 1
+        params["_p_side_truncated"] = True
+
+    def _trim_hybrid_remote_block_ids(self, block_ids: tuple[list[int], ...], prompt_len: int) -> tuple[list[int], ...]:
+        if not self.need_truncate or prompt_len <= 1:
+            return block_ids
+
+        trimmed_block_ids: list[list[int]] = []
+        for group_block_ids, block_size in zip(block_ids, self.block_size):
+            if prompt_len % block_size == 1:
+                trimmed_block_ids.append(list(group_block_ids[:-1]))
+            else:
+                trimmed_block_ids.append(list(group_block_ids))
+        return tuple(trimmed_block_ids)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
@@ -850,9 +908,11 @@ class MooncakeLayerwiseConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % min(self.block_size) == 0
-            # Note: We use the full token count as transmit data here.
-            count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
+            count = max(self._hybrid_prefill_token_count(len(request.prompt_token_ids)) - num_computed_tokens, 0)
             return count, count > 0
+
+        if params is not None and params.get("do_remote_decode"):
+            self._truncate_request_for_hybrid_prefill(request)
 
         # No remote prefill for this request.
         return 0, False
@@ -868,6 +928,7 @@ class MooncakeLayerwiseConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             do_virtual = params.get("do_virtual", False)
             local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
+            remote_block_ids = self._trim_hybrid_remote_block_ids(local_block_ids, len(request.prompt_token_ids))
             remote_cached_tokens = request.num_computed_tokens
             # Get unhashed blocks to pull from remote.
             logger.debug(
@@ -891,7 +952,7 @@ class MooncakeLayerwiseConnectorScheduler:
                 request_id=external_req_id,
                 do_remote_prefill=False,
                 do_remote_decode=True,
-                remote_block_ids=local_block_ids,
+                remote_block_ids=remote_block_ids,
                 remote_block_size=self.block_size,
                 remote_engine_id=self.engine_id,
                 remote_host=self.side_channel_host,

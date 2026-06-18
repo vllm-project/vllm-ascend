@@ -33,16 +33,10 @@ on:
         type: choice
         options:
           - main
+          - v0.23.0rc1
+          - v0.22.1rc1
           - v0.21.0rc1
           - v0.20.2rc1
-          - v0.19.1rc1
-          - v0.18.0
-          - v0.18.0rc1
-          - v0.17.0rc1
-          - v0.16.0rc1
-          - v0.15.0rc1
-          - v0.14.0rc1
-          - v0.13.0
 
 jobs:
   build_and_release_code:

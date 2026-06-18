@@ -25,7 +25,6 @@ from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
-    attention_calculation_stream,
     get_ascend_device_type,
     npu_stream_switch,
     olora_tp_enable,
@@ -1435,9 +1434,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self.attn_sink = kwargs["attn_sink"]
 
         ascend_config = get_ascend_config()
-        self.multistream_dsa_preprocess = ascend_config.multistream_dsa_preprocess
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
-        self.prefill_comm_compute_overlap = ascend_config.prefill_comm_compute_overlap
         self.vllm_config = get_current_vllm_config()
 
         # indexer param
@@ -1483,51 +1480,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             "use_index_cache",
             False,
         )
-
-    def dsa_warmup_with_multistream(self, hidden_states: torch.Tensor) -> None:
-        """
-        Warmup function for DSA profiling run.
-        When dual-stream is enabled, the aux stream runs ops during forward that have never been
-        exercised during profiling. This warmup ensures all aux-stream op patterns are captured
-        for ACL graph compatibility.
-        """
-        if hasattr(self, "multistream_dsv4_dsa_overlap") and self.multistream_dsv4_dsa_overlap:
-            hidden_states_dummy = torch.zeros(
-                1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device
-            )
-            aux_stream = dsv4_dsa_overlap_stream()
-            e_warmup = torch.npu.current_stream().record_event()
-            with npu_stream_switch(aux_stream, enabled=True):
-                torch.npu.current_stream().wait_event(e_warmup)
-                if hasattr(self.wkv, "weight_scale") and self.wkv.weight.dtype == torch.int8:
-                    kv_q_dummy, kv_s_dummy = torch_npu.npu_dynamic_quant(hidden_states_dummy)
-                    _ = torch_npu.npu_quant_matmul(
-                        kv_q_dummy,
-                        self.wkv.weight,
-                        self.wkv.weight_scale,
-                        pertoken_scale=kv_s_dummy,
-                        output_dtype=hidden_states.dtype,
-                    )
-                else:
-                    _ = self.cv_wkv.quantize(hidden_states_dummy)
-                    _ = self.cv_wkv.matmul(hidden_states_dummy, None)
-                assert self.rope_head_dim is not None
-                kv_dummy = torch.zeros(
-                    1, self.nope_head_dim + self.rope_head_dim, dtype=hidden_states.dtype, device=hidden_states.device
-                )
-                _ = self.kv_norm(kv_dummy)
-
-                # indexer module aux stream ops
-                # Part1 aux: kv_quant + scatter (device-dispatched via DeviceOperator)
-                # In profiling stage, create dummy tensors to ensure ACL graph captures scatter operator.
-                if self.compress_ratio == 4 and self.indexer is not None:
-                    slot_mapping_dummy = torch.zeros(1, dtype=torch.int64, device=hidden_states.device)
-                    DeviceOperator.warmup_indexer_quant_scatter(hidden_states_dummy, slot_mapping_dummy)
-
-                    # Warm up weights_proj on the aux stream.
-                    _ = self.weights_proj(hidden_states_dummy)
-
-            torch.npu.current_stream().wait_stream(aux_stream)
 
     def _get_indexcache_topk_indices(self, num_tokens: int, offset: int = 0) -> torch.Tensor:
         if self.topk_indices_buffer is None:
@@ -1592,25 +1544,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         decode_tokens = attn_metadata[0].num_decode_tokens
         actual_tokens = attn_metadata[0].num_actual_tokens
 
-        # Delay allgather optimization: when prefill_comm_compute_overlap is
-        # enabled and the batch is pure-prefill, wq_a/wkv can compute on the
-        # local SP partition first, then allgather smaller intermediates.
-        # Mutually exclusive with multistream_dsv4_dsa_overlap (multistream wins).
-        need_prefill_gather = (
-            self.prefill_comm_compute_overlap
-            and not self.multistream_dsv4_dsa_overlap
-            and need_gather_q_kv
-            and has_prefill
-            and not has_decode
-        )
-        if need_prefill_gather:
-            prefill_hidden_states = hidden_states
-            decode_hidden_states = hidden_states[:0]
-        else:
-            # Process for Flash Comm V1
-            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
-            prefill_hidden_states = hidden_states[decode_tokens:actual_tokens]
-            decode_hidden_states = hidden_states[:decode_tokens]
+        # Process for Flash Comm V1
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
+        prefill_hidden_states = hidden_states[decode_tokens:actual_tokens]
+        decode_hidden_states = hidden_states[:decode_tokens]
 
         forward_context = get_forward_context()
         o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
@@ -1623,7 +1560,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 prefill_hidden_states,
                 kv_cache,
                 attn_metadata,
-                need_prefill_gather,
             )  # type: ignore[arg-type]
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata[0].prefill.cos[layer_name]
@@ -1785,91 +1721,12 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         return q, qr, qr_pertoken_scale
 
-    def _mla_prolog_prefill_overlap(self, hidden_states, cos, sin, swa_kv_cache, slot_mapping):
-        """Delayed allgather + compute-communication overlap for pure prefill.
-
-        hidden_states: [N/tp, dim] local SP partition.
-        Returns: (q, qr, full_hidden_states)
-          - q: [actual_tokens, n_local_heads, head_dim] with RoPE applied
-          - qr: [actual_tokens, q_lora_rank] for indexer
-          - full_hidden_states: [actual_tokens, dim] for compressor
-        """
-        main_stream = torch.npu.current_stream()
-        aux_stream = dsv4_dsa_overlap_stream()
-        num_actual_tokens = cos.shape[0]
-
-        # === Phase 1: q_a_down [main/C] || kv_quant [aux/V] ===
-        q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
-        e_phase1 = main_stream.record_event()
-
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_phase1)
-            kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
-
-        main_stream.wait_stream(aux_stream)
-        q_a_down = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
-        qr = self.q_norm(q_a_down)
-
-        # === Phase 2: allgather(qr) [main/comm] || kv_proj + kv_norm [aux/compute] ===
-        e_phase2 = main_stream.record_event()
-
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_phase2)
-            kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
-            kv = self.kv_norm(kv)
-
-        qr = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(qr, True)
-        qr = qr[:num_actual_tokens]
-        main_stream.wait_stream(aux_stream)
-
-        # === Phase 3: allgather(kv)+allgather(hs) [main/comm] || wq_b+q_rms [aux/compute] ===
-        e_phase3 = main_stream.record_event()
-
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_phase3)
-            q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
-            q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
-            q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
-
-        kv = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv, True)
-        kv = kv[:num_actual_tokens]
-        if self.compress_ratio > 1:
-            full_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True)
-            full_hidden_states = full_hidden_states[:num_actual_tokens]
-        else:
-            full_hidden_states = hidden_states
-
-        main_stream.wait_stream(aux_stream)
-
-        # === Tail: q_rope + kv_rope + scatter (main stream, serial) ===
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
-
-        assert self.rope_head_dim is not None
-        kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            kv.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
-
-        return q, qr, full_hidden_states
-
     def _forward_prefill(
         self,
         layer_name,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
-        need_prefill_gather: bool = False,
     ):
         compress_common_attn_metadata = None
         (compress_kv_cache, swa_kv_cache, state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
@@ -1903,17 +1760,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             q, qr, _ = self._mla_prolog_multistream(
                 hidden_states, cos, sin, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
             )
-        elif need_prefill_gather:
-            # Delayed allgather + compute-communication overlap
-            assert swa_metadata.prefill is not None
-            q, qr, hidden_states = self._mla_prolog_prefill_overlap(
-                hidden_states,
-                cos,
-                sin,
-                swa_kv_cache,
-                swa_prefill_metadata.slot_mapping,
-            )
-            qr_pertoken_scale = None  # noqa: F841
         else:
             # mlaprolog
             share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
@@ -2035,7 +1881,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             compressed_sin=compress_sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             with_prefill=True,
-                            qr_pertoken_scale=qr_pertoken_scale,
                         )
                     else:
                         compress_topk_idxs = self.indexer_select_qli(  # original version
@@ -2230,10 +2075,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             if share_hs_quant:
                 hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
 
-            wait_hidden_state_cal_event = (
-                torch.npu.current_stream().record_event() if self.multistream_dsa_preprocess else None
-            )
-
             # q
             if _is_w8a8_dynamic(self.wq_b):
                 if share_hs_quant:
@@ -2284,43 +2125,32 @@ class AscendDSAImpl(DSAAttentionImpl):
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
 
-            with npu_stream_switch(attention_calculation_stream(), enabled=self.multistream_dsa_preprocess):
-                if wait_hidden_state_cal_event:
-                    torch.npu.current_stream().wait_event(wait_hidden_state_cal_event)
-
-                # win kv & tok_dis
-                if share_hs_quant:
-                    kv = torch_npu.npu_quant_matmul(
-                        hs_int8,
-                        self.wkv.weight,
-                        self.wkv.weight_scale,
-                        pertoken_scale=hs_pertoken_scale,
-                        bias=self.wkv.bias,
-                        output_dtype=hidden_states.dtype,
-                    )
-                else:
-                    kv = self.wkv(hidden_states)
-                kv = self.kv_norm(kv)
-                assert self.rope_head_dim is not None
-                kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-
-                torch.ops._C_ascend.inplace_partial_rotary_mul(
-                    kv.unsqueeze(1),
-                    cos,
-                    sin,
-                    rotary_mode="interleave",
-                    partial_slice=[self.nope_head_dim, self.head_dim],
+            # win kv & tok_dis
+            if share_hs_quant:
+                kv = torch_npu.npu_quant_matmul(
+                    hs_int8,
+                    self.wkv.weight,
+                    self.wkv.weight_scale,
+                    pertoken_scale=hs_pertoken_scale,
+                    bias=self.wkv.bias,
+                    output_dtype=hidden_states.dtype,
                 )
+            else:
+                kv = self.wkv(hidden_states)
+            kv = self.kv_norm(kv)
+            assert self.rope_head_dim is not None
+            kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
-                # swa exec kv
-                DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_decode_metadata.slot_mapping)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
+            )
 
-                wait_attention_cal_event = (
-                    torch.npu.current_stream().record_event() if self.multistream_dsa_preprocess else None
-                )
-
-            if wait_attention_cal_event:
-                torch.npu.current_stream().wait_event(wait_attention_cal_event)
+            # swa exec kv
+            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_decode_metadata.slot_mapping)
 
         if self.compress_ratio > 1:
             compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)

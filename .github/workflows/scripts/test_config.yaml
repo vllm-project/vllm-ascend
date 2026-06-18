@@ -323,6 +323,7 @@
     - vllm_ascend/ops/mm_encoder_attention.py
   tests:
     - tests/e2e/pull_request/one_card/test_vlm.py
+    - tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py
 
 - name: ops_deepseek_v4
   optional: false
@@ -716,6 +717,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_prefix_caching.py: 410
   tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py: 290
   tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 370
+  tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py: 360
   tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 420
   tests/e2e/pull_request/two_card/test_qwen3_performance.py: 30
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 270
