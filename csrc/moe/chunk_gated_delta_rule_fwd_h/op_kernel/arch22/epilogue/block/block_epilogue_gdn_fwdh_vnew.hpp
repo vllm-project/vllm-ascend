@@ -98,6 +98,8 @@ public:
         uint32_t kHeadDim,
         uint32_t vHeadDim,
         Arch::CrossCoreFlag cube1Done
+        // const LayoutOutput &layoutOutput,
+        // const LayoutInput &LayoutInput    
     )
     {
         uint32_t mActual = chunkSize;
@@ -213,15 +215,18 @@ public:
         
         AscendC::Sub<float>(uUbFloatTensor, uUbFloatTensor, wsUbTensor, mActualThisSubBlock * nvActual);
         AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Cast(vNewOutputUbTensor, uUbFloatTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nvActual);
-        AscendC::PipeBarrier<PIPE_ALL>();
+        AscendC::Cast(vNewOutputUbTensor, uUbFloatTensor, AscendC::RoundMode::CAST_RINT, mActualThisSubBlock * nvActual);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
         AscendC::DataCopy(vnewOutputThisSubBlock, vNewOutputUbTensor, mActualThisSubBlock * nvActual);
-        AscendC::PipeBarrier<PIPE_ALL>();
 
+        AscendC::PipeBarrier<PIPE_V>();
         AscendC::Mul(calcUbTensor[gbrcEffStart*nvActual], uUbFloatTensor, calcUbTensor[gbrcEffStart*nvActual], mActualThisSubBlock * nvActual);
-        AscendC::PipeBarrier<PIPE_ALL>();
-        AscendC::Cast(vNewDecayUbTensor, calcUbTensor[gbrcEffStart*nvActual], AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nvActual);
-        AscendC::PipeBarrier<PIPE_ALL>();
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Cast(vNewDecayUbTensor, calcUbTensor[gbrcEffStart*nvActual], AscendC::RoundMode::CAST_RINT, mActualThisSubBlock * nvActual);
+        
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
         AscendC::DataCopy(vnewdecayOutputThisSubBlock, vNewDecayUbTensor, mActualThisSubBlock * nvActual);
 
         if (isFirst) {

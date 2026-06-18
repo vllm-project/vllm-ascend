@@ -15,11 +15,19 @@
 namespace Catlass::Epilogue {
 
 struct EpilogueAtlasGDNFwdHVnew {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
     using ArchTag = Arch::Ascend950;
+#else
+    using ArchTag = Arch::Ascend950;
+#endif
 };
 
 struct EpilogueAtlasGDNFwdHUpdate {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
     using ArchTag = Arch::Ascend950;
+#else
+    using ArchTag = Arch::Ascend950;
+#endif
 };
 
 }  // namespace Catlass::Epilogue

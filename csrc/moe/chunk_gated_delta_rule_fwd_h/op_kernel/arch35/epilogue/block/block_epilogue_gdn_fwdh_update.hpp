@@ -48,13 +48,10 @@ public:
     BlockEpilogue(Arch::Resource<ArchTag> &resource)
     {
 
-        // Bumped layout to fit kHeadDim up to 256 with subBlockNum=2 (per-subblock M up to 128).
-        // Required: calc (fp32) up to 128*128*4=64KB; h (fp16) up to 128*128*2=32KB;
-        // hUpdate/hOutput/finalOutput at the same offset, max needed 64KB; glast small.
         constexpr uint32_t CALC_BUF_OFFSET = 0;
-        constexpr uint32_t PING_BUF_0_OFFSET = 64 * 1024;
-        constexpr uint32_t PING_BUF_1_OFFSET = 96 * 1024;
-        constexpr uint32_t PING_BUF_2_OFFSET = 112 * 1024;
+        constexpr uint32_t PING_BUF_0_OFFSET = 32 * 1024;
+        constexpr uint32_t PING_BUF_1_OFFSET = 64 * 1024;
+        constexpr uint32_t PING_BUF_2_OFFSET = 80 * 1024;
         constexpr uint32_t PING_G_BUF_OFFSET = 160 * 1024;
 
 
@@ -147,18 +144,21 @@ public:
 
         if (isFinalState) {
             if constexpr(!std::is_same<FinalStateElement, float>::value) {
-                AscendC::PipeBarrier<PIPE_ALL>();
-                AscendC::Cast(finalOutputUbTensor, hUpdateUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nActual);
-                AscendC::PipeBarrier<PIPE_ALL>();
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Cast(finalOutputUbTensor, hUpdateUbTensor, AscendC::RoundMode::CAST_RINT, mActualThisSubBlock * nActual);
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::DataCopy(finalStateThisSubBlock, finalOutputUbTensor, mActualThisSubBlock * nActual);
             } else {
-                AscendC::PipeBarrier<PIPE_ALL>();
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::DataCopy(finalStateThisSubBlock, hUpdateUbTensor, mActualThisSubBlock * nActual);
             }
         } else {
-            AscendC::PipeBarrier<PIPE_ALL>();
-            AscendC::Cast(hOutputUbTensor, hUpdateUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nActual);
-            AscendC::PipeBarrier<PIPE_ALL>();
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Cast(hOutputUbTensor, hUpdateUbTensor, AscendC::RoundMode::CAST_RINT, mActualThisSubBlock * nActual);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
             AscendC::DataCopy(hOutputThisSubBlock, hOutputUbTensor, mActualThisSubBlock * nActual);
         }
     }
