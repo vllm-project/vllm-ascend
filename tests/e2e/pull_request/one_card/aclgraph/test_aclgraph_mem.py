@@ -27,7 +27,11 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.utils import fork_new_process_for_each_test
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
-MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
+DEEPSEEK_V2_LITE_W8A8_MODEL = os.getenv(
+    "VLLM_ASCEND_TEST_DEEPSEEK_V2_LITE_W8A8_MODEL",
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8",
+)
+MODELS = ["Qwen/Qwen3-0.6B", DEEPSEEK_V2_LITE_W8A8_MODEL]
 ACLGRAPH_CAPTURE_SIZES = [1, 2, 4]
 
 
@@ -74,7 +78,7 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
             "The future of AI is",
         ]
         sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-        if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
+        if model == DEEPSEEK_V2_LITE_W8A8_MODEL:
             with VllmRunner(
                 model,
                 compilation_config=full_and_piecewise_compilation_config(),
@@ -104,7 +108,7 @@ def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
     mem_used_by_capture = capture_mem_before.value - capture_mem_after.value
     # Empirical observation: capturing ACL graphs for Qwen3-0.6B uses ~0.20 GiB of NPU memory.
     # DeepSeek-V2-Lite-W8A8 uses ~0.68 GiB of NPU memory
-    if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
+    if model == DEEPSEEK_V2_LITE_W8A8_MODEL:
         baseline_capture_mem = 0.68
         capture_mem_tolerance = 1.5
     else:
