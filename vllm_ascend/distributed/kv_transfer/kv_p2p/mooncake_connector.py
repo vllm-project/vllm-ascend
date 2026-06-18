@@ -1417,11 +1417,18 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def set_xfer_handshake_metadata_pp_aware(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        """PP-aware handshake: pass all PP shard metadata to the scheduler."""
-        assert self.connector_scheduler is not None
-        self.connector_scheduler.set_xfer_handshake_metadata({
-            tp_rank: meta for (pp_rank, tp_rank), meta in metadata.items()
-        })
+        """Set handshake metadata keyed by ``(pp_rank, tp_rank)``.
+
+        Flattens the ``(pp_rank, tp_rank)`` tuple keys into unique integer
+        keys to match the port-offset-based lookup used by
+        ``_get_remote_host_info_by_port`` and ``get_remote_port_send_num``.
+        """
+        tp_size = max(tp_rank for (_, tp_rank) in metadata) + 1
+        flat_metadata: dict[int, KVConnectorHandshakeMetadata] = {
+            pp_rank * tp_size + tp_rank: meta
+            for (pp_rank, tp_rank), meta in metadata.items()
+        }
+        self.set_xfer_handshake_metadata(flat_metadata)
 
 
 class MooncakeConnectorScheduler:
