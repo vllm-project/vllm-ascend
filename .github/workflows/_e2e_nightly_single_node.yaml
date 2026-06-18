@@ -89,7 +89,7 @@ jobs:
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
     # timeout-minutes: 120
-    timeout-minutes: ${{ inputs.request_id != '' && 240 || (inputs.testcase_timeout != '' && inputs.testcase_timeout || 120) }}
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     container:
       image: ${{ inputs.image }}
     env:
