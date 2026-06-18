@@ -42,18 +42,21 @@ concurrency:
 
 **Why `cancel-in-progress: false`?**
 
-When events fire rapidly on the same issue (e.g. user opens then immediately edits), `false` queues them:
+Rapid open+edit on the same issue. With `false`, they queue:
 
 ```
 opened  ──► run ████████████ done
 edited  ──────────────── queued ──► run ████████ done
 ```
 
-With `true`, the `opened` run would be **cancelled mid-LLM-call**, leaving the issue in an inconsistent state (partial labels, no comment). `false` guarantees each run completes with a consistent result.
+With `true`, `opened` is cancelled mid-LLM-call → partial labels, no comment.
+`false` guarantees each run completes with a consistent result.
+
+Trade-off: `edited` waits for `opened`'s LLM call (~30s). Acceptable.
 
 **Why per-issue grouping?**
 
-`issue-review-5` only serialises runs for issue #5. Issue #7 runs in parallel — different group key. No unnecessary blocking across different issues.
+`issue-review-5` serialises runs for issue #5 only. Issue #7 runs independently.
 
 ---
 
@@ -158,15 +161,25 @@ concurrency:
 
 **Why `cancel-in-progress: false`?**
 
-Force-push to a PR fires both `edited` and `synchronize` in quick succession. The correct sequence is `edited` first (cleans up old comment, updates desc label) → then `synchronize` (rechecks commits, updates commit label).
+Force-push fires both `edited` + `synchronize`. Each does different work:
+
+| Run | Desc | Commit |
+|-----|:--:|:--:|
+| `edited` | Runs (if body changed) | Skipped |
+| `synchronize` | Skipped (body unchanged) | Runs |
+
+If `edited` is cancelled, the desc check is **lost** — `synchronize` skips desc.
+The desc label is never updated. With `false`, both complete in order:
 
 ```
-edited ──► run ████████████ done
+edited ──► run ████████ done
 sync   ──────────────── queued ──► run ████████ done
 ```
 
-With `cancel-in-progress: true`, `edited` would be **killed mid-run** when `sync` arrives. The LLM call, label update, and comment cleanup would all be aborted — leaving stale labels and comments.
+Trade-off: `sync` waits for `edited` (~5s for a no-body-change `edited`, ~30s if body changed). Acceptable — correctness over latency.
+
+With `cancel-in-progress: true`, `edited` is killed mid-run, desc label is stale forever.
 
 **Why per-PR grouping?**
 
-`pr-review-42` only serialises runs for PR #42. PR #43 runs independently. Different group keys = parallel execution where safe.
+`pr-review-42` serialises runs for PR #42 only. PR #43 runs independently — different group keys, no cross-PR blocking.
