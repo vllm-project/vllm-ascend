@@ -241,7 +241,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --data-parallel-size 1 \
@@ -409,7 +409,7 @@ export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --data-parallel-size 2 \
@@ -456,7 +456,7 @@ export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --headless \
@@ -658,7 +658,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 
 ### 5.3 Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance.
+We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
 Before you start, please
 
@@ -799,7 +799,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        vllm serve /root/.cache/glm5-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -879,7 +879,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        vllm serve /root/.cache/glm5-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -961,7 +961,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
     
-        vllm serve /root/.cache/glm5-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -1041,7 +1041,7 @@ Before you start, please
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
             
-         vllm serve /root/.cache/glm5-w8a8 \
+         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
              --data-parallel-size $3 \
@@ -1121,7 +1121,7 @@ Before you start, please
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
             
-         vllm serve /root/.cache/glm5-w8a8 \
+         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
              --data-parallel-size $3 \
@@ -1201,7 +1201,7 @@ Before you start, please
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
             
-         vllm serve /root/.cache/glm5-w8a8 \
+         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
              --data-parallel-size $3 \
