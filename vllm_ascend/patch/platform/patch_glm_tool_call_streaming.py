@@ -39,18 +39,36 @@ def _create_remaining_args_delta(
     fallback_tool_call_type: str | None = None,
     fallback_tool_call_name: str | None = None,
 ) -> DeltaMessage:
+    if remaining_call == "":
+        return delta_message
+
+    original_tool_call = next(
+        (tool_call for tool_call in delta_message.tool_calls if tool_call.index == index),
+        None,
+    )
+    original_function = original_tool_call.function if original_tool_call else None
+
     function_kwargs: dict[str, str] = {"arguments": remaining_call}
-    if fallback_tool_call_name is not None:
-        function_kwargs["name"] = fallback_tool_call_name
+    function_name = original_function.name if original_function else None
+    if function_name is None:
+        function_name = fallback_tool_call_name
+    if function_name is not None:
+        function_kwargs["name"] = function_name
 
     tool_call_kwargs: dict[str, Any] = {
         "index": index,
         "function": DeltaFunctionCall(**function_kwargs),
     }
-    if fallback_tool_call_id is not None:
-        tool_call_kwargs["id"] = fallback_tool_call_id
-    if fallback_tool_call_type is not None:
-        tool_call_kwargs["type"] = fallback_tool_call_type
+    tool_call_id = original_tool_call.id if original_tool_call else None
+    if tool_call_id is None:
+        tool_call_id = fallback_tool_call_id
+    if tool_call_id is not None:
+        tool_call_kwargs["id"] = tool_call_id
+    tool_call_type = original_tool_call.type if original_tool_call else None
+    if tool_call_type is None:
+        tool_call_type = fallback_tool_call_type
+    if tool_call_type is not None:
+        tool_call_kwargs["type"] = tool_call_type
 
     return DeltaMessage(tool_calls=[DeltaToolCall(**tool_call_kwargs)])
 

@@ -4,8 +4,8 @@ import vllm
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import VllmConfig
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP, DeepSeekMultiTokenPredictorLayer
-
-from vllm_ascend.utils import vllm_version_is
+from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
+from vllm.model_executor.models.utils import AutoWeightsLoader
 
 MTP_ROT_WEIGHT_NAME = "rot.weight"
 
@@ -19,17 +19,6 @@ def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Con
                 or weight_name.startswith(MTP_ROT_WEIGHT_NAME)
                 or weight_name.startswith(f"layers.{layer_idx + i}.")
             ):
-                return layer_idx + i
-    return None
-
-
-def get_spec_layer_idx_from_weight_name_020(
-    config: DeepseekV2Config | DeepseekV3Config, weight_name: str
-) -> int | None:
-    if hasattr(config, "num_nextn_predict_layers") and config.num_nextn_predict_layers > 0:
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}.") or weight_name.startswith(MTP_ROT_WEIGHT_NAME):
                 return layer_idx + i
     return None
 
@@ -74,14 +63,14 @@ class AscendDeepSeekMTP(DeepSeekMTP):
             return f"model.layers.{spec_layer}.rot.weight"
 
 
-if vllm_version_is("0.20.2"):
-    vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name_020
-    vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = (
-        get_spec_layer_idx_from_weight_name_020
-    )
-else:
-    vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
-    vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
+class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
+    def load_weights(self, weights):
+        loader = AutoWeightsLoader(self, skip_prefixes=[MTP_ROT_WEIGHT_NAME])
+        return loader.load_weights(weights)
 
+
+vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
+vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name = get_spec_layer_idx_from_weight_name
 vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer = AscendDeepSeekMultiTokenPredictorLayer
 vllm.model_executor.models.deepseek_mtp.DeepSeekMTP = AscendDeepSeekMTP
+vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM = AscendGlmMoeDsaForCausalLM

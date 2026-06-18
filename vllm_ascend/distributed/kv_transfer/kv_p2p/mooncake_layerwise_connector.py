@@ -33,7 +33,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
-    get_decode_context_model_parallel_rank,
     get_tensor_model_parallel_rank,
     get_tp_group,
     get_world_group,
@@ -58,7 +57,9 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    RegisterRegions,
     align_memory,
+    collect_storage_merged_register_regions,
     context_parallel_parameters_check,
     get_cp_group,
     get_local_remote_block_port_mappings,
@@ -66,7 +67,9 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     kv_alltoall_and_rearrange,
     parallel_info,
+    validate_register_region_count,
 )
+from vllm_ascend.distributed.utils import get_decode_context_model_parallel_rank
 from vllm_ascend.utils import npu_stream_switch, trans_nd_to_nz
 
 # isort: off
@@ -273,7 +276,11 @@ class KVCacheSendingLayerThread(threading.Thread):
         try:
             self._transfer_kv_cache(send_task)
         except Exception as e:
-            logger.error("Failed to transfer KV cache for layer idx %s, %s", send_task.layer_idx, e)
+            logger.error(
+                "Failed to transfer KV cache. layer_idx=%s, error=%s. Check transfer engine and memory state.",
+                send_task.layer_idx,
+                e,
+            )
 
     def get_transfer_meta(self, send_task: SendTask, req_id: str, req_meta: ReqMeta, layer_group_idx: int):
         src_list: list[int] = []
@@ -306,8 +313,8 @@ class KVCacheSendingLayerThread(threading.Thread):
                 )
                 dst_list.extend(
                     [
-                        remote_conv_addr + remote_block_ids[0] * local_conv_len,
-                        remote_ssm_addr + remote_block_ids[0] * local_ssm_len,
+                        remote_conv_addr + remote_block_ids[-1] * local_conv_len,
+                        remote_ssm_addr + remote_block_ids[-1] * local_ssm_len,
                     ]
                 )
                 length_list.extend([local_conv_len, local_ssm_len])
@@ -342,12 +349,12 @@ class KVCacheSendingLayerThread(threading.Thread):
                         src_list.append(
                             local_conv_addr + local_block_ids[transfer_block_idx] * local_conv_len + local_addr_offset
                         )
-                        dst_list.append(remote_conv_addr + remote_block_ids[0] * remote_conv_len + remote_addr_offset)
+                        dst_list.append(remote_conv_addr + remote_block_ids[-1] * remote_conv_len + remote_addr_offset)
                         length_list.append(local_conv_size * get_dtype_size(conv_dtype))
                 # ssm
                 remote_addr_offset = (self.tp_rank % tp_ratio) * math.prod(ssm_shape) * get_dtype_size(ssm_dtype)
                 src_list.append(local_ssm_addr + local_block_ids[transfer_block_idx] * local_ssm_len)
-                dst_list.append(remote_ssm_addr + remote_block_ids[0] * remote_ssm_len + remote_addr_offset)
+                dst_list.append(remote_ssm_addr + remote_block_ids[-1] * remote_ssm_len + remote_addr_offset)
                 length_list.append(local_ssm_len)
         else:
             if self.pd_head_ratio == 1:
@@ -485,9 +492,10 @@ class KVCacheSendingLayerThread(threading.Thread):
                 )
                 if ret < 0:
                     logger.error(
-                        "Mooncake transfer failed for send requests %s kv cache to %s",
+                        "Mooncake transfer failed for send requests. req_ids=%s, destination=%s, ret=%d. ",
                         transfer_meta.req_ids,
                         session_id,
+                        ret,
                     )
                     self.failed_reqs.add(req_id)
                 else:
@@ -589,7 +597,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
         """Run the thread to handle KV cache transfer requests."""
         handshake_port = self.side_channel_port + self.tp_rank
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
-        logger.info("Starting listening on path: %s", path)
+        logger.info("KVCacheRecvingLayerThread listening on %s, tp_rank=%d", path, self.tp_rank)
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(self.metadata)
         with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
@@ -599,13 +607,15 @@ class KVCacheRecvingLayerThread(threading.Thread):
                 try:
                     frames = sock.recv_multipart()
                     if len(frames) < 2:
-                        logger.error("Invalid message format: %s", frames)
+                        logger.error(
+                            "Invalid message format. expected>=2 frames, got %d. frames=%s", len(frames), frames
+                        )
                         continue
 
                     identity = frames[0]
                     payload = [f for f in frames[1:] if f != b""]
                     if len(payload) != 1:
-                        logger.error("Invalid message format: %s", frames)
+                        logger.error("Invalid payload count. expected=1, got %d. frames=%s", len(payload), frames)
                         continue
 
                     msg = decoder.decode(payload[0])
@@ -621,13 +631,19 @@ class KVCacheRecvingLayerThread(threading.Thread):
                         sock.send_multipart((identity, b"", b"ACK"))
                     elif msg[0] == FAILED_SENDING_MSG:
                         request_id = msg[1]
-                        logger.error("Got FAILED_SENDING_MSG for request %s, abort KV load.", msg[1])
+                        logger.error("Got FAILED_SENDING_MSG for request. request_id=%s. ", msg[1])
                         self.update_failed_task(request_id)
                         sock.send_multipart((identity, b"", b"ACK"))
                     else:
-                        logger.error("Connection listener got unexpected message %s", msg)
+                        logger.error(
+                            "Unexpected message type: %s. expected GET_META_MSG or DONE_RECVING_MSG. msg=%s",
+                            msg[0] if msg else "empty",
+                            msg,
+                        )
                 except Exception as e:
-                    logger.error("Failed to decode message: %s", e)
+                    logger.error(
+                        "Failed to decode message. type=%s, error=%s. context=decoding payload", type(e).__name__, e
+                    )
 
 
 class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
@@ -792,6 +808,7 @@ class MooncakeLayerwiseConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int], list[list[int]]]] = {}
         self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
+        self.need_truncate = self._has_attn_mamba_hybrid_cache(kv_cache_config)
         self.executor = ThreadPoolExecutor(32)
         tls_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("tls_config", {})
         ssl_keyfile = tls_config.get("ssl_keyfile")
@@ -807,6 +824,63 @@ class MooncakeLayerwiseConnectorScheduler:
             )
         else:
             self.metaserver_client = httpx.Client(limits=httpx.Limits(max_connections=100000), timeout=None)
+
+    @staticmethod
+    def _iter_kv_cache_specs(kv_cache_config: KVCacheConfig):
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                yield from kv_cache_spec.kv_cache_specs.values()
+            else:
+                yield kv_cache_spec
+
+    @classmethod
+    def _has_attn_mamba_hybrid_cache(cls, kv_cache_config: KVCacheConfig) -> bool:
+        has_attn = False
+        has_mamba = False
+        for kv_cache_spec in cls._iter_kv_cache_specs(kv_cache_config):
+            has_attn = has_attn or isinstance(kv_cache_spec, AttentionSpec)
+            has_mamba = has_mamba or isinstance(kv_cache_spec, MambaSpec)
+        return has_attn and has_mamba
+
+    def _hybrid_prefill_token_count(self, num_prompt_tokens: int) -> int:
+        if self.need_truncate and num_prompt_tokens > 1:
+            return num_prompt_tokens - 1
+        return num_prompt_tokens
+
+    def _truncate_request_for_hybrid_prefill(self, request: "Request") -> None:
+        params = request.kv_transfer_params
+        if (
+            params is None
+            or not self.need_truncate
+            or params.get("_p_side_truncated")
+            or getattr(request, "num_prompt_tokens", len(request.prompt_token_ids or [])) <= 1
+        ):
+            return
+
+        if request.prompt_token_ids is not None:
+            request.prompt_token_ids.pop()
+        elif request.prompt_embeds is not None:
+            request.prompt_embeds = request.prompt_embeds[:-1]
+        else:
+            return
+
+        request._all_token_ids.pop()
+        request.num_prompt_tokens -= 1
+        request.max_tokens = 1
+        params["_p_side_truncated"] = True
+
+    def _trim_hybrid_remote_block_ids(self, block_ids: tuple[list[int], ...], prompt_len: int) -> tuple[list[int], ...]:
+        if not self.need_truncate or prompt_len <= 1:
+            return block_ids
+
+        trimmed_block_ids: list[list[int]] = []
+        for group_block_ids, block_size in zip(block_ids, self.block_size):
+            if prompt_len % block_size == 1:
+                trimmed_block_ids.append(list(group_block_ids[:-1]))
+            else:
+                trimmed_block_ids.append(list(group_block_ids))
+        return tuple(trimmed_block_ids)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
@@ -834,9 +908,11 @@ class MooncakeLayerwiseConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % min(self.block_size) == 0
-            # Note: We use the full token count as transmit data here.
-            count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
+            count = max(self._hybrid_prefill_token_count(len(request.prompt_token_ids)) - num_computed_tokens, 0)
             return count, count > 0
+
+        if params is not None and params.get("do_remote_decode"):
+            self._truncate_request_for_hybrid_prefill(request)
 
         # No remote prefill for this request.
         return 0, False
@@ -852,6 +928,7 @@ class MooncakeLayerwiseConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             do_virtual = params.get("do_virtual", False)
             local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
+            remote_block_ids = self._trim_hybrid_remote_block_ids(local_block_ids, len(request.prompt_token_ids))
             remote_cached_tokens = request.num_computed_tokens
             # Get unhashed blocks to pull from remote.
             logger.debug(
@@ -875,7 +952,7 @@ class MooncakeLayerwiseConnectorScheduler:
                 request_id=external_req_id,
                 do_remote_prefill=False,
                 do_remote_decode=True,
-                remote_block_ids=local_block_ids,
+                remote_block_ids=remote_block_ids,
                 remote_block_size=self.block_size,
                 remote_engine_id=self.engine_id,
                 remote_host=self.side_channel_host,
@@ -892,7 +969,7 @@ class MooncakeLayerwiseConnectorScheduler:
 
                 def handle_exception(future):
                     if future.exception():
-                        logger.error("Access metaserver fail: %s", future.exception())
+                        logger.error("Access metaserver fail. error=%s. ", future.exception())
 
                 future.add_done_callback(handle_exception)
 
@@ -1010,7 +1087,7 @@ class MooncakeLayerwiseConnectorScheduler:
                 self.metaserver_client.post(url, json=message)
                 success = True
             except Exception as e:
-                logger.error("Failed to connect to metaserver: %s, retry %s time.", url, retry)
+                logger.error("Failed to connect to metaserver. url=%s, retry=%d. ", url, retry)
                 if retry == 3:
                     raise e
 
@@ -1056,6 +1133,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.kv_cache_specs: list[KVCacheSpec] = [spec.kv_cache_spec for spec in self.kv_cache_config.kv_cache_groups]
         self.local_engine_id: str = " "
         self.engine_id = engine_id
+        self.dp_rank: int = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank: int = get_tensor_model_parallel_rank()
         self.tp_size: int = vllm_config.parallel_config.tensor_parallel_size
         self.pcp_size: int = vllm_config.parallel_config.prefill_context_parallel_size
@@ -1077,7 +1155,8 @@ class MooncakeLayerwiseConnectorWorker:
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size
+            + self.dp_rank * self.pcp_size * self.tp_size
+            + self.pcp_rank * self.tp_size
         )
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
@@ -1236,7 +1315,16 @@ class MooncakeLayerwiseConnectorWorker:
                 ptrs.append(min(set(tensor_addrs)))
                 lengths.append(kv_cache_tensor.size)
 
-        global_te.register_buffer(ptrs, lengths)
+        if self.use_attn_mamba_hybrid:
+            register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
+        else:
+            # For normal attention / sparse-c8 KV cache, register merged memory
+            # ranges while keeping layer metadata at logical tensor addresses.
+            register_regions = collect_storage_merged_register_regions(kv_caches)
+
+        validate_register_region_count(register_regions)
+        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+
         if use_kv_buffer:
             self.create_kv_buffer(kv_buffer)
 
@@ -1723,8 +1811,7 @@ class MooncakeLayerwiseConnectorWorker:
                     req_meta_update = self.update_decoder_info(req_id, req_meta)
                 except Exception as e:
                     logger.warning(
-                        "MooncakeLayerwiseConnector transfer fail for req_id %s in layer_idx %s, "
-                        "update_decoder_info with error: %s",
+                        "MooncakeLayerwiseConnector transfer fail. req_id=%s, layer_idx=%s, error=%s. ",
                         req_id,
                         self.current_layer,
                         e,
@@ -1780,7 +1867,7 @@ class MooncakeLayerwiseConnectorWorker:
                 agent_meta: MooncakeAgentMetadata = self.decoder.decode(metadata_bytes)
             except Exception as e:
                 logger.error(
-                    "Query to port and kv base addr for request %s from %s:%s fail with error: %s",
+                    "Query to port and kv base addr for request fail. req_id=%s, source=%s:%s, error=%s. ",
                     req_id,
                     req_meta.remote_host,
                     req_meta.remote_port,
@@ -1812,7 +1899,7 @@ class MooncakeLayerwiseConnectorWorker:
                     [128],
                 )
                 if ret < 0:
-                    logger.error("Mooncake transfer failed to create link to device %s", session_id)
+                    logger.error("Mooncake transfer failed to create link. session_id=%s, ret=%d. ", session_id, ret)
         req_meta.remote_te_rpc_port = self.remote_te_port[req_meta.remote_engine_id][req_meta.remote_port]
         req_meta.remote_layer_metadata = self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port]
         return req_meta
@@ -1851,8 +1938,8 @@ class MooncakeLayerwiseConnectorWorker:
                 except Exception as e:
                     if attempt < max_retries:
                         logger.warning(
-                            "Failed to send done sending signal for request %s to %s:%d on attempt %d/%d: %s. "
-                            "Retrying...",
+                            "Failed to send done sending signal. "
+                            "request_id=%s, destination=%s:%d, attempt=%d/%d, error=%s. ",
                             external_req_id,
                             req_meta.remote_host,
                             req_meta.remote_port,
@@ -1865,7 +1952,7 @@ class MooncakeLayerwiseConnectorWorker:
                         raise RuntimeError(f"Failed to receive ACK after {max_retries} attempts: {e}") from e
         except Exception as e:
             logger.error(
-                "Sending  signal %s for request %s to %s:%s fail with error: %s",
+                "Sending signal fail. signal_type=%s, request_id=%s, destination=%s:%s, error=%s. ",
                 send_msg_type,
                 external_req_id,
                 req_meta.remote_host,
@@ -1952,10 +2039,10 @@ def ensure_zmq_send(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning("Send failed: %s, retrying... (%s attempts left)", e, retries_left)
+                logger.warning("Send failed. error=%s, attempts_left=%d. ", e, retries_left)
                 time.sleep(0.1)
             else:
-                logger.error("Send failed after all retries: %s", e)
+                logger.error("Send failed after all retries. error=%s. ", e)
                 raise RuntimeError(f"Failed to send data to {path} after {max_retries} retries: {e}")
 
 
@@ -1977,10 +2064,10 @@ def ensure_zmq_recv(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning("Receive failed: %s, retrying... (%s attempts left)", e, retries_left)
+                logger.warning("Receive failed. error=%s, attempts_left=%d. ", e, retries_left)
                 time.sleep(0.1)
             else:
-                logger.error("Receive failed after all retries: %s", e)
+                logger.error("Receive failed after all retries. error=%s. ", e)
                 raise RuntimeError(f"Failed to receive data from {path} after {max_retries} retries: {e}")
 
 

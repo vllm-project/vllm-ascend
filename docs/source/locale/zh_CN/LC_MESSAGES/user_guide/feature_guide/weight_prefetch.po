@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-06-07 05:04+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -53,6 +53,7 @@ msgid "Quick Start"
 msgstr "快速开始"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:9
+#, python-brace-format
 msgid ""
 "Use `--additional-config '{\"weight_prefetch_config\": {\"enabled\": "
 "true}}'` to enable weight prefetch."
@@ -66,7 +67,7 @@ msgstr "微调预取比例"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:13
 msgid ""
-"Since weight prefetch use vector computations to hide the weight "
+"Since weight prefetch uses vector computations to hide the weight "
 "prefetching pipeline, the setting of the prefetch size is crucial. If the"
 " size is too small, the optimization benefits will not be fully realized,"
 " while a larger size may lead to resource contention, resulting in "
@@ -79,7 +80,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:15
 msgid ""
-"With `prefetch_ratio` in `\"weight_prefetch_config\"` to custom the "
+"With `prefetch_ratio` in `\"weight_prefetch_config\"` to customize the "
 "weight prefetch ratio for specific linear layers."
 msgstr "通过 `\"weight_prefetch_config\"` 中的 `prefetch_ratio` 为特定的线性层自定义权重预取比例。"
 
@@ -90,6 +91,7 @@ msgid ""
 msgstr "“attn” 和 “moe” 配置选项用于 MoE 模型，详情如下："
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:19
+#, python-brace-format
 msgid "`\"attn\": { \"qkv\": 1.0,  \"o\": 1.0},  \"moe\": {\"gate_up\": 0.8}`"
 msgstr "`\"attn\": { \"qkv\": 1.0,  \"o\": 1.0},  \"moe\": {\"gate_up\": 0.8}`"
 
@@ -100,12 +102,13 @@ msgid ""
 msgstr "“mlp” 配置选项用于优化稠密模型的性能，详情如下："
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:23
+#, python-brace-format
 msgid "`\"mlp\": {\"gate_up\": 1.0, \"down\": 1.0}`"
 msgstr "`\"mlp\": {\"gate_up\": 1.0, \"down\": 1.0}`"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:25
 msgid ""
-"Above value are the default config, the default value has a good "
+"Above values are the default config, the default value has a good "
 "performance for Qwen3-235B-A22B-W8A8 when `--max-num-seqs` is 144, for "
 "Qwen3-32B-W8A8 when `--max-num-seqs` is 72."
 msgstr ""

@@ -33,14 +33,10 @@ on:
         type: choice
         options:
           - main
-          - v0.19.1rc1
-          - v0.18.0
-          - v0.18.0rc1
-          - v0.17.0rc1
-          - v0.16.0rc1
-          - v0.15.0rc1
-          - v0.14.0rc1
-          - v0.13.0
+          - v0.23.0rc1
+          - v0.22.1rc1
+          - v0.21.0rc1
+          - v0.20.2rc1
 
 jobs:
   build_and_release_code:
@@ -158,7 +154,7 @@ jobs:
           mkdir -p dist/variants
           python3 .github/workflows/scripts/wheel/make_variant.py \
             -c .github/workflows/scripts/wheel/config.json \
-            -l a2
+            -l 910b
           echo "Generated variant wheels:"
           ls dist/variants/
 
