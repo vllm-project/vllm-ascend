@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Worker-side handler for Ascend SimpleCPUOffloadConnector."""
+"""Worker-side handler for Ascend RecomputeCPUOffloadConnector."""
 
 from typing import TYPE_CHECKING
 
@@ -8,17 +8,17 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.metadata import (
-    SimpleCPUOffloadMetadata,
-    SimpleCPUOffloadWorkerMetadata,
+from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
+    RecomputeCPUOffloadMetadata,
+    RecomputeCPUOffloadWorkerMetadata,
 )
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
-class SimpleCPUOffloadWorker:
-    """Worker-side handler for simple CPU/NPU KV cache transfers."""
+class RecomputeCPUOffloadWorker:
+    """Worker-side handler for recompute CPU/NPU KV cache transfers."""
 
     def __init__(
         self,
@@ -41,7 +41,7 @@ class SimpleCPUOffloadWorker:
         self._load_events: list[tuple[int, torch.npu.Event]] = []
         self._load_hwm: int = -1
 
-        self._connector_metadata: SimpleCPUOffloadMetadata | None = None
+        self._connector_metadata: RecomputeCPUOffloadMetadata | None = None
         self._pending_load_event_indices: set[int] = set()
         self._submitted_load_event_indices: set[int] = set()
         self._completed_store_events: dict[int, int] = {}
@@ -98,14 +98,14 @@ class SimpleCPUOffloadWorker:
         self.store_stream = torch.npu.Stream()
 
         logger.info(
-            "SimpleCPUOffloadWorker scaffold registered %d unique KV tensors, "
+            "RecomputeCPUOffloadWorker scaffold registered %d unique KV tensors, "
             "allocating %d CPU blocks (%.2f GB).",
             len(unique_gpu_caches),
             self.num_cpu_blocks,
             (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
 
-    def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
+    def bind_connector_metadata(self, metadata: RecomputeCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata
         self._load_stream_waited = False
         if metadata.preempt_load_event >= 0:
@@ -117,7 +117,7 @@ class SimpleCPUOffloadWorker:
 
     def handle_preemptions(
         self,
-        kv_connector_metadata: SimpleCPUOffloadMetadata,
+        kv_connector_metadata: RecomputeCPUOffloadMetadata,
     ) -> None:
         """Save preempted blocks before input preparation can overwrite them."""
         if kv_connector_metadata.need_flush:
@@ -272,7 +272,7 @@ class SimpleCPUOffloadWorker:
 
         return None, finished_recving or None
 
-    def build_connector_worker_meta(self) -> SimpleCPUOffloadWorkerMetadata | None:
+    def build_connector_worker_meta(self) -> RecomputeCPUOffloadWorkerMetadata | None:
         """Return completed store events since the previous call.
 
         The scheduler aggregates this metadata across workers/ranks. A store
@@ -281,7 +281,7 @@ class SimpleCPUOffloadWorker:
         """
         if not self._completed_store_events:
             return None
-        meta = SimpleCPUOffloadWorkerMetadata(
+        meta = RecomputeCPUOffloadWorkerMetadata(
             completed_store_events=self._completed_store_events,
         )
         self._completed_store_events = {}

@@ -19,9 +19,9 @@ from vllm.v1.core.kv_cache_coordinator import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.metadata import (
-    SimpleCPUOffloadMetadata,
-    SimpleCPUOffloadWorkerMetadata,
+from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
+    RecomputeCPUOffloadMetadata,
+    RecomputeCPUOffloadWorkerMetadata,
 )
 
 if TYPE_CHECKING:
@@ -51,7 +51,7 @@ class PreemptedRequestState:
     finished: bool = False
 
 
-class SimpleCPUOffloadScheduler:
+class RecomputeCPUOffloadScheduler:
     """Preserve preempted requests' KV blocks in CPU memory.
 
     When offload prefix caching is enabled, full hashed blocks share CPU
@@ -78,7 +78,7 @@ class SimpleCPUOffloadScheduler:
         )
 
         logger.info(
-            "SimpleCPUOffloadScheduler: allocating %d CPU blocks "
+            "RecomputeCPUOffloadScheduler: allocating %d CPU blocks "
             "(%.2f GB) for recompute offload, prefix caching=%s",
             self.num_cpu_blocks,
             cpu_capacity_bytes / (1024**3),
@@ -443,7 +443,7 @@ class SimpleCPUOffloadScheduler:
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
-    ) -> SimpleCPUOffloadMetadata:
+    ) -> RecomputeCPUOffloadMetadata:
         store_event = -1
         store_gpu, store_cpu, store_req_ids = self._prepare_preempt_store_specs()
         if store_gpu:
@@ -475,7 +475,7 @@ class SimpleCPUOffloadScheduler:
                 self._preempted_req_states[req_id].load_event = load_event
             self._preempt_load_event_to_reqs[load_event] = load_req_ids
 
-        return SimpleCPUOffloadMetadata(
+        return RecomputeCPUOffloadMetadata(
             need_flush=bool(scheduler_output.preempted_req_ids),
             preempt_store_event=store_event,
             preempt_store_gpu_blocks=store_gpu,
@@ -492,7 +492,7 @@ class SimpleCPUOffloadScheduler:
                 self._cleanup_preempt_load_request(req_id)
 
         meta = connector_output.kv_connector_worker_meta
-        if not isinstance(meta, SimpleCPUOffloadWorkerMetadata):
+        if not isinstance(meta, RecomputeCPUOffloadWorkerMetadata):
             return
         for event_idx, count in meta.completed_store_events.items():
             total = self._store_event_pending_counts.get(event_idx, 0) + count

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Metadata for SimpleCPUOffloadConnector."""
+"""Metadata for RecomputeCPUOffloadConnector."""
 
 from dataclasses import dataclass, field
 
@@ -13,7 +13,7 @@ INVALID_JOB_ID = -1
 
 
 @dataclass
-class SimpleCPUOffloadMetadata(KVConnectorMetadata):
+class RecomputeCPUOffloadMetadata(KVConnectorMetadata):
     """Recompute offload transfers passed from scheduler to worker."""
 
     # Whether any requests were preempted this step and need flush pending transfers.
@@ -33,7 +33,7 @@ class SimpleCPUOffloadMetadata(KVConnectorMetadata):
 
 
 @dataclass
-class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
+class RecomputeCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker -> Scheduler metadata for completed store events.
 
     Each worker reports {event_idx: 1} for newly completed stores.
@@ -47,8 +47,8 @@ class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
-        assert isinstance(other, SimpleCPUOffloadWorkerMetadata)
+        assert isinstance(other, RecomputeCPUOffloadWorkerMetadata)
         merged = dict(self.completed_store_events)
         for k, v in other.completed_store_events.items():
             merged[k] = merged.get(k, 0) + v
-        return SimpleCPUOffloadWorkerMetadata(completed_store_events=merged)
+        return RecomputeCPUOffloadWorkerMetadata(completed_store_events=merged)
