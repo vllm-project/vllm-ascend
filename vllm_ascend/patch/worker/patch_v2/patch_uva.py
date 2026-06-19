@@ -104,28 +104,24 @@ class UvaBufferWrapper:
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self._np: np.ndarray = self._cpu.numpy()
-        self._uva: torch.Tensor
-        if is_uva_available():
-            self._uva = self._cpu
-        else:
-            self._uva = torch.zeros_like(self._cpu, device="npu")
-            self._modified_indices: set[int] = set()
+        self._modified_indices: set[int] = set()
+        self._uva: torch.Tensor = self._cpu if is_uva_available() else torch.zeros_like(self._cpu, device="npu")
 
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
 
     @property
     def cpu(self):
-        return MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
+        return self._cpu if is_uva_available() else MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
 
     @property
     def np(self):
-        return MonitoredNumPyArray(self._np, self._mark_cpu_modified)
+        return self._np if is_uva_available() else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
     @property
     def uva(self):
         """Get the device data of the buffer."""
-        if self._modified_indices:
+        if not is_uva_available() and self._modified_indices:
             # Sort for better memory access locality
             dirty_rows = sorted(self._modified_indices)
             # can't use copy_ method, because copy_ for index tensor
