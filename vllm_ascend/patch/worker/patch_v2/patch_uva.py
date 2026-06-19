@@ -28,6 +28,7 @@ def is_uva_available() -> bool:
     """check if uva feature is supported in this environment"""
     return "pinned_mem_register:True" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", {})
 
+
 def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int]:
     """get the set of row indices involved in the given key."""
     if isinstance(key, int):
