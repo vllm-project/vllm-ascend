@@ -95,12 +95,11 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
    
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t aicCoreNum = ascendcPlatform.GetCoreNumAic();
+    context->SetBlockDim(aicCoreNum);
 
     constexpr size_t WORKSPACE_RSV_BYTE = 16 * 1024 * 1024;
     constexpr size_t GM_ALIGN = 512;
     int64_t pingpongStages = 2;
-
-    context->SetBlockDim(aicCoreNum);
 
     size_t workspaceOffset = ascendcPlatform.GetLibApiWorkSpaceSize();
     workspaceOffset += WORKSPACE_RSV_BYTE;
