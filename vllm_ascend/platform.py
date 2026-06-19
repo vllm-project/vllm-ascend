@@ -76,6 +76,31 @@ _CUSTOM_OP_REGISTERED = False
 MAX_CAPTURE_SIZES_FOR_950 = 4
 
 
+def _sync_npugraph_ex_to_additional_config(
+    vllm_config: VllmConfig,
+    ascend_config,
+) -> None:
+    """Persist *enable_npugraph_ex* into ``vllm_config.additional_config``.
+
+    ``platform.py`` may override ``enable_npugraph_ex`` (e.g. to ``False`` for
+    PIECEWISE / NONE cudagraph modes).  Worker processes spawned via
+    ``multiprocessing`` re-initialize their own ``AscendConfig`` from
+    ``vllm_config.additional_config``, so the override must be persisted there
+    as well.  Without this sync, workers silently fall back to the default
+    ``enable_npugraph_ex=True`` and use the wrong compilation backend
+    (``npugraph_ex_compile`` / torchair instead of ``fusion_pass_compile``),
+    producing ACL graphs with severely degraded NPU compute utilisation.
+    """
+    if vllm_config.additional_config is None:
+        vllm_config.additional_config = {}
+    additional = vllm_config.additional_config
+    asc_comp = additional.get("ascend_compilation_config")
+    if not isinstance(asc_comp, dict):
+        asc_comp = {}
+        additional["ascend_compilation_config"] = asc_comp
+    asc_comp["enable_npugraph_ex"] = ascend_config.ascend_compilation_config.enable_npugraph_ex
+
+
 def config_deprecated_logging():
     """Configure deprecated logging format, when used deprecated codes
     in vllm-ascend.
@@ -590,6 +615,12 @@ class NPUPlatform(Platform):
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+
+        # Sync enable_npugraph_ex back to vllm_config.additional_config so that
+        # spawned worker processes (which re-init AscendConfig from additional_config)
+        # see the correct value.  Without this, workers default to
+        # enable_npugraph_ex=True and use the wrong compilation path.
+        _sync_npugraph_ex_to_additional_config(vllm_config, ascend_config)
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience

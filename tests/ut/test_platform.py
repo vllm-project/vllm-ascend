@@ -9,7 +9,7 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
-from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.platform import NPUPlatform, _sync_npugraph_ex_to_additional_config
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
@@ -80,6 +80,35 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization, [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
+
+    @pytest.mark.parametrize(
+        "additional_config",
+        [None, {}, {"ascend_compilation_config": None}],
+    )
+    def test_sync_npugraph_ex_to_additional_config(self, additional_config):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.additional_config = additional_config
+        ascend_config = self.mock_vllm_ascend_config()
+        ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+
+        _sync_npugraph_ex_to_additional_config(vllm_config, ascend_config)
+
+        assert vllm_config.additional_config == {"ascend_compilation_config": {"enable_npugraph_ex": False}}
+
+    def test_sync_npugraph_ex_preserves_other_compilation_config(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.additional_config = {"ascend_compilation_config": {"enable_static_kernel": True}}
+        ascend_config = self.mock_vllm_ascend_config()
+        ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+
+        _sync_npugraph_ex_to_additional_config(vllm_config, ascend_config)
+
+        assert vllm_config.additional_config == {
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": False,
+                "enable_static_kernel": True,
+            }
+        }
 
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())
