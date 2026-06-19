@@ -158,6 +158,17 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW4A8DynamicFusedMoEMethod):
                 "W4A4 mega kernel does not support expert parallelism / EPLB "
                 "(expert_map/log2phy). Serve with expert parallelism disabled (TP only)."
             )
+        # apply_router_weight_on_input pre-scales the hidden states by the routing weight
+        # BEFORE the expert MLP (the top-1 dispatcher path). The kernel applies topk_weights
+        # only in the final combine, so honoring this flag would require MLP(x*w) but the
+        # kernel computes MLP(x)*w — different for the nonlinear SwiGLU experts. Qwen3.x-MoE
+        # is top-8 (flag stays False); reject rather than silently produce wrong output.
+        if apply_router_weight_on_input:
+            raise NotImplementedError(
+                "W4A4 mega kernel does not support apply_router_weight_on_input=True "
+                "(pre-scaling hidden states before the expert MLP). It applies the routing "
+                "weight in the combine instead; the two differ for SwiGLU experts."
+            )
         T, H = x.shape[0], x.shape[-1]
         x_2d = x.view(T, H) if x.dim() > 2 else x
         outer_dtype = x_2d.dtype
