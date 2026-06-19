@@ -2495,13 +2495,39 @@ class NPUModelRunner(GPUModelRunner):
             and not self.speculative_config.disable_padded_drafter_batch
         )
         propose_drafts_after_bookkeeping = False
+        # TMP: restore input_fits_in_drafter check that was removed by
+        # 4f86c9a8 (MOE hanging multi-DP fix). When the drafter cannot
+        # accommodate the current sequence lengths, fall back to zero-drafts
+        # instead of proposing real draft tokens that would OOM or hang.
+        input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
+            spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
+            <= self.max_model_len
+        )
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config and not skip_pp_token_state:
                 if use_padded_batch:
                     # Padded draft-model/MTP paths must see the request state
                     # before async bookkeeping appends -1 placeholders.
-                    propose_draft_token_ids(sampler_output.sampled_token_ids)
-                else:
+                    if input_fits_in_drafter:
+                        propose_draft_token_ids(sampler_output.sampled_token_ids)
+                    elif self.valid_sampled_token_count_event is not None:
+                        assert spec_decode_common_attn_metadata is not None
+                        if self.drafter is not None:
+                            next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
+                                sampler_output.sampled_token_ids,
+                                self.requests,
+                                self.input_batch,
+                                self.discard_request_indices.gpu,
+                                self.num_discarded_requests,
+                            )
+                            self._copy_valid_sampled_token_count(
+                                next_token_ids, valid_sampled_tokens_count
+                            )
+                            self._draft_token_ids = torch.zeros(
+                                1, device=self.device, dtype=torch.int32
+                            ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+                            self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
+                elif input_fits_in_drafter:
                     propose_drafts_after_bookkeeping = True
 
         (
@@ -4889,17 +4915,22 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         capture_sizes: list[int] = []
+        # TMP: restore uses_draft_model() (MTP) in the drafter cudagraph keys
+        # init condition. 9033002e narrowed this to use_eagle() +
+        # uses_extract_hidden_states() only, leaving MTP drafters without
+        # cudagraph keys which can cause dispatch to hang.
         if (
             self.speculative_config
             and self.drafter is not None
             and (
                 self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
             )
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+                AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer | AscendExtractHiddenStatesProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
