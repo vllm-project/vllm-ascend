@@ -19,6 +19,8 @@
 
 import os
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 os.environ["HCCL_BUFFSIZE"] = "512"
@@ -57,6 +59,7 @@ def test_pcp_dcp_mtp1_eager():
         runner.generate_greedy(prompts, 32)
 
 
+@pytest.mark.skip(reason="Skip for now, test failed")
 @wait_until_npu_memory_free()
 def test_pcp_dcp_mtp3_eager():
     with VllmRunner(

@@ -31,7 +31,13 @@ from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.kv_transfer import (
+    ensure_kv_transfer_initialized,
+    ensure_kv_transfer_shutdown,
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
@@ -43,6 +49,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -110,6 +117,9 @@ class NPUWorker(WorkerBase):
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
+        from vllm_ascend.logger import configure_ascend_file_logging
+
+        configure_ascend_file_logging()
         check_ascend_device_type()
 
         super().__init__(
@@ -135,6 +145,12 @@ class NPUWorker(WorkerBase):
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
+        # Weight transfer engine is created in `load_model` once the model
+        # is available, since the engine needs a reference to the model.
+        self.weight_transfer_engine = None
+        self._weight_update_active = False
+        self._is_checkpoint_format = True
+
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 
@@ -142,8 +158,8 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
-        if self.use_v2_model_runner and vllm_version_is("0.21.0"):
-            logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.21.0; falling back to v1 model runner.")
+        if self.use_v2_model_runner and vllm_version_is("0.22.1"):
+            logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.22.1; falling back to v1 model runner.")
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
 
@@ -253,6 +269,115 @@ class NPUWorker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+    def _check_weight_transfer_engine(self) -> None:
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
+            )
+
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        """Initialize the HCCL weight transfer process group with the trainer."""
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
+        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+
+    def _check_nz_disabled(self) -> None:
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+            raise ValueError(
+                "FRACTAL_NZ mode is enabled. This may cause model parameter "
+                "precision issues in the RL scenarios. Please set "
+                "VLLM_ASCEND_ENABLE_NZ=0."
+            )
+
+    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+        """Begin a new weight update; prepares the model for layerwise reload."""
+        self._check_weight_transfer_engine()
+
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while a weight update is already active. Call finish_weight_update first."
+            )
+
+        self._check_nz_disabled()
+
+        if is_checkpoint_format:
+            from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
+
+            model = self.model_runner.model
+            with torch.device(self.device):
+                initialize_layerwise_reload(model)
+
+        self._is_checkpoint_format = is_checkpoint_format
+        self._weight_update_active = True
+
+    def update_weights(self, update_info: dict) -> None:
+        """Receive a chunk of weights from the trainer and load them in place."""
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+
+        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        model = self.model_runner.model
+
+        # state machine driven by start/finish.
+        if not self._weight_update_active:
+            raise RuntimeError("start_weight_update must be called before update_weights.")
+
+        with torch.device(self.device):
+            if self._is_checkpoint_format:
+                self.weight_transfer_engine.receive_weights(
+                    typed_update_info,
+                    load_weights=model.load_weights,
+                )
+            else:
+
+                def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
+                    with torch.no_grad():
+                        for name, weight in weights:
+                            param = model.get_parameter(name)
+                            param.copy_(weight)
+
+                self.weight_transfer_engine.receive_weights(
+                    typed_update_info,
+                    load_weights=load_weights_direct,
+                )
+
+        # HCCL broadcast / packed paths are asynchronous.
+        # Sync so the next step uses the new weights.
+        torch.npu.synchronize()
+
+    def finish_weight_update(self) -> None:
+        """Finish the current weight update; runs layerwise postprocessing."""
+        self._check_weight_transfer_engine()
+
+        if not self._weight_update_active:
+            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
+
+        if self._is_checkpoint_format:
+            from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
+
+            model = self.model_runner.model
+            with torch.device(self.device):
+                finalize_layerwise_reload(model, self.model_config)
+
+        self._weight_update_active = False
+        self._is_checkpoint_format = True
+
+    def shutdown(self) -> None:
+        if ensure_kv_transfer_shutdown is not None:
+            ensure_kv_transfer_shutdown()
+
+        if self.profiler is not None:
+            self.profiler.shutdown()
+
+        if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
+            weight_transfer_engine.shutdown()
+
+        if model_runner := getattr(self, "model_runner", None):
+            shutdown_fn = getattr(model_runner, "shutdown", None)
+            if callable(shutdown_fn):
+                shutdown_fn()
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -331,6 +456,10 @@ class NPUWorker(WorkerBase):
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -375,7 +504,18 @@ class NPUWorker(WorkerBase):
             profile_torch_peak = torch.npu.memory_stats(self.device).get("allocated_bytes.all.peak", 0)
 
             npugraph_memory_estimate = 0
-            if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            should_profile_npugraph_memory = self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            if should_profile_npugraph_memory and getattr(self.model_runner, "use_compress", False):
+                hf_config = self.model_config.hf_config
+                if getattr(hf_config, "model_type", None) == "deepseek_v4":
+                    logger.warning_once(
+                        "Skipping ACL graph memory profiling for DeepSeek-V4 "
+                        "DSA compressed attention. Graph mode remains enabled; "
+                        "the normal ACL graph capture still runs after KV cache "
+                        "allocation."
+                    )
+                    should_profile_npugraph_memory = False
+            if should_profile_npugraph_memory:
                 npugraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Override torch_peak_increase with the pre-graph-capture value to
@@ -425,7 +565,7 @@ class NPUWorker(WorkerBase):
                 equiv_util = round(current_util - ng_util_delta, 4)
                 logger.info(
                     "ACL graph memory profiling is enabled (default since "
-                    "v0.21.0). The current --gpu-memory-utilization=%.4f is "
+                    "v0.22.1). The current --gpu-memory-utilization=%.4f is "
                     "equivalent to --gpu-memory-utilization=%.4f without "
                     "ACL graph memory profiling. To maintain the same "
                     "effective KV cache size as before, increase "
@@ -442,7 +582,7 @@ class NPUWorker(WorkerBase):
                     "Without it, ACL graph memory is not accounted for "
                     "during KV cache allocation, which may require lowering "
                     "--gpu-memory-utilization to avoid OOM. Consider "
-                    "re-enabling it (the default as of v0.21.0) and increasing "
+                    "re-enabling it (the default as of v0.22.1) and increasing "
                     "--gpu-memory-utilization from %.4f to %.4f.",
                     current_util,
                     suggested_util,
@@ -542,6 +682,25 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if self.vllm_config.weight_transfer_config is not None:
+            from vllm.distributed.weight_transfer.factory import (
+                WeightTransferEngineFactory,
+            )
+
+            if vllm_version_is("0.21.0"):
+                # v0.21.0: create_engine takes (config, parallel_config)
+                self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                    self.vllm_config.weight_transfer_config,
+                    self.vllm_config.parallel_config,
+                )
+            else:
+                # main: create_engine takes (config, parallel_config, model)
+                self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                    self.vllm_config.weight_transfer_config,
+                    self.vllm_config.parallel_config,
+                    self.model_runner.get_model(),
+                )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
@@ -719,7 +878,9 @@ class NPUWorker(WorkerBase):
 
         return latency_ms
 
-    def get_kv_connector_handshake_metadata(self) -> dict | None:
+    def get_kv_connector_handshake_metadata(
+        self,
+    ) -> dict[int, KVConnectorHandshakeMetadata] | dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
         """Get KV connector metadata from this worker if available."""
         if not has_kv_transfer_group():
             return None
@@ -730,7 +891,12 @@ class NPUWorker(WorkerBase):
         # metadata across workers.
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
-        return {self.rank: metadata}
+        tp_rank = get_tp_group().rank_in_group
+        if vllm_version_is("0.22.1"):
+            return {tp_rank: metadata}
+
+        pp_rank = get_pp_group().rank_in_group
+        return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

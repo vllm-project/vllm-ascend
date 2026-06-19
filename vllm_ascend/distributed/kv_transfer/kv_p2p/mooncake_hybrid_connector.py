@@ -1540,6 +1540,7 @@ class MooncakeConnectorWorker:
                 if share_tensor_addr:
                     ptrs.append(min(share_tensor_addr))
                     lengths.append(kv_cache_tensor.size)
+            self.block_stride_per_addr.extend(self.block_len_per_addr)
         elif self.use_compress:
             layer_group_idx = dict[str, int]()
             for i, group in enumerate(self.kv_cache_config.kv_cache_groups):

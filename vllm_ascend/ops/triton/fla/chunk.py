@@ -14,7 +14,6 @@ import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.logger import logger
 from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
@@ -49,7 +48,9 @@ def chunk_gated_delta_rule_fwd(
         num_decodes = attn_metadata.num_decodes
     chunk_size = 64
     block_indices_cumsum = None if prebuilt_meta is None else prebuilt_meta.block_indices_cumsum
+    cu_seqlens_host = None if prebuilt_meta is None else prebuilt_meta.cu_seqlens_host
     chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64
+    chunk_indices_chunk64_host = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64_host
     chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_offsets_chunk64
     update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
     final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
@@ -92,8 +93,12 @@ def chunk_gated_delta_rule_fwd(
     g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
-    cu_seqlens = cu_seqlens.to(torch.int64)
+    cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
     chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
+    if cu_seqlens_host is None and cu_seqlens is not None:
+        cu_seqlens_host = tuple(cu_seqlens.tolist())
+    if chunk_indices_chunk64_host is None and chunk_indices is not None:
+        chunk_indices_chunk64_host = tuple(chunk_indices.flatten().tolist())
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
         w_ascendc,
@@ -104,8 +109,8 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=True,
         chunk_size=64,
         save_new_value=True,
-        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
-        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_chunk64_host,
         use_exp2=False,
         transpose_state_layout=False,
     )
@@ -170,8 +175,8 @@ def chunk_gated_delta_rule_fwd(
         scale,
         g=g_ascendc,
         g_gamma=None,
-        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
-        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_chunk64_host,
         chunk_size=64,
         transpose_state_layout=False,
     )
@@ -203,22 +208,6 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         prebuilt_meta=None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
-        logger.debug(
-            "[TritonOps] chunk_gated_delta_rule_fwd: q.shape=%s, k.shape=%s, "
-            "v.shape=%s, g.shape=%s, beta.shape=%s, scale=%s, "
-            "initial_state.shape=%s, output_final_state=%s, cu_seqlens_shape=%s, "
-            "use_qk_l2norm_in_kernel=%s.",
-            q.shape,
-            k.shape,
-            v.shape,
-            g.shape,
-            beta.shape,
-            scale,
-            initial_state.shape if initial_state is not None else None,
-            output_final_state,
-            cu_seqlens.shape if cu_seqlens is not None else None,
-            use_qk_l2norm_in_kernel,
-        )
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
@@ -326,14 +315,14 @@ def chunk_gated_delta_rule(
 
     if head_first:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
+            "chunk_gated_delta_rule: head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead.",
             stacklevel=2,
         )
         q, k, v, beta, g = map(lambda x: rearrange(x, "b h t ... -> b t h ..."), (q, k, v, beta, g))
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            f"chunk_gated_delta_rule: Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
             "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
@@ -342,12 +331,12 @@ def chunk_gated_delta_rule(
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"chunk_gated_delta_rule: The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                 f"Please flatten variable-length inputs before processing."
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
-                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"chunk_gated_delta_rule: The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
     if scale is None:
