@@ -392,6 +392,26 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self.multistream_overlap_gate:
             torch.npu.current_stream().wait_stream(PrepareAndFinalize.quant_stream)
 
+        if self.moe_config.pcp_size > 1:
+            max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
+
+            self.num_tokens_pcp = hidden_states.shape[0]
+            pad_size = max_tokens_across_pcp - self.num_tokens_pcp
+            if pad_size > 0:
+                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if pertoken_scale is not None:
+                    pertoken_scale = (
+                        nn.functional.pad(pertoken_scale, (0, pad_size))
+                        if pertoken_scale.dim() == 1
+                        else nn.functional.pad(pertoken_scale, (0, 0, 0, pad_size))
+                    )
+
+            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
+            router_logits = get_pcp_group().all_gather(router_logits, dim=0)
+            if pertoken_scale is not None:
+                pertoken_scale = get_pcp_group().all_gather(pertoken_scale, dim=0)
+
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -495,6 +515,10 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         2 Reduce_results is True usually happens when model has no shared experts. We still do reduce scatter
         here, then skip allreudce in FusedMoe.
         """
+        if self.moe_config.pcp_size > 1:
+            hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
+            hidden_states = hidden_states[: self.num_tokens_pcp]
+
         hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states, True)
 
         return hidden_states
