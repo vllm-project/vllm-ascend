@@ -49,6 +49,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -454,6 +455,10 @@ class NPUWorker(WorkerBase):
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
