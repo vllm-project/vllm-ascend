@@ -3601,13 +3601,13 @@ class NPUModelRunner(GPUModelRunner):
     def update_eplb_heat_collection_status(self, num_tokens_padded: int):
         if self.eplb_heat_collection_stage == "prefill":
             # collect eplb heat for prefill requests.
-            return num_tokens_padded > self.eplb_pd_thresholds
+            self.eplb_heat_collection_status = num_tokens_padded > self.eplb_pd_thresholds
         elif self.eplb_heat_collection_stage == "decode":
             # collect eplb heat for decode requests.
-            return num_tokens_padded <= self.eplb_pd_thresholds
+            self.eplb_heat_collection_status = num_tokens_padded <= self.eplb_pd_thresholds
         else:
             # collect eplb heat for all requests.
-            return True
+            self.eplb_heat_collection_status =  True
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
