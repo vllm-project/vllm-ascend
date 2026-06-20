@@ -65,6 +65,13 @@ class RecomputeCPUOffloadWorker:
         self.num_gpu_blocks = self.kv_cache_config.num_blocks
         self.block_size_scale = {}
 
+        scheduler_gpu_kv_cache_tensors = []
+        for t in self.kv_cache_config.kv_cache_tensors:
+            if t.shared_by:
+                scheduler_gpu_kv_cache_tensors.append(t)
+        scheduler_gpu_total_bytes = sum(t.size for t in scheduler_gpu_kv_cache_tensors)
+        scheduler_num_cpu_blocks = max(1, self.num_gpu_blocks * self.cpu_capacity_bytes // scheduler_gpu_total_bytes)
+
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         register_cache_ptrs = []
         for layer_name, layer_tensor in kv_caches.items():
@@ -83,11 +90,19 @@ class RecomputeCPUOffloadWorker:
                     logger.info(f'Register unique_gpu_caches: {layer_name} shape: {layer_tensor.shape}')
 
         per_tensor_bytes_per_block = [
-            tensor.stride(0) * tensor.element_size()
+            tensor.shape[-1] * tensor.element_size()
             for tensor in unique_gpu_caches.values()
         ]
         total_bytes_per_block = sum(per_tensor_bytes_per_block)
         self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+        if self.num_cpu_blocks != scheduler_num_cpu_blocks:
+            self.num_cpu_blocks = scheduler_num_cpu_blocks
+            logger.warning(
+                "RecomputeCPUOffloadScheduler has different num_blocks: %d,"
+                "worker-side num_block is set to %d to align with scheduler.",
+                scheduler_num_cpu_blocks,
+                scheduler_num_cpu_blocks,
+            )
 
         self.gpu_kv_caches = unique_gpu_caches
         self.cpu_kv_caches = {}

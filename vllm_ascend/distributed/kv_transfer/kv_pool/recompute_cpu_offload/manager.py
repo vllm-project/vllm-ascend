@@ -126,7 +126,11 @@ class RecomputeCPUOffloadScheduler:
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
         assert gpu_config.kv_cache_tensors
-        gpu_total_bytes = sum(t.size for t in gpu_config.kv_cache_tensors)
+        gpu_kv_cache_tensors = []
+        for t in gpu_config.kv_cache_tensors:
+            if t.shared_by:
+                gpu_kv_cache_tensors.append(t)
+        gpu_total_bytes = sum(t.size for t in gpu_kv_cache_tensors)
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
         cpu_tensors = [
@@ -134,7 +138,7 @@ class RecomputeCPUOffloadScheduler:
                 size=t.size // num_gpu_blocks * num_cpu_blocks,
                 shared_by=list(t.shared_by),
             )
-            for t in gpu_config.kv_cache_tensors
+            for t in gpu_kv_cache_tensors
         ]
         return KVCacheConfigCls(
             num_blocks=num_cpu_blocks,
