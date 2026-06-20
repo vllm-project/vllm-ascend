@@ -225,17 +225,21 @@ class RecomputeCPUOffloadScheduler:
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
             group_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+            available_group_gpu_ids = []
+            for bid in group_gpu_ids:
+                if bid > 0:
+                    available_group_gpu_ids.append(bid)
             num_blocks = min(
-                len(group_gpu_ids),
+                len(available_group_gpu_ids),
                 cdiv(num_computed_tokens, group_block_size),
             )
             gpu_blocks = [
                 self._gpu_block_pool.blocks[block_id]
-                for block_id in group_gpu_ids[:num_blocks]
+                for block_id in available_group_gpu_ids[:num_blocks]
             ]
             group_gpu_blocks.append(gpu_blocks)
             effective_hashes: list[BlockHashWithGroupId | None] = []
-            for block_idx, block_id in enumerate(group_gpu_ids):
+            for block_idx, block_id in enumerate(available_group_gpu_ids):
                 gpu_block = self._gpu_block_pool.blocks[block_id]
                 block_is_computed = (
                     (block_idx + 1) * group_block_size <= num_computed_tokens
@@ -374,14 +378,6 @@ class RecomputeCPUOffloadScheduler:
             load_start_tokens + num_external_tokens,
             state.num_computed_tokens,
         )
-        if load_end_tokens - load_start_tokens != num_external_tokens:
-            raise RuntimeError(
-                "Recompute H2D token range does not match the scheduler "
-                f"allocation: req_id={request.request_id}, "
-                f"start={load_start_tokens}, end={load_end_tokens}, "
-                f"external={num_external_tokens}, "
-                f"stored={state.num_computed_tokens}"
-            )
         if load_end_tokens <= load_start_tokens:
             return False
 

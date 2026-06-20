@@ -62,6 +62,8 @@ class RecomputeCPUOffloadWorker:
         self.device = any_tensor.device
 
         assert self.kv_cache_config is not None
+        self.num_gpu_blocks = self.kv_cache_config.num_blocks
+        self.block_size_scale = {}
 
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         register_cache_ptrs = []
@@ -71,10 +73,14 @@ class RecomputeCPUOffloadWorker:
                     if single_tensor.data_ptr() not in register_cache_ptrs:
                         unique_gpu_caches[f"{layer_name}.{idx}"] = single_tensor.view(single_tensor.shape[0], -1)
                         register_cache_ptrs.append(single_tensor.data_ptr())
+                        self.block_size_scale[f"{layer_name}.{idx}"] = single_tensor.shape[0] // self.num_gpu_blocks
+                        logger.info(f'Register unique_gpu_caches: {layer_name}.{idx} shape: {single_tensor.shape}')
             else:
                 if layer_tensor.data_ptr() not in register_cache_ptrs:
                     unique_gpu_caches[layer_name] = layer_tensor.view(layer_tensor.shape[0], -1)
                     register_cache_ptrs.append(layer_tensor.data_ptr())
+                    self.block_size_scale[layer_name] = layer_tensor.shape[0] // self.num_gpu_blocks
+                    logger.info(f'Register unique_gpu_caches: {layer_name} shape: {layer_tensor.shape}')
 
         per_tensor_bytes_per_block = [
             tensor.stride(0) * tensor.element_size()
@@ -86,13 +92,15 @@ class RecomputeCPUOffloadWorker:
         self.gpu_kv_caches = unique_gpu_caches
         self.cpu_kv_caches = {}
         for name, gpu_tensor in unique_gpu_caches.items():
-            cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
+            tensor_block_size_scale = self.block_size_scale[name]
+            cpu_shape = (self.num_cpu_blocks * tensor_block_size_scale,) + gpu_tensor.shape[1:]
             self.cpu_kv_caches[name] = torch.zeros(
                 cpu_shape,
                 dtype=gpu_tensor.dtype,
                 pin_memory=True,
                 device="cpu",
             )
+            logger.info(f'Register cpu_kv_caches: {name} shape: {cpu_shape}')
 
         self.load_stream = torch.npu.Stream()
         self.store_stream = torch.npu.Stream()
@@ -210,28 +218,39 @@ class RecomputeCPUOffloadWorker:
 
         stream = self.store_stream if is_store else self.load_stream
         assert stream is not None
-
-        if is_store:
-            torch.npu.synchronize()
+        torch.npu.synchronize()
 
         with torch.npu.stream(stream):
             for src_block_id, dst_block_id in zip(src_block_ids, dst_block_ids):
                 for name, gpu_tensor in self.gpu_kv_caches.items():
                     cpu_tensor = self.cpu_kv_caches[name]
+                    tensor_block_size_scale = self.block_size_scale[name]
                     if is_store:
                         # TODO: Replace this D2H torch copy with the NPU copy
                         # backend dedicated kernel.
-                        cpu_tensor[dst_block_id].copy_(
-                            gpu_tensor[src_block_id],
-                            non_blocking=True,
-                        )
+                        if tensor_block_size_scale > 1:
+                            cpu_tensor[dst_block_id * tensor_block_size_scale: (dst_block_id + 1) * tensor_block_size_scale].copy_(
+                                gpu_tensor[src_block_id * tensor_block_size_scale: (src_block_id + 1) * tensor_block_size_scale],
+                                non_blocking=True,
+                            )
+                        else:
+                            cpu_tensor[dst_block_id].copy_(
+                                gpu_tensor[src_block_id],
+                                non_blocking=True,
+                            )
                     else:
                         # TODO: Replace this H2D torch copy with the NPU copy
                         # backend dedicated kernel.
-                        gpu_tensor[dst_block_id].copy_(
-                            cpu_tensor[src_block_id],
-                            non_blocking=True,
-                        )
+                        if tensor_block_size_scale > 1:
+                            gpu_tensor[dst_block_id * tensor_block_size_scale: (dst_block_id + 1) * tensor_block_size_scale].copy_(
+                                cpu_tensor[src_block_id * tensor_block_size_scale: (src_block_id + 1) * tensor_block_size_scale],
+                                non_blocking=True,
+                            )
+                        else:
+                            gpu_tensor[dst_block_id].copy_(
+                                cpu_tensor[src_block_id],
+                                non_blocking=True,
+                            )
             event = torch.npu.Event()
             event.record(stream)
 

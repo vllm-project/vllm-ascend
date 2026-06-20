@@ -56,7 +56,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
             extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES)
         )
         enable_offload_prefix_caching = extra_config.get(
-            "enable_offload_prefix_caching", True
+            "enable_offload_prefix_caching", False
         )
         if not isinstance(enable_offload_prefix_caching, bool):
             raise ValueError(
