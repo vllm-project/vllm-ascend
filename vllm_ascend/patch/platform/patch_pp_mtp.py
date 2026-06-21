@@ -75,7 +75,7 @@ def _patch_model_config_validation() -> None:
 
 def _patch_default_v2_model_runner_architectures() -> None:
     """Remove DeepseekV2ForCausalLM from DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES.
-    
+
     Upstream vLLM added DeepseekV2ForCausalLM to DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES,
     but vllm-ascend's v2 model runner does not fully support DeepSeek-V2 in PP scenarios.
     This ensures DeepSeek-V2 uses the v1 model runner which has proper PP support.
@@ -85,8 +85,7 @@ def _patch_default_v2_model_runner_architectures() -> None:
 
         if "DeepseekV2ForCausalLM" in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES:
             DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
-                arch for arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
-                if arch != "DeepseekV2ForCausalLM"
+                arch for arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES if arch != "DeepseekV2ForCausalLM"
             )
             logger.info(
                 "[Patch] Removed DeepseekV2ForCausalLM from DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES. "
@@ -95,9 +94,7 @@ def _patch_default_v2_model_runner_architectures() -> None:
     except ImportError:
         pass
     except Exception as e:
-        logger.error(
-            f"[Patch] Failed to patch DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES: {e}"
-        )
+        logger.error("[Patch] Failed to patch DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES: %s", e)
 
 
 def _apply_patch() -> None:
