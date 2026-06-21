@@ -167,8 +167,8 @@ def _ensure_schedule_wrapped(scheduler):
     cls = type(scheduler)
     _original_schedule = cls.schedule
 
-    def _wrapped_schedule(self):
-        output = _original_schedule(self)
+    def _wrapped_schedule(self, throttle_prefills: bool = False):
+        output = _original_schedule(self, throttle_prefills)
         if getattr(self, "_profiling_timing_done", False) and output is not None:
             output.disable_profiling_timing = True
         return output
