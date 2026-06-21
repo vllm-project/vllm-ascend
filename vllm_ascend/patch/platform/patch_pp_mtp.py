@@ -98,10 +98,7 @@ def _patch_v2_model_runner_supported() -> None:
                 architectures = getattr(model_config, "architectures", [])
                 if any("DeepseekV2" in arch for arch in architectures):
                     # DeepSeek-V2 should use v1 model runner for PP support
-                    logger.info(
-                        "[Patch] DeepSeek-V2 detected, using v1 model runner "
-                        "for proper PP support."
-                    )
+                    logger.info("[Patch] DeepSeek-V2 detected, using v1 model runner for proper PP support.")
                     return False
             # For other models, use the original logic
             return original_is_v2_model(self)
