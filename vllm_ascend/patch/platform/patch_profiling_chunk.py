@@ -168,7 +168,13 @@ def _ensure_schedule_wrapped(scheduler):
     _original_schedule = cls.schedule
 
     def _wrapped_schedule(self, throttle_prefills: bool = False):
-        output = _original_schedule(self, throttle_prefills)
+        # Some scheduler subclasses (e.g. ProfilingChunkScheduler) override
+        # schedule() with a no-arg signature.  Only forward throttle_prefills
+        # when the original method actually accepts it.
+        if _original_schedule.__code__.co_argcount > 1:
+            output = _original_schedule(self, throttle_prefills)
+        else:
+            output = _original_schedule(self)
         if getattr(self, "_profiling_timing_done", False) and output is not None:
             output.disable_profiling_timing = True
         return output
