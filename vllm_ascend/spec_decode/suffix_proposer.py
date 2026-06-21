@@ -20,5 +20,17 @@ class AscendSuffixDecodingProposer(SuffixDecodingProposer):
     ):
         pass
 
-    def propose(self, valid_sampled_token_ids):
-        return super().propose(self.runner.input_batch, valid_sampled_token_ids)
+    def propose(
+        self,
+        num_speculative_tokens: int,
+        sampled_token_ids: list[list[int]],
+        num_tokens_no_spec=None,
+        token_ids_cpu=None,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
+    ):
+        return super().propose(
+            num_speculative_tokens,
+            self.runner.input_batch,
+            sampled_token_ids,
+            slot_mappings,
+        )

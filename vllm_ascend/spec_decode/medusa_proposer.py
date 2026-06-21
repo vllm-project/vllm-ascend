@@ -45,10 +45,12 @@ class AscendMedusaProposer(MedusaProposer):
 
     def propose(
         self,
+        num_speculative_tokens: int,
         valid_sampled_token_ids: list[list[int]],
         sampling_metadata: SamplingMetadata,
         spec_decode_metadata: SpecDecodeMetadata,
         sample_hidden_states: torch.Tensor,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     ):
         if sample_hidden_states.shape[0] == len(valid_sampled_token_ids):
             # The input to the target model does not include draft tokens.
@@ -64,7 +66,9 @@ class AscendMedusaProposer(MedusaProposer):
             hidden_states = sample_hidden_states[indices]
 
         spec_token_ids = super().propose(
+            num_speculative_tokens=num_speculative_tokens,
             target_hidden_states=hidden_states,
             sampling_metadata=sampling_metadata,
+            slot_mappings=slot_mappings,
         )
         return spec_token_ids
