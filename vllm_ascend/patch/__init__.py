@@ -207,6 +207,10 @@
 #       Monkey-patch GLM47 tool-call region extraction so complete inline
 #       zero-argument regions are normalized for the existing streaming name
 #       extractor without emitting partial names for incomplete regions.
+#       Guarded by ``hasattr(_extract_tool_call_regions)`` -- becomes a no-op
+#       when the upstream has migrated to the new declarative parser engine
+#       (Glm47MoeParser / Glm47MoeParserToolAdapter) which natively handles
+#       inline zero-argument tool calls.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/issues/44326
 #       https://github.com/vllm-project/vllm/pull/44327
