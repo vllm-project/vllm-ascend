@@ -122,3 +122,6 @@ def _apply_patch() -> None:
     _patch_model_config_validation()
     _patch_v2_model_runner_supported()
     logger.info("[Patch] patch_pp_mtp patches applied successfully")
+
+
+_apply_patch()
