@@ -44,28 +44,92 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
     return proc.stdout.strip()
 
 
-def resolve_commit(repo: Path, ref: str) -> str:
-    """Resolve any ref/short-sha/``pull/NNN/head`` style ref to a full sha.
-
-    Falls back to fetching the ref (PR head or branch) when it is not present
-    locally, mirroring ``run.sh::checkout_src``.
-    """
+def _try_rev_parse(repo: Path, ref: str) -> str | None:
+    """Return the full sha for ``ref`` if it resolves locally, else None."""
     try:
         return _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
     except GitError:
-        pass
+        return None
 
-    # Maybe it's a bare PR number -> fetch refs/pull/<n>/head.
+
+def _is_shallow(repo: Path) -> bool:
+    return _git(repo, "rev-parse", "--is-shallow-repository", check=False).strip() == "true"
+
+
+def _looks_like_sha(ref: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F]{7,40}", ref))
+
+
+def resolve_commit(repo: Path, ref: str) -> str:
+    """Resolve a ref / short-sha / full-sha / PR number to a full commit sha.
+
+    Robust against the nightly container's ``git clone --depth 1`` shallow clone:
+    a good commit read from the status table is a full sha that is usually *not*
+    in the shallow local history, and ``git fetch origin <sha>`` is refused by
+    most servers (arbitrary-sha fetch is disabled). So we progressively recover
+    history: PR-head fetch -> direct ref fetch -> ``--unshallow`` -> full
+    all-branch fetch, re-checking after each step. Every step is logged so a
+    failure shows exactly what was attempted.
+    """
+    # 0) Already present locally?
+    sha = _try_rev_parse(repo, ref)
+    if sha:
+        return sha
+
+    is_sha = _looks_like_sha(ref)
     pr = ref.lstrip("#")
-    fetch_ref = ref
+    attempts: list[str] = []
+
+    # 1) Bare PR number -> fetch its head ref.
     if pr.isdigit():
-        fetch_ref = f"pull/{pr}/head"
-    logger.info("Ref %s not local; fetching %s", ref, fetch_ref)
-    _git(repo, "fetch", "--quiet", "origin", f"refs/{fetch_ref}:refs/bisect_tmp/{pr}", check=False)
-    try:
-        return _git(repo, "rev-parse", "--verify", f"refs/bisect_tmp/{pr}^{{commit}}")
-    except GitError as exc:
-        raise GitError(f"Could not resolve ref {ref!r}") from exc
+        logger.info("Ref %s not local; fetching PR head refs/pull/%s/head", ref, pr)
+        _git(repo, "fetch", "--quiet", "origin",
+             f"refs/pull/{pr}/head:refs/bisect_tmp/pr_{pr}", check=False)
+        sha = _try_rev_parse(repo, f"refs/bisect_tmp/pr_{pr}")
+        if sha:
+            return sha
+        attempts.append(f"fetch refs/pull/{pr}/head")
+
+    # 2) Shallow clone -> deepen to FULL history FIRST. This is both the reliable
+    #    way to get a good-table sha (it lives on origin's mainline history) and
+    #    -- crucially -- it keeps the history between good..bad complete. We must
+    #    NOT let a by-sha fetch (step 3) succeed first on a shallow repo: that
+    #    would add only the single commit behind a new shallow boundary, leaving
+    #    intermediate commits missing so `git log good..bad` would silently
+    #    return a truncated candidate list and break the bisect.
+    if _is_shallow(repo):
+        logger.info("Repo is a shallow clone; running 'git fetch --unshallow' to "
+                    "recover full history (this can take a while)")
+        _git(repo, "fetch", "--unshallow", "--quiet", "origin", check=False)
+        sha = _try_rev_parse(repo, ref)
+        if sha:
+            return sha
+        attempts.append("fetch --unshallow origin")
+
+    # 3) Direct fetch by ref name (a branch/tag not yet tracked locally; safe now
+    #    that any shallow repo has been fully unshallowed above).
+    logger.info("Trying direct fetch of %r from origin", ref)
+    _git(repo, "fetch", "--quiet", "origin", ref, check=False)
+    sha = _try_rev_parse(repo, ref) or (_try_rev_parse(repo, "FETCH_HEAD") if not is_sha else None)
+    if sha:
+        return sha
+    attempts.append(f"fetch origin {ref}")
+
+    # 4) Last resort: fetch full history of all branches and retry.
+    logger.info("Fetching all branches with full history as a last resort")
+    _git(repo, "fetch", "--quiet", "--tags", "origin",
+         "+refs/heads/*:refs/remotes/origin/*", check=False)
+    sha = _try_rev_parse(repo, ref)
+    if sha:
+        return sha
+    attempts.append("fetch all branches")
+
+    raise GitError(
+        f"Could not resolve ref {ref!r} after: {', '.join(attempts)}. "
+        f"(shallow={_is_shallow(repo)}, looks_like_sha={is_sha}). "
+        "If this is a full sha from the good table, ensure 'origin' points at a "
+        "remote that contains it and that the network allows fetching."
+    )
 
 
 def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
@@ -90,6 +154,18 @@ def candidate_list(repo: Path, good: str, bad: str) -> list[Candidate]:
     last element. The returned list is the bisect search space, one commit per
     element (commit-atomic bisect).
     """
+    # Guard: a shallow repo can make `git log good..bad` silently truncate the
+    # candidate list (history cut at the shallow boundary), which would corrupt
+    # the search. resolve_commit() unshallows when needed, but verify here so we
+    # fail loudly rather than bisect a partial range.
+    if _is_shallow(repo):
+        raise GitError(
+            "Repository is still a shallow clone; the good..bad history may be "
+            "incomplete and the candidate list could be truncated. Run "
+            "'git fetch --unshallow' (or re-run; resolve_commit normally does "
+            "this) before bisecting."
+        )
+
     if not is_ancestor(repo, good, bad):
         raise GitError(
             f"good ({good[:12]}) is not an ancestor of bad ({bad[:12]}); "
