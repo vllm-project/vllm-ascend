@@ -56,9 +56,7 @@ def test_correct_optimistic_seq_lens_cpu_matches_gpu_seq_lens():
     # prev_positions: -1 for new requests, otherwise gather index
     prev_positions = np.array([0, 1, 2, -1, 4], dtype=np.int32)
 
-    optimistic = _build_optimistic_seq_lens(
-        prev_step_computed, prev_drafts, num_scheduled_step_n
-    ).astype(np.int32)
+    optimistic = _build_optimistic_seq_lens(prev_step_computed, prev_drafts, num_scheduled_step_n).astype(np.int32)
 
     correct_optimistic_seq_lens_cpu(
         optimistic,
@@ -68,9 +66,7 @@ def test_correct_optimistic_seq_lens_cpu_matches_gpu_seq_lens():
         num_reqs,
     )
 
-    expected = _ground_truth_seq_lens(
-        prev_step_computed, valid_count, num_scheduled_step_n
-    )
+    expected = _ground_truth_seq_lens(prev_step_computed, valid_count, num_scheduled_step_n)
     # Non-participating requests (prev_drafts == 0 or prev_positions < 0) keep
     # the optimistic value, which already coincides with the truth because
     # there were no drafts to reject.
@@ -104,9 +100,7 @@ def test_correct_optimistic_seq_lens_cpu_all_accepted():
     prev_positions = np.array([0, 1, 2], dtype=np.int32)
     optimistic = np.array([105, 208, 51], dtype=np.int32)
     expected = optimistic.copy()
-    correct_optimistic_seq_lens_cpu(
-        optimistic, prev_positions, prev_drafts, valid_count, num_reqs
-    )
+    correct_optimistic_seq_lens_cpu(optimistic, prev_positions, prev_drafts, valid_count, num_reqs)
     np.testing.assert_array_equal(optimistic, expected)
 
 
@@ -118,9 +112,7 @@ def test_correct_optimistic_seq_lens_cpu_all_rejected():
     prev_positions = np.array([0, 1, 2], dtype=np.int32)
     optimistic = np.array([105, 208, 51], dtype=np.int32)
     expected = optimistic - prev_drafts
-    correct_optimistic_seq_lens_cpu(
-        optimistic, prev_positions, prev_drafts, valid_count, num_reqs
-    )
+    correct_optimistic_seq_lens_cpu(optimistic, prev_positions, prev_drafts, valid_count, num_reqs)
     np.testing.assert_array_equal(optimistic, expected)
 
 
@@ -131,9 +123,7 @@ def test_correct_optimistic_seq_lens_cpu_in_place_mutation():
     valid_count = np.array([2, 0], dtype=np.int32)  # 1 of 2 accepted, prefill
     prev_positions = np.array([0, -1], dtype=np.int32)
     pre_id = id(optimistic)
-    correct_optimistic_seq_lens_cpu(
-        optimistic, prev_positions, prev_drafts, valid_count, 2
-    )
+    correct_optimistic_seq_lens_cpu(optimistic, prev_positions, prev_drafts, valid_count, 2)
     assert id(optimistic) == pre_id
     # req 0: correction = prev_drafts + 1 - valid_count = 2 + 1 - 2 = 1
     # req 1: not participating → unchanged
@@ -147,9 +137,7 @@ def test_correct_optimistic_seq_lens_cpu_partial_batch():
     valid_count = np.array([2, 2, 0, 0], dtype=np.int32)
     prev_positions = np.array([0, 1, -1, -1], dtype=np.int32)
 
-    correct_optimistic_seq_lens_cpu(
-        optimistic, prev_positions, prev_drafts, valid_count, 2
-    )
+    correct_optimistic_seq_lens_cpu(optimistic, prev_positions, prev_drafts, valid_count, 2)
     # req 0: correction = 2 + 1 - 2 = 1, → 99
     # req 1: correction = 1 + 1 - 2 = 0, → 200 unchanged
     # tail (idx 2,3) untouched
@@ -172,12 +160,8 @@ def test_cpu_and_gpu_corrections_agree():
     prev_positions = np.array([0, 1, 2, -1, 4, 5], dtype=np.int32)
 
     # CPU path
-    optimistic = _build_optimistic_seq_lens(
-        prev_step_computed, prev_drafts, num_scheduled_step_n
-    ).astype(np.int32)
-    correct_optimistic_seq_lens_cpu(
-        optimistic, prev_positions, prev_drafts, valid_count, num_reqs
-    )
+    optimistic = _build_optimistic_seq_lens(prev_step_computed, prev_drafts, num_scheduled_step_n).astype(np.int32)
+    correct_optimistic_seq_lens_cpu(optimistic, prev_positions, prev_drafts, valid_count, num_reqs)
 
     # GPU path on CPU device for portability
     cpu_num_computed = torch.from_numpy(
@@ -197,8 +181,6 @@ def test_cpu_and_gpu_corrections_agree():
         cpu_num_computed,
     )
 
-    gpu_seq_lens = (
-        num_computed_gpu.numpy() + num_scheduled_step_n
-    )
+    gpu_seq_lens = num_computed_gpu.numpy() + num_scheduled_step_n
 
     np.testing.assert_array_equal(optimistic, gpu_seq_lens)

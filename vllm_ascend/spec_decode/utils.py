@@ -70,6 +70,4 @@ def correct_optimistic_seq_lens_cpu(
     # rejected_for_participating == correction; non-participating reqs end up
     # at zero via the mask multiply.
     correction = (prev_drafts + 1 - valid_counts) * participating
-    optimistic_seq_lens_cpu_np[:num_reqs] -= correction.astype(
-        optimistic_seq_lens_cpu_np.dtype, copy=False
-    )
+    optimistic_seq_lens_cpu_np[:num_reqs] -= correction.astype(optimistic_seq_lens_cpu_np.dtype, copy=False)
