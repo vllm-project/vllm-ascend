@@ -195,6 +195,16 @@ python3 .github/workflows/scripts/select_tests.py --diff-base origin/main
 
 # Route based on explicit changed files
 python3 .github/workflows/scripts/select_tests.py --changed-files vllm_ascend/ops/foo.py
+
+# Run a specific subset of e2e tests (mirrors the /e2e slash command)
+python3 .github/workflows/scripts/select_tests.py \
+  --explicit-e2e-tests tests/e2e/pull_request/one_card/test_foo.py \
+                        tests/e2e/pull_request/two_card/test_bar.py
+
+# Run a single test method (supports the same ::nodeid syntax as pytest)
+python3 .github/workflows/scripts/select_tests.py \
+  --explicit-e2e-tests \
+    tests/e2e/pull_request/one_card/test_foo.py::TestClass::test_method
 ```
 
 ## Testing Changes to `select_tests.py`

@@ -30,8 +30,10 @@ DeepSeek-R1.md
 DeepSeekOCR2.md
 GLM4.x.md
 GLM5.md
+GLM5.2.md
 Kimi-K2-Thinking.md
 Kimi-K2.5.md
+Kimi-K2.6.md
 PaddleOCR-VL.md
 MiniMax-M2.5.md
 Hunyuan-A13B-Instruct.md

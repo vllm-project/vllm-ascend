@@ -159,6 +159,8 @@ class CompressAttentionManager(FullAttentionManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        alignment_tokens: int | None = None,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -168,6 +170,9 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
             retention_interval: Prefix-cache retention interval.
+            alignment_tokens: Cache-hit alignment passed by hybrid KV cache
+                coordinators. Compressed attention caches logical blocks, so no
+                extra block mask is needed here.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // (self.block_size * self.compress_ratio)
@@ -200,7 +205,7 @@ class CompressAttentionManager(FullAttentionManager):
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...]:
         # vLLM B renamed ``use_eagle`` to ``drop_eagle_block``; accept both.
-        eagle_drop = use_eagle if vllm_version_is("0.21.0") else drop_eagle_block
+        eagle_drop = use_eagle if vllm_version_is("0.22.1") else drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
         # ), (
@@ -259,7 +264,7 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
-    if vllm_version_is("0.21.0"):
+    if vllm_version_is("0.22.1"):
         from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map  # type: ignore[import-not-found]
 
         manager_class = spec_manager_map[type(kv_cache_spec)]
