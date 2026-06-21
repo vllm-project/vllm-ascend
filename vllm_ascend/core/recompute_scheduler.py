@@ -344,8 +344,7 @@ class RecomputeScheduler(Scheduler):
                             )
                         if offloaded:
                             logger.info(
-                                "Recompute preemption offload enabled for "
-                                "request %s, computed_tokens=%d.",
+                                "Recompute preemption offload enabled for request %s, computed_tokens=%d.",
                                 recomputed_req_id,
                                 recomputed_num_computed_tokens,
                             )
@@ -361,8 +360,7 @@ class RecomputeScheduler(Scheduler):
                         else:
                             self.kv_cache_manager.free(recomputed_req)
                             logger.info(
-                                "Recompute preemption falls back without offload "
-                                "for request %s, computed_tokens=%d.",
+                                "Recompute preemption falls back without offload for request %s, computed_tokens=%d.",
                                 recomputed_req_id,
                                 recomputed_num_computed_tokens,
                             )
@@ -994,8 +992,7 @@ class RecomputeScheduler(Scheduler):
                     req_id, new_token_ids
                 ):
                     logger.error(
-                        "Unexpected: grammar rejected tokens %s for request %s. "
-                        "Terminating request.",
+                        "Unexpected: grammar rejected tokens %s for request %s. Terminating request.",
                         new_token_ids,
                         req_id,
                     )

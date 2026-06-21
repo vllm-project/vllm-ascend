@@ -49,17 +49,10 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         # prefix-cache connectors cannot restore. Give its request state
         # priority regardless of connector ordering.
         for i, connector in enumerate(self._connectors):
-            has_preempted_request = getattr(
-                connector, "has_preempted_request", None
-            )
-            if (
-                has_preempted_request is None
-                or not has_preempted_request(request.request_id)
-            ):
+            has_preempted_request = getattr(connector, "has_preempted_request", None)
+            if has_preempted_request is None or not has_preempted_request(request.request_id):
                 continue
-            tokens, load_async = connector.get_num_new_matched_tokens(
-                request, num_computed_tokens
-            )
+            tokens, load_async = connector.get_num_new_matched_tokens(request, num_computed_tokens)
             if tokens is None:
                 return None, False
             if tokens > 0:
@@ -79,9 +72,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         for c in self._connectors:
             hook = getattr(c, "update_state_before_preempt", None)
             if hook is not None:
-                offloaded = bool(
-                    hook(request, block_ids, num_computed_tokens)
-                ) or offloaded
+                offloaded = bool(hook(request, block_ids, num_computed_tokens)) or offloaded
         return offloaded
 
     def request_finished_all_groups(
