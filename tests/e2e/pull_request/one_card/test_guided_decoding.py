@@ -89,7 +89,14 @@ def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema
         "seed": 0,
         "structured_outputs_config": {"backend": guided_decoding_backend},
     }
-    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
+    # xgrammar may timeout on complex JSON schemas with default 5s timeout
+    env_overrides = {}
+    if guided_decoding_backend == "xgrammar":
+        env_overrides["VLLM_REGEX_COMPILATION_TIMEOUT_S"] = "30"
+    with (
+        patch.dict(os.environ, env_overrides, clear=False),
+        VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model,
+    ):
         prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
         inputs = vllm_model.get_inputs(prompts)
         outputs = vllm_model.model.generate(inputs, sampling_params=sampling_params)
