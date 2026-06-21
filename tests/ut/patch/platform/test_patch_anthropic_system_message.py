@@ -41,7 +41,7 @@ def test_inline_system_string_is_merged_and_not_kept_as_chat_message():
         system="Top-level prompt.",
     )
 
-    result = AnthropicServingMessages._convert_anthropic_to_openai_request(request)
+    result = AnthropicServingMessages._convert_anthropic_to_openai_request(request, merge_inline_system=True)
 
     assert result.messages == [
         {"role": "system", "content": "Top-level prompt.Be concise."},
@@ -74,7 +74,7 @@ def test_inline_system_list_content_is_merged_with_billing_header_stripped():
         ],
     )
 
-    result = AnthropicServingMessages._convert_anthropic_to_openai_request(request)
+    result = AnthropicServingMessages._convert_anthropic_to_openai_request(request, merge_inline_system=True)
 
     assert result.messages[0] == {
         "role": "system",
@@ -92,7 +92,7 @@ def test_multiple_inline_system_messages_are_all_merged():
         ]
     )
 
-    result = AnthropicServingMessages._convert_anthropic_to_openai_request(request)
+    result = AnthropicServingMessages._convert_anthropic_to_openai_request(request, merge_inline_system=True)
 
     assert result.messages == [
         {"role": "system", "content": "First.Second."},

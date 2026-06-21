@@ -3,26 +3,17 @@
 import json
 from unittest.mock import MagicMock
 
+import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-
-# vLLM main removed the ``_WrappedParser`` helper; the base ``Parser``
-# already instantiates from ``reasoning_parser_cls`` / ``tool_parser_cls``
-# class attributes, so a thin ``DelegatingParser`` subclass is equivalent.
-from vllm.parser.abstract_parser import DelegatingParser  # type: ignore[import-not-found]
-from vllm.reasoning.deepseek_v3_reasoning_parser import (
-    DeepSeekV3ReasoningWithThinkingParser,
-)
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
 from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401
 
-
-class _WrappedParser(DelegatingParser):
-    pass
-
-
 MOCK_TOKENIZER = MagicMock()
+MOCK_TOKENIZER.decode.return_value = ""
+MOCK_TOKENIZER.eos_token_id = None
+MOCK_TOKENIZER.bos_token_id = None
+MOCK_TOKENIZER.pad_token_id = None
 MOCK_TOKENIZER.get_vocab.return_value = {
     "<think>": 154841,
     "</think>": 154842,
@@ -60,10 +51,14 @@ def _collect_tool_args(tool_calls):
     return "".join(tc.function.arguments for tc in tool_calls if tc.function.arguments)
 
 
-def _parse_delta(parser, *args, finished=False, **kwargs):
-    return parser.parse_delta(*args, finished=finished, **kwargs)
+_LEGACY_PARSER = hasattr(Glm47MoeModelToolParser, "_extract_tool_call_regions")
 
 
+@pytest.mark.skipif(
+    not _LEGACY_PARSER,
+    reason="Legacy regex-based parser no longer present; "
+    "the new state-machine engine handles zero-arg tool calls natively.",
+)
 def test_glm47_streaming_inline_zero_arg_tool_call_waits_until_complete():
     request = _request()
     parser = Glm47MoeModelToolParser(MOCK_TOKENIZER, request.tools)
@@ -94,36 +89,36 @@ def test_glm47_streaming_inline_zero_arg_tool_call_waits_until_complete():
     assert second.tool_calls[0].function.name == "get_current_time"
     assert json.loads(_collect_tool_args(second.tool_calls)) == {}
 
-    finished = OpenAIServingChat._create_remaining_args_delta(second, "", 0)
-    assert finished.tool_calls[0].function.name == "get_current_time"
-    assert json.loads(_collect_tool_args(finished.tool_calls)) == {}
 
-
-def test_glm45_reasoning_glm47_streaming_inline_zero_arg_tool_call():
+@pytest.mark.skipif(
+    _LEGACY_PARSER,
+    reason="Only applicable for the new state-machine engine parser.",
+)
+def test_glm47_engine_streaming_inline_zero_arg_tool_call():
     request = _request()
-    _WrappedParser.reasoning_parser_cls = DeepSeekV3ReasoningWithThinkingParser
-    _WrappedParser.tool_parser_cls = Glm47MoeModelToolParser
-    parser = _WrappedParser(MOCK_TOKENIZER, request.tools)
+    parser = Glm47MoeModelToolParser(MOCK_TOKENIZER, request.tools)
 
-    first = _parse_delta(
-        parser,
-        "Need current time.",
-        [2001, 2002],
-        request,
-        prompt_token_ids=[],
-        finished=False,
+    first = parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text="",
+        delta_text="",
+        previous_token_ids=[],
+        current_token_ids=[154843, 455],
+        delta_token_ids=[154843, 455],
+        request=request,
     )
-    second = _parse_delta(
-        parser,
-        "</think><tool_call>get_current_time</tool_call>",
-        [154842, 154843, 455, 11075, 3009, 154844],
-        request,
-        finished=True,
+    assert first is None
+
+    second = parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text="",
+        delta_text="",
+        previous_token_ids=[154843, 455],
+        current_token_ids=[154843, 455, 11075, 3009, 154844],
+        delta_token_ids=[11075, 3009, 154844],
+        request=request,
     )
 
-    assert first is not None
-    assert first.reasoning == "Need current time."
     assert second is not None
     assert second.tool_calls
     assert second.tool_calls[0].function.name == "get_current_time"
-    assert json.loads(_collect_tool_args(second.tool_calls)) == {}

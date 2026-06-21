@@ -19,6 +19,13 @@ from vllm_ascend.patch.platform import patch_minimax_usage_accounting  # noqa: F
 
 
 class FakeTokenizer:
+    eos_token_id = None
+    bos_token_id = None
+    pad_token_id = None
+
+    def decode(self, token_ids, **kwargs):
+        return ""
+
     def get_vocab(self):
         return {
             "<think>": 1,
