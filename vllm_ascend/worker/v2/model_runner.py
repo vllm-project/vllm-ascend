@@ -123,8 +123,12 @@ class NPUModelRunner(GPUModelRunner):
         # is necessary for weight_prfetching function, and MoE communication optimization.
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
-        set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
-        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
+        # NOTE: decode_query_len is initialized in load_model() after model_state exists.
+        # For now, use a temporary value (num_speculative_steps + 1) for initialization.
+        # The actual decode_query_len will be set in load_model().
+        temp_decode_query_len = self.num_speculative_steps + 1
+        set_cos_and_sin(vllm_config, self.max_num_reqs, temp_decode_query_len, self.dtype, self.device)
+        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, temp_decode_query_len)
         set_mc2_mask(vllm_config, self.device)
 
         # we need to update full graph params in run_fullgraph,
