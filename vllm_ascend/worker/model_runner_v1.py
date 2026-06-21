@@ -4888,7 +4888,6 @@ class NPUModelRunner(GPUModelRunner):
                 cudagraph_mode, self.uniform_decode_query_len
             )
 
-        capture_sizes: list[int] = []
         if (
             self.speculative_config
             and self.drafter is not None
@@ -4903,12 +4902,12 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
-            capture_descs = self.cudagraph_dispatcher.get_capture_descs()
-            capture_sizes = sorted({
-                desc.num_tokens
-                for _, descs in capture_descs
-                for desc in descs
-            })
+        capture_descs = self.cudagraph_dispatcher.get_capture_descs()
+        capture_sizes = sorted({
+            desc.num_tokens
+            for _, descs in capture_descs
+            for desc in descs
+        })
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
