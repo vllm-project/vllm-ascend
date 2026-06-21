@@ -68,18 +68,14 @@ class RecomputeCPUOffloadScheduler:
         assert kv_cache_config is not None
         self.vllm_config = vllm_config
         self.enable_offload_prefix_caching = enable_offload_prefix_caching
-        self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, cpu_capacity_bytes
-        )
+        self.cpu_kv_cache_config = self._derive_cpu_config(kv_cache_config, cpu_capacity_bytes)
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self.enable_kv_cache_events = (
-            vllm_config.kv_events_config is not None
-            and vllm_config.kv_events_config.enable_kv_cache_events
+            vllm_config.kv_events_config is not None and vllm_config.kv_events_config.enable_kv_cache_events
         )
 
         logger.info(
-            "RecomputeCPUOffloadScheduler: allocating %d CPU blocks "
-            "(%.2f GB) for recompute offload, prefix caching=%s",
+            "RecomputeCPUOffloadScheduler: allocating %d CPU blocks (%.2f GB) for recompute offload, prefix caching=%s",
             self.num_cpu_blocks,
             cpu_capacity_bytes / (1024**3),
             self.enable_offload_prefix_caching,
@@ -91,9 +87,7 @@ class RecomputeCPUOffloadScheduler:
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
-            max_num_batched_tokens=(
-                vllm_config.scheduler_config.max_num_batched_tokens
-            ),
+            max_num_batched_tokens=(vllm_config.scheduler_config.max_num_batched_tokens),
             use_eagle=False,
             enable_caching=self.enable_offload_prefix_caching,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -119,9 +113,7 @@ class RecomputeCPUOffloadScheduler:
         self._store_event_pending_counts: dict[int, int] = {}
 
     @staticmethod
-    def _derive_cpu_config(
-        gpu_config: "KVCacheConfig", cpu_capacity_bytes: int
-    ) -> "KVCacheConfig":
+    def _derive_cpu_config(gpu_config: "KVCacheConfig", cpu_capacity_bytes: int) -> "KVCacheConfig":
         from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
@@ -152,9 +144,7 @@ class RecomputeCPUOffloadScheduler:
     def has_preempted_request(self, req_id: str) -> bool:
         return req_id in self._preempted_req_states
 
-    def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
-    ) -> tuple[int | None, bool]:
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
         state = self._preempted_req_states.get(request.request_id)
         if state is None:
             return 0, False
@@ -169,8 +159,7 @@ class RecomputeCPUOffloadScheduler:
 
         state.load_start_tokens = num_computed_tokens
         logger.debug(
-            "Recompute offload cache hit for request %s: load_start=%d, "
-            "load_tokens=%d, stored_tokens=%d.",
+            "Recompute offload cache hit for request %s: load_start=%d, load_tokens=%d, stored_tokens=%d.",
             request.request_id,
             num_computed_tokens,
             hit_length,
@@ -237,17 +226,12 @@ class RecomputeCPUOffloadScheduler:
                 len(available_group_gpu_ids),
                 cdiv(num_computed_tokens, group_block_size),
             )
-            gpu_blocks = [
-                self._gpu_block_pool.blocks[block_id]
-                for block_id in available_group_gpu_ids[:num_blocks]
-            ]
+            gpu_blocks = [self._gpu_block_pool.blocks[block_id] for block_id in available_group_gpu_ids[:num_blocks]]
             group_gpu_blocks.append(gpu_blocks)
             effective_hashes: list[BlockHashWithGroupId | None] = []
             for block_idx, block_id in enumerate(available_group_gpu_ids):
                 gpu_block = self._gpu_block_pool.blocks[block_id]
-                block_is_computed = (
-                    (block_idx + 1) * group_block_size <= num_computed_tokens
-                )
+                block_is_computed = (block_idx + 1) * group_block_size <= num_computed_tokens
                 if not block_is_computed and gpu_block.block_hash is not None:
                     # allocate_slots() may assign a hash using tokens planned
                     # for this scheduling step. If the request is then
@@ -257,20 +241,12 @@ class RecomputeCPUOffloadScheduler:
                 if block_idx >= num_blocks:
                     continue
 
-                block_hash = (
-                    gpu_block.block_hash
-                    if block_is_computed
-                    and self.enable_offload_prefix_caching
-                    else None
-                )
+                block_hash = gpu_block.block_hash if block_is_computed and self.enable_offload_prefix_caching else None
                 effective_hashes.append(block_hash)
                 if block_hash is None:
                     num_unhashed += 1
                 elif (
-                    self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
-                        block_hash
-                    )
-                    is None
+                    self.cpu_block_pool.cached_block_hash_to_block.get_one_block(block_hash) is None
                     and block_hash not in self._pending_hash_blocks
                 ):
                     missing_hashes.add(block_hash)
@@ -281,8 +257,7 @@ class RecomputeCPUOffloadScheduler:
             return False
         if num_needed > self.cpu_block_pool.get_num_free_blocks():
             logger.warning(
-                "Skip recompute offload for request %s: CPU cache has %d "
-                "free blocks, but %d new blocks are required.",
+                "Skip recompute offload for request %s: CPU cache has %d free blocks, but %d new blocks are required.",
                 req_id,
                 self.cpu_block_pool.get_num_free_blocks(),
                 num_needed,
@@ -295,19 +270,13 @@ class RecomputeCPUOffloadScheduler:
         store_cpu_block_ids: list[int] = []
         waiting_for_store = False
 
-        for gpu_blocks, effective_hashes in zip(
-            group_gpu_blocks, group_gpu_hashes
-        ):
+        for gpu_blocks, effective_hashes in zip(group_gpu_blocks, group_gpu_hashes):
             group_cpu_ids: list[int] = []
             for gpu_block, block_hash in zip(gpu_blocks, effective_hashes):
                 cpu_block = None
 
                 if block_hash is not None:
-                    cpu_block = (
-                        self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
-                            block_hash
-                        )
-                    )
+                    cpu_block = self.cpu_block_pool.cached_block_hash_to_block.get_one_block(block_hash)
                     if cpu_block is not None:
                         self.cpu_block_pool.touch([cpu_block])
                     else:
@@ -396,10 +365,7 @@ class RecomputeCPUOffloadScheduler:
         gpu_block_ids: list[int] = []
         cpu_block_ids: list[int] = []
         for g, group_cpu_ids in enumerate(state.cpu_block_ids):
-            group_block_size = (
-                self.cpu_kv_cache_config.kv_cache_groups[g]
-                .kv_cache_spec.block_size
-            )
+            group_block_size = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
             start_block = load_start_tokens // group_block_size
             end_block = min(
                 len(group_cpu_ids),
@@ -426,13 +392,10 @@ class RecomputeCPUOffloadScheduler:
             )
 
         assert self._gpu_block_pool is not None
-        self._gpu_block_pool.touch(
-            [self._gpu_block_pool.blocks[block_id] for block_id in gpu_block_ids]
-        )
+        self._gpu_block_pool.touch([self._gpu_block_pool.blocks[block_id] for block_id in gpu_block_ids])
         state.load_transfer_meta = TransferMeta(gpu_block_ids, cpu_block_ids)
         logger.info(
-            "Prepared recompute offload H2D load for request %s: "
-            "tokens=[%d, %d), blocks=%d.",
+            "Prepared recompute offload H2D load for request %s: tokens=[%d, %d), blocks=%d.",
             request.request_id,
             load_start_tokens,
             load_end_tokens,
@@ -449,9 +412,7 @@ class RecomputeCPUOffloadScheduler:
         if store_gpu:
             store_event = self._store_event_counter
             self._store_event_counter += 1
-            self._preempt_store_event_to_blocks[store_event] = TransferMeta(
-                store_gpu, store_cpu
-            )
+            self._preempt_store_event_to_blocks[store_event] = TransferMeta(store_gpu, store_cpu)
             self._preempt_store_event_to_reqs[store_event] = store_req_ids
             for req_id in store_req_ids:
                 self._preempted_req_states[req_id].store_event = store_event
@@ -511,15 +472,9 @@ class RecomputeCPUOffloadScheduler:
             block_hash = cpu_block.block_hash
             if block_hash is None:
                 continue
-            cached_block = (
-                self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
-                    block_hash
-                )
-            )
+            cached_block = self.cpu_block_pool.cached_block_hash_to_block.get_one_block(block_hash)
             if cached_block is None:
-                self.cpu_block_pool.cached_block_hash_to_block.insert(
-                    block_hash, cpu_block
-                )
+                self.cpu_block_pool.cached_block_hash_to_block.insert(block_hash, cpu_block)
             elif cached_block.block_id != cpu_block.block_id:
                 cpu_block.reset_hash()
 
@@ -535,16 +490,14 @@ class RecomputeCPUOffloadScheduler:
             self._store_event_pending_counts
             or self._preempt_store_event_to_blocks
             or any(
-                not state.ready or state.load_transfer_meta is not None
-                for state in self._preempted_req_states.values()
+                not state.ready or state.load_transfer_meta is not None for state in self._preempted_req_states.values()
             )
         )
 
     def reset_cache(self) -> bool:
         if self.has_pending_transfers():
             logger.warning(
-                "Failed to reset recompute offload cache because transfers "
-                "or request states are still pending."
+                "Failed to reset recompute offload cache because transfers or request states are still pending."
             )
             return False
         for req_id in list(self._preempted_req_states):
@@ -591,8 +544,7 @@ class RecomputeCPUOffloadScheduler:
         if state.load_transfer_meta is not None:
             assert self._gpu_block_pool is not None
             self._gpu_block_pool.free_blocks(
-                self._gpu_block_pool.blocks[block_id]
-                for block_id in state.load_transfer_meta.gpu_block_ids
+                self._gpu_block_pool.blocks[block_id] for block_id in state.load_transfer_meta.gpu_block_ids
             )
         self._cleanup_preempt_cache_request(req_id)
 
@@ -601,9 +553,7 @@ class RecomputeCPUOffloadScheduler:
         if state is None:
             return
         self.cpu_block_pool.free_blocks(
-            self.cpu_block_pool.blocks[block_id]
-            for group_cpu_ids in state.cpu_block_ids
-            for block_id in group_cpu_ids
+            self.cpu_block_pool.blocks[block_id] for group_cpu_ids in state.cpu_block_ids for block_id in group_cpu_ids
         )
 
     def take_events(self) -> Iterable[KVCacheEvent]:

@@ -52,17 +52,10 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
 
         extra_config = self._kv_transfer_config.kv_connector_extra_config or {}
-        cpu_capacity_bytes = int(
-            extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES)
-        )
-        enable_offload_prefix_caching = extra_config.get(
-            "enable_offload_prefix_caching", False
-        )
+        cpu_capacity_bytes = int(extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES))
+        enable_offload_prefix_caching = extra_config.get("enable_offload_prefix_caching", False)
         if not isinstance(enable_offload_prefix_caching, bool):
-            raise ValueError(
-                "enable_offload_prefix_caching must be a boolean, got "
-                f"{enable_offload_prefix_caching!r}"
-            )
+            raise ValueError(f"enable_offload_prefix_caching must be a boolean, got {enable_offload_prefix_caching!r}")
         world_size = vllm_config.parallel_config.world_size
         cpu_capacity_per_rank = cpu_capacity_bytes // world_size
         if "cpu_bytes_to_use_per_rank" in extra_config:
@@ -80,8 +73,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         self.worker_handler: RecomputeCPUOffloadWorker | None = None
 
         logger.info(
-            "RecomputeCPUOffloadConnector: role=%s, per_rank=%.2f GB, "
-            "world_size=%d, offload_prefix_caching=%s",
+            "RecomputeCPUOffloadConnector: role=%s, per_rank=%.2f GB, world_size=%d, offload_prefix_caching=%s",
             role.name,
             cpu_capacity_per_rank / (1024**3),
             world_size,
@@ -173,9 +165,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
         if self.scheduler_manager is not None:
-            return self.scheduler_manager.get_num_new_matched_tokens(
-                request, num_computed_tokens
-            )
+            return self.scheduler_manager.get_num_new_matched_tokens(request, num_computed_tokens)
         return 0, False
 
     def update_state_after_alloc(
@@ -185,9 +175,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         num_external_tokens: int,
     ) -> None:
         if self.scheduler_manager is not None:
-            self.scheduler_manager.update_state_after_alloc(
-                request, blocks, num_external_tokens
-            )
+            self.scheduler_manager.update_state_after_alloc(request, blocks, num_external_tokens)
 
     def update_state_before_preempt(
         self,
@@ -233,9 +221,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         if self.scheduler_manager is not None:
-            return self.scheduler_manager.request_finished_all_groups(
-                request, block_ids
-            )
+            return self.scheduler_manager.request_finished_all_groups(request, block_ids)
         return False, None
 
     # NOTE: New API only for RecomputeCPUOffloadConnector.

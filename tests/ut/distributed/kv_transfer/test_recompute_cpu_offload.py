@@ -4,8 +4,8 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.manager import (
@@ -27,9 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.worker im
 
 
 def test_recompute_cpu_offload_worker_metadata_aggregate():
-    metadata = RecomputeCPUOffloadWorkerMetadata(
-        completed_store_events={1: 1, 2: 2}
-    )
+    metadata = RecomputeCPUOffloadWorkerMetadata(completed_store_events={1: 1, 2: 2})
     other = RecomputeCPUOffloadWorkerMetadata(completed_store_events={2: 3, 4: 1})
 
     merged = metadata.aggregate(other)
@@ -52,9 +50,7 @@ def test_recompute_cpu_offload_metadata_defaults_are_empty():
 
 
 def test_recompute_cpu_offload_connector_scheduler_methods_forward():
-    connector = RecomputeCPUOffloadConnectorV1.__new__(
-        RecomputeCPUOffloadConnectorV1
-    )
+    connector = RecomputeCPUOffloadConnectorV1.__new__(RecomputeCPUOffloadConnectorV1)
     scheduler_manager = MagicMock()
     scheduler_manager.get_num_new_matched_tokens.return_value = (8, True)
     scheduler_manager.update_state_before_preempt.return_value = True
@@ -72,25 +68,17 @@ def test_recompute_cpu_offload_connector_scheduler_methods_forward():
     assert connector.has_pending_transfers() is True
     assert connector.has_preempted_request("req-1") is True
 
-    scheduler_manager.get_num_new_matched_tokens.assert_called_once_with(
-        request, 4
-    )
-    scheduler_manager.update_state_after_alloc.assert_called_once_with(
-        request, blocks, 8
-    )
-    scheduler_manager.update_state_before_preempt.assert_called_once_with(
-        request, block_ids, 16
-    )
+    scheduler_manager.get_num_new_matched_tokens.assert_called_once_with(request, 4)
+    scheduler_manager.update_state_after_alloc.assert_called_once_with(request, blocks, 8)
+    scheduler_manager.update_state_before_preempt.assert_called_once_with(request, block_ids, 16)
 
 
 def test_recompute_cpu_offload_connector_worker_methods_forward():
-    connector = RecomputeCPUOffloadConnectorV1.__new__(
-        RecomputeCPUOffloadConnectorV1
-    )
+    connector = RecomputeCPUOffloadConnectorV1.__new__(RecomputeCPUOffloadConnectorV1)
     worker_handler = MagicMock()
     worker_handler.get_finished.return_value = (None, {"req-1"})
-    worker_handler.build_connector_worker_meta.return_value = (
-        RecomputeCPUOffloadWorkerMetadata(completed_store_events={3: 1})
+    worker_handler.build_connector_worker_meta.return_value = RecomputeCPUOffloadWorkerMetadata(
+        completed_store_events={3: 1}
     )
     connector.worker_handler = worker_handler
 
@@ -110,9 +98,7 @@ def test_recompute_cpu_offload_connector_worker_methods_forward():
 
 
 def test_recompute_cpu_offload_connector_defaults_without_scheduler_manager():
-    connector = RecomputeCPUOffloadConnectorV1.__new__(
-        RecomputeCPUOffloadConnectorV1
-    )
+    connector = RecomputeCPUOffloadConnectorV1.__new__(RecomputeCPUOffloadConnectorV1)
     connector.scheduler_manager = None
 
     assert connector.get_num_new_matched_tokens(MagicMock(), 0) == (0, False)
@@ -174,9 +160,7 @@ def test_recompute_cpu_offload_scheduler_update_state_after_alloc_errors():
     else:
         raise AssertionError("Expected RuntimeError when load mapping fails")
 
-    scheduler._prepare_preempt_load_after_alloc.assert_called_once_with(
-        request, ([1, 2],), 2
-    )
+    scheduler._prepare_preempt_load_after_alloc.assert_called_once_with(request, ([1, 2],), 2)
 
 
 def test_recompute_cpu_offload_scheduler_build_connector_meta_assigns_events():
@@ -229,9 +213,7 @@ def test_recompute_cpu_offload_scheduler_update_connector_output_marks_store_rea
     scheduler._process_preempt_store_event = MagicMock()
     output = KVConnectorOutput(
         finished_recving=set(),
-        kv_connector_worker_meta=RecomputeCPUOffloadWorkerMetadata(
-            completed_store_events={5: 1}
-        ),
+        kv_connector_worker_meta=RecomputeCPUOffloadWorkerMetadata(completed_store_events={5: 1}),
     )
 
     scheduler.update_connector_output(output)
@@ -277,12 +259,8 @@ def test_recompute_cpu_offload_scheduler_request_finished_ready_and_pending():
         False,
         None,
     )
-    assert scheduler.request_finished(
-        SimpleNamespace(request_id="pending"), []
-    ) == (False, None)
-    assert scheduler.request_finished(
-        SimpleNamespace(request_id="loading"), []
-    ) == (False, None)
+    assert scheduler.request_finished(SimpleNamespace(request_id="pending"), []) == (False, None)
+    assert scheduler.request_finished(SimpleNamespace(request_id="loading"), []) == (False, None)
 
     scheduler._cleanup_preempt_cache_request.assert_called_once_with("ready")
     assert scheduler._preempted_req_states["pending"].finished is True

@@ -81,18 +81,13 @@ class RecomputeCPUOffloadWorker:
                         unique_gpu_caches[f"{layer_name}.{idx}"] = single_tensor.view(single_tensor.shape[0], -1)
                         register_cache_ptrs.append(single_tensor.data_ptr())
                         self.block_size_scale[f"{layer_name}.{idx}"] = single_tensor.shape[0] // self.num_gpu_blocks
-                        logger.info(f'Register unique_gpu_caches: {layer_name}.{idx} shape: {single_tensor.shape}')
             else:
                 if layer_tensor.data_ptr() not in register_cache_ptrs:
                     unique_gpu_caches[layer_name] = layer_tensor.view(layer_tensor.shape[0], -1)
                     register_cache_ptrs.append(layer_tensor.data_ptr())
                     self.block_size_scale[layer_name] = layer_tensor.shape[0] // self.num_gpu_blocks
-                    logger.info(f'Register unique_gpu_caches: {layer_name} shape: {layer_tensor.shape}')
 
-        per_tensor_bytes_per_block = [
-            tensor.shape[-1] * tensor.element_size()
-            for tensor in unique_gpu_caches.values()
-        ]
+        per_tensor_bytes_per_block = [tensor.shape[-1] * tensor.element_size() for tensor in unique_gpu_caches.values()]
         total_bytes_per_block = sum(per_tensor_bytes_per_block)
         self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
         if self.num_cpu_blocks != scheduler_num_cpu_blocks:
@@ -115,14 +110,12 @@ class RecomputeCPUOffloadWorker:
                 pin_memory=True,
                 device="cpu",
             )
-            logger.info(f'Register cpu_kv_caches: {name} shape: {cpu_shape}')
 
         self.load_stream = torch.npu.Stream()
         self.store_stream = torch.npu.Stream()
 
         logger.info(
-            "RecomputeCPUOffloadWorker scaffold registered %d unique KV tensors, "
-            "allocating %d CPU blocks (%.2f GB).",
+            "RecomputeCPUOffloadWorker scaffold registered %d unique KV tensors, allocating %d CPU blocks (%.2f GB).",
             len(unique_gpu_caches),
             self.num_cpu_blocks,
             (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
@@ -244,8 +237,13 @@ class RecomputeCPUOffloadWorker:
                         # TODO: Replace this D2H torch copy with the NPU copy
                         # backend dedicated kernel.
                         if tensor_block_size_scale > 1:
-                            cpu_tensor[dst_block_id * tensor_block_size_scale: (dst_block_id + 1) * tensor_block_size_scale].copy_(
-                                gpu_tensor[src_block_id * tensor_block_size_scale: (src_block_id + 1) * tensor_block_size_scale],
+                            cpu_tensor[
+                                dst_block_id * tensor_block_size_scale : (dst_block_id + 1) * tensor_block_size_scale
+                            ].copy_(
+                                gpu_tensor[
+                                    src_block_id * tensor_block_size_scale : (src_block_id + 1)
+                                    * tensor_block_size_scale
+                                ],
                                 non_blocking=True,
                             )
                         else:
@@ -257,8 +255,13 @@ class RecomputeCPUOffloadWorker:
                         # TODO: Replace this H2D torch copy with the NPU copy
                         # backend dedicated kernel.
                         if tensor_block_size_scale > 1:
-                            gpu_tensor[dst_block_id * tensor_block_size_scale: (dst_block_id + 1) * tensor_block_size_scale].copy_(
-                                cpu_tensor[src_block_id * tensor_block_size_scale: (src_block_id + 1) * tensor_block_size_scale],
+                            gpu_tensor[
+                                dst_block_id * tensor_block_size_scale : (dst_block_id + 1) * tensor_block_size_scale
+                            ].copy_(
+                                cpu_tensor[
+                                    src_block_id * tensor_block_size_scale : (src_block_id + 1)
+                                    * tensor_block_size_scale
+                                ],
                                 non_blocking=True,
                             )
                         else:
@@ -292,17 +295,11 @@ class RecomputeCPUOffloadWorker:
         finished_recving: set[str] = set()
         if self._pending_load_event_indices:
             load_hwm = self._poll_load_events()
-            completed_loads = [
-                event_idx
-                for event_idx in self._pending_load_event_indices
-                if event_idx <= load_hwm
-            ]
+            completed_loads = [event_idx for event_idx in self._pending_load_event_indices if event_idx <= load_hwm]
             for event_idx in completed_loads:
                 self._pending_load_event_indices.discard(event_idx)
                 self._submitted_load_event_indices.discard(event_idx)
-                finished_recving.update(
-                    metadata.preempt_load_event_to_reqs.get(event_idx, [])
-                )
+                finished_recving.update(metadata.preempt_load_event_to_reqs.get(event_idx, []))
 
         return None, finished_recving or None
 
