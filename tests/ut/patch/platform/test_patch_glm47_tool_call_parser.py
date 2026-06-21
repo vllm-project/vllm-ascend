@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from unittest.mock import MagicMock
 
 import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -9,21 +8,41 @@ from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
 from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401
 
-MOCK_TOKENIZER = MagicMock()
-MOCK_TOKENIZER.decode.return_value = ""
-MOCK_TOKENIZER.eos_token_id = None
-MOCK_TOKENIZER.bos_token_id = None
-MOCK_TOKENIZER.pad_token_id = None
-MOCK_TOKENIZER.get_vocab.return_value = {
-    "<think>": 154841,
-    "</think>": 154842,
-    "<tool_call>": 154843,
-    "</tool_call>": 154844,
-    "<arg_key>": 154847,
-    "</arg_key>": 154848,
-    "<arg_value>": 154849,
-    "</arg_value>": 154850,
+THINK_START = "<think>"
+THINK_END = "</think>"
+TOOL_CALL_START = "<tool_call>"
+TOOL_CALL_END = "</tool_call>"
+ARG_KEY_START = "<arg_key>"
+ARG_KEY_END = "</arg_key>"
+ARG_VALUE_START = "<arg_value>"
+ARG_VALUE_END = "</arg_value>"
+
+_VOCAB = {
+    THINK_START: 154841,
+    THINK_END: 154842,
+    TOOL_CALL_START: 154843,
+    TOOL_CALL_END: 154844,
+    ARG_KEY_START: 154847,
+    ARG_KEY_END: 154848,
+    ARG_VALUE_START: 154849,
+    ARG_VALUE_END: 154850,
 }
+_VOCAB_R = {v: k for k, v in _VOCAB.items()}
+
+
+class _FakeTokenizer:
+    eos_token_id = None
+    bos_token_id = None
+    pad_token_id = None
+
+    def decode(self, token_ids, **kwargs):
+        return "".join(_VOCAB_R.get(tid, "") for tid in token_ids)
+
+    def get_vocab(self):
+        return dict(_VOCAB)
+
+
+MOCK_TOKENIZER = _FakeTokenizer()
 
 
 def _request():
@@ -65,8 +84,8 @@ def test_glm47_streaming_inline_zero_arg_tool_call_waits_until_complete():
 
     first = parser.extract_tool_calls_streaming(
         previous_text="",
-        current_text="<tool_call>get",
-        delta_text="<tool_call>get",
+        current_text=TOOL_CALL_START + "get",
+        delta_text=TOOL_CALL_START + "get",
         previous_token_ids=[],
         current_token_ids=[154843, 455],
         delta_token_ids=[154843, 455],
@@ -75,9 +94,9 @@ def test_glm47_streaming_inline_zero_arg_tool_call_waits_until_complete():
     assert first is None
 
     second = parser.extract_tool_calls_streaming(
-        previous_text="<tool_call>get",
-        current_text="<tool_call>get_current_time</tool_call>",
-        delta_text="_current_time</tool_call>",
+        previous_text=TOOL_CALL_START + "get",
+        current_text=TOOL_CALL_START + "get_current_time" + TOOL_CALL_END,
+        delta_text="_current_time" + TOOL_CALL_END,
         previous_token_ids=[154843, 455],
         current_token_ids=[154843, 455, 11075, 3009, 154844],
         delta_token_ids=[11075, 3009, 154844],
@@ -100,21 +119,21 @@ def test_glm47_engine_streaming_inline_zero_arg_tool_call():
 
     first = parser.extract_tool_calls_streaming(
         previous_text="",
-        current_text="",
-        delta_text="",
+        current_text=TOOL_CALL_START,
+        delta_text=TOOL_CALL_START,
         previous_token_ids=[],
-        current_token_ids=[154843, 455],
-        delta_token_ids=[154843, 455],
+        current_token_ids=[154843],
+        delta_token_ids=[154843],
         request=request,
     )
     assert first is None
 
     second = parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text="",
-        delta_text="",
-        previous_token_ids=[154843, 455],
-        current_token_ids=[154843, 455, 11075, 3009, 154844],
+        previous_text=TOOL_CALL_START,
+        current_text=TOOL_CALL_START + "get_current_time" + TOOL_CALL_END,
+        delta_text="get_current_time" + TOOL_CALL_END,
+        previous_token_ids=[154843],
+        current_token_ids=[154843, 11075, 3009, 154844],
         delta_token_ids=[11075, 3009, 154844],
         request=request,
     )
