@@ -381,7 +381,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 # vLLM B renamed the ``use_eagle`` kwarg to ``drop_eagle_block``.
-                if vllm_version_is("0.21.0"):
+                if vllm_version_is("0.22.1"):
                     eagle_kwarg = {"use_eagle": use_eagle}
                 else:
                     eagle_kwarg = {"drop_eagle_block": use_eagle}
