@@ -259,7 +259,7 @@ sys.exit(1)
 }
 
 # Run AOP decision pipeline on failure: classify → check age → bisect-or-exit
-# Same logic as _e2e_nightly_multi_node.yaml AOP hooks
+# Same logic as _e2e_nightly_multi_node.yaml AOP hooks.
 aop_pipeline() {
     local rules="$WORKSPACE/vllm-ascend/tests/e2e/nightly/scripts/rules-env.txt"
     local table="$WORKSPACE/vllm-ascend/tests/e2e/nightly/bisect/good_table.csv"
