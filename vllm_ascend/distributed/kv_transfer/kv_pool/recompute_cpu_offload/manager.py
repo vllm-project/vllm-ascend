@@ -120,10 +120,7 @@ class RecomputeCPUOffloadScheduler:
         for group in kv_cache_config.kv_cache_groups:
             if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
                 group_is_sliding_window.append(
-                    any(
-                        isinstance(spec, SlidingWindowSpec)
-                        for spec in group.kv_cache_spec.kv_cache_specs.values()
-                    )
+                    any(isinstance(spec, SlidingWindowSpec) for spec in group.kv_cache_spec.kv_cache_specs.values())
                 )
             else:
                 group_is_sliding_window.append(isinstance(group.kv_cache_spec, SlidingWindowSpec))
@@ -165,9 +162,9 @@ class RecomputeCPUOffloadScheduler:
             return []
         aligned_group_block_ids = list(group_block_ids)
         if self._group_is_sliding_window[group_idx] and len(aligned_group_block_ids) < logical_num_blocks:
-            aligned_group_block_ids = (
-                [0] * (logical_num_blocks - len(aligned_group_block_ids)) + aligned_group_block_ids
-            )
+            aligned_group_block_ids = [0] * (
+                logical_num_blocks - len(aligned_group_block_ids)
+            ) + aligned_group_block_ids
         return aligned_group_block_ids[:logical_num_blocks]
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
@@ -426,7 +423,9 @@ class RecomputeCPUOffloadScheduler:
                 ),
                 cdiv(load_end_tokens, group_block_size),
             )
-            if end_block <= start_block:
+            if end_block == start_block:
+                continue
+            if end_block < start_block:
                 raise RuntimeError(
                     "Recompute H2D produced an empty block range: "
                     f"req_id={request.request_id}, group={g}, "
