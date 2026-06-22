@@ -2540,7 +2540,7 @@ class NPUModelRunner(GPUModelRunner):
                 # synchronized by ``_to_list``'s event.synchronize(), so
                 # the pinned buffers are ready to be wrapped as numpy.
                 total = scheduler_output.total_num_scheduled_tokens
-                output.routed_experts = RoutedExpertsLists(
+                model_runner_output.routed_experts = RoutedExpertsLists(
                     routing_data=self.routed_experts_cpu[:total].numpy(),
                     slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
                 )
