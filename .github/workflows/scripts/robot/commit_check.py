@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Step 5: Check PR commit message compliance.
+"""Check PR commit message compliance against Conventional Commits.
 
-1. Reads PR info to get base/head SHAs
-2. Runs git log to extract all commits
-3. Applies hard rules (type format, description, sign-off)
-4. Calls LLM for commits that fail hard rules
-5. Outputs commit_results.json
+Workflow:
+1. Reads PR info to get base/head SHAs.
+2. Runs ``git log`` to extract all commits in the PR.
+3. Applies hard rules (type format, description quality, sign-off).
+4. Calls the LLM for commits that fail the hard rules.
+5. Outputs ``commit_results.json``.
+
+Used as step 6 of the PR Review Bot workflow.
 """
 
 import argparse
@@ -13,14 +16,10 @@ import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
-import requests
+from lib.llm import call_llm
 
-LLM_API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("VLLM_API_KEY", "")
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL") or os.environ.get("VLLM_BASE_URL", "")
-LLM_MODEL = os.environ.get("LLM_MODEL", "default")
 VALID_TYPES = os.environ.get("VALID_TYPES", "feat,fix,perf,refactor,test,docs,chore").split(",")
 REQUIRE_SIGNOFF = os.environ.get("REQUIRE_SIGNOFF", "true").lower() == "true"
 
@@ -29,8 +28,20 @@ COMMIT_PATTERN = re.compile(r"^(\w+)(\([^)]+\))?!?:\s+(.+)$")
 HARD_FAIL = "hard_fail"
 HARD_PASS = "hard_pass"
 
+LLM_MAX_TOKENS = 4096
+LLM_TIMEOUT = 180
+
 
 def run_git_log(base_sha: str, head_sha: str) -> list[dict]:
+    """Return commits between *base_sha* and *head_sha*.
+
+    Args:
+        base_sha: The base commit SHA.
+        head_sha: The head commit SHA.
+
+    Returns:
+        List of dicts with keys ``sha``, ``subject``, ``body``.
+    """
     cmd = ["git", "log", f"{base_sha}..{head_sha}", "--format=%H|||%s|||%B"]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     commits = []
@@ -44,6 +55,14 @@ def run_git_log(base_sha: str, head_sha: str) -> list[dict]:
 
 
 def check_type_format(subject: str) -> tuple[bool, str]:
+    """Validate the Conventional Commits type prefix.
+
+    Args:
+        subject: The commit subject line.
+
+    Returns:
+        A ``(ok, message)`` tuple.
+    """
     m = COMMIT_PATTERN.match(subject)
     if not m:
         return False, "提交信息不以 `<type>: <description>` 格式开头（如 feat: add feature）"
@@ -54,23 +73,42 @@ def check_type_format(subject: str) -> tuple[bool, str]:
 
 
 def check_description(subject: str) -> tuple[bool, str]:
+    """Validate commit description quality (length, specificity).
+
+    Args:
+        subject: The commit subject line.
+
+    Returns:
+        A ``(ok, message)`` tuple.
+    """
+    VAGUE_WORDS = ["fix bug", "add feature", "update code", "修改", "更新"]
+    MIN_DESC_LENGTH = 3
+    MAX_VAGUE_LENGTH = 20
+
     m = COMMIT_PATTERN.match(subject)
     if not m:
         return False, "无法解析描述字段"
     desc = m.group(3).strip()
     if not desc:
         return False, "描述不能为空"
-    if len(desc) < 3:
+    if len(desc) < MIN_DESC_LENGTH:
         return False, f"描述过于简短（{len(desc)} 个字符），请提供更有意义的摘要"
-    vague_words = ["fix bug", "add feature", "update code", "修改", "更新"]
     desc_lower = desc.lower()
-    for vw in vague_words:
-        if vw in desc_lower and len(desc) < 20:
+    for vw in VAGUE_WORDS:
+        if vw in desc_lower and len(desc) < MAX_VAGUE_LENGTH:
             return False, f"描述过于泛化（'{desc}'），请具体说明变更内容"
     return True, ""
 
 
 def check_signoff(body: str) -> tuple[bool, str]:
+    """Check that the commit body contains a ``Signed-off-by:`` trailer.
+
+    Args:
+        body: The full commit body text.
+
+    Returns:
+        A ``(ok, message)`` tuple.
+    """
     if not REQUIRE_SIGNOFF:
         return True, ""
     if "Signed-off-by:" in body:
@@ -79,7 +117,16 @@ def check_signoff(body: str) -> tuple[bool, str]:
 
 
 def hard_check(commit: dict) -> tuple[str, list[str]]:
-    issues = []
+    """Run all hard (deterministic) checks on a single commit.
+
+    Args:
+        commit: Dict with keys ``subject`` and ``body``.
+
+    Returns:
+        A ``(status, issues)`` tuple where *status* is ``HARD_PASS`` or
+        ``HARD_FAIL``.
+    """
+    issues: list[str] = []
     ok, msg = check_type_format(commit["subject"])
     if not ok:
         issues.append(msg)
@@ -92,31 +139,18 @@ def hard_check(commit: dict) -> tuple[str, list[str]]:
     return (HARD_FAIL if issues else HARD_PASS, issues)
 
 
-def call_llm(system_prompt: str, user_prompt: str) -> str:
-    headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.3,
-        "max_tokens": 4096,
-    }
-    resp = requests.post(
-        f"{LLM_BASE_URL}/v1/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=180,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
-
-
 def parse_llm_json_output(text: str) -> dict:
+    """Extract the first JSON object from LLM output.
+
+    Args:
+        text: Raw LLM response.
+
+    Returns:
+        Parsed dict.
+
+    Raises:
+        ValueError: If no JSON object is found.
+    """
     json_match = re.search(r"\{[\s\S]*\}", text)
     if json_match:
         return json.loads(json_match.group(0))
@@ -124,6 +158,15 @@ def parse_llm_json_output(text: str) -> dict:
 
 
 def evaluate_commits_with_llm(failed_commits: list[dict], system_prompt: str) -> list[dict]:
+    """Send hard-failed commits to the LLM for detailed analysis.
+
+    Args:
+        failed_commits: Commits that failed the hard rules.
+        system_prompt: System prompt text.
+
+    Returns:
+        LLM evaluation results, one dict per commit.
+    """
     if not failed_commits:
         return []
 
@@ -180,17 +223,17 @@ def evaluate_commits_with_llm(failed_commits: list[dict], system_prompt: str) ->
 严格输出 JSON 数组，不要输出任何其他文本。"""
 
     print("Calling LLM for commit compliance check...")
-    raw = call_llm(system_prompt, user_prompt)
+    raw = call_llm(system_prompt, user_prompt, max_tokens=LLM_MAX_TOKENS, timeout=LLM_TIMEOUT)
 
     try:
         results = json.loads(raw)
         if isinstance(results, dict):
             results = [results]
         if not isinstance(results, list):
-            raise ValueError(f"Expected list, got {type(results)}")
+            raise ValueError(f"Expected list, got {type(results).__name__}")
         return results
     except (json.JSONDecodeError, ValueError):
-        print(f"JSON parse failed, trying regex extraction...")
+        print("JSON parse failed, trying regex extraction...")
         array_match = re.search(r"\[[\s\S]*\]", raw)
         if array_match:
             return json.loads(array_match.group(0))
@@ -239,13 +282,10 @@ def main() -> None:
     commits = run_git_log(base_sha, head_sha)
     print(f"Found {len(commits)} commits in {base_sha[:7]}..{head_sha[:7]}")
 
-    passed = []
-    failed_hard = []
+    failed_hard: list[dict] = []
     for c in commits:
         status, issues = hard_check(c)
-        if status == HARD_PASS:
-            passed.append({"sha": c["sha"], "subject": c["subject"], "ok": True, "score": 100})
-        else:
+        if status == HARD_FAIL:
             failed_hard.append(c)
             print(f"  HARD FAIL {c['sha'][:7]}: {c['subject'][:50]}")
 
@@ -263,11 +303,11 @@ def main() -> None:
     system_prompt = system_prompt_path.read_text() if system_prompt_path.exists() else ""
     llm_results = evaluate_commits_with_llm(failed_hard, system_prompt)
 
-    sha_to_llm = {}
+    sha_to_llm: dict[str, dict] = {}
     for r in llm_results:
         sha_to_llm[r.get("sha", "")] = r
 
-    failed_commits = []
+    failed_commits: list[dict] = []
     for c in failed_hard:
         short_sha = c["sha"][:7]
         llm_r = sha_to_llm.get(c["sha"], sha_to_llm.get(short_sha, {}))

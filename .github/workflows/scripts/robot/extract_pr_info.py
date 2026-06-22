@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Step 1: Extract PR metadata from event payload and write to JSON."""
+"""Extract PR metadata from the GitHub event payload and write it to JSON.
+
+Used as step 1 of the PR Review Bot workflow.
+"""
 
 import argparse
 import json

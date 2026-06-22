@@ -22,8 +22,8 @@ VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "EMPTY")
 
 # Add parent to path so we can import the step modules
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from prepare_system_prompt import load_system_prompt
-from prepare_template import load_template
+from lib.prompts import load_system_prompt
+from lib.templates import load_issue_template as load_template
 
 
 def call_vllm(system_prompt: str, user_prompt: str) -> str:

@@ -1,44 +1,39 @@
 #!/usr/bin/env python3
-"""Step 6: Post review comment and write label actions.
+"""Post the review comment and compute label actions.
 
-Supports two modes:
-  - Issue:  reads description_result.json only
-  - PR:     reads description_result.json + commit_results.json, builds combined comment
+Supports two modes inferred from the presence of commit results:
 
-Outputs label_actions.json for the label management step.
+* **Issue mode** — reads ``description_result.json`` only, posts an
+  issue-specific comment.
+* **PR mode** — reads ``description_result.json`` + ``commit_results.json``,
+  builds a combined PR review comment.
+
+Outputs ``label_actions.json`` for the downstream label-management step.
 """
 
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
 
-import requests
+from lib.github_api import post_comment
 
-GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-REPO = os.environ["REPO"]
 ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
 
 NEED_DETAIL_LABEL = os.environ.get("NEED_DETAIL_LABEL", "need-detail-desc")
 NEED_COMMIT_FIX_LABEL = os.environ.get("NEED_COMMIT_FIX_LABEL", "need-commit-fix")
 
 
-API_HEADERS = {
-    "Authorization": f"Bearer {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github+json",
-}
-API_BASE = f"https://api.github.com/repos/{REPO}"
-
-
-def post_comment(body: str) -> None:
-    url = f"{API_BASE}/issues/{ISSUE_NUMBER}/comments"
-    resp = requests.post(url, headers=API_HEADERS, json={"body": body}, timeout=30)
-    resp.raise_for_status()
-    print(f"Comment posted to #{ISSUE_NUMBER}")
-
-
 def build_desc_section(desc_result: dict | None) -> str:
+    """Build the Markdown section for the description completeness check.
+
+    Args:
+        desc_result: The validated description check result, or ``None`` if
+            the check was skipped.
+
+    Returns:
+        Markdown string.
+    """
     lines = ["### 1. 描述完整性检查", ""]
     if desc_result is None:
         lines.append("本次未触发描述检查")
@@ -65,6 +60,14 @@ def build_desc_section(desc_result: dict | None) -> str:
 
 
 def build_commit_section(commit_result: dict | None) -> str:
+    """Build the Markdown section for the commit message compliance check.
+
+    Args:
+        commit_result: The commit check result, or ``None`` if skipped.
+
+    Returns:
+        Markdown string.
+    """
     lines = ["### 2. Commit Message 合规性检查", ""]
 
     if commit_result is None or not commit_result.get("executed"):
@@ -128,7 +131,14 @@ def build_commit_section(commit_result: dict | None) -> str:
 
 
 def build_issue_comment(desc_result: dict) -> str:
-    """Issue-only comment (backward compatible)."""
+    """Build the issue-only review comment body.
+
+    Args:
+        desc_result: Validated description check result.
+
+    Returns:
+        Markdown string.
+    """
     missing_items = desc_result.get("missing_items", [])
     suggestions = desc_result.get("suggestions", [])
 
@@ -156,6 +166,15 @@ def build_issue_comment(desc_result: dict) -> str:
 
 
 def build_pr_combined_comment(desc_result: dict | None, commit_result: dict | None) -> str:
+    """Build the combined PR review comment body.
+
+    Args:
+        desc_result: Description check result or ``None``.
+        commit_result: Commit check result or ``None``.
+
+    Returns:
+        Markdown string.
+    """
     sections = ["## PR Review 检查结果", "", ""]
     sections.append(build_desc_section(desc_result))
     sections.append("")
@@ -168,8 +187,17 @@ def build_pr_combined_comment(desc_result: dict | None, commit_result: dict | No
 
 
 def compute_label_actions(desc_result: dict | None, commit_result: dict | None) -> dict:
-    add_labels = []
-    remove_labels = []
+    """Determine which labels to add and remove based on review results.
+
+    Args:
+        desc_result: Description check result or ``None``.
+        commit_result: Commit check result or ``None``.
+
+    Returns:
+        Dict with keys ``add`` and ``remove`` (lists of label names).
+    """
+    add_labels: list[str] = []
+    remove_labels: list[str] = []
 
     if desc_result:
         desc_executed = desc_result.get("executed", True)
@@ -224,7 +252,7 @@ def main() -> None:
                 "内容由 AI 生成，请仔细甄别。\n\n"
                 + comment_body
             )
-            post_comment(full_comment)
+            post_comment(ISSUE_NUMBER, full_comment)
         else:
             print("PR review passed: no comment needed")
     else:
@@ -242,7 +270,7 @@ def main() -> None:
                 "内容由 AI 生成，请仔细甄别。\n\n"
                 + comment_body
             )
-            post_comment(full_comment)
+            post_comment(ISSUE_NUMBER, full_comment)
         else:
             print("Issue description check passed, no comment needed")
 

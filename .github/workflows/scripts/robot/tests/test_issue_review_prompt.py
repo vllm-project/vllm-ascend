@@ -15,9 +15,9 @@ import requests
 
 # Add parent to path so we can import the step modules
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from call_llm import call_vllm
-from prepare_system_prompt import load_system_prompt
-from prepare_template import load_template
+from lib.llm import call_llm
+from lib.prompts import load_system_prompt
+from lib.templates import load_issue_template
 
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
 VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "EMPTY")
@@ -282,7 +282,7 @@ EDGE_CASES = [
 def run_test_case(case: dict, system_prompt: str) -> dict:
     """Run a single test case and return the result."""
     issue_type = case["issue_type"]
-    template_text = load_template(issue_type)
+    template_text = load_issue_template(issue_type)
 
     user_prompt = f"""## Issue Title
 {case['title']}
@@ -297,7 +297,7 @@ Please review this issue and provide your feedback in the specified format.
 """
 
     try:
-        review = call_vllm(system_prompt, user_prompt)
+        review = call_llm(system_prompt, user_prompt)
         return {"name": case["name"], "status": "OK", "review": review}
     except Exception as e:
         return {"name": case["name"], "status": f"ERROR: {e}", "review": ""}
@@ -343,7 +343,7 @@ def main():
     # Edge case extraction tests (no LLM call needed)
     print(f"\n{'─' * 80}")
     print("EDGE CASE: Title prefix extraction")
-    from extract_input import extract_issue_type
+    from lib.prefix_map import extract_issue_type
 
     for ec in EDGE_CASES:
         result = extract_issue_type(ec["title"])

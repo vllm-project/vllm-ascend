@@ -1,27 +1,16 @@
 #!/usr/bin/env python3
-"""Step 1: Extract issue type from title, write to a file for the next step."""
+"""Extract the issue type prefix from the title and write it to a file.
+
+Used as step 1 of the Issue Review Bot workflow.
+"""
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
+from lib.prefix_map import extract_issue_type
+
 ISSUE_TITLE = os.environ["ISSUE_TITLE"]
-
-TITLE_TO_TEMPLATE = {
-    "[Bug]": "400-bug-report.yml",
-    "[Installation]": "200-installation.yml",
-    "[Usage]": "300-usage.yml",
-    "[Doc]": "100-documentation.yml",
-    "[Misc]": "800-others.yml",
-}
-
-
-def extract_issue_type(title: str) -> str | None:
-    for prefix in TITLE_TO_TEMPLATE:
-        if title.startswith(f"{prefix}:"):
-            return prefix
-    return None
 
 
 def main() -> None:
@@ -31,8 +20,8 @@ def main() -> None:
 
     issue_type = extract_issue_type(ISSUE_TITLE)
     if issue_type is None:
-        print(f"Unrecognized issue title format: {ISSUE_TITLE}")
-        sys.exit(0)
+        print(f"Unrecognized issue title format: {ISSUE_TITLE}, skipping review")
+        return
 
     Path(args.output).write_text(issue_type)
     print(f"Issue type: {issue_type}")
