@@ -235,6 +235,7 @@ jobs:
             -D pvc_name="$pvc_name" \
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
+            -D aop_hold_on_failure="true" \
             --outfile lws.yaml
 
           kubectl apply -f ./lws.yaml
@@ -339,6 +340,12 @@ jobs:
             echo "Directory contents (if exists):"
             ls -la "$SRC" 2>/dev/null || echo "Directory does not exist"
           fi
+
+      # ============================================================
+      # GHA AOP temporarily disabled — Pod AOP (run.sh) takes over
+      # ============================================================
+
+      # ============================================================
 
       - name: Post process
         if: always()

@@ -149,8 +149,9 @@ checkout_src() {
     echo "====> Checkout source code"
     mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
-    pip uninstall -y vllm-ascend || true
+    # pip uninstall -y vllm-ascend || true
     cp -r "$WORKSPACE/vllm-ascend/benchmark" /tmp/aisbench-backup || true
+    cp /vllm-workspace/vllm-ascend/vllm_ascend/_build_info.py /tmp/_build_info_backup.py 2>/dev/null || true
     rm -rf "$WORKSPACE/vllm-ascend"
 
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
@@ -180,6 +181,7 @@ install_aisbench() {
     BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
 
     cp -r /tmp/aisbench-backup "$BENCH_DIR"
+    cp /tmp/_build_info_backup.py /vllm-workspace/vllm-ascend/vllm_ascend/_build_info.py 2>/dev/null || true
 
     cd "$BENCH_DIR"
     pip install -e . \
@@ -208,17 +210,94 @@ run_tests_with_log() {
     set +e
     kill_npu_processes
     echo "====> Run pytest entry: $MULTI_NODE_TEST_PATH"
-    pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH"
+    local log_file="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-?}_pytest.log"
+    pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH" 2>&1 | tee "$log_file"
     ret=$?
     set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            print_failure "Some tests failed, please check the error stack above for details. \
-If this is insufficient to pinpoint the error, please download and review the logs of all other nodes from the job's summary."
+            if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
+                aop_pipeline
+            fi
+            echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
+            exit 1
+        fi
+    elif [ $ret -ne 0 ] && [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
+        aop_pipeline
+        exit 1
+    fi
+}
+
+# Run AOP decision pipeline on failure: classify → check age → bisect-or-exit
+# Same logic as _e2e_nightly_multi_node.yaml AOP hooks
+aop_pipeline() {
+    local rules="$WORKSPACE/vllm-ascend/tests/e2e/nightly/scripts/rules-env.txt"
+    local table="$WORKSPACE/vllm-ascend/tests/e2e/nightly/bisect/good_table.csv"
+    # Strip branch prefix from BENCHMARK_JOB_NAME (e.g. "main-Qwen3.5-27B-w8a8-A2" → "Qwen3.5-27B-w8a8-A2")
+    local case_name="${BENCHMARK_JOB_NAME#*-}"
+    if [ -z "$case_name" ] || [ "$case_name" = "$BENCHMARK_JOB_NAME" ]; then
+        case_name="${CONFIG_YAML_PATH%.yaml}"
+    fi
+
+    echo "=== AOP Pipeline (Pod) ==="
+
+    # ---- Classify: env_failure or not_env_failure ----
+    # Scan all pod logs on PVC (shared storage, Leader + Workers all visible)
+    local env_count=0
+    if [ -f "$rules" ]; then
+        for f in "${LOG_PREFIX}/node_"*"_pytest.log"; do
+            if [ -f "$f" ]; then
+                local n
+                n=$(grep -v '^[[:space:]]*$' "$rules" | grep -ciEf - "$f" 2>/dev/null || echo 0)
+                echo "  Classify: ${f} → ${n} matches"
+                env_count=$((env_count + n))
+            fi
+        done
+    fi
+    echo "  Classify: total env_count=${env_count}"
+
+    if [ "$env_count" -gt 0 ]; then
+        echo "  -> env_failure: skip (exit directly)"
+        exit 1
+    fi
+
+    # ---- Check commit age from good table ----
+    echo "  -> not_env_failure, checking commit age..."
+    local age_days=0
+    if [ -f "$table" ]; then
+        local row
+        row=$(grep -F "$case_name" "$table" | head -1 || true)
+        if [ -n "$row" ]; then
+            local last_date
+            last_date=$(echo "$row" | awk -F',' '{print $NF}' | xargs)
+            if [ -n "$last_date" ]; then
+                local last_ts now_ts
+                last_ts=$(date -d "$last_date" +%s 2>/dev/null || echo 0)
+                now_ts=$(date +%s)
+                age_days=$(( (now_ts - last_ts) / 86400 ))
+            fi
         fi
     fi
+    echo "  Commit age: ${age_days} days"
+
+    if [ "$age_days" -gt 3 ]; then
+        echo "  -> old commit (> 3 days): skip (exit directly)"
+        exit 1
+    fi
+
+    # ---- Process: recent real failure → run bisect directly in pod ----
+    echo "  -> recent real failure: running bisect"
+    cd "$WORKSPACE/vllm-ascend"
+    python -m tests.e2e.nightly.bisect.auto_bisect \
+        --scene multi_node \
+        --config-yaml "${CONFIG_YAML_PATH}" \
+        --bad-commit HEAD \
+        --good-table "${table}" \
+        --name "${case_name}" \
+        --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}"
+    exit 1
 }
 
 clear_logs() {
