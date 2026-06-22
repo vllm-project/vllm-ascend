@@ -554,6 +554,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 positions=self.runner.positions,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
+                is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                 max_seq_len=0,
             )
             if self.pcp_size * self.dcp_size > 1:
@@ -1846,6 +1847,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else None,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
+            is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
         )
         return spec_common_attn_metadata, token_indices
@@ -1938,6 +1940,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens,
+            is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
         )
 
