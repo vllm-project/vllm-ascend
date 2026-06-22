@@ -223,10 +223,10 @@ sys.exit(1)
         set -e
         echo "pytest exit code: ret=${ret}"
         if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
-            echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
             if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
                 aop_pipeline
             fi
+            echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
             exit 1
         elif [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
             aop_pipeline
@@ -245,10 +245,10 @@ sys.exit(1)
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
             if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
                 aop_pipeline
             fi
+            echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
             exit 1
         fi
     elif [ $ret -ne 0 ] && [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
@@ -286,8 +286,8 @@ aop_pipeline() {
     echo "  Classify: total env_count=${env_count}"
 
     if [ "$env_count" -gt 0 ]; then
-        echo "  -> env_failure: skip (exit directly)"
-        exit 1
+        echo "  -> env_failure: skip"
+        return 1
     fi
 
     # ---- Check commit age from good table ----
@@ -310,8 +310,8 @@ aop_pipeline() {
     echo "  Commit age: ${age_days} days"
 
     if [ "$age_days" -gt 3 ]; then
-        echo "  -> old commit (> 3 days): skip (exit directly)"
-        exit 1
+        echo "  -> old commit (> 3 days): skip"
+        return 1
     fi
 
     # ---- Process: recent real failure → run bisect directly in pod ----
@@ -324,7 +324,7 @@ aop_pipeline() {
         --good-table "${table}" \
         --name "${case_name}" \
         --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}"
-    exit 1
+    return 1
 }
 
 clear_logs() {
