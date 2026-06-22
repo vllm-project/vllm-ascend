@@ -259,7 +259,7 @@ If the service starts successfully, the following startup log will be displayed:
 ### 5.2 Multi-Node PD Separation Deployment
 PD (Prefill-Decode) separation splits the Prefill and Decode phases across different nodes for better throughput. The following example shows the parameter configuration for a three-node A3 PD disaggregation scenario (one Prefill node + two Decode nodes):
 
-For the detailed deployment guide, please refer to [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](../features/pd_disaggregation_mooncake_multi_node.md).
+For the detailed deployment guide, please refer to [Prefill-Decode Disaggregation Mooncake Verification](../features/pd_disaggregation_mooncake_multi_node.md).
 
 **Hardware**: 3 × Atlas 800 A3 (64G × 16), one for Prefill, two for Decode.
 
