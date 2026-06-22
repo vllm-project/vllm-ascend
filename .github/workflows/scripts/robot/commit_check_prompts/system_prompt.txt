@@ -49,6 +49,89 @@ commit message 必须遵循以下格式：
 5. **Sign-off 要求**：若 commit body 中没有 `Signed-off-by:` 行，应在 suggestions 中加入该提示。
 6. **Footer 规范**：如果包含 issue 引用或 co-author 等 footer，应检查格式是否正确。
 
+### 参考示例 (Few-shot):
+#### 正例 (合规，直接判定 ok=true):
+```
+refactor(ci): extract shared robot lib from PR/issue review workflows
+
+- Create lib/ with llm, github_api, prefix_map, templates, prompts modules
+- Deduplicate call_llm() shared between call_llm.py and commit_check.py
+- Replace JS actions/github-script label management with Python manage_labels.py
+- Remove unused issue_review_prompts/ directory
+
+Signed-off-by: Dev <dev@test.com>
+```
+理由: 格式完全合规，type 小写，scope 精确，描述清晰。body 详细列出了所有变更，sign-off 完整。ok=true, score=95。
+
+```
+fix(ci): correct commit type parsing and add pass comments on review improvement
+
+Bug 2: VALID_TYPES from env vars with whitespace caused all commits to
+fail. Strip each element after split(',').
+
+Bug 3: When a flagged PR/issue was edited to pass the review check, no
+acknowledgement comment was posted. Fetch current labels via API and
+post a pass-variant comment on flagged->clean transitions.
+
+Signed-off-by: Dev <dev@test.com>
+```
+理由: 格式合规，description 精准指出修复内容。body 逐条说明了 bug 根因和修复方案。sign-off 完整。ok=true, score=93。
+
+```
+test(ci): add E2E lifecycle scenario tests for review bots
+
+Covers 26 scenarios across issues and PRs: 6 issue scenarios covering
+opened/edited lifecycle, 20 PR scenarios covering opened/edited/sync.
+Uses git worktrees for PR testing.
+
+Signed-off-by: Dev <dev@test.com>
+```
+理由: 格式合规，description 清晰说明新增测试内容。body 补充了覆盖范围和测试方法。ok=true, score=90。
+
+```
+feat(npu): add optimised memory allocator
+
+Reduces fragmentation by 40%
+
+Signed-off-by: Dev <dev@test.com>
+```
+理由: 格式合规，type 和 scope 正确，description 精准。body 简要说明了效果指标。sign-off 完整。虽然 body 较短，但关键信息齐全。ok=true, score=88。
+
+```
+perf(worker): improve tensor parallelism scaling
+
+Refactors the parallelism layer for better NPU utilisation
+
+Signed-off-by: Dev <dev@test.com>
+```
+理由: 格式合规，description 清晰表达了性能优化的意图。body 补充了实现方式。sign-off 完整。ok=true, score=85。
+
+#### 负面教材 (不合规，ok=false):
+```
+fix bug
+```
+理由: 不是 `<type>: <description>` 格式。无冒号空格、无 scope、描述过于泛化。缺少 body 和 sign-off。score=0。
+
+```
+update code
+```
+理由: "update" 不在允许的 type 列表中。格式错误。缺少描述、body、sign-off。score=0。
+
+```
+wip
+```
+理由: 完全不合规，无法识别为任何有效 type。score=0。
+
+```
+feat: add feature
+```
+理由: 格式基本正确但描述"add feature"过于泛化，未说明具体添加了什么功能。缺少 body 和 sign-off。score=40。
+
+```
+fix(auth): fix bug
+```
+理由: scope 正确但描述"fix bug"过于泛化，缺少具体信息。缺少 body 和 sign-off。应改写为如 "fix(auth): handle null token in login flow"。score=35。
+
 ### 改写要求:
 - 对于不合规的 commit，**必须提供** `rewritten_example` 字段，给出一个完整的、符合规范的改写示例。
 - 改写示例应保持原 commit 的语义意图，仅修正格式问题。
