@@ -403,10 +403,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.sinks = sinks
         self.layerIndex = 0
         self.enable_hamming_sparse = is_enable_hamming_sparse()
+        # Graph replay cannot always rely on the iteration order of
+        # attn_metadata. Record the captured layer name so update_graph_params
+        # can fetch the metadata that belongs to the same attention layer.
         self._layer_name: str | None = None
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
+        # KV-sharing layers replay with the target layer's metadata instead of
+        # their own module name, matching vLLM's shared KV-cache ownership.
         return self.kv_sharing_target_layer_name or layer_name
 
     @staticmethod
@@ -497,6 +502,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
             else:
+                # One graph size can contain captured FIA ops from all layers.
+                # Repeat attn keys to match the captured op count, then use the
+                # stored layer name in each op param to resolve the exact
+                # metadata entry during replay.
                 attn_keys = expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
             attn_count = 0
             with torch.npu.stream(update_stream):
@@ -588,6 +597,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
             else:
+                # Keep the replay loop length aligned with captured FIA ops;
+                # layer-specific metadata lookup below prevents global/sliding
+                # window layers from accidentally sharing the same metadata.
                 attn_keys = expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
             attn_count = 0
             with torch.npu.stream(update_stream):
@@ -749,6 +761,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         use_max_workspace = is_gemma4_model(self.vllm_config)
         workspace = graph_params.workspaces.get(num_tokens)
         if workspace is None or use_max_workspace:
+            # Gemma4 mixes attention layer shapes under the same graph size.
+            # During capture, keep the largest required workspace for that
+            # num_tokens bucket; other models preserve the original first-cache
+            # behavior and do not pay repeated workspace-query cost.
             new_workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
                 key=key,
@@ -864,6 +880,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         use_max_workspace = is_gemma4_model(self.vllm_config)
         workspace = graph_params.workspaces.get(num_tokens)
         if workspace is None or use_max_workspace:
+            # See full_graph_fia: Gemma4 needs the max workspace across layer
+            # variants sharing the same graph size, while non-Gemma4 keeps the
+            # original cached-workspace behavior.
             new_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                 query=query,
                 key=key,
