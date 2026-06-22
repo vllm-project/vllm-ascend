@@ -15,15 +15,17 @@
 #
 # Patch target: vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory
 #
-# Replace the "nccl" factory entry with HCCLWeightTransferEngine so that
-# --weight-transfer-config '{"backend": "nccl"}' loads the HCCL engine
-# instead of the (unavailable) NCCL engine on Ascend NPU.
+# Replace the "nccl" and "ipc" factory entries with Ascend equivalents so that
+# --weight-transfer-config '{"backend": "nccl"}' loads HCCLWeightTransferEngine
+# and '{"backend": "ipc"}' loads NPUIPCWeightTransferEngine instead of the
+# (unavailable) NCCL / CUDA IPC engines on Ascend NPU.
 #
 # Why this approach (factory swap) instead of patching Literal["nccl", "ipc"]:
 #   WeightTransferConfig.backend is a pydantic Literal["nccl", "ipc"].
-#   Adding "hccl" would require modifying pydantic core schemas — fragile
-#   across pydantic versions.  Swapping the factory entry means users pass
-#   the already-accepted "nccl" string, but the factory resolves it to HCCL.
+#   Adding "hccl" / "npu_ipc" would require modifying pydantic core schemas —
+#   fragile across pydantic versions. Swapping the factory entries means users
+#   pass the already-accepted "nccl" / "ipc" strings, but the factory resolves
+#   them to HCCL / NPU IPC.
 #
 # Timing — guaranteed to run before first factory usage:
 #
@@ -52,5 +54,9 @@ from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferEngine,
 )
+from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+    NPUIPCWeightTransferEngine,
+)
 
 WeightTransferEngineFactory._registry["nccl"] = lambda: HCCLWeightTransferEngine
+WeightTransferEngineFactory._registry["ipc"] = lambda: NPUIPCWeightTransferEngine

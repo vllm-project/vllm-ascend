@@ -73,8 +73,11 @@ class HCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     """Update info for HCCL weight transfer backend."""
 
     names: list[str]
+    """Names of the parameters to transfer (e.g. ``model.layers.0.weight``)."""
     dtype_names: list[str]
+    """Torch dtype names (e.g. ``bfloat16``, ``float32``) for each parameter."""
     shapes: list[list[int]]
+    """Shapes of each parameter as integer lists."""
     packed: bool = False
     """Whether to use packed tensor broadcasting for efficiency.
     When True, multiple tensors are batched together before broadcasting
