@@ -460,20 +460,22 @@ def _realistic_num_pcp_pads(
         # Case 2: prefill only (num_decode_reqs == 0). Exercises the case where
         # the diff-based per-req length derivation would otherwise drop the
         # first req's length.
-        #   num_scheduled=[3, 5], realistic pads=[1, 3]
+        #   num_scheduled=[3, 5], realistic pads=[1, 3] -> cumsum=[1, 4]
         #   cu=[3, 8]; padded prefill_lens=[4, 8]; base=0
-        #   prefill_cu=[4, 12]; final = [4*2-1, 12*2-3] = [7, 21]
-        (2, [3, 5], 0, [7, 21]),
+        #   prefill_cu=[4, 12]; final = [4*2-1, 12*2-4] = [7, 20]
+        (2, [3, 5], 0, [7, 20]),
         # Case 3: mix decode + prefill, pcp_size=2.
         #   num_scheduled=[1, 1, 3, 5], realistic pads=[1, 1, 1, 3]
+        #   prefill pads cumsum=[1, 4]
         #   cu=[1, 2, 5, 10]; padded prefill_lens=[4, 8]; base=cu[1]=2
-        #   prefill_cu=[6, 14]; final[2:] = [12, 28] - [1, 3] = [11, 25]
-        (2, [1, 1, 3, 5], 2, [1, 2, 11, 25]),
+        #   prefill_cu=[6, 14]; final[2:] = [12, 28] - [1, 4] = [11, 24]
+        (2, [1, 1, 3, 5], 2, [1, 2, 11, 24]),
         # Case 4: pcp_size=4, mix decode + prefill with uneven prefill tokens.
         #   num_scheduled=[1, 1, 5, 9], realistic pads=[3, 3, 3, 7]
+        #   prefill pads cumsum=[3, 10]
         #   cu=[1, 2, 7, 16]; padded prefill_lens=[8, 16]; base=cu[1]=2
-        #   prefill_cu=[10, 26]; final[2:] = [40, 104] - [3, 7] = [37, 97]
-        (4, [1, 1, 5, 9], 2, [1, 2, 37, 97]),
+        #   prefill_cu=[10, 26]; final[2:] = [40, 104] - [3, 10] = [37, 94]
+        (4, [1, 1, 5, 9], 2, [1, 2, 37, 94]),
         # Case 5: single prefill req, pcp_size=2.
         #   num_scheduled=[7], realistic pads=[1]
         #   cu=[7]; padded prefill_lens=[8]; base=0
