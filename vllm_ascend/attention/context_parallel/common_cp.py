@@ -19,6 +19,7 @@ class AscendPCPMetadata:
 
     q_head_idx: torch.Tensor = None
     q_tail_idx: torch.Tensor = None
+    q_head_tail_idx: torch.Tensor = None
     kv_with_q_head_nomask_idx: torch.Tensor = None
     kv_with_q_head_mask_idx: torch.Tensor = None
     kv_with_q_tail_nomask_idx: torch.Tensor = None
@@ -27,8 +28,10 @@ class AscendPCPMetadata:
     kv_with_q_head_attn_idx_in_tail: torch.Tensor = None
     kv_with_q_tail_attn_idx_in_tail: torch.Tensor = None
     attn_mask_seqlens: torch.Tensor = None
+    attn_mask_full_seqlens: torch.Tensor = None
     head_attn_nomask_seqlens: torch.Tensor = None
     tail_attn_nomask_seqlens: torch.Tensor = None
+    full_overall_attn_seq_lens: torch.Tensor = None
     head_actual_seq_lengths_kv: list[int] | None = None
     tail_actual_seq_lengths_kv: list[int] | None = None
     q_full_idx: torch.Tensor = None
@@ -39,11 +42,16 @@ class AscendPCPMetadata:
     pcp_padded_tokens_fla: int = 0
     pcp_enter_fa_restore_idx: torch.Tensor = None
     block_table_cp: torch.Tensor = None
+    block_table_cp_repeat: torch.Tensor = None
     valid_block_ids: torch.Tensor = None
     prefill_q_cum_seqlens: torch.Tensor = None
     max_num_tokens_across_pcp: int = 0
     total_num_scheduled_tokens: int = 0
     block_arange: torch.Tensor = None
+    prefill_allgather_kli_event: torch.npu.Event = None
+    prefill_allgather_kv_event: torch.npu.Event = None
+    prefill_kli_cache_event: torch.npu.Event = None
+    prefill_kv_cache_event: torch.npu.Event = None
 
 
 @dataclass
