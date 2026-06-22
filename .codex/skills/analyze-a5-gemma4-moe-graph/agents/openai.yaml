@@ -1,0 +1,4 @@
+interface:
+  display_name: "分析 A5 Gemma4 MoE 图模式"
+  short_description: "诊断并解释 A5 Gemma4 MoE 图模式精度修复。"
+  default_prompt: "使用这个 skill 分析 A5 Gemma4 MoE 图模式精度问题，解释 moe_graph workaround，并说明它的劣势和后续优化方向。"
