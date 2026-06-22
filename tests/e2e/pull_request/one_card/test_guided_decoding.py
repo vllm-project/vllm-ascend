@@ -89,9 +89,9 @@ def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema
         "seed": 0,
         "structured_outputs_config": {"backend": guided_decoding_backend},
     }
-    # xgrammar may timeout on complex JSON schemas with default 5s timeout
+    # xgrammar and outlines may timeout on complex JSON schemas with default 5s timeout
     env_overrides = {}
-    if guided_decoding_backend == "xgrammar":
+    if guided_decoding_backend in ("xgrammar", "outlines"):
         env_overrides["VLLM_REGEX_COMPILATION_TIMEOUT_S"] = "30"
     with (
         patch.dict(os.environ, env_overrides, clear=False),
