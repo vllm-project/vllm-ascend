@@ -21,7 +21,7 @@ import math
 from collections.abc import Callable
 from itertools import accumulate
 from typing import TYPE_CHECKING, Any
-
+import copy
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -239,7 +239,8 @@ class PCPManager:
         prefill_lens = [
             math.ceil(num / pad_multiple) * pad_multiple for num in prefill_lens
         ]
-
+        pads = copy.deepcopy(num_pcp_pads)
+        pads[:self.num_decode_reqs : ] = np.cumsum(pads[self.num_decode_reqs:])
         base = (
             int(cu_num_scheduled_tokens[self.num_decode_reqs - 1])
             if self.num_decode_reqs > 0
@@ -251,7 +252,7 @@ class PCPManager:
         cu_num_scheduled_tokens[self.num_decode_reqs :] = prefill_cu
         cu_num_scheduled_tokens[self.num_decode_reqs :] = (
             cu_num_scheduled_tokens[self.num_decode_reqs :] * self.pcp_world_size
-            - num_pcp_pads[self.num_decode_reqs :]
+            - pads[self.num_decode_reqs :]
         )
         return cu_num_scheduled_tokens
 
