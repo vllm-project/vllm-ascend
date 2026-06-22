@@ -28,7 +28,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -1900,6 +1900,149 @@ class NPUModelRunner(GPUModelRunner):
                 self.draft_token_ids_cpu[:num_reqs] = 0
             self.draft_token_ids_event.record()
 
+    def _copy_prefix_cache_blocks(self, scheduler_output: "SchedulerOutput") -> None:
+        """Materialize DSv4 partial-prefix cache hits by copying the source KV
+        block into the request's private destination block before the model runs.
+
+        This lives in the model runner (rather than a patch) because it needs the
+        runner-owned ``_kv_caches_by_layer`` map from layer name to the on-device
+        KV tensors, and the copy must happen inside ``_update_states`` so the
+        destination blocks are populated before this step's forward pass. It is a
+        no-op for every model except DSv4 with partial prefix caching: when no
+        partial hit was scheduled, ``new_block_ids_to_copy`` is empty and this
+        returns immediately, so it adds no cost to other models or to the
+        long-context decode path.
+        """
+        copy_block_ids = getattr(scheduler_output, "new_block_ids_to_copy", None)
+        if copy_block_ids:
+            logger.info("DSV4_COPY_N=%d", len(copy_block_ids))
+        if not copy_block_ids:
+            return
+        if not hasattr(self, "_kv_caches_by_layer"):
+            logger.warning("Skip prefix-cache block copy because layer KV caches are not registered.")
+            return
+
+        copies_by_group: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        for group_id, src_block_id, dst_block_id in copy_block_ids:
+            copies_by_group[group_id].append((src_block_id, dst_block_id))
+
+        # Run the KV copy on a dedicated stream so it overlaps with the
+        # default-stream input preparation (token gather, positions, attention
+        # metadata, H2D copies) that runs before the forward pass. None of that
+        # prep reads the copied KV, so the forward only has to wait on the copy
+        # event right before it consumes the cache (see _model_forward). This
+        # hides the ~60 per-layer indexed-copy kernels behind work that would
+        # otherwise run after them, which is what made short-prompt partial
+        # hits a net latency loss on the default stream.
+        if not hasattr(self, "_prefix_cache_copy_stream"):
+            self._prefix_cache_copy_stream = torch.npu.Stream()
+            self._prefix_cache_copy_event = torch.npu.Event()
+        from vllm_ascend.utils import is_310p
+
+        default_stream = torch.npu.current_stream()
+        with torch.npu.stream(self._prefix_cache_copy_stream):
+            # Order after any pending default-stream writes to the KV cache.
+            self._prefix_cache_copy_stream.wait_stream(default_stream)
+            # Collapse every (layer, block-pair) copy into ONE batched D2D memcpy.
+            # The per-layer indexed path issues 2 kernels per layer (gather +
+            # scatter); the fixed launch overhead of ~60 layers is what dominates
+            # the copy cost for short prompts, so a single batch_memcpy launch is
+            # what makes a short partial hit a net win. Triton batch_memcpy is
+            # unavailable on 310P, so fall back to the per-layer copy there.
+            if not is_310p():
+                self._batch_copy_prefix_blocks(copies_by_group)
+            else:
+                for group_id, copy_pairs in copies_by_group.items():
+                    if group_id >= len(self.kv_cache_config.kv_cache_groups):
+                        logger.warning("Skip prefix-cache block copy for invalid group_id=%s.", group_id)
+                        continue
+                    copied_cache_ids: set[int] = set()
+                    # Build the (src, dst) index tensors once per device and reuse
+                    # them across every layer in the group, instead of rebuilding
+                    # (a host->device tensor + sync) for each of the ~60 layers.
+                    idx_by_device: dict = {}
+                    for layer_name in self.kv_cache_config.kv_cache_groups[group_id].layer_names:
+                        kv_cache = self._kv_caches_by_layer.get(layer_name)
+                        if kv_cache is None or id(kv_cache) in copied_cache_ids:
+                            continue
+                        copied_cache_ids.add(id(kv_cache))
+                        self._copy_prefix_cache_tensor(kv_cache, copy_pairs, idx_by_device)
+            self._prefix_cache_copy_event.record()
+        self._prefix_copy_pending = True
+        logger.debug("Copied DSv4 partial prefix-cache blocks: %s", copy_block_ids)
+
+    @staticmethod
+    def _iter_block_tensors(kv_cache):
+        """Yield each leaf KV tensor (block dim = dim 0) from a tensor / list."""
+        if torch.is_tensor(kv_cache):
+            yield kv_cache
+        elif isinstance(kv_cache, (list, tuple)):
+            for item in kv_cache:
+                yield from NPUModelRunner._iter_block_tensors(item)
+
+    def _batch_copy_prefix_blocks(self, copies_by_group: dict[int, list[tuple[int, int]]]) -> None:
+        """Materialize all partial-prefix hits with one batched D2D memcpy.
+
+        For every KV tensor of every layer in the group and every (src, dst)
+        block pair, build a (src_ptr, dst_ptr, bytes) descriptor and issue a
+        single Triton ``batch_memcpy_kernel`` launch covering all of them. Each
+        copy moves a whole block row (stride(0) bytes), matching the per-layer
+        ``kv_cache[dst] = kv_cache[src]`` it replaces.
+        """
+        from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
+
+        src_ptrs: list[int] = []
+        dst_ptrs: list[int] = []
+        sizes: list[int] = []
+        device = None
+        for group_id, copy_pairs in copies_by_group.items():
+            if group_id >= len(self.kv_cache_config.kv_cache_groups):
+                logger.warning("Skip prefix-cache block copy for invalid group_id=%s.", group_id)
+                continue
+            seen: set[int] = set()
+            for layer_name in self.kv_cache_config.kv_cache_groups[group_id].layer_names:
+                kv_cache = self._kv_caches_by_layer.get(layer_name)
+                if kv_cache is None:
+                    continue
+                for t in self._iter_block_tensors(kv_cache):
+                    if id(t) in seen:
+                        continue
+                    seen.add(id(t))
+                    if device is None:
+                        device = t.device
+                    block_bytes = t.stride(0) * t.element_size()
+                    base = t.data_ptr()
+                    for src_b, dst_b in copy_pairs:
+                        src_ptrs.append(base + src_b * block_bytes)
+                        dst_ptrs.append(base + dst_b * block_bytes)
+                        sizes.append(block_bytes)
+        if not src_ptrs:
+            return
+        src_t = torch.tensor(src_ptrs, dtype=torch.int64, device=device)
+        dst_t = torch.tensor(dst_ptrs, dtype=torch.int64, device=device)
+        size_t = torch.tensor(sizes, dtype=torch.int64, device=device)
+        batch_memcpy_kernel[(src_t.shape[0],)](src_t, dst_t, size_t, BLOCK_SIZE=8192)
+
+    def _copy_prefix_cache_tensor(self, kv_cache, copy_pairs: list[tuple[int, int]], idx_by_device: dict) -> None:
+        if torch.is_tensor(kv_cache):
+            dev = kv_cache.device
+            idx = idx_by_device.get(dev)
+            if idx is None:
+                pairs = torch.tensor(copy_pairs, dtype=torch.long, device=dev)
+                idx = (pairs[:, 0], pairs[:, 1])
+                idx_by_device[dev] = idx
+            src_idx, dst_idx = idx
+            kv_cache[dst_idx] = kv_cache[src_idx]
+            return
+        if isinstance(kv_cache, (list, tuple)):
+            for item in kv_cache:
+                self._copy_prefix_cache_tensor(item, copy_pairs, idx_by_device)
+
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        deferred_state_corrections_fn = super()._update_states(scheduler_output)
+        self._copy_prefix_cache_blocks(scheduler_output)
+        return deferred_state_corrections_fn
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2763,6 +2906,12 @@ class NPUModelRunner(GPUModelRunner):
         **model_kwargs: dict[str, Any],
     ):
         assert self.model is not None
+        # Wait for an in-flight DSv4 partial prefix-cache block copy that was
+        # issued on the side stream during _update_states, so the model reads a
+        # fully materialized KV cache. No-op on steps without a partial copy.
+        if getattr(self, "_prefix_copy_pending", False):
+            torch.npu.current_stream().wait_event(self._prefix_cache_copy_event)
+            self._prefix_copy_pending = False
         forward_context = get_forward_context()
         assert forward_context is not None
 
@@ -3810,6 +3959,7 @@ class NPUModelRunner(GPUModelRunner):
                 kvcomp_meta_data=self.kvcomp_meta_data
             )
 
+        self._kv_caches_by_layer = kv_caches
         return kv_caches
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
