@@ -2850,13 +2850,16 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
         self._finalize_dump_data()
-        if self.need_accepted_tokens and not use_pp_async_token_state:
-            assert self.sampling_done_event is not None
-            with (
-                record_function_or_nullcontext("async_state_update"),
-                torch.npu.stream(global_stream()),
-            ):
-                global_stream().wait_event(self.sampling_done_event)
+        if not use_pp_async_token_state:
+            if self.need_accepted_tokens:
+                assert self.sampling_done_event is not None
+                with (
+                    record_function_or_nullcontext("async_state_update"),
+                    torch.npu.stream(global_stream()),
+                ):
+                    global_stream().wait_event(self.sampling_done_event)
+                    self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
+            else:
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
         logger.info(
             "%s sample_tokens output_ready async=%s req_ids=%s sampled_len=%s invalid_req_indices=%s",
