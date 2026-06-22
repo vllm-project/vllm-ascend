@@ -37,11 +37,11 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
 from vllm_ascend.utils import vllm_version_is
 
-try:
+if vllm_version_is("0.22.1"):
     from vllm.model_executor.layers.mamba.linear_attn import (  # type: ignore[import-not-found]
         MiniMaxText01RMSNormTP,
     )
-except ImportError:
+else:
     from vllm.model_executor.layers.minimax_rms_norm import (  # type: ignore[import-not-found]
         MiniMaxText01RMSNormTP,
     )
