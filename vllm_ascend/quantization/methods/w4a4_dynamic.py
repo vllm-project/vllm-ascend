@@ -169,8 +169,17 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW4A8DynamicFusedMoEMethod):
                 "(pre-scaling hidden states before the expert MLP). It applies the routing "
                 "weight in the combine instead; the two differ for SwiGLU experts."
             )
-        T, H = x.shape[0], x.shape[-1]
-        x_2d = x.view(T, H) if x.dim() > 2 else x
+        # Stage 3 is hard-coded to SwiGLU (silu); reject other activations rather than
+        # silently computing the wrong expert output (matches the fail-fast stance above).
+        if activation != "silu":
+            raise NotImplementedError(
+                f"W4A4 mega kernel implements only SwiGLU (silu) experts; got activation={activation!r}."
+            )
+        H = x.shape[-1]
+        # Flatten ALL leading dims (e.g. rank-3 [batch, seq, hidden]) to [tokens, H]; the
+        # final out.view_as(x) restores the shape. x.view(x.shape[0], H) would collapse only
+        # the first dim and raise for seq > 1.
+        x_2d = x.reshape(-1, H) if x.dim() > 2 else x
         outer_dtype = x_2d.dtype
         # The INT4 expert path is fp16-only on 910B; the kernel consumes x as half*.
         # bf16 is the validated production dtype (Qwen3.x linear-attn requires a bf16 model),
