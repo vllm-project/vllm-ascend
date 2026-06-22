@@ -537,6 +537,7 @@
     - tests/e2e/pull_request/two_card/test_qwen3_performance.py
     - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
     - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
+    - tests/e2e/pull_request/four_card/test_qwen3_5.py
 
 
 - name: worker_v2
