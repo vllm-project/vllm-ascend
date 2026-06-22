@@ -310,8 +310,9 @@ class AscendConfig:
 
         # Enable optimized reduce sampling scheme
         # default to False on 310P to avoid potential aicore exceptions.
-        _reduce_sample_default = not self._is_310p()
-        self.enable_reduce_sample = additional_config.get("enable_reduce_sample", _reduce_sample_default)
+        # _reduce_sample_default = not self._is_310p()
+        # self.enable_reduce_sample = additional_config.get("enable_reduce_sample", _reduce_sample_default)
+        self.enable_reduce_sample = additional_config.get("enable_reduce_sample", True)
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
