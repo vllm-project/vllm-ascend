@@ -2,7 +2,6 @@ import sys
 
 import torch
 from torch import nn
-
 from vllm.config import ModelConfig
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -13,8 +12,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.model_loader import base_loader, utils
-from vllm.model_executor.model_loader.utils import device_loading_context
 from vllm.model_executor.model_loader.reload import set_torchao_reload_attrs
+from vllm.model_executor.model_loader.utils import device_loading_context
 
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 
@@ -36,9 +35,9 @@ def ascend_process_weights_after_loading(
     # Initialize post-load attention weights for Attention, MLA, and MM encoder.
     # NOTE: Happens after other modules so we can easily decompress weights.
     for _, module in model.named_modules():
-        if isinstance(
-            module, (Attention, MLAAttention, MMEncoderAttention, DSAAttention)
-        ) and hasattr(module, "process_weights_after_loading"):
+        if isinstance(module, (Attention, MLAAttention, MMEncoderAttention, DSAAttention)) and hasattr(
+            module, "process_weights_after_loading"
+        ):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
@@ -60,4 +59,4 @@ vllm_ascend_loaders = [
 for loader_module in vllm_ascend_loaders:
     loader = sys.modules.get(loader_module)
     if loader is not None:
-        setattr(loader, "process_weights_after_loading", ascend_process_weights_after_loading)
+        loader.process_weights_after_loading = ascend_process_weights_after_loading
