@@ -137,26 +137,27 @@ DelegatingParser._parse_tool_calls = _patched_delegating_parse_tool_calls
 if vllm_version_is("0.22.1"):
     from vllm.entrypoints.openai.engine.serving import OpenAIServing  # type: ignore[import-not-found]
 
-    _original_parse_tool_calls_from_content = OpenAIServing._parse_tool_calls_from_content
+    if hasattr(OpenAIServing, "_parse_tool_calls_from_content"):
+        _original_parse_tool_calls_from_content = OpenAIServing._parse_tool_calls_from_content
 
-    def _patched_parse_tool_calls_from_content(
-        request,
-        tokenizer,
-        enable_auto_tools: bool,
-        tool_parser_cls,
-        content: str | None = None,
-    ):
-        if content is None and _is_forced_tool_choice(request):
-            _set_no_forced_tool_call(request, True)
-            return [], None
+        def _patched_parse_tool_calls_from_content(
+            request,
+            tokenizer,
+            enable_auto_tools: bool,
+            tool_parser_cls,
+            content: str | None = None,
+        ):
+            if content is None and _is_forced_tool_choice(request):
+                _set_no_forced_tool_call(request, True)
+                return [], None
 
-        _set_no_forced_tool_call(request, False)
-        return _original_parse_tool_calls_from_content(
-            request=request,
-            tokenizer=tokenizer,
-            enable_auto_tools=enable_auto_tools,
-            tool_parser_cls=tool_parser_cls,
-            content=content,
-        )
+            _set_no_forced_tool_call(request, False)
+            return _original_parse_tool_calls_from_content(
+                request=request,
+                tokenizer=tokenizer,
+                enable_auto_tools=enable_auto_tools,
+                tool_parser_cls=tool_parser_cls,
+                content=content,
+            )
 
-    OpenAIServing._parse_tool_calls_from_content = staticmethod(_patched_parse_tool_calls_from_content)
+        OpenAIServing._parse_tool_calls_from_content = staticmethod(_patched_parse_tool_calls_from_content)

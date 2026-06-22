@@ -798,7 +798,8 @@ class RecomputeScheduler(Scheduler):
             # These blocks contain externally computed tokens that failed to
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
-            failed_kv_load_req_ids = self._handle_invalid_blocks(kv_connector_output.invalid_block_ids)
+            failed_kv_load_req_ids = self._handle_invalid_blocks(
+                kv_connector_output.invalid_block_ids, num_scheduled_tokens)
 
         # return recomputed requests as EngineCoreOutput
         if scheduler_output.recomputed_reqs is not None:
