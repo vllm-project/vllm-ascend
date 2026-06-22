@@ -44,6 +44,7 @@ from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -68,6 +69,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_world_size,
 )
 from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.worker.kv_cache_layout import HND_KV_CACHE_LAYOUT, check_hnd_kv_cache_layout_supported
 
 # isort: off
 if TYPE_CHECKING:
@@ -96,6 +98,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     num_blocks: int
     block_lens: list[list[int]]
     block_strides: list[list[int]]
+    kv_cache_layout: str = "NHD"
     local_ip: str = ""
 
 
@@ -449,7 +452,9 @@ class KVCacheRecvingThread(threading.Thread):
             self.group_compress_ratios[group_id] = compress_ratio
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
         self.remote_block_size_scale: dict[str, dict[int, list[list[int]]]] = SizedDict()
+        self.remote_block_len_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
+        self.remote_kv_cache_layout: dict[str, dict[int, str]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
@@ -479,12 +484,17 @@ class KVCacheRecvingThread(threading.Thread):
         self.use_mla = self.model_config.is_deepseek_mla
         self.is_hma_required = is_hma_required
         self.block_size = self.vllm_config.cache_config.block_size
+        self.kv_cache_layout = get_kv_cache_layout()
+        self.use_hnd_transfer = self.kv_cache_layout == HND_KV_CACHE_LAYOUT
+        if self.use_hnd_transfer:
+            check_hnd_kv_cache_layout_supported(self.kv_cache_layout)
         try:
             hf_text_config = self.model_config.hf_text_config
             if hf_text_config is None:
                 raise AttributeError
         except AttributeError:
             hf_text_config = self.model_config.hf_config
+        self.use_sparse = hasattr(hf_text_config, "index_topk")
         self.num_layers = hf_text_config.num_hidden_layers
         if block_size_scale is None:
             block_size_scale = []
@@ -636,8 +646,211 @@ class KVCacheRecvingThread(threading.Thread):
                     self._send_done_recv_signal(request_id, remote_host_, remote_port, remote_port_send_num)
             self.proc_not_transfer_request[request_id] = False
 
+    def _get_prefill_pp_layer_indices(self, layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
+        first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
+        if self.vllm_config.speculative_config is not None and prefill_pp_rank == self._prefill_pp_size - 1:
+            end_layer_index += self.num_draft_layers
+        return [layer_idx for layer_idx in layer_indices if first_layer_index <= layer_idx < end_layer_index]
+
+    def _append_hnd_attention_transfer_meta(
+        self,
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+        *,
+        local_layer_base_addr: int,
+        remote_layer_base_addr: int,
+        local_block_stride: int,
+        remote_block_stride: int,
+        local_kv_block_len: int,
+        remote_kv_block_len: int,
+        grouped_remote_block_ids: list[list[int]],
+        grouped_local_block_ids: list[list[int]],
+        tp_num_need_pulls: int,
+        remote_tp_offset: int,
+    ) -> None:
+        if self.use_mla or self.use_sparse or tp_num_need_pulls == 1:
+            if local_kv_block_len != remote_kv_block_len:
+                raise RuntimeError(
+                    "Mooncake HND transfer expects equal KV block lengths for replicated or homogeneous TP "
+                    f"caches, got local={local_kv_block_len}, remote={remote_kv_block_len}."
+                )
+            local_region_offset = 0
+            remote_region_offset = 0
+            transfer_len = local_kv_block_len
+        else:
+            if local_kv_block_len != remote_kv_block_len * tp_num_need_pulls:
+                raise RuntimeError(
+                    "Mooncake HND transfer expects Decode KV block length to cover all Prefill TP shards, "
+                    f"got local={local_kv_block_len}, remote={remote_kv_block_len}, pulls={tp_num_need_pulls}."
+                )
+            local_region_offset = remote_tp_offset * remote_kv_block_len
+            remote_region_offset = 0
+            transfer_len = remote_kv_block_len
+
+        can_coalesce = (
+            local_region_offset == 0
+            and remote_region_offset == 0
+            and transfer_len == local_block_stride
+            and transfer_len == remote_block_stride
+        )
+        for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
+            if can_coalesce:
+                src = local_layer_base_addr + local_block_id[0] * local_block_stride
+                dst = remote_layer_base_addr + remote_block_id[0] * remote_block_stride
+                src_list.append(src)
+                dst_list.append(dst)
+                length_list.append(transfer_len * len(local_block_id))
+                continue
+
+            for remote_block, local_block in zip(remote_block_id, local_block_id):
+                src = local_layer_base_addr + local_block * local_block_stride + local_region_offset
+                dst = remote_layer_base_addr + remote_block * remote_block_stride + remote_region_offset
+                src_list.append(src)
+                dst_list.append(dst)
+                length_list.append(transfer_len)
+
+    def _transfer_hnd_kv_cache_all_groups(self, req_meta: dict[str, Any]):
+        """Transfer HND KV cache shards directly to their final head interval."""
+        remote_request_id = req_meta["remote_request_id"]
+        local_block_ids: BlockIds = req_meta["local_block_ids"]
+        remote_block_ids: BlockIds = req_meta["remote_block_ids"]
+        group_pulls: list[GroupPull] = req_meta["group_pulls"]
+        remote_engine_id = req_meta["remote_engine_id"]
+        remote_host = req_meta["remote_host"]
+        remote_handshake_port = req_meta["remote_handshake_port"]
+
+        num_local_blocks = sum(len(group_block_ids) for group_block_ids in local_block_ids)
+        if num_local_blocks == 0:
+            return
+
+        if (
+            remote_engine_id not in self.kv_caches_base_addr
+            or remote_handshake_port not in self.kv_caches_base_addr[remote_engine_id]
+        ):
+            self._get_remote_metadata(remote_host, remote_handshake_port)
+
+        remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
+        local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
+        remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
+        remote_block_size_scale = self.remote_block_size_scale[remote_engine_id][remote_handshake_port]
+        remote_block_len_per_addr = self.remote_block_len_per_addr[remote_engine_id][remote_handshake_port]
+        remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
+        session_id = f"{remote_host}:{remote_transfer_port}"
+
+        req_start_time = time.perf_counter()
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
+
+        def expand_block_ids(block_ids, scale):
+            return [bid * scale + offset for bid in block_ids for offset in range(scale)]
+
+        for group_pull in group_pulls:
+            group_idx = group_pull.group_id
+            group_spec, layer_indices = self.kv_group2layeridx[group_idx]
+            layer_indices = self._get_prefill_pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
+            if not layer_indices:
+                continue
+
+            tp_num_need_pulls = group_pull.num_group_pulls
+            remote_tp_offset = group_pull.remote_tp_offset
+            local_group_block_ids = local_block_ids[group_idx]
+            remote_group_block_ids = remote_block_ids[group_idx]
+            if not local_group_block_ids:
+                continue
+
+            is_mamba_group = group_spec["kv_cache_spec_type"] == "MambaSpec"
+            if is_mamba_group:
+                transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
+                grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
+                grouped_local_block_ids = [[local_group_block_ids[0]]]
+            else:
+                local_scale = self.block_size_scale[layer_indices[0]][0]
+                remote_scale = remote_block_size_scale[layer_indices[0]][0]
+                kernel_local_block_ids = expand_block_ids(local_group_block_ids, local_scale)
+                kernel_remote_block_ids = expand_block_ids(remote_group_block_ids, remote_scale)
+                num_computed_tokens = req_meta.get("num_computed_tokens", 0)
+                remote_kernel_block_size = self.block_size // remote_scale
+                remote_kernel_token_size = remote_kernel_block_size * self.group_compress_ratios[group_idx]
+                remote_start_idx = num_computed_tokens // remote_kernel_token_size
+                kernel_remote_block_ids = kernel_remote_block_ids[remote_start_idx:]
+                num_kernel_blocks = min(len(kernel_remote_block_ids), len(kernel_local_block_ids))
+                kernel_remote_block_ids = kernel_remote_block_ids[:num_kernel_blocks]
+                kernel_local_block_ids = kernel_local_block_ids[:num_kernel_blocks]
+
+                if tp_num_need_pulls == 1:
+                    grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
+                        kernel_remote_block_ids, kernel_local_block_ids
+                    )
+                else:
+                    grouped_remote_block_ids = [[block_id] for block_id in kernel_remote_block_ids]
+                    grouped_local_block_ids = [[block_id] for block_id in kernel_local_block_ids]
+
+            for layer_idx in layer_indices:
+                if is_mamba_group:
+                    self._append_mamba_transfer_meta(
+                        src_list,
+                        dst_list,
+                        length_list,
+                        group_spec=group_spec,
+                        src_layer_base_addr=local_kv_caches_base_addrs[layer_idx],
+                        dst_layer_base_addr=remote_kv_caches_base_addrs[layer_idx],
+                        block_len=self.block_len_per_addr[layer_idx],
+                        block_stride=self.block_stride_per_addr[layer_idx],
+                        remote_block_stride=remote_block_stride_per_addr[layer_idx],
+                        remote_block_id=grouped_remote_block_ids[0][0],
+                        local_block_id=grouped_local_block_ids[0][0],
+                        tp_num_need_pulls=tp_num_need_pulls,
+                        remote_tp_offset=remote_tp_offset,
+                    )
+                    continue
+
+                for cache_idx in range(len(local_kv_caches_base_addrs[layer_idx])):
+                    self._append_hnd_attention_transfer_meta(
+                        src_list,
+                        dst_list,
+                        length_list,
+                        local_layer_base_addr=local_kv_caches_base_addrs[layer_idx][cache_idx],
+                        remote_layer_base_addr=remote_kv_caches_base_addrs[layer_idx][cache_idx],
+                        local_block_stride=self.block_stride_per_addr[layer_idx][cache_idx],
+                        remote_block_stride=remote_block_stride_per_addr[layer_idx][cache_idx],
+                        local_kv_block_len=self.block_len_per_addr[layer_idx][cache_idx],
+                        remote_kv_block_len=remote_block_len_per_addr[layer_idx][cache_idx],
+                        grouped_remote_block_ids=grouped_remote_block_ids,
+                        grouped_local_block_ids=grouped_local_block_ids,
+                        tp_num_need_pulls=tp_num_need_pulls,
+                        remote_tp_offset=remote_tp_offset,
+                    )
+
+        if not src_list:
+            return
+
+        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
+        if ret < 0:
+            logger.error(
+                "Mooncake HND transfer failed for request. remote_request_id=%s, ret=%d. ",
+                req_meta["remote_request_id"],
+                ret,
+            )
+            raise RuntimeError(f"Mooncake HND transfer failed, ret: {ret}")
+
+        req_transfer_elapsed = (time.perf_counter() - req_start_time) * 1000
+        logger.info(
+            "HND KV cache transfer for request %s took %.2f ms. local_ip %s local_device_id %s remote_session_id %s",
+            remote_request_id,
+            req_transfer_elapsed,
+            get_ip(),
+            self.tp_rank,
+            session_id,
+        )
+
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
+        if self.use_hnd_transfer:
+            self._transfer_hnd_kv_cache_all_groups(req_meta)
+            return
+
         remote_request_id = req_meta["remote_request_id"]
         local_block_ids: BlockIds = req_meta["local_block_ids"]
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
@@ -674,16 +887,10 @@ class KVCacheRecvingThread(threading.Thread):
         def expand_block_ids(block_ids, scale):
             return [bid * scale + offset for bid in block_ids for offset in range(scale)]
 
-        def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
-            first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
-            if self.vllm_config.speculative_config is not None and prefill_pp_rank == self._prefill_pp_size - 1:
-                end_layer_index += self.num_draft_layers
-            return [layer_idx for layer_idx in layer_indices if first_layer_index <= layer_idx < end_layer_index]
-
         for group_pull in group_pulls:
             group_idx = group_pull.group_id
             group_spec, layer_indices = self.kv_group2layeridx[group_idx]
-            layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
+            layer_indices = self._get_prefill_pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
             if not layer_indices:
                 continue
             tp_num_need_pulls = group_pull.num_group_pulls
@@ -1195,7 +1402,14 @@ class KVCacheRecvingThread(threading.Thread):
             self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
             self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
             self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
+            self.remote_block_len_per_addr[engine_id][remote_handshake_port] = agent_meta.block_lens
             self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
+            self.remote_kv_cache_layout[engine_id][remote_handshake_port] = agent_meta.kv_cache_layout
+            if self.use_hnd_transfer and agent_meta.kv_cache_layout != HND_KV_CACHE_LAYOUT:
+                raise RuntimeError(
+                    "Mooncake HND KV transfer requires HND layout on both Prefill and Decode, "
+                    f"but remote layout is {agent_meta.kv_cache_layout}."
+                )
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -1316,6 +1530,16 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
+        if get_kv_cache_layout() != HND_KV_CACHE_LAYOUT:
+            return None
+        if vllm_config.model_config is None or vllm_config.model_config.use_mla:
+            return None
+        check_hnd_kv_cache_layout_supported(HND_KV_CACHE_LAYOUT)
+        logger.info("Mooncake connector setting KV cache layout to HND.")
+        return HND_KV_CACHE_LAYOUT
 
     ############################################################
     # Scheduler Side Methods
@@ -1754,6 +1978,10 @@ class MooncakeConnectorWorker:
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
+        self.kv_cache_layout = get_kv_cache_layout()
+        self.use_hnd_transfer = self.kv_cache_layout == HND_KV_CACHE_LAYOUT
+        if self.use_hnd_transfer:
+            check_hnd_kv_cache_layout_supported(self.kv_cache_layout)
 
         # kv cache config
         self.kv_cache_config = kv_cache_config
@@ -2055,6 +2283,7 @@ class MooncakeConnectorWorker:
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_addr,
             block_strides=self.block_stride_per_addr,
+            kv_cache_layout=self.kv_cache_layout,
             local_ip=get_ip(),
         )
         self.xfer_handshake_metadata = metadata

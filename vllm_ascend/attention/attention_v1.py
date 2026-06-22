@@ -64,6 +64,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.worker.kv_cache_layout import check_hnd_kv_cache_layout_supported
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
@@ -107,7 +108,7 @@ class AscendAttentionBackend(AttentionBackend):
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
-    
+
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
@@ -118,8 +119,10 @@ class AscendAttentionBackend(AttentionBackend):
         if cache_layout == "NHD":
             return (0, 1, 2, 3, 4)
         if cache_layout == "HND" and include_num_layers_dimension:
+            check_hnd_kv_cache_layout_supported(cache_layout)
             return (2, 4, 0, 1, 3, 5)
         if cache_layout == "HND":
+            check_hnd_kv_cache_layout_supported(cache_layout)
             return (0, 1, 3, 2, 4)
         raise ValueError(f"Unknown cache layout format {cache_layout}.")
 
@@ -1006,8 +1009,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             assert self.key_cache is not None
             assert self.value_cache is not None
             num_block, block_size, _, _ = self.key_cache.shape
+            cache_layout = get_kv_cache_layout()
+            if cache_layout == "HND":
+                check_hnd_kv_cache_layout_supported(cache_layout)
             is_hnd_physical_cache = (
-                get_kv_cache_layout() == "HND" and self.key_cache.stride(2) == block_size * self.key_cache.shape[-1]
+                cache_layout == "HND" and self.key_cache.stride(2) == block_size * self.key_cache.shape[-1]
             )
             if is_hnd_physical_cache:
                 key = self.key_cache.permute(0, 2, 1, 3)
@@ -1016,7 +1022,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = self.key_cache.view(num_block, block_size, -1)
             value = self.value_cache.view(num_block, block_size, -1)
             return key, value, block_size
-        
+
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:

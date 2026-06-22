@@ -4,12 +4,25 @@
 from typing import Any
 
 import torch
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
+
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+HND_KV_CACHE_LAYOUT = "HND"
+
+
+def check_hnd_kv_cache_layout_supported(cache_layout: str | None = None) -> None:
+    if cache_layout is None:
+        cache_layout = get_kv_cache_layout()
+    if cache_layout == HND_KV_CACHE_LAYOUT and get_ascend_device_type() != AscendDeviceType.A5:
+        raise RuntimeError("HND KV cache layout is only supported on Ascend A5.")
 
 
 def get_kv_cache_stride_order(
     attn_backend: Any,
     kv_cache_shape: tuple[int, ...],
 ) -> tuple[int, ...]:
+    check_hnd_kv_cache_layout_supported()
     try:
         stride_order = attn_backend.get_kv_cache_stride_order()
         assert len(stride_order) == len(kv_cache_shape)
