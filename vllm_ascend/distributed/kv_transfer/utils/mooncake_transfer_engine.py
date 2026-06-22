@@ -1,4 +1,7 @@
+import logging
 import threading
+
+logger = logging.getLogger(__name__)
 
 
 class GlobalTE:
@@ -13,6 +16,7 @@ class GlobalTE:
             with self.transfer_engine_lock:
                 # Double-Checked Locking
                 if self.transfer_engine is None:
+
                     try:
                         from mooncake.engine import TransferEngine  # type: ignore
                     except ImportError as e:

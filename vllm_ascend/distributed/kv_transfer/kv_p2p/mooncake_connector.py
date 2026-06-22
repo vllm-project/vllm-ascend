@@ -1411,6 +1411,16 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        tp_size = max(tp_rank for (_, tp_rank) in metadata) + 1
+        flat_metadata: dict[int, KVConnectorHandshakeMetadata] = {
+            pp_rank * tp_size + tp_rank: meta
+            for (pp_rank, tp_rank), meta in metadata.items()
+        }
+        self.set_xfer_handshake_metadata(flat_metadata)
+
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -1744,7 +1754,15 @@ class MooncakeConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
-        self.total_layers = vllm_config.model_config.get_total_num_hidden_layers()
+        # Use global hidden layer count (not PP-sliced) for MTP index assignment,
+        # ensuring consistent MTP layer indices between P and D nodes in PD+PP mode.
+        try:
+            hf_text_config = vllm_config.model_config.hf_text_config
+            if hf_text_config is None:
+                raise AttributeError
+        except AttributeError:
+            hf_text_config = vllm_config.model_config.hf_config
+        self.total_layers = hf_text_config.num_hidden_layers
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
@@ -1782,7 +1800,10 @@ class MooncakeConnectorWorker:
         device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-        self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
+        self.engine = global_te.get_transfer_engine(
+            self.side_channel_host,
+            device_name=str(torch.npu.current_device()),
+        )
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.

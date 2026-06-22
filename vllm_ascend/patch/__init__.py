@@ -784,7 +784,66 @@
 #       Rotary quant is a unique feature of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   4. `vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM.load_weights`
+# ** 19b. File: worker/patch_deepseek_mtp_pp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.__init__`
+#      `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.forward`
+#      `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.compute_logits`
+#      `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.load_weights`
+#      `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.embed_input_ids`
+#    Why:
+#       DeepSeekMTP (used as the MTP draft model for GLM5.1 with model_type=glm_moe_dsa)
+#       does not support pipeline parallelism. When PP>1, all ranks attempt to load
+#       the full MTP model, wasting memory and potentially causing errors.
+#    How：
+#       On non-last PP ranks, replace the MTP model with a minimal stub
+#       (PPMissingLayer) and skip weight loading. Full MTP model is only
+#       created on the last PP stage. Set supports_pp=True.
+#    Related PR (if no, explain why):
+#       No, MTP+PP is a vllm-ascend feature combination.
+#    Future Plan:
+#       Remove this patch when upstream DeepSeekMTP supports PP natively.
+#
+#   2. `vllm_ascend.spec_decode.eagle_proposer.AscendEagleProposer.load_model`
+#    Why:
+#       On non-last PP ranks the proposer should skip attention-layer discovery
+#       and kernel setup for the MTP draft model since only a stub exists.
+#    How：
+#       When method=="mtp" and PP>1 and not last rank, only create the stub model,
+#       skip all attention-layer discovery.
+#    Related PR (if no, explain why):
+#       No, same as above.
+#    Future Plan:
+#       Remove this patch when upstream DeepSeekMTP supports PP natively.
+#
+#   3. `vllm_ascend.spec_decode.eagle_proposer.AscendEagleProposer._maybe_share_embeddings`
+#    Why:
+#       With PP>1 the original code skips embedding sharing entirely, but on the
+#       last PP rank the target model has real embed_tokens that can be shared.
+#       Skipping sharing causes MTP to load its own embedding copy (extra memory,
+#       potential precision issues).
+#    How：
+#       On the last PP rank with PP>1, share the target model's embed_tokens
+#       with the MTP draft model. On non-last ranks, skip sharing (the MTP model
+#       is a stub).
+#    Related PR (if no, explain why):
+#       No, PP+spec-decode embedding sharing is vllm-ascend specific.
+#    Future Plan:
+#       Remove this patch when upstream supports PP+MTP embedding sharing.
+#
+#   4. `vllm_ascend.spec_decode.eagle_proposer.AscendEagleProposer._maybe_share_lm_head`
+#    Why:
+#       With PP>1, on non-last PP ranks the target model's lm_head is PPMissingLayer,
+#       causing torch.equal() comparison with MTP shared_head to fail.
+#    How：
+#       Skip LM head sharing on non-last PP ranks. Use original logic on last
+#       PP rank or when PP=1.
+#    Related PR (if no, explain why):
+#       No, same as above.
+#    Future Plan:
+#       Remove this patch when upstream supports PP+MTP LM head sharing.
+#
+#   5. `vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM.load_weights`
 #    Why:
 #       After vllm PR #41706, GlmMoeDsaForCausalLM.load_weights uses `AutoWeightsLoader` which
 #       does not skip `rot.weight`, and will cause ValueError while loading weights.
@@ -794,7 +853,8 @@
 #       https://github.com/vllm-project/vllm/pull/41706
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-# ** 19b. File: worker/model_runner_v1.py**
+#
+# ** 19c. File: worker/model_runner_v1.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `NPUModelRunner._check_and_update_cudagraph_mode`
 #    Why:

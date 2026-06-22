@@ -41,11 +41,18 @@ if vllm_version_is("0.22.1"):
         linear_attention_prefill_and_mix,
     )
 else:
-    from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (  # type: ignore[import-not-found]
-        clear_linear_attention_cache_for_new_sequences,
-        linear_attention_decode,
-        linear_attention_prefill_and_mix,
-    )
+    try:
+        from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (  # type: ignore[import-not-found]
+            clear_linear_attention_cache_for_new_sequences,
+            linear_attention_decode,
+            linear_attention_prefill_and_mix,
+        )
+    except ModuleNotFoundError:
+        from vllm.model_executor.layers.mamba.linear_attn import (  # type: ignore[import-not-found]
+            clear_linear_attention_cache_for_new_sequences,
+            linear_attention_decode,
+            linear_attention_prefill_and_mix,
+        )
 
 
 class AscendBailingMoELinearAttention(BailingMoELinearAttention):

@@ -490,6 +490,7 @@ class AscendFusedMoE(FusedMoE):
 
             self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
+
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated
         computation."""
