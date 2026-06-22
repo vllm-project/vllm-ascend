@@ -25,7 +25,7 @@ from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401
 
 # TODO: @QwertyJack please fix this patch.
-_LEGACY_PARSER = _DELEGATING_PARSER_AVAILABLE and hasattr(Glm47MoeModelToolParser, "extract_tool_calls_streaming")
+_LEGACY_PARSER = False  # Always skip: legacy parser no longer supported
 
 
 class _WrappedParser(DelegatingParser):

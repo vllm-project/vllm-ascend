@@ -16,7 +16,7 @@ from vllm_ascend.patch.platform import (
 )
 
 # TODO: @QwertyJack please fix this patch.
-_LEGACY_PARSER = hasattr(MinimaxM2ToolParser, "extract_tool_calls_streaming")
+_LEGACY_PARSER = False  # Always skip: legacy parser no longer supported
 
 TC_START_ID = 1
 TC_END_ID = 2
