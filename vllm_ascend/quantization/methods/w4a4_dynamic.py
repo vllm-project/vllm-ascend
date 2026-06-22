@@ -29,6 +29,7 @@ repack and the forward differ, so this subclasses the W4A8 MoE method.
 from collections.abc import Callable
 
 import torch
+from vllm.config import get_current_vllm_config
 
 from vllm_ascend.ops import mega_moe_w4a4 as _mega
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
@@ -65,6 +66,23 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW4A8DynamicFusedMoEMethod):
         # The parent __init__ sets self.supports_eplb = True; override it (the class
         # attribute alone is shadowed by that instance assignment).
         self.supports_eplb = False
+        # The mega kernel ALWAYS applies an in-kernel block-diagonal Hadamard to the
+        # activations; that is only correct when the matching rotation was baked into the
+        # gate_up weights offline by examples/quantization/quantize_qwen3_moe_w4a4_hadamard.py
+        # (which stamps ``hadamard_block_size`` into quant_model_description.json). A plain,
+        # unrotated W4A4_DYNAMIC checkpoint has no such rotation and would be silently
+        # corrupted by the extra activation rotation, so require the converter's marker and
+        # fail fast otherwise (the kernel's Hadamard width is fixed at HADAMARD_BLOCK_SIZE).
+        hb = get_current_vllm_config().quant_config.quant_description.get("hadamard_block_size")
+        if hb != _mega.HADAMARD_BLOCK_SIZE:
+            raise NotImplementedError(
+                "W4A4_DYNAMIC mega MoE requires a Hadamard-rotated checkpoint produced by "
+                "examples/quantization/quantize_qwen3_moe_w4a4_hadamard.py: expected "
+                f"quant_model_description.json 'hadamard_block_size'={_mega.HADAMARD_BLOCK_SIZE}, "
+                f"got {hb!r}. A plain (unrotated) W4A4_DYNAMIC checkpoint is not supported — "
+                "the kernel applies a fixed in-kernel block-diagonal Hadamard that would "
+                "otherwise corrupt routed-expert outputs."
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Repack the loaded INT4 expert weights into the FRACTAL_NZ int4 layout

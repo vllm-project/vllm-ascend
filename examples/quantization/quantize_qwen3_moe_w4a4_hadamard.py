@@ -274,6 +274,11 @@ def main() -> None:
         (dst / "quant_model_weights.safetensors.index.json").open("w"),
         indent=2,
     )
+    # Stamp the Hadamard block size so the runtime W4A4_DYNAMIC mega-MoE scheme can verify
+    # this checkpoint was produced by THIS converter: the kernel applies a matching in-kernel
+    # block-diagonal Hadamard, so a plain (unrotated) W4A4_DYNAMIC checkpoint without this
+    # marker is rejected rather than silently given an unmatched activation rotation.
+    description["hadamard_block_size"] = n
     json.dump(description, (dst / "quant_model_description.json").open("w"), indent=2)
     n_q = sum(v == "W4A4_DYNAMIC" for v in description.values())
     print(

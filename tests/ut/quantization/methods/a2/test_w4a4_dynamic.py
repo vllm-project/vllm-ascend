@@ -22,13 +22,31 @@ class TestAscendW4A4DynamicFusedMoEMethod(TestBase):
 
     # get_mc2_group() needs a distributed env; raise AttributeError so the
     # parent __init__'s own try/except falls back to an empty comm-group name.
+    @patch("vllm_ascend.quantization.methods.w4a4_dynamic.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a8.get_mc2_group", side_effect=AttributeError)
     @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
-    def setUp(self, mock_vllm, mock_ascend, mock_mc2):
+    def setUp(self, mock_vllm, mock_ascend, mock_mc2, mock_vllm_w4a4):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
+        # The scheme's __init__ requires the Hadamard converter's marker in the quant
+        # description; supply it so construction succeeds (see test_rejects_* for the
+        # missing-marker path).
+        mock_vllm_w4a4.return_value.quant_config.quant_description = {"hadamard_block_size": 64}
         self.scheme = AscendW4A4DynamicFusedMoEMethod()
+
+    @patch("vllm_ascend.quantization.methods.w4a4_dynamic.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_mc2_group", side_effect=AttributeError)
+    @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
+    def test_rejects_non_hadamard_checkpoint(self, mock_vllm, mock_ascend, mock_mc2, mock_vllm_w4a4):
+        # A plain W4A4_DYNAMIC checkpoint (no hadamard_block_size marker) must fail fast,
+        # since the kernel unconditionally applies its in-kernel block-diagonal Hadamard.
+        mock_vllm.return_value = create_mock_vllm_config()
+        mock_ascend.return_value = create_mock_ascend_config()
+        mock_vllm_w4a4.return_value.quant_config.quant_description = {}
+        with self.assertRaises(NotImplementedError):
+            AscendW4A4DynamicFusedMoEMethod()
 
     def test_registered_under_w4a4_dynamic_moe(self):
         self.assertIs(
