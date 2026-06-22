@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import pytest
 from typing import Any
 
+import pytest
 from openai.types.responses.function_tool import FunctionTool
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,

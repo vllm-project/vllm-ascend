@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 
@@ -12,6 +12,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 # class attributes, so a thin ``DelegatingParser`` subclass is equivalent.
 try:
     from vllm.parser.abstract_parser import DelegatingParser  # type: ignore[import-not-found]
+
     _DELEGATING_PARSER_AVAILABLE = True
 except ImportError:
     _DELEGATING_PARSER_AVAILABLE = False
@@ -24,10 +25,7 @@ from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401
 
 # TODO: @QwertyJack please fix this patch.
-_LEGACY_PARSER = (
-    _DELEGATING_PARSER_AVAILABLE
-    and hasattr(Glm47MoeModelToolParser, "extract_tool_calls_streaming")
-)
+_LEGACY_PARSER = _DELEGATING_PARSER_AVAILABLE and hasattr(Glm47MoeModelToolParser, "extract_tool_calls_streaming")
 
 
 class _WrappedParser(DelegatingParser):

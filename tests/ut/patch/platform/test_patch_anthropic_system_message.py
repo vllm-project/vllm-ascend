@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
@@ -15,10 +14,7 @@ _convert_fn = getattr(AnthropicServingMessages, "_convert_system_message", None)
 if isinstance(_convert_fn, classmethod):
     _convert_fn = _convert_fn.__func__
 _upstream_co_varnames = getattr(_convert_fn, "__code__", None)
-_UPSTREAM_HAS_MERGE = (
-    _upstream_co_varnames is not None
-    and "merge_inline_system" in _upstream_co_varnames.co_varnames
-)
+_UPSTREAM_HAS_MERGE = _upstream_co_varnames is not None and "merge_inline_system" in _upstream_co_varnames.co_varnames
 
 # TODO: @QwertyJack please fix this patch.
 # Skip tests when upstream already has the feature (patch not active)

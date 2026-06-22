@@ -28,7 +28,6 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 
-
 # TODO: @QwertyJack please fix this patch.
 if False:
     _ANTHROPIC_MESSAGE_ROLES = Literal["user", "assistant", "system"]
@@ -39,14 +38,12 @@ if False:
     AnthropicMessagesRequest.model_rebuild(force=True)
     AnthropicCountTokensRequest.model_rebuild(force=True)
 
-
     def _append_system_text(system_parts: list[str], text: str | None) -> None:
         if not text:
             return
         if text.startswith("x-anthropic-billing-header"):
             return
         system_parts.append(text)
-
 
     def _append_system_content(
         system_parts: list[str],
@@ -59,7 +56,6 @@ if False:
         for block in content:
             if block.type == "text":
                 _append_system_text(system_parts, block.text)
-
 
     def _patched_convert_system_message(
         cls,
@@ -77,7 +73,6 @@ if False:
 
         if system_parts:
             openai_messages.append({"role": "system", "content": "".join(system_parts)})
-
 
     def _patched_convert_messages(
         cls,
@@ -97,7 +92,6 @@ if False:
 
             if not (msg.role == "user" and "content" not in openai_msg):
                 openai_messages.append(openai_msg)
-
 
     AnthropicServingMessages._convert_system_message = classmethod(_patched_convert_system_message)
     AnthropicServingMessages._convert_messages = classmethod(_patched_convert_messages)

@@ -28,7 +28,6 @@ if False:
             Glm47MoeModelToolParser._extract_tool_call_regions
         )
 
-
     def _patched_extract_tool_call_regions(
         self: Glm47MoeModelToolParser,
         text: str,
@@ -44,6 +43,5 @@ if False:
             normalized_regions.append((inner_text, is_complete))
 
         return normalized_regions
-
 
     Glm47MoeModelToolParser._extract_tool_call_regions = _patched_extract_tool_call_regions

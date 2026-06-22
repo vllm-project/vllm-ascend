@@ -48,7 +48,6 @@ if False:
     _extract_types_from_schema = getattr(tool_parser_utils, "extract_types_from_schema", None)
     _coerce_to_schema_type = getattr(tool_parser_utils, "coerce_to_schema_type", None)
 
-
     def _patched_init(
         self: MinimaxM2ToolParser,
         tokenizer: TokenizerLike,
@@ -60,7 +59,6 @@ if False:
         self._tool_call_ids = tool_call_ids
         self._tool_name_sent = tool_name_sent
         self._tool_call_started_from_token_id = False
-
 
     def _extract_types_from_schema_fallback(schema: Any) -> list[str]:
         if not isinstance(schema, dict):
@@ -99,12 +97,10 @@ if False:
 
         return list(types) if types else ["string"]
 
-
     def _extract_param_types_from_schema(schema: Any) -> list[str]:
         if callable(_extract_types_from_schema):
             return _extract_types_from_schema(schema)
         return _extract_types_from_schema_fallback(schema)
-
 
     def _coerce_param_value_fallback(value: str, param_types: list[str]) -> Any:
         type_aliases = {
@@ -157,12 +153,10 @@ if False:
         except (json.JSONDecodeError, ValueError):
             return value
 
-
     def _coerce_param_value(value: str, param_types: list[str]) -> Any:
         if callable(_coerce_to_schema_type):
             return _coerce_to_schema_type(value, param_types)
         return _coerce_param_value_fallback(value, param_types)
-
 
     def _get_param_types_from_config(
         param_name: str,
@@ -172,7 +166,6 @@ if False:
         if not isinstance(param_schema, dict):
             return ["string"]
         return _extract_param_types_from_schema(param_schema)
-
 
     def _patched_parse_single_invoke(
         self: MinimaxM2ToolParser,
@@ -203,7 +196,6 @@ if False:
             ),
         )
 
-
     def _reset_streaming_state(
         self: MinimaxM2ToolParser,
         tool_call_started: bool = False,
@@ -216,7 +208,6 @@ if False:
         self._tool_call_started_from_token_id = False
         self.is_tool_call_started = tool_call_started
 
-
     def _ensure_streaming_slots(self: MinimaxM2ToolParser, tool_count: int) -> None:
         while len(self.streamed_args_for_tool) < tool_count:
             self.streamed_args_for_tool.append("")
@@ -225,13 +216,11 @@ if False:
         while len(self._tool_name_sent) < tool_count:
             self._tool_name_sent.append(False)
 
-
     def _get_param_config(
         self: MinimaxM2ToolParser,
         function_name: str,
     ) -> dict[str, Any]:
         return find_tool_properties(self.tools, function_name)
-
 
     def _serialize_partial_param_value(
         self: MinimaxM2ToolParser,
@@ -266,7 +255,6 @@ if False:
             return value
 
         return json.dumps(value, ensure_ascii=False)[:-1]
-
 
     def _build_partial_arguments(
         self: MinimaxM2ToolParser,
@@ -323,7 +311,6 @@ if False:
         if invoke_complete:
             args_json += "}"
         return args_json
-
 
     def _get_invoke_states(
         self: MinimaxM2ToolParser,
@@ -387,7 +374,6 @@ if False:
 
         return invoke_states
 
-
     def _finalize_completed_tool_call(
         self: MinimaxM2ToolParser,
         idx: int,
@@ -406,7 +392,6 @@ if False:
                 "arguments": json.loads(tool_call.function.arguments),
             }
         )
-
 
     def _extract_delta_tool_call(
         self: MinimaxM2ToolParser,
@@ -458,7 +443,6 @@ if False:
 
         return None
 
-
     def _patched_extract_tool_calls_streaming(
         self: MinimaxM2ToolParser,
         previous_text: str,
@@ -507,7 +491,6 @@ if False:
             return DeltaMessage(content="")
 
         return None
-
 
     MinimaxM2ToolParser.__init__ = _patched_init
     MinimaxM2ToolParser._parse_single_invoke = _patched_parse_single_invoke
