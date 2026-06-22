@@ -28,21 +28,17 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 
-_ANTHROPIC_MESSAGE_ROLES = Literal["user", "assistant", "system"]
 
-AnthropicMessage.__annotations__["role"] = _ANTHROPIC_MESSAGE_ROLES
-AnthropicMessage.model_fields["role"].annotation = _ANTHROPIC_MESSAGE_ROLES
-AnthropicMessage.model_rebuild(force=True)
-AnthropicMessagesRequest.model_rebuild(force=True)
-AnthropicCountTokensRequest.model_rebuild(force=True)
+# TODO: @QwertyJack please fix this patch.
+if False:
+    _ANTHROPIC_MESSAGE_ROLES = Literal["user", "assistant", "system"]
 
-_convert_fn = AnthropicServingMessages._convert_system_message
-if isinstance(_convert_fn, classmethod):
-    _convert_fn = _convert_fn.__func__
-_upstream_co_varnames = getattr(_convert_fn, "__code__", None)
-_upstream_has_merge = _upstream_co_varnames is not None and "merge_inline_system" in _upstream_co_varnames.co_varnames
+    AnthropicMessage.__annotations__["role"] = _ANTHROPIC_MESSAGE_ROLES
+    AnthropicMessage.model_fields["role"].annotation = _ANTHROPIC_MESSAGE_ROLES
+    AnthropicMessage.model_rebuild(force=True)
+    AnthropicMessagesRequest.model_rebuild(force=True)
+    AnthropicCountTokensRequest.model_rebuild(force=True)
 
-if not _upstream_has_merge:
 
     def _append_system_text(system_parts: list[str], text: str | None) -> None:
         if not text:
@@ -50,6 +46,7 @@ if not _upstream_has_merge:
         if text.startswith("x-anthropic-billing-header"):
             return
         system_parts.append(text)
+
 
     def _append_system_content(
         system_parts: list[str],
@@ -63,41 +60,32 @@ if not _upstream_has_merge:
             if block.type == "text":
                 _append_system_text(system_parts, block.text)
 
+
     def _patched_convert_system_message(
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         openai_messages: list[dict[str, Any]],
-        *,
-        merge_inline_system: bool = False,
     ) -> None:
         system_parts: list[str] = []
 
         if anthropic_request.system:
             _append_system_content(system_parts, anthropic_request.system)
 
-        if merge_inline_system:
-            for msg in anthropic_request.messages:
-                if msg.role == "system":
-                    _append_system_content(system_parts, msg.content)
+        for msg in anthropic_request.messages:
+            if msg.role == "system":
+                _append_system_content(system_parts, msg.content)
 
         if system_parts:
             openai_messages.append({"role": "system", "content": "".join(system_parts)})
+
 
     def _patched_convert_messages(
         cls,
         messages: list,
         openai_messages: list[dict[str, Any]],
-        *,
-        merge_inline_system: bool = False,
     ) -> None:
         for msg in messages:
             if msg.role == "system":
-                if merge_inline_system:
-                    continue
-                system_parts: list[str] = []
-                _append_system_content(system_parts, msg.content)
-                if system_parts:
-                    openai_messages.append({"role": "system", "content": "".join(system_parts)})
                 continue
 
             openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
@@ -109,6 +97,7 @@ if not _upstream_has_merge:
 
             if not (msg.role == "user" and "content" not in openai_msg):
                 openai_messages.append(openai_msg)
+
 
     AnthropicServingMessages._convert_system_message = classmethod(_patched_convert_system_message)
     AnthropicServingMessages._convert_messages = classmethod(_patched_convert_messages)

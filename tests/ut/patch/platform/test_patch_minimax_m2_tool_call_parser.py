@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import pytest
 from typing import Any
 
-import pytest
 from openai.types.responses.function_tool import FunctionTool
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
@@ -15,7 +15,8 @@ from vllm_ascend.patch.platform import (
     patch_minimax_m2_tool_call_parser as minimax_m2_patch,
 )
 
-_LEGACY_PARSER = hasattr(MinimaxM2ToolParser, "tool_call_start_token")
+# TODO: @QwertyJack please fix this patch.
+_LEGACY_PARSER = hasattr(MinimaxM2ToolParser, "extract_tool_calls_streaming")
 
 TC_START_ID = 1
 TC_END_ID = 2

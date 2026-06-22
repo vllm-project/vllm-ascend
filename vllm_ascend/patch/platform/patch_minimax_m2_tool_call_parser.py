@@ -41,16 +41,13 @@ from vllm.tool_parsers.utils import (
     find_tool_properties,
 )
 
-# Upstream vLLM refactored the MiniMax M2 parser from a regex-based
-# implementation (with tool_call_start_token, tool_call_start_token_id, etc.)
-# to a declarative state-machine parser engine (MinimaxM2Parser exposed via
-# MinimaxM2ParserToolAdapter). The new engine natively handles incremental
-# tool-call argument streaming, so this patch is only required for the legacy
-# regex-based parser.
-if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
+# TODO: @QwertyJack please fix this patch.
+if False:
     _original_init = MinimaxM2ToolParser.__init__
+    # vLLM main moved schema helpers from this parser class into tool_parsers.utils.
     _extract_types_from_schema = getattr(tool_parser_utils, "extract_types_from_schema", None)
     _coerce_to_schema_type = getattr(tool_parser_utils, "coerce_to_schema_type", None)
+
 
     def _patched_init(
         self: MinimaxM2ToolParser,
@@ -63,6 +60,7 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
         self._tool_call_ids = tool_call_ids
         self._tool_name_sent = tool_name_sent
         self._tool_call_started_from_token_id = False
+
 
     def _extract_types_from_schema_fallback(schema: Any) -> list[str]:
         if not isinstance(schema, dict):
@@ -101,10 +99,12 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
 
         return list(types) if types else ["string"]
 
+
     def _extract_param_types_from_schema(schema: Any) -> list[str]:
         if callable(_extract_types_from_schema):
             return _extract_types_from_schema(schema)
         return _extract_types_from_schema_fallback(schema)
+
 
     def _coerce_param_value_fallback(value: str, param_types: list[str]) -> Any:
         type_aliases = {
@@ -118,15 +118,7 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
         }
         normalized_types = {type_aliases.get(t.lower(), t.lower()) for t in param_types}
 
-        for candidate_type in (
-            "null",
-            "integer",
-            "number",
-            "boolean",
-            "object",
-            "array",
-            "string",
-        ):
+        for candidate_type in ("null", "integer", "number", "boolean", "object", "array", "string"):
             if candidate_type not in normalized_types:
                 continue
 
@@ -165,10 +157,12 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
         except (json.JSONDecodeError, ValueError):
             return value
 
+
     def _coerce_param_value(value: str, param_types: list[str]) -> Any:
         if callable(_coerce_to_schema_type):
             return _coerce_to_schema_type(value, param_types)
         return _coerce_param_value_fallback(value, param_types)
+
 
     def _get_param_types_from_config(
         param_name: str,
@@ -178,6 +172,7 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
         if not isinstance(param_schema, dict):
             return ["string"]
         return _extract_param_types_from_schema(param_schema)
+
 
     def _patched_parse_single_invoke(
         self: MinimaxM2ToolParser,
@@ -208,6 +203,7 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
             ),
         )
 
+
     def _reset_streaming_state(
         self: MinimaxM2ToolParser,
         tool_call_started: bool = False,
@@ -220,6 +216,7 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
         self._tool_call_started_from_token_id = False
         self.is_tool_call_started = tool_call_started
 
+
     def _ensure_streaming_slots(self: MinimaxM2ToolParser, tool_count: int) -> None:
         while len(self.streamed_args_for_tool) < tool_count:
             self.streamed_args_for_tool.append("")
@@ -228,11 +225,13 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
         while len(self._tool_name_sent) < tool_count:
             self._tool_name_sent.append(False)
 
+
     def _get_param_config(
         self: MinimaxM2ToolParser,
         function_name: str,
     ) -> dict[str, Any]:
         return find_tool_properties(self.tools, function_name)
+
 
     def _serialize_partial_param_value(
         self: MinimaxM2ToolParser,
@@ -267,6 +266,7 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
             return value
 
         return json.dumps(value, ensure_ascii=False)[:-1]
+
 
     def _build_partial_arguments(
         self: MinimaxM2ToolParser,
@@ -323,6 +323,7 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
         if invoke_complete:
             args_json += "}"
         return args_json
+
 
     def _get_invoke_states(
         self: MinimaxM2ToolParser,
@@ -386,6 +387,7 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
 
         return invoke_states
 
+
     def _finalize_completed_tool_call(
         self: MinimaxM2ToolParser,
         idx: int,
@@ -404,6 +406,7 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
                 "arguments": json.loads(tool_call.function.arguments),
             }
         )
+
 
     def _extract_delta_tool_call(
         self: MinimaxM2ToolParser,
@@ -455,15 +458,16 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
 
         return None
 
+
     def _patched_extract_tool_calls_streaming(
         self: MinimaxM2ToolParser,
         previous_text: str,
         current_text: str,
         delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
+        previous_token_ids: Sequence[int],  # pylint: disable=unused-argument
+        current_token_ids: Sequence[int],  # pylint: disable=unused-argument
         delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
+        request: ChatCompletionRequest,  # pylint: disable=unused-argument
     ) -> DeltaMessage | None:
         start_in_text = self.tool_call_start_token in delta_text
         start_in_ids = self.tool_call_start_token_id in delta_token_ids
@@ -503,6 +507,7 @@ if hasattr(MinimaxM2ToolParser, "tool_call_start_token"):
             return DeltaMessage(content="")
 
         return None
+
 
     MinimaxM2ToolParser.__init__ = _patched_init
     MinimaxM2ToolParser._parse_single_invoke = _patched_parse_single_invoke
