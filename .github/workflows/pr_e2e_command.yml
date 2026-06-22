@@ -34,7 +34,9 @@ permissions:
 jobs:
   e2e-test:
     name: Run /e2e tests
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
       pr_sha: ${{ steps.resolve.outputs.pr_sha }}
       test_groups: ${{ steps.groups.outputs.test_groups }}
@@ -45,18 +47,12 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          sudo apt-get update -y && sudo apt-get install -y curl
           sudo mkdir -p -m 755 /etc/apt/keyrings
           curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
           sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
           sudo apt-get update -y
           sudo apt-get install gh -y
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
 
       - name: Check user authorization
         id: auth
@@ -198,7 +194,7 @@ jobs:
     name: Report result
     needs: [e2e-test, trigger-selected-tests]
     if: always() && needs.e2e-test.result == 'success' && needs.e2e-test.outputs.notify_comment_id != ''
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Update comment with result
         uses: peter-evans/create-or-update-comment@v5
