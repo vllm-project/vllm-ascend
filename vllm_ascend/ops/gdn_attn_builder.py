@@ -755,9 +755,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
 
         self.spec_sequence_masks: torch.Tensor = torch.empty(
-            (sequence_index_capacity,),
-            dtype=torch.bool,
-            device=device
+            (sequence_index_capacity,), dtype=torch.bool, device=device
         )
 
         self.spec_sequence_masks_cpu: torch.Tensor = torch.empty(

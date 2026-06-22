@@ -31,11 +31,7 @@ def _build_inputs(req_scheduled_tokens: dict[str, int], hidden_size: int):
     """
     total_tokens = sum(req_scheduled_tokens.values())
     input_ids = torch.arange(total_tokens, dtype=torch.int32)
-    target_hidden_states = (
-        torch.arange(total_tokens, dtype=torch.float32)
-        .unsqueeze(-1)
-        .repeat(1, hidden_size)
-    )
+    target_hidden_states = torch.arange(total_tokens, dtype=torch.float32).unsqueeze(-1).repeat(1, hidden_size)
     return input_ids, target_hidden_states
 
 
