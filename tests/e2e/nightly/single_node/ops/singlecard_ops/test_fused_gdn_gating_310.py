@@ -78,7 +78,7 @@ def test_fused_gdn_gating_310(batch_size, num_heads, beta, threshold):
     if batch_size >= 4 and num_heads >= 4:
         boundary = threshold / beta
         a[0, 0] = boundary + 2.0
-        a[1, 1] = boundary 
+        a[1, 1] = boundary
         a[2, 2] = boundary - 0.5
         a[3, 3] = -boundary - 2.0
     # 获取 Golden 参考值
