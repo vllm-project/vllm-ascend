@@ -1086,6 +1086,9 @@ async def handle_completions_impl(api: str, request: Request):
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
+    except asyncio.CancelledError:
+        proxy_state.request_num -= 1
+        raise
     except Exception:
         import traceback
 
