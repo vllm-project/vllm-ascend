@@ -78,7 +78,7 @@ on:
         required: true
       OBS_ACCESS_KEY_ID:
         required: false
-      OBS_SECRET_KEY_ID:
+      OBS_SECRET_ACCESS_KEY:
         required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -399,7 +399,7 @@ jobs:
         uses: ascend-gha-runners/artifact/upload@v0.3
         with:
           access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
-          secret_key: ${{ secrets.OBS_SECRET_KEY_ID }}
+          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
           name: ${{ inputs.config_file_path }}-ascend-logs
           path: /tmp/ascend-logs.tar.gz
           retention-days: 7
@@ -424,7 +424,7 @@ jobs:
         uses: ascend-gha-runners/artifact/upload@v0.3
         with:
           access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
-          secret_key: ${{ secrets.OBS_SECRET_KEY_ID }}
+          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
           name: nightly-test-benchmark-results-${{ inputs.name || inputs.config_file_path }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /tmp/benchmark_results/
           if-no-files-found: warn
