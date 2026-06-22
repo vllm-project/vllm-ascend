@@ -3,7 +3,6 @@ from typing import Any
 
 from vllm.logger import logger
 from vllm.model_executor.model_loader.weight_utils import maybe_remap_kv_scale_name
-from vllm.model_executor.models.utils import AutoWeightsLoader
 
 
 class ImportPatchDecorator:
@@ -64,17 +63,6 @@ def patch_deepseek(module):
     if hasattr(module, "maybe_remap_kv_scale_name"):
         module._original_maybe_remap_kv_scale_name = module.maybe_remap_kv_scale_name
         module.maybe_remap_kv_scale_name = new_remap
-
-    # Patch GlmMoeDsaForCausalLM.load_weights to ignore rot.* weights
-    # from rotary-quantized checkpoints.
-    if hasattr(module, "GlmMoeDsaForCausalLM"):
-        _orig_load_weights = module.GlmMoeDsaForCausalLM.load_weights
-
-        def _patched_dsa_load_weights(self, weights):
-            loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=["rot"])
-            return loader.load_weights(weights)
-
-        module.GlmMoeDsaForCausalLM.load_weights = _patched_dsa_load_weights
 
 
 @ImportPatchDecorator.register("vllm.model_executor.model_loader.weight_utils")
