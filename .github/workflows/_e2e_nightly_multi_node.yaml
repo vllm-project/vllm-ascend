@@ -111,7 +111,7 @@ jobs:
         run: echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
 
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set job variables
         id: vars
