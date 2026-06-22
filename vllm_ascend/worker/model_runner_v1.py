@@ -447,6 +447,17 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=self.pin_memory,
         )
         self._dsa_positions_np_buf = self._dsa_positions_cpu_buf.numpy()
+        self._compressor_counts = torch.zeros(
+            self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._compressor_query_start_loc = torch.zeros(
+            self.max_num_reqs + 1,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._optimistic_seq_lens_np = self.optimistic_seq_lens_cpu.numpy()
 
         self.use_eagle = (
             vllm_config.speculative_config.use_eagle()
@@ -463,12 +474,11 @@ class NPUModelRunner(GPUModelRunner):
         # Event for async GPU→CPU copy of corrected seq_lens in async
         # spec decode mode. Recorded in _prepare_inputs, synchronized
         # in _build_attention_metadata. Created once, reused each iteration.
-        # Only backends that consume CPU seq_lens (AscendAttentionBackend,
-        # AscendMLABackend, and DSV4 compressed attention metadata) need this;
-        # others (SFA, GDN, etc.) do not.
-        self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
-            self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
-        )
+        # Only backends that still require GPU-corrected seq_lens copied back
+        # from device need this event. DSV4 compressed metadata refreshes the
+        # CPU seq_lens from deferred state corrections before metadata build,
+        # so it should not force an extra D2H sync here.
+        self._needs_seq_lens_cpu_sync = issubclass(self.attn_backend, (AscendAttentionBackend, AscendMLABackend))
         self._seq_lens_cpu_event: torch.npu.Event | None = None
         self._seq_lens_cpu_event_pending = False
 
@@ -746,7 +756,14 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
-    ) -> tuple[torch.Tensor, SpecDecodeMetadata | None, int, list[np.ndarray[Any, Any]]]:
+    ) -> tuple[
+        torch.Tensor,
+        SpecDecodeMetadata | None,
+        int,
+        list[np.ndarray[Any, Any]] | None,
+        list[bool] | None,
+        list[bool] | None,
+    ]:
         """
         :return: tuple[
             logits_indices,
@@ -1214,43 +1231,62 @@ class NPUModelRunner(GPUModelRunner):
         else:
             self._seq_lens_cpu_event_pending = False
 
-        num_computed_tokens_for_compress = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-        )
-        if (
-            self.use_compress
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
-            and prev_req_id_to_index
-        ):
-            # Async spec decode keeps the CPU counter optimistic until after
-            # target forward is launched. DSV4 compressed KV slot mapping is
-            # CPU-built today, so use the GPU-corrected counter before
-            # computing compressed cache positions.
+        positions_compressed_list = None
+        req_indices_compressed_list = None
+        num_scheduled_tokens_compressed_list = None
+        full_slot_mapping_ready_list = None
+        compact_slot_mapping_ready_list = None
+        if self.use_compress and self.pcp_size == 1 and self.dcp_size == 1:
+            # Single-rank DSV4 can derive compact compressor slot_mapping from
+            # device positions directly. This removes the async-spec D2H wait
+            # while preserving the old compact slot_mapping consumer contract.
+            (
+                full_slot_mapping_ready_list,
+                compact_slot_mapping_ready_list,
+            ) = self.input_batch.block_table.compute_compressed_slot_mapping(
+                num_reqs,
+                self.query_start_loc.gpu[: num_reqs + 1],
+                self.positions[:total_num_scheduled_tokens],
+                self._compressor_counts,
+                self._compressor_query_start_loc,
+            )
+        elif self.use_compress:
+            num_computed_tokens_for_compress = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            )
             if (
-                self._seq_lens_cpu_event_pending
-                and self._seq_lens_cpu_event is not None
+                self.use_async_spec_decode
+                and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
+                and prev_req_id_to_index
             ):
-                self._seq_lens_cpu_event.synchronize()
-                self._seq_lens_cpu_event_pending = False
-                num_computed_tokens_for_compress = (
-                    self.optimistic_seq_lens_cpu[:num_reqs].numpy()
-                    - num_scheduled_tokens[:num_reqs]
-                )
-            else:
-                num_computed_tokens_for_compress = (
-                    self.num_computed_tokens[:num_reqs].to("cpu").numpy()
-                )
+                # CP/DCP remains on the original CPU-list path in this PR.
+                # Keep the existing correctness sync there rather than mixing
+                # interleaved CP slot semantics into the single-rank Triton
+                # validation branch.
+                if (
+                    self._seq_lens_cpu_event_pending
+                    and self._seq_lens_cpu_event is not None
+                ):
+                    self._seq_lens_cpu_event.synchronize()
+                    self._seq_lens_cpu_event_pending = False
+                    num_computed_tokens_for_compress = (
+                        self.optimistic_seq_lens_cpu[:num_reqs].numpy()
+                        - num_scheduled_tokens[:num_reqs]
+                    )
+                else:
+                    num_computed_tokens_for_compress = (
+                        self.num_computed_tokens[:num_reqs].to("cpu").numpy()
+                    )
 
-        (positions_compressed_list, req_indices_compressed_list,
-         num_scheduled_tokens_compressed_list) = get_compressed_pos_and_indices(
-            num_computed_tokens_for_compress,
-            num_scheduled_tokens[:num_reqs], self.arange_np[:num_reqs],
-            self.use_compress,
-            self.kv_cache_config.kv_cache_groups)
+            (positions_compressed_list, req_indices_compressed_list,
+             num_scheduled_tokens_compressed_list) = get_compressed_pos_and_indices(
+                num_computed_tokens_for_compress,
+                num_scheduled_tokens[:num_reqs], self.arange_np[:num_reqs],
+                self.use_compress,
+                self.kv_cache_config.kv_cache_groups)
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
-        if self.pcp_size <= 1:
+        if self.pcp_size <= 1 and compact_slot_mapping_ready_list is None:
             self.input_batch.block_table.compute_slot_mapping(
                 num_reqs,
                 self.query_start_loc.gpu[: num_reqs + 1],
@@ -1344,7 +1380,9 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
-            num_scheduled_tokens_compressed_list
+            num_scheduled_tokens_compressed_list,
+            full_slot_mapping_ready_list,
+            compact_slot_mapping_ready_list,
         )
 
     def _rebuild_input_ids_with_corrected_positions(
@@ -2025,6 +2063,8 @@ class NPUModelRunner(GPUModelRunner):
                     spec_decode_metadata,
                     total_num_scheduled_tokens,
                     num_scheduled_tokens_compressed_list,
+                    full_slot_mapping_ready_list,
+                    compact_slot_mapping_ready_list,
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
@@ -2134,6 +2174,16 @@ class NPUModelRunner(GPUModelRunner):
                         self.query_pos.np[:total_num_scheduled_tokens],
                         out=dsa_positions_np,
                     )
+                    # DSV4 metadata consumes CPU seq_lens, but async-spec
+                    # correction has already been applied to input_batch CPU
+                    # state above. Refresh the CPU view directly instead of
+                    # recording a GPU->CPU copy in _prepare_inputs.
+                    np.add(
+                        self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                        num_scheduled_tokens_np[:num_reqs],
+                        out=self._optimistic_seq_lens_np[:num_reqs],
+                    )
+                    self._optimistic_seq_lens_np[num_reqs:].fill(0)
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
@@ -2165,6 +2215,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     num_scheduled_tokens_compressed_list=num_scheduled_tokens_compressed_list,
+                    full_slot_mapping_ready_list=full_slot_mapping_ready_list,
+                    compact_slot_mapping_ready_list=compact_slot_mapping_ready_list,
                 )
 
                 self._sanitize_placeholder_input_ids_for_forward(
@@ -2919,6 +2971,8 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         num_scheduled_tokens_compressed_list: list[np.ndarray] | None = None,
+        full_slot_mapping_ready_list: list[bool] | None = None,
+        compact_slot_mapping_ready_list: list[bool] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -3005,6 +3059,25 @@ class NPUModelRunner(GPUModelRunner):
                         slot_mapping[
                             total_num_scheduled_tokens_compressed_list[
                                 kv_cache_gid]:num_tokens_padded].fill_(-1)
+                    elif (
+                        self.use_compress
+                        and compact_slot_mapping_ready_list is not None
+                        and compact_slot_mapping_ready_list[kv_cache_gid]
+                    ):
+                        # The Triton compact path initializes padding rows to
+                        # PAD_SLOT_ID on device. Keep the mapping intact and
+                        # only clear padded block table rows for graph shape.
+                        blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
+                    elif (
+                        self.use_compress
+                        and full_slot_mapping_ready_list is not None
+                        and full_slot_mapping_ready_list[kv_cache_gid]
+                    ):
+                        # A ratio<=1 group still uses the normal full-token
+                        # slot_mapping contract. Only padded rows should be
+                        # invalidated; actual token rows were just computed.
+                        slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
+                        blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
                     elif self.use_compress:
                         # DSA dummy/graph-capture runs do not go through
                         # _prepare_inputs(), so no fresh compressed cache

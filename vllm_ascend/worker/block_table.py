@@ -3,10 +3,21 @@ import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
+
+from vllm_ascend.ops.triton.compressor.slot_mapping import build_compressed_slot_mapping
+
+
+def _get_group_kv_cache_spec(kv_cache_group: KVCacheGroupSpec | None):
+    if kv_cache_group is None or not hasattr(kv_cache_group, "kv_cache_spec"):
+        return None
+    kv_cache_spec = kv_cache_group.kv_cache_spec
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        return next(iter(kv_cache_spec.kv_cache_specs.values()))
+    return kv_cache_spec
 
 
 class BlockTable:
@@ -28,31 +39,19 @@ class BlockTable:
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
         self.dcp_world_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
-        compress_ratio = 1
-        if (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and hasattr(kv_cache_group.kv_cache_spec, "compress_ratio")
-        ):
-            compress_ratio = kv_cache_group.kv_cache_spec.compress_ratio
-        if (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and (self.pcp_world_size * self.dcp_world_size > 1)
-            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-        ):
+        kv_cache_spec = _get_group_kv_cache_spec(kv_cache_group)
+        compress_ratio = getattr(kv_cache_spec, "compress_ratio", 1)
+        self.compress_ratio = compress_ratio
+        if (self.pcp_world_size * self.dcp_world_size > 1) and isinstance(kv_cache_spec, MambaSpec):
             max_num_blocks_per_req = max_num_blocks_per_req * self.pcp_world_size * self.dcp_world_size
-        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, compress_ratio), 1)
+        effective_compress_ratio = compress_ratio if compress_ratio > 1 else 1
+        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, effective_compress_ratio), 1)
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
         self.physical_block_size = block_size
-        self.is_mamba_group = (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-        )
+        self.is_mamba_group = isinstance(kv_cache_spec, MambaSpec)
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:
@@ -200,6 +199,38 @@ class BlockTable:
             block_offsets = positions % self.block_size
             np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
             self.slot_mapping.copy_to_gpu(req_indices.shape[0])
+
+    def compute_compressed_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        compressed_counts_buffer: torch.Tensor,
+        compressed_query_start_loc_buffer: torch.Tensor,
+    ) -> tuple[bool, bool]:
+        if self.compress_ratio <= 1:
+            self.compute_slot_mapping(num_reqs, query_start_loc, positions)
+            return True, False
+
+        # Keep CP/DCP on the existing path for this PR. The sync regression
+        # being tested is the single-rank DSV4 compressor path; extending the
+        # interleaved CP mapping needs separate validation.
+        if self.dcp_world_size * self.pcp_world_size > 1:
+            return False, False
+
+        build_compressed_slot_mapping(
+            num_reqs=num_reqs,
+            max_output_tokens=self.max_num_batched_tokens,
+            query_start_loc=query_start_loc,
+            positions=positions,
+            block_table=self.block_table.gpu,
+            block_size=self.block_size,
+            slot_mapping=self.slot_mapping.gpu,
+            compress_ratio=self.compress_ratio,
+            compressed_counts_buffer=compressed_counts_buffer,
+            compressed_query_start_loc_buffer=compressed_query_start_loc_buffer,
+        )
+        return False, True
 
     def _compute_pcp_dcp_slot_mapping(
         self,
@@ -400,6 +431,32 @@ class MultiGroupBlockTable:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
                 block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
+
+    def compute_compressed_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        compressed_counts_buffer: torch.Tensor,
+        compressed_query_start_loc_buffer: torch.Tensor,
+    ) -> tuple[list[bool], list[bool]]:
+        full_slot_mapping_ready_list: list[bool] = []
+        compact_slot_mapping_ready_list: list[bool] = []
+        for block_table in self.block_tables:
+            if block_table.is_mamba_group:
+                full_slot_mapping_ready_list.append(False)
+                compact_slot_mapping_ready_list.append(False)
+                continue
+            full_ready, compact_ready = block_table.compute_compressed_slot_mapping(
+                num_reqs,
+                query_start_loc,
+                positions,
+                compressed_counts_buffer,
+                compressed_query_start_loc_buffer,
+            )
+            full_slot_mapping_ready_list.append(full_ready)
+            compact_slot_mapping_ready_list.append(compact_ready)
+        return full_slot_mapping_ready_list, compact_slot_mapping_ready_list
 
     def compute_slot_mapping_draft(
         self,
