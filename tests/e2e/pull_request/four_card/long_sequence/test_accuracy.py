@@ -77,11 +77,23 @@ DSV3_2_GOLDEN = [
     "The president of United States is平行astra unbehetroni",
 ]
 
-DSV3_2_GOLDEN_backup = [
-    "The capital of France isbearerdenomorthal",
-    "Hello, my name is Tom, I am" + "ERIC slicpacelike Chop",
-    "The president of United States isoint054 Rund959arki",
-]
+DSV3_2_GOLDEN_BACKUPS = (
+    [
+        "The capital of France isbearerhaloce梗",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike Chop",
+        "The president of United States isoint054 Rund959arki",
+    ],
+    [
+        "The capital of France isbearerdenomorthal",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike Chop",
+        "The president of United States is平行astra unbehetroni",
+    ],
+    [
+        "The capital of France isbearerdenomorthal",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike Chop",
+        "The president of United States isoint054 Rund959arki",
+    ],
+)
 
 DEEPSEEK_MTP3_GOLDEN = [
     "The capital of France is Salmonella团团 elsewhereッγκ",
@@ -102,7 +114,7 @@ class AccuracyCase:
     name: str
     model: str
     prompts: Sequence[str]
-    expected_outputs: Sequence[str] | tuple[Sequence[str], Sequence[str]]
+    expected_outputs: Sequence[str] | Sequence[Sequence[str]]
     max_tokens: int
     runner_kwargs: dict[str, Any]
 
@@ -256,7 +268,7 @@ FULL_FEATURE_MODEL_CASES = [
         model="vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
         prompts=COMMON_PROMPTS,
         # TODO(qcs): Remove multi-expected_outputs after the first request output is stable.
-        expected_outputs=(DSV3_2_GOLDEN, DSV3_2_GOLDEN_backup),
+        expected_outputs=(DSV3_2_GOLDEN, *DSV3_2_GOLDEN_BACKUPS),
         max_tokens=5,
         runner_kwargs={
             "max_model_len": 1024,
