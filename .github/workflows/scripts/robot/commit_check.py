@@ -20,7 +20,7 @@ from pathlib import Path
 
 from lib.llm import call_llm
 
-VALID_TYPES = os.environ.get("VALID_TYPES", "feat,fix,perf,refactor,test,docs,chore").split(",")
+VALID_TYPES = [t.strip() for t in os.environ.get("VALID_TYPES", "feat,fix,perf,refactor,test,docs,chore").split(",")]
 REQUIRE_SIGNOFF = os.environ.get("REQUIRE_SIGNOFF", "true").lower() == "true"
 
 COMMIT_PATTERN = re.compile(r"^(\w+)(\([^)]+\))?!?:\s+(.+)$")

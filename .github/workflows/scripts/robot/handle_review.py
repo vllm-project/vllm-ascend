@@ -16,7 +16,7 @@ import json
 import os
 from pathlib import Path
 
-from lib.github_api import post_comment
+from lib.github_api import get_labels, post_comment
 
 ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
 
@@ -186,6 +186,60 @@ def build_pr_combined_comment(desc_result: dict | None, commit_result: dict | No
     return "\n".join(sections)
 
 
+def build_pr_pass_comment(desc_result: dict | None, commit_result: dict | None) -> str:
+    """Build a pass-variant PR review comment for flagged→clean transitions.
+
+    Args:
+        desc_result: Description check result or ``None``.
+        commit_result: Commit check result or ``None``.
+
+    Returns:
+        Markdown string.
+    """
+    sections = ["## PR Review 检查结果 (已通过)", ""]
+    if desc_result is not None and desc_result.get("executed", True):
+        sections.append(":white_check_mark: 描述完整性检查已通过")
+    if commit_result is not None and commit_result.get("executed", False):
+        sections.append(":white_check_mark: Commit Message 检查已通过")
+    sections.append("")
+    sections.append("感谢您的改进！内容由 AI 生成，请仔细甄别。")
+    return "\n".join(sections)
+
+
+def build_issue_pass_comment(desc_result: dict) -> str:
+    """Build a pass-variant issue review comment for flagged→clean transitions.
+
+    Args:
+        desc_result: Description check result.
+
+    Returns:
+        Markdown string.
+    """
+    return (
+        "### 描述完整性检查结果 (已通过)\n\n"
+        ":white_check_mark: 描述信息已完善，感谢您的更新！\n\n"
+        "_内容由 AI 生成，请仔细甄别。_"
+    )
+
+
+def was_previously_flagged(desc_result: dict | None, commit_result: dict | None,
+                           current_labels: list[str]) -> bool:
+    """Determine whether the issue/PR was in a flagged state before this run.
+
+    A flagged state means at least one of the managed labels was present.
+
+    Args:
+        desc_result: Description check result or ``None``.
+        commit_result: Commit check result or ``None``.
+        current_labels: Labels currently on the issue/PR.
+
+    Returns:
+        ``True`` if the entity had at least one managed label.
+    """
+    managed = {NEED_DETAIL_LABEL, NEED_COMMIT_FIX_LABEL}
+    return bool(managed & set(current_labels))
+
+
 def compute_label_actions(desc_result: dict | None, commit_result: dict | None) -> dict:
     """Determine which labels to add and remove based on review results.
 
@@ -237,22 +291,30 @@ def main() -> None:
 
     is_pr = commit_result is not None
 
+    current_labels = get_labels(ISSUE_NUMBER)
+    previously_flagged = was_previously_flagged(desc_result, commit_result, current_labels)
+
     if is_pr:
+        desc_executed = desc_result.get("executed", True) if desc_result else False
         desc_ok = desc_result.get("ok", True) if desc_result else True
         commit_executed = commit_result.get("executed", False) if commit_result else False
         commit_ok = commit_result.get("overall_ok", True) if commit_result else True
 
-        needs_comment = not desc_ok or (commit_executed and not commit_ok)
+        has_failure = not desc_ok or (commit_executed and not commit_ok)
+        all_pass = (not desc_executed or desc_ok) and (not commit_executed or commit_ok)
+
+        needs_comment = has_failure or (all_pass and previously_flagged)
 
         if needs_comment:
-            print("Posting PR combined review comment...")
-            comment_body = build_pr_combined_comment(desc_result, commit_result)
-            full_comment = (
-                "> 这是由 PR Review Bot 自动生成的反馈。"
-                "内容由 AI 生成，请仔细甄别。\n\n"
-                + comment_body
-            )
-            post_comment(ISSUE_NUMBER, full_comment)
+            if has_failure:
+                print("Posting PR combined review comment...")
+                comment_body = build_pr_combined_comment(desc_result, commit_result)
+                prefix = "> 这是由 PR Review Bot 自动生成的反馈。内容由 AI 生成，请仔细甄别。\n\n"
+            else:
+                print("Posting PR pass comment...")
+                comment_body = build_pr_pass_comment(desc_result, commit_result)
+                prefix = ""
+            post_comment(ISSUE_NUMBER, prefix + comment_body)
         else:
             print("PR review passed: no comment needed")
     else:
@@ -261,7 +323,9 @@ def main() -> None:
             Path(args.label_output).write_text(json.dumps({"add": [], "remove": []}))
             return
 
+        desc_executed = desc_result.get("executed", True)
         desc_ok = desc_result.get("ok", False)
+
         if not desc_ok:
             print(f"Posting issue description check comment... (score={desc_result.get('score', 0)})")
             comment_body = build_issue_comment(desc_result)
@@ -271,6 +335,9 @@ def main() -> None:
                 + comment_body
             )
             post_comment(ISSUE_NUMBER, full_comment)
+        elif desc_executed and previously_flagged:
+            print("Posting issue pass comment...")
+            post_comment(ISSUE_NUMBER, build_issue_pass_comment(desc_result))
         else:
             print("Issue description check passed, no comment needed")
 

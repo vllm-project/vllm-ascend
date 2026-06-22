@@ -73,6 +73,24 @@ def remove_label(issue_number: str | int, label: str) -> None:
     print(f"Removed label '{label}' from #{issue_number}")
 
 
+def get_labels(issue_number: str | int) -> list[str]:
+    """Return the label names currently on an issue or PR.
+
+    Args:
+        issue_number: Issue or PR number.
+
+    Returns:
+        List of label name strings.
+
+    Raises:
+        requests.HTTPError: If the API call fails.
+    """
+    url = f"{_api_base()}/issues/{issue_number}"
+    resp = requests.get(url, headers=_api_headers(), timeout=DEFAULT_TIMEOUT)
+    resp.raise_for_status()
+    return [lb["name"] for lb in resp.json().get("labels", [])]
+
+
 def manage_labels(
     issue_number: str | int,
     add: list[str] | None = None,
