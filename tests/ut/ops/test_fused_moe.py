@@ -371,9 +371,7 @@ class TestVllmParentInterfaceCompatibility:
     )
     def test_overridden_method_signature_accepts_parent_interface(self, child_cls, parent_cls, method_name):
         child_method = getattr(child_cls, method_name)
-        explicitly_calls_parent = (
-            child_cls is AscendRoutedExperts and parent_cls is fused_moe_module.RoutedExperts
-        )
+        explicitly_calls_parent = child_cls is AscendRoutedExperts and parent_cls is fused_moe_module.RoutedExperts
         if not explicitly_calls_parent and not _method_uses_super(child_method):
             pytest.skip(
                 f"{child_cls.__name__}.{method_name} does not call "
@@ -564,9 +562,9 @@ class TestAscendMoERunner:
 
     @pytest.mark.parametrize("has_shared_experts", [False, True])
     def test_forward_impl_delegates_to_routed_experts(self, monkeypatch, has_shared_experts):
-        # vLLM PR #41184 removed the legacy layer argument from MoERunner and
-        # moved expert execution under runner.routed_experts. This test pins the
-        # new delegation path so it does not regress back to the old signature.
+        # vLLM PR #41184 moved expert execution under runner.routed_experts.
+        # This test pins the current delegation path so it does not regress to
+        # the pre-refactor signature.
         runner = AscendMoERunner.__new__(AscendMoERunner)
         shared_experts = MagicMock() if has_shared_experts else None
         shared_experts_owner = next(

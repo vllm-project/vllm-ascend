@@ -345,8 +345,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # vLLM PR #41184 moved the router gate into MoERunner and lets
         # models pass hidden_states as the router_logits placeholder when
         # the runner is the internal router. Ascend delegates execution to
-        # AscendRoutedExperts, so normalize that placeholder before the old
-        # Ascend forward_impl sees it as expert logits.
+        # AscendRoutedExperts, so normalize that placeholder before the Ascend
+        # forward_impl sees it as expert logits.
         gate = self.gate
         expected_router_experts = getattr(self.moe_config, "num_logical_experts", None)
         if expected_router_experts is None:
