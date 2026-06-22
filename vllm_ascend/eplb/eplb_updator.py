@@ -124,7 +124,7 @@ class EplbUpdator:
                 self.reqs = []
                 self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
-    def forward_end(self):
+    def forward_end(self, eplb_heat_collection_status: bool = True):
         if self.wakeup_eplb_worker_flag():
             with record_function_or_nullcontext("EPLB gather moe load"):
                 self.compute_and_set_moe_load()
@@ -133,7 +133,12 @@ class EplbUpdator:
         if self.update_expert_weight_flag() and self.expert_map_record_path is None:
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
-        self.update_iteration()
+        # One circle of eplb update includes expert_heat_collection_interval + algorithm_execution_interval
+        # + num_moe_layers (for weight update). In expert_heat_collection stage, we only update the counter
+        # when eplb_heat_collection_status is True. In later stages, the counter is always updated.
+        # TODO(Angazenn): Decouple algorithm execution && weight update with heat collection iterations.
+        if self.cur_iterations >= self.expert_heat_collection_interval - 1 or eplb_heat_collection_status:
+            self.update_iteration()
 
     def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)

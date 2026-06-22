@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"POT-Creation-Date: 2026-06-22 05:29+0000\n"
 "PO-Revision-Date: 2026-01-22 16:40+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -67,7 +67,7 @@ msgstr "1.ModelSlim（推荐）"
 
 #: ../../source/user_guide/feature_guide/quantization.md:19
 msgid ""
-"[ModelSlim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)"
+"[ModelSlim](https://gitcode.com/Ascend/msmodelslim/blob/master/README.md)"
 " is an Ascend-friendly compression tool focused on acceleration, using "
 "compression techniques, and built for Ascend hardware. It includes a "
 "series of inference optimization technologies such as quantization and "
@@ -75,7 +75,7 @@ msgid ""
 "models, multimodal understanding models, multimodal generation models, "
 "etc."
 msgstr ""
-"[ModelSlim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)"
+"[ModelSlim](https://gitcode.com/Ascend/msmodelslim/blob/master/README.md)"
 " 是一个对 Ascend 友好的压缩工具，专注于利用压缩技术实现加速，并专为 Ascend "
 "硬件构建。它包含一系列推理优化技术，如量化和压缩，旨在加速大语言稠密模型、MoE 模型、多模态理解模型、多模态生成模型等。"
 
@@ -87,8 +87,8 @@ msgstr "安装"
 #: ../../source/user_guide/feature_guide/quantization.md:23
 msgid ""
 "To use ModelSlim for model quantization, install it from its [Git "
-"repository](https://gitcode.com/Ascend/msit):"
-msgstr "若要使用 ModelSlim 进行模型量化，请从其 [Git 仓库](https://gitcode.com/Ascend/msit) 安装："
+"repository](https://gitcode.com/Ascend/msmodelslim):"
+msgstr "若要使用 ModelSlim 进行模型量化，请从其 [Git 仓库](https://gitcode.com/Ascend/msmodelslim) 安装："
 
 #: ../../source/user_guide/feature_guide/quantization.md:34
 #: ../../source/user_guide/feature_guide/quantization.md:73
@@ -99,10 +99,10 @@ msgstr "模型量化"
 msgid ""
 "The following example shows how to generate W8A8 quantized weights for "
 "the [Qwen3-MoE "
-"model](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/Qwen3-MOE/README.md)."
+"model](https://gitcode.com/Ascend/msmodelslim/blob/master/example/Qwen3-MOE/README.md)."
 msgstr ""
 "以下示例展示了如何为 [Qwen3-MoE "
-"模型](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/Qwen3-MOE/README.md)"
+"模型](https://gitcode.com/Ascend/msmodelslim/blob/master/example/Qwen3-MOE/README.md)"
 " 生成 W8A8 量化权重。"
 
 #: ../../source/user_guide/feature_guide/quantization.md:38
@@ -118,10 +118,10 @@ msgstr "量化完成后，输出目录将包含量化后的模型文件。"
 #: ../../source/user_guide/feature_guide/quantization.md:61
 msgid ""
 "For more examples, refer to the [official "
-"examples](https://gitcode.com/Ascend/msit/tree/master/msmodelslim/example)."
+"examples](https://gitcode.com/Ascend/msmodelslim/tree/master/example)."
 msgstr ""
 "更多示例请参考 "
-"[官方示例](https://gitcode.com/Ascend/msit/tree/master/msmodelslim/example)。"
+"[官方示例](https://gitcode.com/Ascend/msmodelslim/tree/master/example)。"
 
 #: ../../source/user_guide/feature_guide/quantization.md:63
 msgid "2. LLM-Compressor"
@@ -165,9 +165,12 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/quantization.md:103
 msgid ""
-"Currently supported quantization types by LLM-Compressor: `W8A8` and "
-"`W8A8_DYNAMIC`."
-msgstr "目前 LLM-Compressor 支持的量化类型：`W8A8` 和 `W8A8_DYNAMIC`。"
+"The quantization types currently supported by LLM-Compressor can be "
+"viewed in the `vllm_ascend/quantization/compressed_tensors_config.py` "
+"file."
+msgstr ""
+"LLM-Compressor 当前支持的量化类型可在 `vllm_ascend/quantization/compressed_tensors_config.py` "
+"文件中查看。"
 
 #: ../../source/user_guide/feature_guide/quantization.md:105
 msgid "Running Quantized Models"
@@ -196,12 +199,8 @@ msgid "References"
 msgstr "参考资料"
 
 #: ../../source/user_guide/feature_guide/quantization.md:159
-msgid ""
-"[ModelSlim "
-"Documentation](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)"
-msgstr ""
-"[ModelSlim "
-"文档](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)"
+msgid "[ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)"
+msgstr "[ModelSlim GitCode](https://gitcode.com/Ascend/msmodelslim)"
 
 #: ../../source/user_guide/feature_guide/quantization.md:160
 msgid "[LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)"

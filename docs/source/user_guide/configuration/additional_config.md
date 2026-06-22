@@ -80,6 +80,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_overlap_gate`          | bool | `False` | Whether to enable multi-stream overlap gate. This option only takes effect on MoE models with shared experts.  |
 | `recompute_scheduler_enable`        | bool | `False` | Whether to enable the recompute scheduler. **Only valid in PD-disaggregated mode** (`kv_role` is `kv_producer` or `kv_consumer`). **Do not enable in PD-mixed mode** (no `kv_transfer_config`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
+| `enable_sleep_mode_extra_cleanup`   | bool | `False` | Enables extra sleep-mode cleanup for RL workloads, including HCCL process-group release and ACL graph workspace cleanup. Disabled by default because wakeup may need to restore HCCL and recapture ACL graphs. |
 | `SLO_limits_for_dynamic_batch`      | int  | `-1`    | SLO limits for dynamic batch. This is new scheduler to support dynamic batch feature                            |
 | `enable_npugraph_ex`                | bool | `False` | Whether to enable npugraph_ex graph mode.                                                                 |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
@@ -150,6 +151,7 @@ The details of each configuration option are as follows:
 | `expert_map_record_path`         | str | `None` | Save the expert load calculation results to a new expert table in the specified directory.|
 | `num_redundant_experts`          | int | `0`    | Specify redundant experts during initialization. |
 | `eplb_policy_type`               | int | `1`    | EPLB balancing policy: `0`=Random, `1`=DefaultEplb (open-source algorithm), `2`=SwiftBalanceEplb (optimized for low-bandwidth), `3`=FlashLB (statistical method with sliding windows). |
+| `eplb_heat_collection_stage`      | str | `"all"`| Stage to collect EPLB heat: `"prefill"` collects only during prefill, `"decode"` collects only during decode, `"all"` collects during both stages. In PD colocation scenarios, prefill and decode requests may produce different expert workloads. Selectively collecting heat on one stage can reduce expert imbalance more effectively. |
 
 **profiling_chunk_config**
 
