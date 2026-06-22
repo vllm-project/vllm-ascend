@@ -14,18 +14,24 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 
 def expand_attn_keys_for_graph_params(attn_keys: list[str], graph_param_count: int) -> list[str]:
+    # Graph replay iterates over captured ops, whose count can be larger than
+    # the current metadata key count. Repeat keys to keep the zip loop aligned.
     if len(attn_keys) == 0:
         return []
     return [attn_keys[index % len(attn_keys)] for index in range(graph_param_count)]
 
 
 def get_attn_metadata_key(attn_metadata: dict, fallback_key: str, layer_name: str | None) -> str:
+    # Prefer the layer name recorded during graph capture. The fallback keeps
+    # compatibility with params captured before layer names were appended.
     if layer_name is not None and layer_name in attn_metadata:
         return layer_name
     return fallback_key
 
 
 def split_optional_workspace_and_layer_name(optional_items: tuple) -> tuple[torch.Tensor | None, str | None]:
+    # Graph param tuples are append-only for backward compatibility. Older
+    # entries may contain a workspace only; newer entries may append layer_name.
     if not optional_items:
         return None, None
 
@@ -39,6 +45,8 @@ def split_optional_workspace_and_layer_name(optional_items: tuple) -> tuple[torc
 
 
 def is_gemma4_model(vllm_config: VllmConfig) -> bool:
+    # Gemma4 multimodal configs can expose the text model type from different
+    # config objects depending on the vLLM/HF wrapper in use.
     model_config = vllm_config.model_config
     hf_config = getattr(model_config, "hf_config", None)
     hf_text_config = getattr(model_config, "hf_text_config", None)
@@ -76,6 +84,9 @@ def cache_graph_workspace(
     *,
     use_max_workspace: bool,
 ) -> torch.Tensor:
+    # Non-Gemma4 keeps the original first-workspace cache behavior. Gemma4
+    # keeps the largest workspace seen for this graph size because its layers
+    # can require different FIA workspace sizes under the same num_tokens.
     current_workspace = graph_params.workspaces.get(num_tokens)
     if use_max_workspace:
         graph_params.workspaces[num_tokens] = choose_larger_workspace(current_workspace, new_workspace)
