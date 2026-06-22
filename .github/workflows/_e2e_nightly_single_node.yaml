@@ -326,18 +326,18 @@ jobs:
           steps.commit-age.outputs.is_old == 'false' }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
-          # bash tests/e2e/nightly/scripts/aop_process.sh \
-          #   "${{ steps.classify.outputs.failure_type }}" \
-          #   "${{ steps.commit-age.outputs.commit_age_days }}" \
-          #   "${{ inputs.runner }}" \
-          #   "${{ inputs.tests }}" \
-          #   "${{ inputs.config_file_path }}" \
-          #   "${{ steps.test-result.outputs.pytest_summary }}" \
-          #   "${{ steps.test-result.outputs.yaml_summary }}" \
-          #   "single_node" \
-          #   "HEAD" \
-          #   "" \
-          #   ""
+          bash tests/e2e/nightly/scripts/aop_process.sh \
+            "${{ steps.classify.outputs.failure_type }}" \
+            "${{ steps.commit-age.outputs.commit_age_days }}" \
+            "${{ inputs.runner }}" \
+            "${{ inputs.tests }}" \
+            "${{ inputs.config_file_path }}" \
+            "${{ steps.test-result.outputs.pytest_summary }}" \
+            "${{ steps.test-result.outputs.yaml_summary }}" \
+            "single_node" \
+            "HEAD" \
+            "" \
+            ""
 
       - name: On success
         if: ${{ always() && steps.test-result.outputs.result == 'success' }}
