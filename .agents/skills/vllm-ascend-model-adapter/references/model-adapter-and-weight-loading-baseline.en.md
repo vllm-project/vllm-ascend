@@ -1,111 +1,111 @@
 # Model Adapter And Weight Loading Baseline
 
-This document defines the current capability baseline of `vllm-ascend-model-adapter` at the **model registration, model wiring, weight mapping, weight loading** layer, which is used to compare with new model requirements and output gap analysis.
+本文档定义 `vllm-ascend-model-adapter` 在 **模型注册、模型接线、权重映射、weight loading** 这一层的当前能力基线，用于和新模型需求做对比，输出 gap analysis。
 
-## 1. What problem does this layer solve?
+## 1. 这一层解决什么问题
 
-The question answered at this level is not "Can the Ascend operator run?", but:
+这一层回答的问题不是 “Ascend 算子能不能跑”，而是：
 
-- Whether vLLM already knows this architecture;
-- Whether the model already has a reusable adapter;
-- Whether the key structure of checkpoint can be mapped to the current implementation of vLLM;
-- TP/KV head/norm/rope/fp8 scale Whether these weight loading rules are already overridden by existing implementations.
+- vLLM 是否已经认识这个 architecture；
+- 模型是否已经有可复用的 adapter；
+- checkpoint 的 key 结构是否能映射到 vLLM 当前实现；
+- TP / KV head / norm / rope / fp8 scale 这些权重装载规则是否已经被现有实现覆盖。
 
-If this layer is not connected, it will usually fail before attention/operator is executed.
+如果这一层没打通，通常在 attention/operator 执行前就会失败。
 
-## 2. Current capability baseline
+## 2. 当前能力基线
 
-### 2.1 Already have default capabilities
+### 2.1 已有默认能力
 
-The current skill assumes that the following capabilities already exist or can be quickly reused:
+当前 skill 假设以下能力已经存在或可快速复用：
 
-- Determine the model entry through the `architectures` field of `config.json`;
-- Determine whether the architecture has been registered through `vllm/model_executor/models/registry.py`;
-- Add or reuse model adapter in `/vllm-workspace/vllm/vllm/model_executor/models/`;
-- Add processor when needed;
-- Solve the problem of inconsistency between checkpoint key and vLLM layer name through explicit weight remap rules;
-- Keep implementation happening mainly in `vllm`, not `vllm-ascend`.
+- 通过 `config.json` 的 `architectures` 字段判断模型入口；
+- 通过 `vllm/model_executor/models/registry.py` 判断 architecture 是否已注册；
+- 在 `/vllm-workspace/vllm/vllm/model_executor/models/` 中新增或复用 model adapter；
+- 在需要时新增 processor；
+- 通过显式 weight remap 规则解决 checkpoint key 与 vLLM 层名不一致的问题；
+- 保持实现主要发生在 `vllm`，而不是 `vllm-ascend`。
 
-### 2.2 Default adaptation position
+### 2.2 默认适配位置
 
-By default, this layer should prioritize:
+这一层默认应优先落在：
 
 - `vllm/model_executor/models/<new_model>.py`
 - `vllm/model_executor/models/registry.py`
-- `vllm/transformers_utils/processors/<new_model>.py` (if processor required)
+- `vllm/transformers_utils/processors/<new_model>.py`（如果需要 processor）
 
-Only if it is confirmed that the incompatibility is at the Ascend backend level, continue to `vllm-ascend` analysis.
+只有确认是 Ascend backend 层面的 incompatibility，才继续往 `vllm-ascend` 分析。
 
-### 2.3 Known high frequency capability boundaries
+### 2.3 已知高频能力边界
 
-The current skill has by default regarded the following as high-frequency adaptation items for this layer:
+当前 skill 已经默认把下面这些视为这一层的高频适配项：
 
-- architecture registration is missing;
-- remote code is not compatible with native vLLM adapter;
-- qkv/o_proj/gate/moe layer naming is inconsistent;
-- The weight loading rules related to q_norm / k_norm / kv_norm / rope are inconsistent;
-- KV head replication or TP shard mode causes norm / head dimension mismatch;
-- fp8 checkpoint requires weight + scale to be loaded in pairs;
-- The safetensors index or shard key pattern is inconsistent with existing loader assumptions.
+- architecture 注册缺失；
+- remote code 与原生 vLLM adapter 不兼容；
+- qkv / o_proj / gate / moe 层命名不一致；
+- q_norm / k_norm / kv_norm / rope 相关权重装载规则不一致；
+- KV head replication 或 TP shard 方式导致 norm / head 维度不匹配；
+- fp8 checkpoint 需要 weight + scale 成对加载；
+- safetensors index 或 shard key 模式与现有 loader 假设不一致。
 
-## 3. Typical input evidence for this layer
+## 3. 这一层的典型输入证据
 
-When doing gap analysis, give priority to:
+做 gap analysis 时，优先看：
 
 - `config.json`
 - `architectures`
 - `model_type`
 - `auto_map`
--Module naming for modeling/remote code
+- modeling / remote code 的模块命名
 - safetensors index
-- checkpoint key prefix and layer naming pattern
-- Error reporting during load phase (missing keys / unexpected keys / shape mismatch)
+- checkpoint key 前缀与层命名模式
+- load 阶段报错（missing keys / unexpected keys / shape mismatch）
 
-## 4. Typical failure signals at this level
+## 4. 这一层的典型失败信号
 
-The following symptoms usually fall into this tier:
+以下症状通常优先归到这一层：
 
 - architecture not recognized
-- registry miss
-- Model class import succeeded but `load_weights` failed
-- missing / unexpected key appears in large numbers
-- Some layers have shape mismatch, but attention/operator has not been actually executed yet
-- qk norm / kv norm / tp shard dimensions do not match
-- fp8 scale/weight pairing is incomplete
+- registry 未命中
+- 模型类导入成功但 `load_weights` 失败
+- missing / unexpected key 大量出现
+- 某些层 shape mismatch，但 attention/operator 还没真正执行
+- qk norm / kv norm / tp shard 维度不匹配
+- fp8 scale / weight 配对不完整
 
-## 5. Adaptation judgment principle
+## 5. 适配判断原则
 
-### 5.1 Prioritize reuse of existing adapters
+### 5.1 优先复用已有 adapter
 
-If the new model is just a slight variation of an already supported architecture, take precedence:
+如果新模型只是某个已支持架构的轻微变体，优先：
 
-- Reuse existing adapter;
-- Increase minimum remap / conditional path;
-- Avoid creating a new set of model implementations.
+- 复用现有 adapter；
+- 增加最小 remap / conditional path；
+- 避免新建一整套模型实现。
 
-### 5.2 Conditions for creating a new adapter
+### 5.2 新建 adapter 的条件
 
-Only when the following conditions are true at the same time, it is preferable to create a new adapter:
+只有在下面情况同时成立时，才倾向新建 adapter：
 
-- There is no suitable schema in the registry;
-- The input/layer structure of the existing adapter is quite different from that of the new model;
-- Cannot be reused cleanly through remap;
-- processor / weight layout / execution semantics are all obviously different.
+- registry 中没有合适架构；
+- 现有 adapter 的输入/层结构与新模型差异较大；
+- 通过 remap 无法干净复用；
+- processor / weight layout / execution semantics 都明显不同。
 
-### 5.3 Don’t erroneously transfer model adaptation issues to Ascend backend
+### 5.3 不要把模型适配问题错误下沉到 Ascend backend
 
-If the problem is essentially:
+如果问题本质是：
 
-- architecture registration is missing;
-- The weight key mapping is incorrect;
-- processor binding error;
-- The layer wiring in the vLLM model file does not match;
+- architecture 注册缺失；
+- 权重键映射不对；
+- processor 绑定错误；
+- vLLM 模型文件里层接线不匹配；
 
-Then you should fix the `vllm` side first instead of changing `vllm-ascend` directly.
+那么应先修 `vllm` 侧，而不是直接改 `vllm-ascend`。
 
-## 6. Fixed output template of this layer
+## 6. 这一层的固定输出模板
 
-Whenever this layer is involved, first write:
+每次涉及这一层时，先写：
 
 ```markdown
 ## Model Adapter Gap Analysis
@@ -135,24 +135,24 @@ Whenever this layer is involved, first write:
 - Stop / escalate condition:
 ```
 
-## 7. The most common adaptation actions
+## 7. 最常见的适配动作
 
-- Complement architecture mapping in `registry.py`;
-- Reuse proximity model adapter;
-- Added `load_weights` remap;
-- Added shard rules for KV/QK norm, replicated KV heads, and rope variants;
-- Add scale pairing / dequant load path for fp8 checkpoint;
-- When there is a strong dependency on the processor, continue to expand the processor layer adaptation.
+- 在 `registry.py` 补 architecture 映射；
+- 复用邻近模型 adapter；
+- 增加 `load_weights` remap；
+- 为 KV/QK norm、replicated KV heads、rope 变体补 shard 规则；
+- 为 fp8 checkpoint 增加 scale pairing / dequant load path；
+- 在 processor 存在强依赖时，再继续扩展 processor 层适配。
 
-## 8. When to stop and upgrade
+## 8. 什么时候停止并升级
 
-If you have confirmed:
+如果你已经确认：
 
-- The model adapter is correct;
-- Weight mapping is correct;
-- The load phase passed;
-- Failure only occurs at the Ascend backend/operator layer;
+- 模型 adapter 正确；
+- 权重映射正确；
+- load 阶段通过；
+- 失败只在 Ascend backend/operator 层出现；
 
-Then enter the attention/operator/framework layer analysis.
+再进入 attention/operator/framework 层分析。
 
-If the model must add a new modeling file in `vllm-ascend` to work, according to the current skill constraints, the analysis should be stopped and upgraded, not done directly.
+如果模型必须在 `vllm-ascend` 中新增 modeling 文件才能工作，按当前 skill 约束，应停止并升级分析，不直接这么做。

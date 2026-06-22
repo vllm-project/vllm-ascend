@@ -1,59 +1,59 @@
 # Operator Compatibility Baseline
 
-本文档定义 **模型新增算子 / 自定义 kernel / Ascend 算子接口兼容性** 这一层的当前能力基线。
+This document defines **model new operator/custom kernel/Ascend operator interface compatibility** the current capability baseline of this layer.
 
-## 1. 这一层解决什么问题
+## 1. What problem does this layer solve?
 
-这一层关注：
+This layer focuses on:
 
-- 新模型是否引入了 Torch / Triton / CUDA / `torch_npu` / `aclnn` 特定算子；
-- 当前 Ascend 环境是否具备功能支持；
-- 是功能不支持、精度不稳定，还是只需要 layout / dtype / shape 调整。
+- Whether the new model introduces Torch / Triton / CUDA / `torch_npu` / `aclnn` specific operators;
+- Whether the current Ascend environment has functional support;
+- Is the function not supported, the accuracy is unstable, or it just needs layout/dtype/shape adjustment.
 
-## 2. 当前能力基线
+## 2. Current capability baseline
 
-当前 skill 的默认决策表是：
+The default decision table for the current skill is:
 
-- Torch native op：通常可运行，性能待验证；
-- Triton：功能与精度都需要显式验证；
-- CUDA kernel：Ascend 不支持，必须有 fallback；
-- Ascend-specific op：必须参考官方 HiAscend 文档约束。
+- Torch native op: usually runnable, performance to be verified;
+- Triton: Both functionality and accuracy require explicit verification;
+- CUDA kernel: Ascend does not support it and must have fallback;
+- Ascend-specific op: Must refer to the official HiAscend document constraints.
 
-## 3. 当前实现倾向
+## 3. Current implementation trends
 
-### 3.1 先分类，再决定是否继续
+### 3.1 Classify first, then decide whether to continue
 
-不要在未分类前直接改代码。先确认：
+Do not change the code directly before classification. Confirm first:
 
-- 这是不是纯 CUDA 路径；
-- Triton 是否有 Torch fallback；
-- `torch_npu` / `aclnn` 调用是否违反了文档限制。
+- Is this a pure CUDA path;
+- Does Triton have Torch fallback;
+- `torch_npu` / `aclnn` whether the call violates documentation restrictions.
 
-### 3.2 对 Ascend-specific op 必须查官方文档
+### 3.2 You must check the official documentation for Ascend-specific ops
 
-以下类型一旦失败，不要只靠盲试：
+If the following types fail, don’t just rely on blind testing:
 
 - `torch_npu.*`
 - `torch.ops.npu.*`
 - `aclnn*`
 
-至少提取：
+At least extract:
 
-- dtype 支持
-- shape 约束
-- layout / contiguous 约束
-- graph-mode 限制
-- fallback / replacement 建议
+- dtype support
+- shape constraints
+- layout / contiguous constraints
+- graph-mode restrictions
+- fallback / replacement suggestions
 
-## 4. 典型输入证据
+## 4. Typical input evidence
 
 - `modeling_*.py`
 - `processing_*.py`
-- vLLM 新增 model adapter 文件
-- 栈里出现的 operator symbol
-- HiAscend operator 文档
+- vLLM adds model adapter file
+- operator symbol appearing on the stack
+- HiAscend operator documentation
 
-## 5. 固定输出模板
+## 5. Fixed output template
 
 ```markdown
 ## Operator Compatibility Gap Analysis
@@ -82,8 +82,8 @@
 - Stop / escalate condition:
 ```
 
-## 6. 什么时候必须停止
+## 6. When must you stop?
 
-- 纯 CUDA kernel 且无 fallback；
-- Triton 在 Ascend 上验证失败且没有合理替代；
-- Ascend-specific operator 的官方约束与模型要求根本冲突。
+- Pure CUDA kernel without fallback;
+- Triton fails validation on Ascend and has no reasonable replacement;
+- The official constraints of the Ascend-specific operator fundamentally conflict with the model requirements.
