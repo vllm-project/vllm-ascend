@@ -19,7 +19,10 @@ from collections.abc import Callable
 import torch
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
@@ -126,23 +129,58 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         return final_hidden_states
 
 
-class AscendFusedMoE310(FusedMoE):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class AscendFusedMoE310(RoutedExperts):
+    def __init__(
+        self,
+        layer_name: str,
+        params_dtype: torch.dtype,
+        moe_config: FusedMoEConfig,
+        quant_config,
+        expert_map_manager,
+        expert_mapping=None,
+        renormalize=True,
+        use_grouped_topk=False,
+        num_expert_group=None,
+        topk_group=None,
+        custom_routing_function=None,
+        scoring_func="softmax",
+        routed_scaling_factor=1.0,
+        swiglu_limit=None,
+        e_score_correction_bias=None,
+        apply_router_weight_on_input=False,
+        # Extra Ascend-specific kwargs
+        gate=None,
+        shared_experts=None,
+        shared_expert_gate=None,
+        routed_input_transform=None,
+        routed_output_transform=None,
+        **kwargs,
+    ):
+        super().__init__(
+            layer_name=layer_name,
+            params_dtype=params_dtype,
+            moe_config=moe_config,
+            quant_config=quant_config,
+            expert_map_manager=expert_map_manager,
+            expert_mapping=expert_mapping,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            swiglu_limit=swiglu_limit,
+            e_score_correction_bias=e_score_correction_bias,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
 
-        self._routed_input_transform = kwargs.get("routed_input_transform")
-        self._shared_experts = kwargs.get("shared_experts")
-        self.global_num_experts = kwargs["num_experts"]
+        self._routed_input_transform = routed_input_transform
+        self._shared_experts = shared_experts
+        self.global_num_experts = self.moe_config.num_experts
 
-        if self.quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod310(self.moe_config)
-        else:
-            self.quant_method = self.quant_config.get_quant_method(self, self.layer_name)
-
+        # Replace quant_method with Ascend 310P version
         assert self.quant_method is not None
-        # Keep base_quant_method aligned with the Ascend-replaced quant_method
-        # so FusedMoE.maybe_init_modular_kernel doesn't dispatch into the
-        # upstream UnquantizedFusedMoEMethod.maybe_make_prepare_finalize.
         self.base_quant_method = self.quant_method
 
         self.moe_config.tp_group = get_tp_group()
@@ -150,11 +188,13 @@ class AscendFusedMoE310(FusedMoE):
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.supports_eplb = False
 
-        # init moe
         self.global_expert_map = None
         self.local_expert_map = None
         if self.moe_config.ep_size > 1:
-            raise RuntimeError("Expert Parallel is not supported on 310P. Please remove --enable-expert-parallel.")
+            raise RuntimeError(
+                "Expert Parallel is not supported on 310P. "
+                "Please remove --enable-expert-parallel."
+            )
         self.local_num_experts = self.global_num_experts
 
         self.moe_config.num_experts = self.global_num_experts
@@ -176,21 +216,56 @@ class AscendFusedMoE310(FusedMoE):
 
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-        self.runner = AscendMoERunner(
-            self.layer_name,
-            self.moe_config,
-            self.router,
-            self._routed_input_transform,
-            kwargs.pop("gate", None),
-            kwargs.pop("shared_experts", None),
-            self.quant_method,
-            self.vllm_config.parallel_config.enable_dbo,
+        # Store runner reference for factory to optionally use
+        self._runner = AscendMoERunner(
+            layer_name=self.layer_name,
+            moe_config=self.moe_config,
+            router=None,  # router is set by factory
+            routed_experts=self,
+            enable_dbo=False,
+            gate=gate,
+            shared_experts=shared_experts,
+            routed_input_transform=routed_input_transform,
         )
 
     @property
     def is_internal_router(self) -> bool:
         # 310P Ascend path expects router logits from the model forward path.
         return False
+
+    def _get_quant_method(
+        self,
+        prefix: str,
+        quant_config,
+        moe_config: FusedMoEConfig,
+    ):
+        if quant_config is None:
+            return AscendUnquantizedFusedMoEMethod310(moe_config)
+        else:
+            return quant_config.get_quant_method(self, prefix)
+
+    @property
+    def tp_size(self):
+        return self.moe_config.tp_size
+
+    @property
+    def ep_size(self):
+        return self.moe_config.moe_parallel_config.ep_size
+
+    @property
+    def tp_rank(self):
+        return self.moe_config.tp_rank
+
+    @property
+    def ep_rank(self):
+        return self.moe_config.moe_parallel_config.ep_rank
+
+    @property
+    def use_ep(self) -> bool:
+        return self.moe_config.moe_parallel_config.use_ep
+
+    def ensure_moe_quant_config_init(self):
+        return self._ensure_moe_quant_config_init()
 
     def init_experts_map(self, moe_config):
         """

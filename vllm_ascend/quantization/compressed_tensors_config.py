@@ -22,7 +22,7 @@ from typing import Any, Optional, cast
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy, QuantizationType
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
@@ -167,7 +167,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
             return AscendLinearMethod(linear_scheme)
 
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             # Delayed import to avoid circular import
             from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 

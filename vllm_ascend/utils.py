@@ -635,6 +635,95 @@ def dispose_tensor(x: torch.Tensor):
     x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
 
 
+def _patch_moe_runner_getattr():
+    """Monkey-patch MoERunner.__getattr__ to forward missing attrs to routed_experts.
+
+    Upstream refactored FusedMoE from a class that directly held weights to a
+    MoERunner that delegates to routed_experts. Many model and EPLB code paths
+    access attributes like ``local_num_experts``, ``w2_weight`` directly on the
+    runner object. This patch forwards AttributeError accesses to
+    ``routed_experts`` so those code paths continue to work without changes.
+    """
+    import vllm.model_executor.layers.fused_moe.runner.moe_runner as moe_runner_mod
+
+    _original_getattr = moe_runner_mod.MoERunner.__getattr__
+
+    def _patched_moe_runner_getattr(self, name):
+        try:
+            return _original_getattr(self, name)
+        except AttributeError:
+            if "_modules" in self.__dict__ and "routed_experts" in self._modules:
+                return getattr(self._modules["routed_experts"], name)
+            raise
+
+    moe_runner_mod.MoERunner.__getattr__ = _patched_moe_runner_getattr
+
+    # Also patch named_parameters() so that parameters of routed_experts
+    # are visible without the "routed_experts." prefix.  Upstream model
+    # weight-loading code (e.g. qwen3_vl_moe.py) builds a params_dict
+    # from self.named_parameters() and expects keys like
+    # "experts.w2_weight", not "experts.routed_experts.w2_weight".
+    _original_named_params = moe_runner_mod.MoERunner.named_parameters
+
+    def _patched_named_parameters(self, prefix="", recurse=True, remove_duplicate=True):
+        if recurse and "_modules" in self.__dict__ and "routed_experts" in self._modules:
+            routed_experts = self._modules["routed_experts"]
+            for name, param in routed_experts.named_parameters():
+                yield prefix + name, param
+        yield from _original_named_params(
+            self, prefix=prefix, recurse=recurse, remove_duplicate=remove_duplicate
+        )
+
+    moe_runner_mod.MoERunner.named_parameters = _patched_named_parameters
+
+
+def _patch_fused_moe_factory():
+    """Monkey-patch the FusedMoE factory to use Ascend classes by default.
+
+    Upstream refactored FusedMoE from a PluggableLayer class to a module-level
+    factory function. The PluggableLayer OOT dispatch no longer applies, so we
+    must patch the factory directly to default runner_cls and pass Ascend-specific
+    kwargs (gate, shared_experts, etc.) to routed_experts_cls via
+    routed_experts_args.
+    """
+    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
+
+    _original_fused_moe = fused_moe_layer.FusedMoE
+
+    @functools.wraps(_original_fused_moe)
+    def _patched_fused_moe(*args, **kwargs):
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+
+        if kwargs.get("runner_cls") is None:
+            kwargs["runner_cls"] = AscendMoERunner
+
+        routed_experts_args = kwargs.get("routed_experts_args", None)
+        if routed_experts_args is None:
+            routed_experts_args = {}
+            kwargs["routed_experts_args"] = routed_experts_args
+
+        for key in (
+            "gate",
+            "shared_experts",
+            "shared_expert_gate",
+            "routed_input_transform",
+            "routed_output_transform",
+            "n_shared_experts",
+        ):
+            val = kwargs.get(key)
+            if val is not None and key not in routed_experts_args:
+                routed_experts_args[key] = val
+
+        return _original_fused_moe(*args, **kwargs)
+
+    fused_moe_layer.FusedMoE = _patched_fused_moe
+    # Also patch the import cache so that models importing FusedMoE from
+    # vllm.model_executor.layers.fused_moe pick up the patched function.
+    import vllm.model_executor.layers.fused_moe as fused_moe_pkg
+
+    fused_moe_pkg.FusedMoE = _patched_fused_moe
+
+
 def register_ascend_customop(vllm_config: VllmConfig | None = None):
     """Register Ascend CustomOP
 
@@ -700,6 +789,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RMSNorm": AscendRMSNorm,
         "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
+        "routed_experts": AscendFusedMoE,
+        "RoutedExperts": AscendFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
@@ -749,6 +840,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
                 "RMSNormGated": AscendRMSNormGated310,
                 "FusedMoE": AscendFusedMoE310,
+                "routed_experts": AscendFusedMoE310,
+                "RoutedExperts": AscendFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
@@ -760,6 +853,18 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
+
+    # Monkey-patch FusedMoE factory function to use Ascend runner/experts
+    # classes by default. The upstream refactoring moved FusedMoE from a
+    # PluggableLayer class to a module-level factory function, so the
+    # PluggableLayer OOT dispatch no longer applies to it directly.
+    _patch_fused_moe_factory()
+
+    # Forward missing attribute accesses on MoERunner to routed_experts so
+    # that model code and EPLB adaptors that access properties like
+    # local_num_experts, w2_weight, etc. directly on the runner still work
+    # after the upstream refactoring.
+    _patch_moe_runner_getattr()
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
