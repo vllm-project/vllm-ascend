@@ -52,6 +52,7 @@ llm = LLM(
 | `smooth_factor` | float | 1.0 | Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more |
 | `min_chunk` | int | 4096 | Minimum chunk size for dynamic calculation |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
+| `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
 
 ### Parameter Tuning
 

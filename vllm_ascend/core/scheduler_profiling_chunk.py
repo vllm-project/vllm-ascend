@@ -89,6 +89,7 @@ class ProfilingChunkScheduler(Scheduler):
             page_size=self.cache_config.block_size,
             smooth_factor=profiling_cfg.smooth_factor,
             min_chunk=profiling_cfg.min_chunk,
+            max_fit_chunk=profiling_cfg.max_fit_chunk,
         )
         self._profiling_initialized = False
 
@@ -329,6 +330,13 @@ class ProfilingChunkScheduler(Scheduler):
                         predicted_chunk,
                     )
                     num_new_tokens = min(predicted_chunk, num_new_tokens)
+                elif self.profiling_chunk_config.need_timing:
+                    logger.info("[Dynamic Chunk] Online calibration stage. Long requests are better")
+                elif time_budget == target_latency:
+                    logger.warning_once(
+                        "[Dynamic Chunk] Profiling Failed. Degenerated to a fixed chunk size"
+                        "Please increase the `max_fit_chunk` to profile more data"
+                    )
                 else:
                     break
             # <<< PROFILING CHUNK <<<
@@ -544,6 +552,13 @@ class ProfilingChunkScheduler(Scheduler):
                         )
                         if predicted_chunk is not None and predicted_chunk > 0:
                             num_new_tokens = min(num_new_tokens, predicted_chunk)
+                        elif self.profiling_chunk_config.need_timing:
+                            logger.info("[Dynamic Chunk] Online calibration stage. Long requests are better")
+                        elif time_budget == target_latency:
+                            logger.warning_once(
+                                "[Dynamic Chunk] Profiling Failed. Degenerated to a fixed chunk size"
+                                "Please increase the `max_fit_chunk` to profile more data"
+                            )
                         else:
                             break
                     # <<< PROFILING CHUNK <<<
