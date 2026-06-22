@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-22 08:13+0000\n"
+"POT-Creation-Date: 2026-06-17 11:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -49,10 +49,13 @@ msgid "Quick Start"
 msgstr "快速开始"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:9
+#, python-brace-format
 msgid ""
 "Use `--additional-config '{\"weight_prefetch_config\": {\"enabled\": "
 "true}}'` to enable weight prefetch."
-msgstr "使用 `--additional-config '{\"weight_prefetch_config\": {\"enabled\": true}}'` 来开启权重预取。"
+msgstr ""
+"使用 `--additional-config '{\"weight_prefetch_config\": {\"enabled\": "
+"true}}'` 来开启权重预取。"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:11
 msgid "Fine-tune Prefetch Ratio"
@@ -71,7 +74,7 @@ msgstr "由于权重预取使用向量计算来隐藏权重预取流水线，预
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:15
 msgid ""
-"With `prefetch_ratio` in `\"weight_prefetch_config\"` to custom the "
+"With `prefetch_ratio` in `\"weight_prefetch_config\"` to customize the "
 "weight prefetch ratio for specific linear layers."
 msgstr "使用`\"weight_prefetch_config\"`中的`prefetch_ratio`来为特定的线性层自定义权重预取比例。"
 
@@ -82,6 +85,7 @@ msgid ""
 msgstr "“attn”和“moe”配置选项用于MoE模型，详情如下："
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:19
+#, python-brace-format
 msgid "`\"attn\": { \"qkv\": 1.0,  \"o\": 1.0},  \"moe\": {\"gate_up\": 0.8}`"
 msgstr "`\"attn\": { \"qkv\": 1.0,  \"o\": 1.0},  \"moe\": {\"gate_up\": 0.8}`"
 
@@ -92,15 +96,18 @@ msgid ""
 msgstr "“mlp”配置选项用于优化Dense模型的性能，详情如下："
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:23
+#, python-brace-format
 msgid "`\"mlp\": {\"gate_up\": 1.0, \"down\": 1.0}`"
 msgstr "`\"mlp\": {\"gate_up\": 1.0, \"down\": 1.0}`"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:25
 msgid ""
-"Above value are the default config, the default value has a good "
+"Above values are the default config, the default value has a good "
 "performance for Qwen3-235B-A22B-W8A8 when `--max-num-seqs` is 144, for "
 "Qwen3-32B-W8A8 when `--max-num-seqs` is 72."
-msgstr "以上值为默认配置，当`--max-num-seqs`为144时，该默认值对Qwen3-235B-A22B-W8A8有良好性能；当`--max-num-seqs`为72时，对Qwen3-32B-W8A8有良好性能。"
+msgstr ""
+"以上值为默认配置，当`--max-num-seqs`为144时，该默认值对Qwen3-235B-A22B-W8A8有良好性能；当`--max-"
+"num-seqs`为72时，对Qwen3-32B-W8A8有良好性能。"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:27
 msgid ""
@@ -116,7 +123,10 @@ msgid ""
 "computation operator. In the profiling timeline, a prefetch operation "
 "appears as a CMO operation on a single stream; this CMO operation is the "
 "prefetch operation."
-msgstr "然而，这可能不是您场景下的最优配置。对于更高的并发度，可以尝试增加预取大小。对于较低的并发度，预取可能不会带来任何优势，因此可以减少大小或禁用预取。通过收集性能分析数据来确定预取大小是否合适。具体来说，检查预取操作（例如，MLP Down Proj权重预取）所需的时间是否与并行向量计算算子（例如，SwiGlu计算）所需的时间重叠，以及预取操作是否不晚于向量计算算子的完成时间。在性能分析时间线中，预取操作显示为单个流上的CMO操作；此CMO操作即为预取操作。"
+msgstr ""
+"然而，这可能不是您场景下的最优配置。对于更高的并发度，可以尝试增加预取大小。对于较低的并发度，预取可能不会带来任何优势，因此可以减少大小或禁用预取。通过收集性能分析数据来确定预取大小是否合适。具体来说，检查预取操作（例如，MLP"
+" Down "
+"Proj权重预取）所需的时间是否与并行向量计算算子（例如，SwiGlu计算）所需的时间重叠，以及预取操作是否不晚于向量计算算子的完成时间。在性能分析时间线中，预取操作显示为单个流上的CMO操作；此CMO操作即为预取操作。"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:29
 msgid "Notes:"
@@ -134,7 +144,9 @@ msgid ""
 "Due to the current size of the L2 cache, the maximum prefetch cannot "
 "exceed 18MB. If `prefetch_ratio * linear_layer_weight_size >= 18 * 1024 *"
 " 1024` bytes, the backend will only prefetch 18MB."
-msgstr "由于当前L2缓存的大小，最大预取量不能超过18MB。如果`prefetch_ratio * linear_layer_weight_size >= 18 * 1024 * 1024`字节，后端将只预取18MB。"
+msgstr ""
+"由于当前L2缓存的大小，最大预取量不能超过18MB。如果`prefetch_ratio * linear_layer_weight_size >="
+" 18 * 1024 * 1024`字节，后端将只预取18MB。"
 
 #: ../../source/user_guide/feature_guide/weight_prefetch.md:34
 msgid "Example"

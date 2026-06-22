@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-22 08:13+0000\n"
+"POT-Creation-Date: 2026-06-17 11:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -223,13 +223,13 @@ msgstr "运行 Docker 容器以在单NPU上启动 vLLM 服务器："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:332
 msgid ""
-"Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-8B-"
+"Add `--max-model-len` option to avoid ValueError that the Qwen3-VL-8B-"
 "Instruct model's max seq len (256000) is larger than the maximum number "
 "of tokens that can be stored in KV cache. This will differ with different"
 " NPU series based on the on-chip memory size. Please modify the value "
 "according to a suitable value for your NPU series."
 msgstr ""
-"添加 `--max_model_len` 选项以避免 ValueError，该错误提示 Qwen3-VL-8B-Instruct 模型的最大序列长度（256000）大于 KV 缓存可存储的最大令牌数。此值因不同 NPU 系列的片上内存大小而异。请根据您 NPU 系列的合适值修改此值。"
+"添加 `--max-model-len` 选项以避免 ValueError，该错误提示 Qwen3-VL-8B-Instruct 模型的最大序列长度（256000）大于 KV 缓存可存储的最大令牌数。此值因不同 NPU 系列的片上内存大小而异。请根据您 NPU 系列的合适值修改此值。"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:335
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:422
@@ -259,13 +259,13 @@ msgstr "运行 Docker 容器以在多NPU上启动 vLLM 服务器："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:419
 msgid ""
-"Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-32B-"
+"Add `--max-model-len` option to avoid ValueError that the Qwen2.5-VL-32B-"
 "Instruct model's max_model_len (128000) is larger than the maximum number"
 " of tokens that can be stored in KV cache. This will differ with "
 "different NPU series base on the on-chip memory size. Please modify the "
 "value according to a suitable value for your NPU series."
 msgstr ""
-"添加 `--max_model_len` 选项以避免 ValueError，该错误提示 Qwen2.5-VL-32B-Instruct 模型的最大模型长度（128000）大于 KV 缓存可存储的最大令牌数。此值因不同 NPU 系列的片上内存大小而异。请根据您 NPU 系列的合适值修改此值。"
+"添加 `--max-model-len` 选项以避免 ValueError，该错误提示 Qwen2.5-VL-32B-Instruct 模型的最大模型长度（128000）大于 KV 缓存可存储的最大令牌数。此值因不同 NPU 系列的片上内存大小而异。请根据您 NPU 系列的合适值修改此值。"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:468
 msgid "Accuracy Evaluation"
@@ -325,8 +325,7 @@ msgstr "以 `mmmu_val` 数据集作为测试数据集为例，在离线模式下
 msgid ""
 "After execution, you can get the result, here is the result of `Qwen2.5"
 "-VL-32B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only."
-msgstr ""
-"执行后，您将获得结果。以下是 `vllm-ascend:0.11.0rc3` 中 `Qwen2.5-VL-32B-Instruct` 的结果，仅供参考。"
+msgstr "执行后，您将获得结果。以下是 `vllm-ascend:0.11.0rc3` 中 `Qwen2.5-VL-32B-Instruct` 的结果，仅供参考。"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:543
 msgid "Performance"

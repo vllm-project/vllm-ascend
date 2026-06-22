@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-15 09:41+0000\n"
+"POT-Creation-Date: 2026-06-17 11:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -58,9 +58,9 @@ msgstr "物理层要求"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:12
 msgid ""
-"The physical machines must be located on the same WLAN, with network "
+"The physical machines must be located on the same LAN, with network "
 "connectivity."
-msgstr "物理机必须位于同一无线局域网内，并具备网络连通性。"
+msgstr "物理机必须位于同一局域网内，并具备网络连通性。"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:13
 msgid ""
@@ -259,8 +259,8 @@ msgid ""
 "project/vllm-"
 "ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)"
 msgstr ""
-"您可以在仓库的示例中找到代理程序，[load_balance_proxy_server_example.py](https://github.com"
-"/vllm-project/vllm-"
+"您可以在仓库的示例中找到代理程序，[load_balance_proxy_server_example.py](https://github"
+".com/vllm-project/vllm-"
 "ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:366

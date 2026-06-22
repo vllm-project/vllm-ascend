@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-22 08:13+0000\n"
+"POT-Creation-Date: 2026-06-17 11:03+0000\n"
 "PO-Revision-Date: 2025-07-18 10:09+0800\n"
 "Last-Translator: \n"
 "Language: zh_CN\n"
@@ -66,10 +66,10 @@ msgstr "昇腾 HDK"
 #: ../../source/installation.md
 msgid ""
 "Refer to the documentation [CANN "
-"8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html)"
+"9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html)"
 msgstr ""
 "请参考文档 [CANN "
-"8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html)"
+"9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html)"
 
 #: ../../source/installation.md
 msgid "Required for CANN"
@@ -80,8 +80,8 @@ msgid "CANN"
 msgstr "CANN"
 
 #: ../../source/installation.md
-msgid "== 8.5.1"
-msgstr "== 8.5.1"
+msgid "== 9.0.0"
+msgstr "== 9.0.0"
 
 #: ../../source/installation.md
 msgid "Required for vllm-ascend and torch-npu"
@@ -92,8 +92,8 @@ msgid "torch-npu"
 msgstr "torch-npu"
 
 #: ../../source/installation.md
-msgid "== 2.9.0"
-msgstr "== 2.9.0"
+msgid "== 2.9.0.post2"
+msgstr "== 2.9.0.post2"
 
 #: ../../source/installation.md
 msgid ""
@@ -104,6 +104,10 @@ msgstr "vllm-ascend 所需，无需手动安装，将在后续步骤中自动安
 #: ../../source/installation.md
 msgid "torch"
 msgstr "torch"
+
+#: ../../source/installation.md
+msgid "== 2.9.0"
+msgstr "== 2.9.0"
 
 #: ../../source/installation.md
 msgid "Required for torch-npu and vllm"
@@ -204,31 +208,31 @@ msgstr "如果在运行时遇到“libatb.so not found”错误，请确保 NNAL
 msgid "Before using docker"
 msgstr "使用 docker 前"
 
-#: ../../source/installation.md:115
+#: ../../source/installation.md:116
 msgid ""
 "No extra steps are needed if you are using the `vllm-ascend` prebuilt "
 "Docker image."
 msgstr "如果您使用 `vllm-ascend` 预构建的 Docker 镜像，则无需额外步骤。"
 
-#: ../../source/installation.md:119
+#: ../../source/installation.md:120
 msgid "Once this is done, you can start to set up `vllm` and `vllm-ascend`."
 msgstr "完成此步骤后，您就可以开始设置 `vllm` 和 `vllm-ascend`。"
 
-#: ../../source/installation.md:121
+#: ../../source/installation.md:122
 msgid "Set up using Python"
 msgstr "使用 Python 设置"
 
-#: ../../source/installation.md:123
+#: ../../source/installation.md:124
 msgid "First, install system dependencies and configure the pip mirror:"
 msgstr "首先，安装系统依赖项并配置 pip 镜像："
 
-#: ../../source/installation.md:135
+#: ../../source/installation.md:136
 msgid ""
 "**[Optional]** Then configure the extra-index of `pip` if you are working"
 " on an x86 machine or using torch-npu dev version:"
 msgstr "**[可选]** 如果您在 x86 机器上工作或使用 torch-npu 开发版本，请配置 `pip` 的额外索引："
 
-#: ../../source/installation.md:142
+#: ../../source/installation.md:143
 msgid "Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel**:"
 msgstr "然后，您可以从 **预构建的 wheel 包** 安装 `vllm` 和 `vllm-ascend`："
 
@@ -236,11 +240,11 @@ msgstr "然后，您可以从 **预构建的 wheel 包** 安装 `vllm` 和 `vllm
 msgid "Click here to see \"Build from source code\""
 msgstr "点击此处查看“从源代码构建”"
 
-#: ../../source/installation.md:155
+#: ../../source/installation.md:156
 msgid "or build from **source code**:"
 msgstr "或从 **源代码** 构建："
 
-#: ../../source/installation.md:174
+#: ../../source/installation.md:175
 msgid ""
 "If you are building custom operators for Atlas A3, you should run `git "
 "submodule update --init --recursive` manually, or ensure your environment"
@@ -249,7 +253,7 @@ msgstr ""
 "如果您正在为 Atlas A3 构建自定义算子，您应该手动运行 `git submodule update --init "
 "--recursive`，或确保您的环境可以访问互联网。"
 
-#: ../../source/installation.md:178
+#: ../../source/installation.md:179
 msgid ""
 "To build custom operators, gcc/g++ higher than 8 and C++17 or higher are "
 "required. If you are using `pip install -e .` and encounter a torch-npu "
@@ -260,11 +264,11 @@ msgid ""
 "specify your g++ and gcc locations before compiling."
 msgstr ""
 "构建自定义算子需要 gcc/g++ 版本高于 8 且支持 C++17 或更高标准。如果您使用 `pip install -e .` 并遇到 "
-"torch-npu 版本冲突，请使用 `pip install --no-build-isolation "
-"-e .` 在系统环境中进行安装。如果在编译过程中遇到其他问题，可能是因为使用了非预期的编译器，您可以在编译前通过环境变量导出 `CXX_COMPILER` "
+"torch-npu 版本冲突，请使用 `pip install --no-build-isolation -e .` "
+"在系统环境中进行安装。如果在编译过程中遇到其他问题，可能是因为使用了非预期的编译器，您可以在编译前通过环境变量导出 `CXX_COMPILER` "
 "和 `C_COMPILER` 来指定您的 g++ 和 gcc 路径。"
 
-#: ../../source/installation.md:181
+#: ../../source/installation.md:182
 msgid ""
 "If you are building in a CPU-only environment where `npu-smi` is "
 "unavailable, you need to set `SOC_VERSION` before `pip install -e .` so "
@@ -274,27 +278,29 @@ msgstr ""
 "如果您在仅 CPU 的环境中构建，且 `npu-smi` 不可用，则需要在 `pip install -e .` 之前设置 "
 "`SOC_VERSION`，以便构建过程能针对正确的芯片。您可以参考 `Dockerfile*` 的默认值，例如："
 
-#: ../../source/installation.md:183
+#: ../../source/installation.md:184
 msgid "Atlas A2: `export SOC_VERSION=ascend910b1`"
 msgstr "Atlas A2：`export SOC_VERSION=ascend910b1`"
 
-#: ../../source/installation.md:184
+#: ../../source/installation.md:185
 msgid "Atlas A3: `export SOC_VERSION=ascend910_9391`"
 msgstr "Atlas A3：`export SOC_VERSION=ascend910_9391`"
 
-#: ../../source/installation.md:185
+#: ../../source/installation.md:186
 msgid "Atlas 300I: `export SOC_VERSION=ascend310p1`"
 msgstr "Atlas 300I：`export SOC_VERSION=ascend310p1`"
 
-#: ../../source/installation.md:186
-msgid "Ascend 950 Products: `export SOC_VERSION=<value starting with \"ascend950\">`"
+#: ../../source/installation.md:187
+msgid ""
+"Ascend 950 Products: `export SOC_VERSION=<value starting with "
+"\"ascend950\">`"
 msgstr "Ascend 950 系列产品：`export SOC_VERSION=<以 \"ascend950\" 开头的值>`"
 
-#: ../../source/installation.md:189
+#: ../../source/installation.md:190
 msgid "Set up using Docker"
 msgstr "使用 Docker 设置"
 
-#: ../../source/installation.md:191
+#: ../../source/installation.md:192
 msgid ""
 "`vllm-ascend` offers Docker images for deployment. You can just pull the "
 "**prebuilt image** from the image repository [ascend/vllm-"
@@ -305,63 +311,63 @@ msgstr ""
 "ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags) 拉取 "
 "**预构建镜像** 并使用 bash 运行。"
 
-#: ../../source/installation.md:193
+#: ../../source/installation.md:194
 msgid "Supported images as following."
 msgstr "支持的镜像如下。"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "image name"
 msgstr "镜像名称"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "Hardware"
 msgstr "硬件"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "OS"
 msgstr "操作系统"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "vllm-ascend:{{ vllm_ascend_version }}"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "Atlas A2"
 msgstr "Atlas A2"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "Ubuntu"
 msgstr "Ubuntu"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "vllm-ascend:{{ vllm_ascend_version }}-openeuler"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-openeuler"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "openEuler"
 msgstr "openEuler"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "vllm-ascend:{{ vllm_ascend_version }}-a3"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-a3"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "Atlas A3"
 msgstr "Atlas A3"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "vllm-ascend:{{ vllm_ascend_version }}-310p"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-310p"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "Atlas 300I"
 msgstr "Atlas 300I"
 
-#: ../../source/installation.md:177
+#: ../../source/installation.md:178
 msgid "vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler"
 msgstr "vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler"
 
@@ -369,11 +375,11 @@ msgstr "vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler"
 msgid "Click here to see \"Build from Dockerfile\""
 msgstr "点击这里查看“从 Dockerfile 构建”"
 
-#: ../../source/installation.md:205
+#: ../../source/installation.md:206
 msgid "or build IMAGE from **source code**:"
 msgstr "或从**源代码**构建 IMAGE："
 
-#: ../../source/installation.md:247
+#: ../../source/installation.md:248
 msgid ""
 "The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed"
 " in `/vllm-workspace` and installed in [development "
@@ -385,23 +391,23 @@ msgstr ""
 "目录下，并以[开发模式](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)（`pip"
 " install -e`）安装，以便开发者能够即时应用更改，而无需重新安装。"
 
-#: ../../source/installation.md:249
+#: ../../source/installation.md:250
 msgid "Extra information"
 msgstr "额外信息"
 
-#: ../../source/installation.md:251
+#: ../../source/installation.md:252
 msgid "Verify installation"
 msgstr "验证安装"
 
-#: ../../source/installation.md:253
+#: ../../source/installation.md:254
 msgid "Create and run a simple inference test. The `example.py` can be like:"
 msgstr "创建并运行一个简单的推理测试。`example.py` 内容示例如下："
 
-#: ../../source/installation.md:278
+#: ../../source/installation.md:279
 msgid "Then run:"
 msgstr "然后运行："
 
-#: ../../source/installation.md:284
+#: ../../source/installation.md:285
 msgid ""
 "If you encounter a connection error with Hugging Face (e.g., `We couldn't"
 " connect to 'https://huggingface.co' to load the files, and couldn't find"
@@ -412,45 +418,45 @@ msgstr ""
 "'https://huggingface.co' to load the files, and couldn't find them in the"
 " cached files.`），请运行以下命令以使用 ModelScope 作为替代方案："
 
-#: ../../source/installation.md:292
-msgid "The output will be like:"
-msgstr "输出示例如下："
+#: ../../source/installation.md:293
+msgid "The output is shown below, and it may change with version updates:"
+msgstr "输出如下所示，并可能随版本更新而变化："
 
-#: ../../source/installation.md:316
+#: ../../source/installation.md:378
 msgid "Multi-node Deployment"
 msgstr "多节点部署"
 
-#: ../../source/installation.md:318
+#: ../../source/installation.md:380
 msgid "Verify Multi-Node Communication"
 msgstr "验证多节点通信"
 
-#: ../../source/installation.md:320
+#: ../../source/installation.md:382
 msgid ""
 "First, check physical layer connectivity, then verify each node, and "
 "finally verify the inter-node connectivity."
 msgstr "首先，检查物理层连通性，然后验证每个节点，最后验证节点间连通性。"
 
-#: ../../source/installation.md:322
+#: ../../source/installation.md:384
 msgid "Physical Layer Requirements"
 msgstr "物理层要求"
 
-#: ../../source/installation.md:324
+#: ../../source/installation.md:386
 msgid ""
 "The physical machines must be located on the same WLAN, with network "
 "connectivity."
 msgstr "物理机必须位于同一无线局域网（WLAN）内，并具备网络连通性。"
 
-#: ../../source/installation.md:325
+#: ../../source/installation.md:387
 msgid ""
 "All NPUs are connected with optical modules, and the connection status "
 "must be normal."
 msgstr "所有 NPU 均通过光模块连接，且连接状态必须正常。"
 
-#: ../../source/installation.md:327
+#: ../../source/installation.md:389
 msgid "Each Node Verification"
 msgstr "单节点验证"
 
-#: ../../source/installation.md:329
+#: ../../source/installation.md:391
 msgid ""
 "Execute the following commands on each node in sequence. The results must"
 " all be `success` and the status must be `UP`:"
@@ -464,29 +470,29 @@ msgstr "A2 系列"
 msgid "A3 series"
 msgstr "A3 系列"
 
-#: ../../source/installation.md:374
+#: ../../source/installation.md:436
 msgid "Interconnect Verification"
 msgstr "互连验证"
 
-#: ../../source/installation.md:376
+#: ../../source/installation.md:438
 msgid "1. Get NPU IP Addresses"
 msgstr "1.获取 NPU IP 地址"
 
-#: ../../source/installation.md:399
+#: ../../source/installation.md:461
 msgid "2. Cross-Node PING Test"
 msgstr "2.跨节点 PING 测试"
 
-#: ../../source/installation.md:406
+#: ../../source/installation.md:468
 msgid "Run Container In Each Node"
 msgstr "在每个节点中运行容器"
 
-#: ../../source/installation.md:408
+#: ../../source/installation.md:470
 msgid ""
 "Using vLLM-ascend official container is more efficient to run multi-node "
 "environment."
 msgstr "使用 vLLM-ascend 官方容器运行多节点环境更为高效。"
 
-#: ../../source/installation.md:410
+#: ../../source/installation.md:472
 msgid ""
 "Run the following command to start the container in each node (You should"
 " download the weight to /root/.cache in advance):"
@@ -518,3 +524,9 @@ msgstr "在每个节点中运行以下命令以启动容器（您应提前将权
 
 #~ msgid "You can just pull the **prebuilt image** and run it with bash."
 #~ msgstr "您可以直接拉取**预构建镜像**并用 bash 运行它。"
+
+#~ msgid "== 8.5.1"
+#~ msgstr "== 8.5.1"
+
+#~ msgid "The output will be like:"
+#~ msgstr "输出示例如下："
