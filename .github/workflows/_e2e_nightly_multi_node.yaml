@@ -108,17 +108,7 @@ jobs:
         NAMESPACE: vllm-project
     steps:
       - name: Decode kubeconfig
-        run: |
-          if [ -n "${{ inputs.request_id }}" ]; then
-            if [ "${{ inputs.soc_version }}" = "a3" ]; then
-              # NOTE: This is too hack, we should find a better way to manage kubeconfig for pr tests.
-              cp /root/.cache/.kube/kubeconfig.yaml "$KUBECONFIG"
-            else
-              cp /root/.cache/.kube/hk_001_kb.yaml "$KUBECONFIG"
-            fi
-          else
-            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
-          fi
+        run: echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
 
       - name: Checkout code
         uses: actions/checkout@v6
