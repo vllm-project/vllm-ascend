@@ -22,7 +22,6 @@ def npu_fused_gdn_gating_310(
         A_log = A_log.contiguous()
     if not dt_bias.is_contiguous():
         dt_bias = dt_bias.contiguous()
-        
     g, beta_output = torch.ops._C_ascend.npu_fused_gdn_gating(
         A_log,
         a,
@@ -34,9 +33,7 @@ def npu_fused_gdn_gating_310(
     return g, beta_output
 
 
-def golden_fused_gdn_gating(
-    A_log, a, b, dt_bias, beta=1.0, threshold=20.0
-):
+def golden_fused_gdn_gating(A_log, a, b, dt_bias, beta=1.0, threshold=20.0):
     batch, num_heads = a.shape
     compute_dtype = torch.float32
 
@@ -56,10 +53,8 @@ def golden_fused_gdn_gating(
         torch.log1p(torch.exp(beta_x)) / beta,
         x,
     )
-
     g = -torch.exp(A_log_expanded) * softplus_o
     g = g.unsqueeze(0)
-
     beta_output = torch.sigmoid(b_f).to(b.dtype)
     beta_output = beta_output.unsqueeze(0)
 
@@ -73,39 +68,23 @@ def golden_fused_gdn_gating(
 @pytest.mark.parametrize("threshold", [1.0, 20.0])
 def test_fused_gdn_gating_310(batch_size, num_heads, beta, threshold):
     enable_custom_op()
-    
-    # 310P 硬件强制要求 float16
     dtype = torch.float16
-    
     torch.manual_seed(42)
     A_log = torch.randn(num_heads, dtype=dtype)
     dt_bias = torch.randn(num_heads, dtype=dtype)
     a = torch.randn(batch_size, num_heads, dtype=dtype)
-    b = torch.randn(batch_size, num_heads, dtype=dtype)
-    
+    b = torch.randn(batch_size, num_heads, dtype=dtype) 
     # 注入边界测试值，强制触发 Softplus 和线性截断分支
     if batch_size >= 4 and num_heads >= 4:
         boundary = threshold / beta
-        a[0, 0] = boundary + 2.0       # 大于阈值：走线性逻辑
-        a[1, 1] = boundary             # 等于阈值边界
-        a[2, 2] = boundary - 0.5       # 小于阈值：走 Softplus 逻辑
-        a[3, 3] = -boundary - 2.0      # 负数极值输入
-
+        a[0, 0] = boundary + 2.0
+        a[1, 1] = boundary         
+        a[2, 2] = boundary - 0.5    
+        a[3, 3] = -boundary - 2.0
     # 获取 Golden 参考值
-    g_golden, beta_out_golden = golden_fused_gdn_gating(
-        A_log, a, b, dt_bias, beta, threshold
-    )
-
+    g_golden, beta_out_golden = golden_fused_gdn_gating(A_log, a, b, dt_bias, beta, threshold)
     # 获取 NPU 执行结果
-    g_npu, beta_out_npu = npu_fused_gdn_gating_310(
-        A_log.npu(),
-        a.npu(),
-        b.npu(),
-        dt_bias.npu(),
-        beta,
-        threshold
-    )
-
+    g_npu, beta_out_npu = npu_fused_gdn_gating_310(A_log.npu(), a.npu(), b.npu(), dt_bias.npu(), beta, threshold)
     # 精度断言验证
     torch.testing.assert_close(
         g_npu.to(torch.float32).cpu(),
@@ -114,7 +93,6 @@ def test_fused_gdn_gating_310(batch_size, num_heads, beta, threshold):
         atol=1e-2,
         equal_nan=True,
     )
-    
     torch.testing.assert_close(
         beta_out_npu.to(torch.float32).cpu(),
         beta_out_golden.to(torch.float32).cpu(),
