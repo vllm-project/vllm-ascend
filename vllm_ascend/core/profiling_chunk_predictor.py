@@ -71,8 +71,7 @@ class ChunkSizePredictor:
             logger.warning("[ProfilingChunk] Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
             fitted_a = 1e-9
         if fitted_b < 0:
-            logger.warning("[ProfilingChunk] Fitted b=%.2e is not positive. Setting b=1e-9.", fitted_b)
-            fitted_b = 1e-9
+            logger.warning("Fitted b=%.2e is not positive. The performance may deteriorate..", fitted_b)
 
         return fitted_a, fitted_b
 
@@ -88,7 +87,7 @@ class ChunkSizePredictor:
 
         if len(L) < MIN_FIT_POINTS_NO_CHUNK:
             logger.warning(
-                "[ProfilingChunk] Not enough data points for quadratic fitting (%s < 8)",
+                "[ProfilingChunk] Not enough data points for quadratic fitting (%d < 8)",
                 len(L),
             )
             return False
@@ -144,7 +143,7 @@ class ChunkSizePredictor:
         MAX_FIT_POINTS_CHUNK = 30
         if num_points < MIN_FIT_POINTS_CHUNK:
             logger.warning(
-                "[ProfilingChunk] Not enough data points for chunked data fitting (%s < %s)",
+                "[ProfilingChunk] Not enough data points for chunked data fitting (%d < %d)",
                 num_points,
                 MIN_FIT_POINTS_CHUNK,
             )
@@ -282,7 +281,7 @@ class ChunkSizePredictor:
         if chunk_size < align:
             chunk_size = align
 
-        logger.debug("[ProfilingChunk] Predicted chunk_size=%s", chunk_size)
+        logger.debug("[ProfilingChunk] Predicted chunk_size=%d", chunk_size)
         return chunk_size if chunk_size >= align else None
 
     def predict_with_history(

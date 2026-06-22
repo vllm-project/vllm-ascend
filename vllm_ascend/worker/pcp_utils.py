@@ -158,7 +158,7 @@ class PCPManager:
         self.async_rebuild_cu_num_tokens_full = None
         self.async_rebuild_num_tokens_full = 0
 
-        logger.info(
+        logger.debug(
             "PCP initialized: pcp_world_size=%s, pcp_rank=%s, "
             "dcp_world_size=%s, dcp_rank=%s, "
             "use_sparse=%s, use_async_scheduling=%s, hybrid_attn=%s",

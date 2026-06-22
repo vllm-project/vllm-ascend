@@ -53,12 +53,6 @@ class AscendInputBuffers(InputBuffers):
             device=device,
         )
 
-        logger.debug(
-            "AscendInputBuffers: max_num_reqs=%d, max_num_tokens=%d",
-            max_num_reqs,
-            max_num_tokens,
-        )
-
         # Create seq_lens_cpu and seq_lens_np.
         # npu's attention backend still needs seq_lens on CPU side.
         self.seq_lens_cpu: torch.Tensor = torch.zeros(

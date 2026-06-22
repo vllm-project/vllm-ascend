@@ -93,7 +93,7 @@ class ProfilingChunkScheduler(Scheduler):
         self._profiling_initialized = False
 
         logger.info(
-            "[ProfilingChunk] Scheduler initialized. base_chunk=%s, page_size=%s, smooth_factor=%.2f, min_chunk=%s",
+            "[ProfilingChunk] Scheduler initialized. base_chunk=%d, page_size=%d, smooth_factor=%.2f, min_chunk=%d",
             base_chunk,
             self.cache_config.block_size,
             profiling_cfg.smooth_factor,
@@ -141,7 +141,7 @@ class ProfilingChunkScheduler(Scheduler):
             if i % log_interval == 0 or i == total_steps - 1:
                 elapsed = time.perf_counter() - t_start
                 logger.info(
-                    "[ProfilingChunk] Profiling prefill latency: %s/%s samples done (chunk=%s, elapsed=%.1fs)",
+                    "[ProfilingChunk] Profiling prefill latency: %d/%d samples done (chunk=%d, elapsed=%.1fs)",
                     max(i - 1, 0),
                     num_samples,
                     chunk_size,
@@ -168,7 +168,7 @@ class ProfilingChunkScheduler(Scheduler):
 
             except Exception as e:
                 logger.debug(
-                    "[ProfilingChunk] Forward failed for chunk=%s: %s",
+                    "[ProfilingChunk] Forward failed for chunk=%d: %s",
                     chunk_size,
                     e,
                 )
@@ -176,13 +176,13 @@ class ProfilingChunkScheduler(Scheduler):
 
         if len(seq_lens) < 8:
             logger.warning(
-                "[ProfilingChunk] Profiling failed: only %s/8 samples collected",
+                "[ProfilingChunk] Profiling failed: only %d/8 samples collected",
                 len(seq_lens),
             )
             return
 
         logger.info(
-            "[ProfilingChunk] Collected %s samples. Latency range: [%.2f, %.2f] ms",
+            "[ProfilingChunk] Collected %d samples. Latency range: [%.2f, %.2f] ms",
             len(seq_lens),
             min(latencies),
             max(latencies),

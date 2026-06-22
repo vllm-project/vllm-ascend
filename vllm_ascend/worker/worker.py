@@ -738,7 +738,7 @@ class NPUWorker(WorkerBase):
                     warmup_sizes.append(compile_range.end)
 
         for size in sorted(warmup_sizes, reverse=True):
-            logger.info("Compile and warming up model for size %s", size)
+            logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
 
         npugraph_memory_bytes = 0

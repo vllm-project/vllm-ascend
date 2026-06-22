@@ -52,12 +52,6 @@ class AscendRequestState(RequestState):
             dtype=torch.int32,
             device="cpu",
         )
-        logger.debug(
-            "AscendRequestState: max_num_reqs=%d, max_model_len=%d, max_num_batched_tokens=%d",
-            max_num_reqs,
-            max_model_len,
-            max_num_batched_tokens,
-        )
 
     def add_request(
         self,
