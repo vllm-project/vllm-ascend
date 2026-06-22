@@ -351,6 +351,11 @@ class NPUModelRunner(GPUModelRunner):
         ) and not hasattr(
             vllm_config.model_config.hf_text_config, "compress_ratios"
         )
+        from vllm_ascend.models.minimax_m3 import is_minimax_m3_sparse_model
+
+        self.use_minimax_m3_sparse = is_minimax_m3_sparse_model(
+            vllm_config.model_config.hf_text_config
+        )
         if self.use_sparse:
             if get_ascend_device_type() == AscendDeviceType.A5 and self.ascend_config.enable_sparse_c8:
                 # A5 sparse C8: kv_lora and k_rope are merged into a single CKV FP8 tensor.
@@ -3653,6 +3658,7 @@ class NPUModelRunner(GPUModelRunner):
                 runtime_mode=CUDAGraphMode.FULL,
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
+                use_breakable_capture=self.use_minimax_m3_sparse,
             )
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
@@ -4726,6 +4732,21 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=spec.dtype,
                         cache_dtype_str=spec.cache_dtype_str,
                     )
+                    attn_layer_names.add(layer_name)
+
+            elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                # MiniMax-M3 sparse attention / indexer side caches and other
+                # custom AttentionLayerBase modules that are not handled above.
+                from vllm_ascend.attention.msa_m3 import (
+                    AscendMiniMaxM3IndexerCache,
+                    AscendMiniMaxM3SparseBackend,
+                )
+
+                if attn_module.get_attn_backend() is AscendMiniMaxM3SparseBackend:
+                    kv_cache_spec[layer_name] = spec
+                    attn_layer_names.add(layer_name)
+                elif isinstance(attn_module, AscendMiniMaxM3IndexerCache):
+                    kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
 
         if len(mamba_layers) > 0:
