@@ -1,4 +1,5 @@
 # mypy: ignore-errors
+import os
 import signal
 import time
 
@@ -38,8 +39,6 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     additional_config = getattr(vllm_config, "additional_config", None) or {}
     if "enable_balance_scheduling" in additional_config:
         return bool(additional_config["enable_balance_scheduling"])
-    import os
-
     return bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0")))
 
 
