@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-07 05:04+0000\n"
+"POT-Creation-Date: 2026-06-22 05:29+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -55,7 +55,9 @@ msgid ""
 "or a later version.The version of transformers need to be upgraded to "
 "5.2.0."
 msgstr ""
-"`GLM-5` 模型首次在 `vllm-ascend:v0.17.0rc1` 中得到支持，所有 **v0.17.0rc1 及更高版本** 均可稳定运行。要使用最新特性（如 PD 分离、MTP），建议使用 v0.17.0rc1 或更高版本。transformers 版本需要升级到 5.2.0。"
+"`GLM-5` 模型首次在 `vllm-ascend:v0.17.0rc1` 中得到支持，所有 **v0.17.0rc1 及更高版本** "
+"均可稳定运行。要使用最新特性（如 PD 分离、MTP），建议使用 v0.17.0rc1 或更高版本。transformers 版本需要升级到 "
+"5.2.0。"
 
 #: ../../source/tutorials/models/GLM5.md:11
 msgid ""
@@ -100,13 +102,17 @@ msgstr "`GLM-5`（BF16 版本）：[下载模型权重](https://www.modelscope.c
 msgid ""
 "`GLM-5-w4a8`(Quantized version): [Download model "
 "weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8)."
-msgstr "`GLM-5-w4a8`（量化版本）：[下载模型权重](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8)。"
+msgstr ""
+"`GLM-5-w4a8`（量化版本）：[下载模型权重](https://modelscope.cn/models/Eco-"
+"Tech/GLM-5-w4a8)。"
 
 #: ../../source/tutorials/models/GLM5.md:25
 msgid ""
 "`GLM-5-w8a8`(Quantized version): [Download model "
 "weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8)."
-msgstr "`GLM-5-w8a8`（量化版本）：[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8)。"
+msgstr ""
+"`GLM-5-w8a8`（量化版本）：[下载模型权重](https://www.modelscope.cn/models/Eco-"
+"Tech/GLM-5-w8a8)。"
 
 #: ../../source/tutorials/models/GLM5.md:26
 msgid ""
@@ -118,13 +124,17 @@ msgstr "`GLM-5.1`（BF16 版本）：[下载模型权重](https://huggingface.co
 msgid ""
 "`GLM-5.1-w4a8`(Quantized version): [Download model "
 "weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8)."
-msgstr "`GLM-5.1-w4a8`（量化版本）：[下载模型权重](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8)。"
+msgstr ""
+"`GLM-5.1-w4a8`（量化版本）：[下载模型权重](https://modelers.cn/models/Eco-"
+"Tech/GLM-5.1-w4a8)。"
 
 #: ../../source/tutorials/models/GLM5.md:28
 msgid ""
 "`GLM-5.1-w8a8`(Quantized version): [Download model "
 "weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8)."
-msgstr "`GLM-5.1-w8a8`（量化版本）：[下载模型权重](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8)。"
+msgstr ""
+"`GLM-5.1-w8a8`（量化版本）：[下载模型权重](https://modelers.cn/models/Eco-"
+"Tech/GLM-5.1-w8a8)。"
 
 #: ../../source/tutorials/models/GLM5.md:30
 msgid ""
@@ -141,7 +151,9 @@ msgid ""
 "If multi-node deployment is required, please follow the [Verify Multi-"
 "node Communication Environment](../../installation.md#verify-multi-node-"
 "communication) guide for communication verification."
-msgstr "如果需要多节点部署，请按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)指南进行通信验证。"
+msgstr ""
+"如果需要多节点部署，请按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
+"communication)指南进行通信验证。"
 
 #: ../../source/tutorials/models/GLM5.md:36
 msgid "4 Installation"
@@ -255,7 +267,9 @@ msgid ""
 "If you want to deploy multi-node environment, you need to verify multi-"
 "node communication according to [verify multi-node communication "
 "environment](../../installation.md#verify-multi-node-communication)."
-msgstr "如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+msgstr ""
+"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
+"communication)验证多节点通信。"
 
 #: ../../source/tutorials/models/GLM5.md:286
 msgid ""
@@ -282,11 +296,14 @@ msgid "**node 1**"
 msgstr "**节点 1**"
 
 #: ../../source/tutorials/models/GLM5.md:486
+#, fuzzy
 msgid ""
 "For bf16 weight, use this script on each node to enable [Multi Token "
 "Prediction "
-"(MTP)](../../user_guide/feature_guide/Multi_Token_Prediction.md)."
-msgstr "对于 bf16 权重，在每个节点上使用此脚本来启用[多 Token 预测（MTP）](../../user_guide/feature_guide/Multi_Token_Prediction.md)。"
+"(MTP)](../../user_guide/feature_guide/speculative_decoding.md)."
+msgstr ""
+"对于 bf16 权重，在每个节点上使用此脚本来启用[多 Token "
+"预测（MTP）](../../user_guide/feature_guide/speculative_decoding.md)。"
 
 #: ../../source/tutorials/models/GLM5.md:551
 msgid "`glm-5-w8a8`: require 2 Atlas 800 A3 (64G × 16)."
@@ -299,8 +316,11 @@ msgstr "5.3.预填充-解码分离部署"
 #: ../../source/tutorials/models/GLM5.md:661
 msgid ""
 "We'd like to show the deployment guide of `GLM-5` on multi-node "
-"environment with 1P1D for better performance."
-msgstr "我们将在多节点环境下以 1P1D 方式展示 `GLM-5` 的部署指南，以获得更好的性能。"
+"environment with 1P1D for better performance. *Prefill-Decode "
+"Disaggregation* refers to the separation of the prefill stage and the "
+"decode stage across different nodes to improve throughput and latency."
+msgstr ""
+"我们将展示 `GLM-5` 在多节点环境下采用 1P1D 配置的部署指南，以获得更好的性能。*预填充-解码分离*是指将预填充阶段和解码阶段分布在不同的节点上，以提高吞吐量和降低延迟。"
 
 #: ../../source/tutorials/models/GLM5.md:663
 msgid "Before you start, please"
@@ -319,7 +339,9 @@ msgid ""
 "To support a 200k context window on the stage of prefill, the parameter "
 "`\"layer_sharding\": [\"q_b_proj\", \"o_proj\"]` needs to be added to "
 "`--additional_config` on each prefill node."
-msgstr "为了在预填充阶段支持 200k 的上下文窗口，需要在每个预填充节点的 `--additional_config` 中添加参数 `\"layer_sharding\": [\"q_b_proj\", \"o_proj\"]`。"
+msgstr ""
+"为了在预填充阶段支持 200k 的上下文窗口，需要在每个预填充节点的 `--additional_config` 中添加参数 "
+"`\"layer_sharding\": [\"q_b_proj\", \"o_proj\"]`。"
 
 #: ../../source/tutorials/models/GLM5.md:771
 #: ../../source/tutorials/models/GLM5.md:1251
@@ -507,9 +529,7 @@ msgid ""
 "**Notice:** `max-model-len` and `max-num-seqs` need to be set according "
 "to the actual usage scenario. For other settings, please refer to the "
 "Online Service Deployment chapter."
-msgstr ""
-"**注意：** `max-model-len` 和 `max-num-seqs` "
-"需要根据实际使用场景进行设置。其他设置请参考在线服务部署章节。"
+msgstr "**注意：** `max-model-len` 和 `max-num-seqs` 需要根据实际使用场景进行设置。其他设置请参考在线服务部署章节。"
 
 #: ../../source/tutorials/models/GLM5.md:1395
 msgid "10 FAQ"
@@ -534,3 +554,10 @@ msgstr "**问：如何为 GLM-5 启用函数调用功能？**"
 #: ../../source/tutorials/models/GLM5.md:1405
 msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在 vLLM 启动命令中添加以下配置"
+
+#~ msgid ""
+#~ "We'd like to show the deployment "
+#~ "guide of `GLM-5` on multi-node "
+#~ "environment with 1P1D for better "
+#~ "performance."
+#~ msgstr "我们将在多节点环境下以 1P1D 方式展示 `GLM-5` 的部署指南，以获得更好的性能。"

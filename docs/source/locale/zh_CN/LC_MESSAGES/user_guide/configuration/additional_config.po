@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-10 04:47+0000\n"
+"POT-Creation-Date: 2026-06-22 05:29+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -396,6 +396,18 @@ msgstr ""
 "绑定](../feature_guide/cpu_binding.md)。"
 
 #: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_sleep_mode_extra_cleanup`"
+msgstr "`enable_sleep_mode_extra_cleanup`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Enables extra sleep-mode cleanup for RL workloads, including HCCL "
+"process-group release and ACL graph workspace cleanup. Disabled by "
+"default because wakeup may need to restore HCCL and recapture ACL graphs."
+msgstr ""
+"为 RL 工作负载启用额外的睡眠模式清理，包括 HCCL 进程组释放和 ACL 图工作空间清理。默认禁用，因为唤醒可能需要恢复 HCCL 并重新捕获 ACL 图。"
+
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`SLO_limits_for_dynamic_batch`"
 msgstr "`SLO_limits_for_dynamic_batch`"
 
@@ -466,6 +478,18 @@ msgid ""
 "Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and "
 "GLM5). Not supported on Ascend 950 devices now"
 msgstr "是否在 DSA 模型中启用 KV 缓存 C8（例如 DeepSeekV3.2 和 GLM5）。目前 Ascend 950 设备不支持。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`c8_enable_reshape_optim`"
+msgstr "`c8_enable_reshape_optim`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable StoreKVBlock operator achieves acceleration under the "
+"C8 feature (this means that enable_sparse_c8 needs to be enabled). In the"
+" PD separation scenario, only the P node is enabled."
+msgstr ""
+"是否启用 StoreKVBlock 算子在 C8 特性下实现加速（这意味着需要启用 enable_sparse_c8）。在 PD 分离场景中，仅 P 节点启用。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_mc2_hierarchy_comm`"
@@ -587,11 +611,19 @@ msgid ""
 "verify)."
 msgstr "拒绝采样器（块验证和熵验证）的配置选项。"
 
-#: ../../source/user_guide/configuration/additional_config.md:104
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`multistream_dsv4_dsa_overlap`"
+msgstr "`multistream_dsv4_dsa_overlap`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable dsa multi-stream overlap for DeepSeek V4."
+msgstr "是否为 DeepSeek V4 启用 dsa 多流重叠。"
+
+#: ../../source/user_guide/configuration/additional_config.md:107
 msgid "The details of each configuration option are as follows:"
 msgstr "每个配置选项的详细说明如下："
 
-#: ../../source/user_guide/configuration/additional_config.md:106
+#: ../../source/user_guide/configuration/additional_config.md:109
 msgid "**xlite_graph_config**"
 msgstr "**xlite_graph_config**"
 
@@ -615,7 +647,7 @@ msgid ""
 "default, Xlite is only enabled for the decode stage."
 msgstr "是否在预填充和解码阶段同时启用 Xlite。默认情况下，Xlite 仅在解码阶段启用。"
 
-#: ../../source/user_guide/configuration/additional_config.md:113
+#: ../../source/user_guide/configuration/additional_config.md:116
 msgid "**weight_prefetch_config**"
 msgstr "**weight_prefetch_config**"
 
@@ -640,7 +672,7 @@ msgstr ""
 msgid "Prefetch ratio of each weight."
 msgstr "各项权重的预取比例。"
 
-#: ../../source/user_guide/configuration/additional_config.md:120
+#: ../../source/user_guide/configuration/additional_config.md:123
 msgid "**finegrained_tp_config**"
 msgstr "**finegrained_tp_config**"
 
@@ -676,7 +708,7 @@ msgstr "`mlp_tensor_parallel_size`"
 msgid "The custom tensor parallel size of mlp."
 msgstr "MLP 层的自定义张量并行大小。"
 
-#: ../../source/user_guide/configuration/additional_config.md:129
+#: ../../source/user_guide/configuration/additional_config.md:132
 msgid "**ascend_compilation_config**"
 msgstr "**ascend_compilation_config**"
 
@@ -731,7 +763,7 @@ msgstr "`fuse_muls_add`"
 msgid "Whether to enable fuse_muls_add pass."
 msgstr "是否启用 fuse_muls_add 优化通道。"
 
-#: ../../source/user_guide/configuration/additional_config.md:140
+#: ../../source/user_guide/configuration/additional_config.md:143
 msgid "**eplb_config**"
 msgstr "**eplb_config**"
 
@@ -795,7 +827,39 @@ msgstr "`num_redundant_experts`"
 msgid "Specify redundant experts during initialization."
 msgstr "在初始化阶段指定冗余专家的数量。"
 
-#: ../../source/user_guide/configuration/additional_config.md:151
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`eplb_policy_type`"
+msgstr "`eplb_policy_type`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"EPLB balancing policy: `0`=Random, `1`=DefaultEplb (open-source "
+"algorithm), `2`=SwiftBalanceEplb (optimized for low-bandwidth), "
+"`3`=FlashLB (statistical method with sliding windows)."
+msgstr ""
+"EPLB 均衡策略：`0`=随机，`1`=DefaultEplb（开源算法），`2`=SwiftBalanceEplb（针对低带宽优化），"
+"`3`=FlashLB（基于滑动窗口的统计方法）。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`eplb_heat_collection_stage`"
+msgstr "`eplb_heat_collection_stage`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`\"all\"`"
+msgstr "`\"all\"`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Stage to collect EPLB heat: `\"prefill\"` collects only during prefill, "
+"`\"decode\"` collects only during decode, `\"all\"` collects during both "
+"stages. In PD colocation scenarios, prefill and decode requests may "
+"produce different expert workloads. Selectively collecting heat on one "
+"stage can reduce expert imbalance more effectively."
+msgstr ""
+"收集 EPLB 热度的阶段：`\"prefill\"` 仅在预填充阶段收集，`\"decode\"` 仅在解码阶段收集，`\"all\"` 在两个阶段均收集。"
+"在 PD 共置场景中，预填充和解码请求可能产生不同的专家工作负载。选择性地在某个阶段收集热度可以更有效地减少专家不均衡。"
+
+#: ../../source/user_guide/configuration/additional_config.md:156
 msgid "**profiling_chunk_config**"
 msgstr "**profiling_chunk_config**"
 
@@ -849,11 +913,11 @@ msgstr "True"
 msgid "Enable/disable Online Calibration"
 msgstr "启用/禁用在线校准"
 
-#: ../../source/user_guide/configuration/additional_config.md:160
+#: ../../source/user_guide/configuration/additional_config.md:165
 msgid "**rejection_sampler_config**"
 msgstr "**rejection_sampler_config**"
 
-#: ../../source/user_guide/configuration/additional_config.md:162
+#: ../../source/user_guide/configuration/additional_config.md:167
 msgid ""
 "**Note**: Both block verify and entropy verify improve speculative "
 "decoding performance (higher acceptance rate, lower latency) at the cost "
@@ -864,7 +928,9 @@ msgid ""
 " weights and application scenario to find the right trade-off between "
 "performance and precision."
 msgstr ""
-"**注意**：块验证和熵验证都能提升推测解码性能（更高的接受率、更低的延迟），但会降低采样精度。`posterior_alpha` 值越大，调整越激进——它会进一步降低高熵 token 的接受阈值，从而提高吞吐量但降低输出质量。用户应根据具体的模型权重和应用场景调整这些参数，以找到性能与精度之间的最佳平衡。"
+"**注意**：块验证和熵验证都能提升推测解码性能（更高的接受率、更低的延迟），但会降低采样精度。`posterior_alpha` "
+"值越大，调整越激进——它会进一步降低高熵 token "
+"的接受阈值，从而提高吞吐量但降低输出质量。用户应根据具体的模型权重和应用场景调整这些参数，以找到性能与精度之间的最佳平衡。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_block_verify`"
@@ -887,7 +953,9 @@ msgid ""
 "acceptance threshold based on the entropy of the target distribution — "
 "higher entropy (uncertain) tokens get a lower threshold (easier to "
 "accept), while lower entropy (confident) tokens get a stricter threshold."
-msgstr "是否启用熵验证模式。熵验证根据目标分布的熵调整接受阈值——高熵（不确定）token 获得更低的阈值（更容易接受），而低熵（确定）token 获得更严格的阈值。"
+msgstr ""
+"是否启用熵验证模式。熵验证根据目标分布的熵调整接受阈值——高熵（不确定）token 获得更低的阈值（更容易接受），而低熵（确定）token "
+"获得更严格的阈值。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`posterior_threshold`"
@@ -902,7 +970,9 @@ msgid ""
 "Upper bound for the entropy-adjusted acceptance threshold. Must be in (0,"
 " 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), "
 "posterior_threshold)`."
-msgstr "熵调整后接受阈值的上限。必须在 (0, 1] 范围内。有效阈值为 `min(exp(-entropy * posterior_alpha), posterior_threshold)`。"
+msgstr ""
+"熵调整后接受阈值的上限。必须在 (0, 1] 范围内。有效阈值为 `min(exp(-entropy * posterior_alpha), "
+"posterior_threshold)`。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`posterior_alpha`"
@@ -920,19 +990,10 @@ msgid ""
 "precision."
 msgstr "阈值计算中熵的缩放因子。必须 >= 0。值越大，阈值对熵越敏感——高熵 token 更容易被接受，从而提高性能但降低精度。"
 
-#: ../../source/user_guide/configuration/additional_config.md:171
+#: ../../source/user_guide/configuration/additional_config.md:176
 msgid "Example"
 msgstr "示例"
 
-#: ../../source/user_guide/configuration/additional_config.md:173
+#: ../../source/user_guide/configuration/additional_config.md:178
 msgid "An example of additional configuration is as follows:"
 msgstr "附加配置的一个示例如下："
-
-#~ msgid ""
-#~ "Whether to enable CPU binding. Only "
-#~ "takes effect on ARM CPUs; A3 uses"
-#~ " the global-slicing CPU allocation "
-#~ "strategy and other device types use "
-#~ "the topo-affinity CPU allocation "
-#~ "strategy."
-#~ msgstr "是否启用 CPU 绑定。仅在 ARM CPU 上生效；A3 使用全局切片 CPU 分配策略，其他设备类型使用拓扑亲和性 CPU 分配策略。"

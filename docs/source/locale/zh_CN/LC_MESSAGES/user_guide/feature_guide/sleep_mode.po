@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-06-22 05:29+0000\n"
 "PO-Revision-Date: 2026-01-22 16:15+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -54,6 +54,7 @@ msgid "Getting started"
 msgstr "快速入门"
 
 #: ../../source/user_guide/feature_guide/sleep_mode.md:11
+#, python-brace-format
 msgid ""
 "With `enable_sleep_mode=True`, the way we manage memory (malloc, free) in"
 " vLLM is under a specific memory pool. During model loading and KV cache "
@@ -123,22 +124,95 @@ msgstr ""
 " 并从源码构建。如果您使用的版本早于 v0.12.0rc1，请记得设置 `export COMPILE_CUSTOM_KERNELS=1`。"
 
 #: ../../source/user_guide/feature_guide/sleep_mode.md:28
+msgid "Optional extra cleanup"
+msgstr "可选额外清理"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:30
+msgid ""
+"By default, sleep mode only releases memory managed by the sleep-mode "
+"allocator. For RL workloads that need to return more NPU memory to the "
+"trainer, vLLM Ascend also provides an optional extra cleanup path:"
+msgstr ""
+"默认情况下，睡眠模式仅释放由睡眠模式分配器管理的内存。对于需要将更多 NPU 内存归还给训练器的 RL 工作负载，vLLM Ascend "
+"还提供了一个可选的额外清理路径："
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:40
+msgid "For online serving, pass the same option through `--additional-config`:"
+msgstr "对于在线服务，通过 `--additional-config` 传递相同选项："
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:48
+msgid "When `enable_sleep_mode_extra_cleanup` is enabled, `sleep()` additionally:"
+msgstr "当启用 `enable_sleep_mode_extra_cleanup` 时，`sleep()` 还会额外执行以下操作："
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:50
+msgid ""
+"clears ACL graph attention workspaces and invalidates captured ACL graph "
+"caches when ACL graph is enabled;"
+msgstr "当启用 ACL graph 时，清除 ACL graph attention 工作空间并使已捕获的 ACL graph 缓存失效；"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:51
+msgid ""
+"resets the model runner graph manager so ACL graphs can be captured again"
+" after wakeup;"
+msgstr "重置模型运行器 graph 管理器，以便在唤醒后可以重新捕获 ACL graphs；"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:52
+msgid ""
+"waits for pending pipeline-parallel send work, synchronizes the NPU, and "
+"destroys HCCL process groups."
+msgstr "等待待处理的流水线并行发送工作完成，同步 NPU，并销毁 HCCL 进程组。"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:54
+msgid ""
+"During `wake_up()`, vLLM Ascend restores the HCCL process groups, "
+"refreshes MoE dispatcher HCCL metadata, restores sleep-mode allocator "
+"memory, and recaptures ACL graphs when needed."
+msgstr ""
+"在 `wake_up()` 期间，vLLM Ascend 会恢复 HCCL 进程组，刷新 MoE 调度器 HCCL 元数据，恢复睡眠模式分配器内存，并在需要时重新捕获 "
+"ACL graphs。"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:57
+msgid ""
+"Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup "
+"latency. In particular, if ACL graph is enabled, `wake_up()` must call "
+"`capture_model()` again after the model state has been restored. Keep "
+"`enable_sleep_mode_extra_cleanup` disabled when lower wakeup latency is "
+"more important than releasing HCCL and ACL graph workspace memory."
+msgstr ""
+"额外清理以更长的唤醒延迟为代价换取更低的睡眠期 NPU 内存使用。特别是，如果启用了 ACL graph，`wake_up()` "
+"必须在模型状态恢复后再次调用 `capture_model()`。当更低的唤醒延迟比释放 HCCL 和 ACL graph "
+"工作空间内存更重要时，请保持 `enable_sleep_mode_extra_cleanup` 禁用。"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:60
+msgid "For level 2 sleep, wakeup can be split into two phases:"
+msgstr "对于二级睡眠，唤醒可以分为两个阶段："
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:68
+msgid ""
+"With extra cleanup enabled, ACL graphs are recaptured only when `tags` is"
+" `None` or contains `\"kv_cache\"`. This avoids recapturing graphs before"
+" externally reloaded weights and KV-cache state are ready."
+msgstr ""
+"启用额外清理后，仅当 `tags` 为 `None` 或包含 `\"kv_cache\"` 时才会重新捕获 ACL graphs。这避免了在外部重新加载的权重和 "
+"KV-cache 状态准备就绪之前重新捕获 graphs。"
+
+#: ../../source/user_guide/feature_guide/sleep_mode.md:70
 msgid "Usage"
 msgstr "使用方法"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:30
+#: ../../source/user_guide/feature_guide/sleep_mode.md:72
 msgid "The following is a simple example of how to use sleep mode."
 msgstr "以下是如何使用睡眠模式的一个简单示例。"
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:32
+#: ../../source/user_guide/feature_guide/sleep_mode.md:74
 msgid "Offline inference:"
 msgstr "离线推理："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:72
+#: ../../source/user_guide/feature_guide/sleep_mode.md:114
 msgid "Online serving:"
 msgstr "在线服务："
 
-#: ../../source/user_guide/feature_guide/sleep_mode.md:74
+#: ../../source/user_guide/feature_guide/sleep_mode.md:116
 msgid ""
 "Considering there may be a risk of malicious access, please make sure you"
 " are under a dev-mode, and explicitly specify the dev environment "
