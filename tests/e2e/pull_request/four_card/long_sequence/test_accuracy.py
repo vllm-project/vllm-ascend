@@ -127,9 +127,8 @@ def _run_accuracy_case(case: AccuracyCase) -> None:
                 break
         if len(tries) == len(multi_expected_outputs):
             failure_details = "\n\n".join(tries)
-            raise AssertionError(
-                f"Output did not match any of the expected output sets:\n{failure_details}"
-            ) 
+            raise AssertionError(f"Output did not match any of the expected output sets:\n{failure_details}")
+
 
 def match_outputs_with_goldens(outputs: list[tuple[list[int], str]], goldens: Sequence[str]) -> None:
     """Helper function to compare output with golden output, ignoring whitespace differences."""
