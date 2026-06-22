@@ -554,6 +554,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
                 slot_mapping_cpu=self.runner.input_batch.block_table[0].slot_mapping.cpu,
                 positions=self.runner.positions,
+                positions_cpu=(
+                    self.runner._dsa_positions_cpu_buf
+                    if getattr(self.runner, "use_compress", False)
+                    else None
+                ),
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
