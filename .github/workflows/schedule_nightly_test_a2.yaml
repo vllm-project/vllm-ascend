@@ -286,7 +286,7 @@ jobs:
 
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger, build-image, single-node-tests, single-node-accuracy-tests]
+    needs: [setup-vars, parse-trigger, build-image, single-node-accuracy-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
