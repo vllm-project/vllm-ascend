@@ -344,7 +344,7 @@ backup_ascend_logs() {
 main() {
     trap backup_ascend_logs EXIT
 
-    # TODO: remove this block after AOP testing
+    # TODO: remove this block after AOP testing.
     if [[ "${CONFIG_YAML_PATH:-}" == *"Kimi-K2_5-W4A8-A2-dual-nodes"* ]]; then
         echo "====> TEST MODE: skip setup, go straight to run_tests_with_log ===="
         cd "$WORKSPACE/vllm-ascend"
