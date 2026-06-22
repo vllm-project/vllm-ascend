@@ -240,7 +240,7 @@ class PCPManager:
             math.ceil(num / pad_multiple) * pad_multiple for num in prefill_lens
         ]
         pads = copy.deepcopy(num_pcp_pads)
-        pads[:self.num_decode_reqs : ] = np.cumsum(pads[self.num_decode_reqs:])
+        pads[self.num_decode_reqs : ] = np.cumsum(pads[self.num_decode_reqs:])
         base = (
             int(cu_num_scheduled_tokens[self.num_decode_reqs - 1])
             if self.num_decode_reqs > 0
