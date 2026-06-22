@@ -216,6 +216,7 @@ class TestNPUWorker(TestBase):
     def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_extra_cleanup = True
         mock_get_config.return_value = mock_config
         """Test wake_up method when sleep mode is enabled"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -241,10 +242,12 @@ class TestNPUWorker(TestBase):
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
+            worker.sleep_wakeup_manager = MagicMock()
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
+            worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
 
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
@@ -975,6 +978,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
             worker.vllm_config.weight_transfer_config = None
+            worker.vllm_config.kv_transfer_config = None
 
             # Setup allocator mock
             mock_allocator = MagicMock()
@@ -1161,13 +1165,17 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
+        ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.vllm_config.speculative_config = None
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
+            worker.vllm_config.kv_transfer_config = None
 
             # Setup allocator mock
             mock_allocator = MagicMock()
@@ -1186,19 +1194,75 @@ class TestNPUWorker(TestBase):
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
+    def test_acl_graph_sleep_wakeup_manager_sleep_resets_acl_graph_state(self):
+        from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
+
+        model_runner = MagicMock()
+        model_runner.use_aclgraph = True
+        graph_manager = MagicMock()
+        graph_manager.graphs = MagicMock()
+        graph_manager.pool = None
+        model_runner.cudagraph_manager = graph_manager
+        saver = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+        with (
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.AclGraphSleepWakeupManager"
+                ".clear_all_attention_workspaces"
+            ) as mock_clear,
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.AclGraphSleepWakeupManager.reset_all_graph_params"
+            ) as mock_reset,
+        ):
+            saver.sleep()
+        mock_clear.assert_called_once()
+        mock_reset.assert_called_once()
+        graph_manager.graphs.clear.assert_called_once()
+
+    def test_hccl_sleep_wakeup_manager_sleep_waits_and_destroys(self):
+        from vllm_ascend.device_allocator.sleep_mem_optimized import HcclSleepWakeupManager
+
+        worker = MagicMock()
+        handle = MagicMock()
+        worker._pp_send_work = [handle]
+        saver = HcclSleepWakeupManager(MagicMock(), worker)
+        saver._destroyed = False
+
+        with (
+            patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_available", return_value=True),
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_initialized",
+                return_value=True,
+            ),
+            patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.synchronize") as mock_synchronize,
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.HcclSleepWakeupManager.destroy_hccl",
+                return_value=2,
+            ) as mock_destroy,
+        ):
+            saver.sleep()
+
+        handle.wait.assert_called_once()
+        self.assertEqual(worker._pp_send_work, [])
+        mock_synchronize.assert_called_once()
+        mock_destroy.assert_called_once()
+
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     def test_initialize_from_config_without_sleep_mode(self, mock_ensure_kv_transfer):
         """Test initialize_from_config method - without sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
+        ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.vllm_config.speculative_config = None
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = False
+            worker.vllm_config.kv_transfer_config = None
 
             # Create mock kv_cache_config
             mock_kv_cache_config = MagicMock()
