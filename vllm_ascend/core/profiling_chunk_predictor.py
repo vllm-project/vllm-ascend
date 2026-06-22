@@ -60,12 +60,9 @@ class ChunkSizePredictor:
         self.min_chunk = min_chunk
         self.history_fitted = False
 
-    def clamp_quadratic_and_linear_if_negative(self, fitted_a: float, fitted_b: float) -> tuple[float, float]:
+    def clamp_quadratic_and_linear_if_negative(self, fitted_a: float, fitted_b: float) -> float:
         """In theory, for the Transfomur structure of LLM, the fitted quadratic and linear
         terms should not be negative. Can perform zero clamping for inaccurate fitting
-
-        Returns:
-            tuple of (fitted_a, fitted_b), both clamped to 1e-9 if negative.
         """
         if fitted_a < 0:
             logger.warning("[ProfilingChunk] Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
@@ -73,7 +70,7 @@ class ChunkSizePredictor:
         if fitted_b < 0:
             logger.warning("Fitted b=%.2e is not positive. The performance may deteriorate..", fitted_b)
 
-        return fitted_a, fitted_b
+        return fitted_a
 
     def fit(self, seq_lens: list[int], latencies: list[float]) -> bool:
         """Fit quadratic coefficients f(l) = al^2 + bl + c from data points.
@@ -115,7 +112,7 @@ class ChunkSizePredictor:
                 logger.warning("[ProfilingChunk] Failed to fit quadratic model: %s", fallback_error)
                 return False
 
-        fitted_a, fitted_b = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
+        fitted_a = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
 
         self.quadratic_coeff_a = fitted_a
         self.linear_coeff_b = fitted_b
@@ -165,7 +162,7 @@ class ChunkSizePredictor:
             logger.warning("[ProfilingChunk] Failed to fit chunked model: %s", e)
             return False
 
-        fitted_a, fitted_b = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
+        fitted_a = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
 
         self.quadratic_chunk_a = fitted_a
         self.linear_chunk_b = fitted_b
