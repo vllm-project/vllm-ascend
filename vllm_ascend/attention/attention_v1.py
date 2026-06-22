@@ -428,13 +428,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params = get_draft_graph_params()
             else:
                 graph_params = get_graph_params()
-            attn_keys = list(forward_context.attn_metadata)
-            attn_keys = expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
-            if len(attn_keys) == 0:
-                return
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
-                    attn_keys,
+                    forward_context.attn_metadata,
                     graph_params.attn_params[num_tokens],
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
@@ -449,12 +445,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         block_table,
                         seq_lens,
                         output,
-                        *maybe_layer_name,
                     ) = param
-                    layer_name = maybe_layer_name[0] if maybe_layer_name else None
-                    metadata_key = get_attn_metadata_key(forward_context.attn_metadata, key, layer_name)
-                    block_table = forward_context.attn_metadata[metadata_key].block_tables
-                    seq_lens = forward_context.attn_metadata[metadata_key].seq_lens
+                    seq_lens = forward_context.attn_metadata[key].seq_lens
 
                     workspace = torch_npu._npu_paged_attention_get_workspace(
                         query=query,
@@ -995,7 +987,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     attn_metadata.block_tables,
                     attn_metadata.seq_lens,
                     weak_ref_tensors(output),
-                    self._graph_metadata_layer_name(),
                 )
             )
 
