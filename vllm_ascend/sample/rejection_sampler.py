@@ -116,6 +116,10 @@ class AscendRejectionSampler(RejectionSampler):
         # Calculate indices of target logits.
         if sampling_metadata.allowed_token_ids_mask is not None or has_penalties:
             num_requests = len(metadata.num_draft_tokens)
+            # TODO: The apply_logits_processors function originally reused the base class from the
+            # upper-level vLLM module. However, the current vLLM implementation introduces synchronous
+            # host-to-device (H2D) copy operations. This function will be removed once PR
+            # https://github.com/vllm-project/vllm/pull/46323 is merged into the upstream vLLM repository.
             original_indices = torch.arange(num_requests, device=logits.device, dtype=torch.long)
             repeat_indices = expand_batch_to_tokens(
                 original_indices,
