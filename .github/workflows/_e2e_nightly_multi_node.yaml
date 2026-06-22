@@ -201,7 +201,7 @@ jobs:
 
           if [ "${{ inputs.soc_version }}" = "a3" ]; then
             npu_per_node=16
-            pvc_name=nv-action-vllm-benchmarks-v2
+            pvc_name=gy005-az5-vllm-ascend
           else
             npu_per_node=8
             pvc_name=vllm-project-hk001
