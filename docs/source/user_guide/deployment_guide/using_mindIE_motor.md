@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-[MindIE-PyMotor](https://gitcode.com/Ascend/MindIE-PyMotor) provides one-click deployment for **prefill–decode (PD) disaggregation** and **PD aggregation** on Ascend NPUs. It combines high-performance scheduling and load balancing to build scalable, highly available inference services on top of **vLLM-Ascend**.
+[MindIE-PyMotor](https://gitcode.com/Ascend/MindIE-PyMotor) provides one-click deployment for **prefill–decode (PD) disaggregation** and **PD aggregation** on Ascend NPUs. It uses **high-performance scheduling** and load balancing to build large-scale inference services that are **scalable and highly available**.
 
 ## 2. Getting Started
 
