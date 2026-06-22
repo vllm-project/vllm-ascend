@@ -13,6 +13,77 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_de
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 
+def expand_attn_keys_for_graph_params(attn_keys: list[str], graph_param_count: int) -> list[str]:
+    if len(attn_keys) == 0:
+        return []
+    return [attn_keys[index % len(attn_keys)] for index in range(graph_param_count)]
+
+
+def get_attn_metadata_key(attn_metadata: dict, fallback_key: str, layer_name: str | None) -> str:
+    if layer_name is not None and layer_name in attn_metadata:
+        return layer_name
+    return fallback_key
+
+
+def split_optional_workspace_and_layer_name(optional_items: tuple) -> tuple[torch.Tensor | None, str | None]:
+    if not optional_items:
+        return None, None
+
+    layer_name = None
+    if isinstance(optional_items[-1], str) or optional_items[-1] is None:
+        layer_name = optional_items[-1]
+        optional_items = optional_items[:-1]
+
+    workspace = optional_items[0] if optional_items else None
+    return workspace, layer_name
+
+
+def is_gemma4_model(vllm_config: VllmConfig) -> bool:
+    model_config = vllm_config.model_config
+    hf_config = getattr(model_config, "hf_config", None)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    model_types = [
+        getattr(hf_config, "model_type", None),
+        getattr(hf_text_config, "model_type", None),
+    ]
+    text_config = getattr(hf_config, "text_config", None)
+    if text_config is not None:
+        model_types.append(getattr(text_config, "model_type", None))
+    return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
+
+
+def workspace_byte_size(workspace: torch.Tensor | None) -> int:
+    if workspace is None:
+        return 0
+    return workspace.numel() * workspace.element_size()
+
+
+def choose_larger_workspace(
+    current_workspace: torch.Tensor | None,
+    new_workspace: torch.Tensor,
+) -> torch.Tensor:
+    if current_workspace is None:
+        return new_workspace
+    if workspace_byte_size(new_workspace) > workspace_byte_size(current_workspace):
+        return new_workspace
+    return current_workspace
+
+
+def cache_graph_workspace(
+    graph_params: Any,
+    num_tokens: int,
+    new_workspace: torch.Tensor,
+    *,
+    use_max_workspace: bool,
+) -> torch.Tensor:
+    current_workspace = graph_params.workspaces.get(num_tokens)
+    if use_max_workspace:
+        graph_params.workspaces[num_tokens] = choose_larger_workspace(current_workspace, new_workspace)
+    elif current_workspace is None:
+        graph_params.workspaces[num_tokens] = new_workspace
+    return graph_params.workspaces[num_tokens]
+
+
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config
