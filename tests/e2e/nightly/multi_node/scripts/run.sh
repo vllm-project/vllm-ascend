@@ -209,6 +209,33 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
+
+    # TODO: remove this block after AOP testing
+    if [[ "${CONFIG_YAML_PATH:-}" == *"Kimi-K2_5-W4A8-A2-dual-nodes"* ]]; then
+        echo "====> Run pytest entry (TEST MODE - forced failure): $MULTI_NODE_TEST_PATH"
+        local log_file="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-?}_pytest.log"
+        # Write a real-looking failure to test not_env_failure → bisect path
+        # Change to "RuntimeError: Timeout" to test env_failure → skip path
+        python -c "
+import sys
+print('AssertionError: test failed - forced for AOP testing')
+sys.exit(1)
+" 2>&1 | tee "$log_file"
+        ret=$?
+        set -e
+        if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
+            if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
+                aop_pipeline
+            fi
+            echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
+            exit 1
+        elif [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
+            aop_pipeline
+            exit 1
+        fi
+        return
+    fi
+
     echo "====> Run pytest entry: $MULTI_NODE_TEST_PATH"
     local log_file="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-?}_pytest.log"
     pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH" 2>&1 | tee "$log_file"
