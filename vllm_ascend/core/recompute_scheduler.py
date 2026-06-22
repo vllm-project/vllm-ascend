@@ -317,6 +317,12 @@ class RecomputeScheduler(Scheduler):
 
                         self._preempt_request(preempted_req, scheduled_timestamp)
                         preempted_reqs.append(preempted_req)
+                        logger.info(
+                            "[RecomputeScheduler] Preempted request %s. running_count=%s, token_budget=%s",
+                            preempted_req.request_id,
+                            len(self.running),
+                            token_budget,
+                        )
                         if preempted_req == request:
                             # No more request to preempt. Cannot schedule this request.
                             break
@@ -393,7 +399,7 @@ class RecomputeScheduler(Scheduler):
                 ):
                     if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                         logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                            "[RecomputeScheduler] %s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
                     request_queue.pop_request()
@@ -797,7 +803,7 @@ class RecomputeScheduler(Scheduler):
         # return recomputed requests as EngineCoreOutput
         if scheduler_output.recomputed_reqs is not None:
             for req_info in scheduler_output.recomputed_reqs:
-                logger.warning("Recompute triggered for request %s.", req_info.request_id)
+                logger.warning("[RecomputeScheduler] Recompute triggered for request %s.", req_info.request_id)
                 outputs[req_info.client_index].append(
                     EngineCoreOutput(
                         request_id=req_info.request_id,
@@ -936,7 +942,7 @@ class RecomputeScheduler(Scheduler):
                 ok = struct_output_request.grammar.accept_tokens(req_id, new_token_ids)
                 if not ok:
                     logger.warning(
-                        "Unexpected: grammar rejected tokens %s for request %s.",
+                        "[RecomputeScheduler] Unexpected: grammar rejected tokens %s for request %s.",
                         new_token_ids,
                         req_id,
                     )

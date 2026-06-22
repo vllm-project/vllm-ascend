@@ -234,7 +234,8 @@ class NPUWorker(WorkerBase):
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
 
         logger.info(
-            "Sleep mode freed %.2f GiB memory, %.2f GiB memory is still in use.",
+            "Sleep mode (level=%s) freed %.2f GiB memory, %.2f GiB memory is still in use.",
+            level,
             freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes,
         )
@@ -561,7 +562,9 @@ class NPUWorker(WorkerBase):
 
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
+            "Available KV cache memory: %.2f GiB",
+            GiB(self.available_kv_cache_memory_bytes),
+            scope="local",
         )
 
         if npugraph_memory_estimate > 0:
@@ -605,11 +608,12 @@ class NPUWorker(WorkerBase):
         """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
         self.torch_reserved = torch.npu.memory_reserved()
         self.torch_allocated = torch.npu.memory_allocated()
-        logger.debug(
-            "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB",
-            self.torch_reserved / GiB_bytes,
-            self.torch_allocated / GiB_bytes,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB",
+                self.torch_reserved / GiB_bytes,
+                self.torch_allocated / GiB_bytes,
+            )
 
     def execute_model(
         self,
@@ -734,7 +738,7 @@ class NPUWorker(WorkerBase):
                     warmup_sizes.append(compile_range.end)
 
         for size in sorted(warmup_sizes, reverse=True):
-            logger.info("Compile and warming up model for size %d", size)
+            logger.info("Compile and warming up model for size %s", size)
             self.model_runner._dummy_run(size)
 
         npugraph_memory_bytes = 0
@@ -772,25 +776,38 @@ class NPUWorker(WorkerBase):
             suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
             suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
             msg = (
-                f"Free memory on device "
-                f"({format_gib(self.init_snapshot.free_memory)}/"
-                f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
-                f"Desired GPU memory utilization is "
-                f"({self.cache_config.gpu_memory_utilization}, "
-                f"{format_gib(self.requested_memory)} GiB). "
-                f"Actual usage: {format_gib(self.model_runner.model_memory_usage)} GiB "
-                f"for weights, {format_gib(self.peak_activation_memory)} GiB for peak "
-                f"activation, {format_gib(self.non_torch_memory)} GiB for non-torch "
-                f"memory, {format_gib(npugraph_memory_bytes)} GiB for NPU graph memory. "
-                f"Replace gpu_memory_utilization with "
-                f"`--kv-cache-memory={suggested_to_requested}` "
-                f"({format_gib(suggested_to_requested)} GiB) to fit into requested "
-                f"memory, or `--kv-cache-memory={suggested_to_gpu_limit}` "
-                f"({format_gib(suggested_to_gpu_limit)} GiB) to fully utilize NPU "
-                f"free memory. Current KV cache memory: "
-                f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
+                "Free memory on device "
+                "(%s/%s GiB) on startup. "
+                "Desired GPU memory utilization is "
+                "(%s, %s GiB). "
+                "Actual usage: %s GiB "
+                "for weights, %s GiB for peak "
+                "activation, %s GiB for non-torch "
+                "memory, %s GiB for NPU graph memory. "
+                "Replace gpu_memory_utilization with "
+                "`--kv-cache-memory=%s` "
+                "(%s GiB) to fit into requested "
+                "memory, or `--kv-cache-memory=%s` "
+                "(%s GiB) to fully utilize NPU "
+                "free memory. Current KV cache memory: "
+                "%s GiB."
             )
-            logger.info(msg)
+            logger.info(
+                msg,
+                format_gib(self.init_snapshot.free_memory),
+                format_gib(self.init_snapshot.total_memory),
+                self.cache_config.gpu_memory_utilization,
+                format_gib(self.requested_memory),
+                format_gib(self.model_runner.model_memory_usage),
+                format_gib(self.peak_activation_memory),
+                format_gib(self.non_torch_memory),
+                format_gib(npugraph_memory_bytes),
+                suggested_to_requested,
+                format_gib(suggested_to_requested),
+                suggested_to_gpu_limit,
+                format_gib(suggested_to_gpu_limit),
+                format_gib(self.available_kv_cache_memory_bytes),
+            )
 
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
@@ -881,7 +898,7 @@ class NPUWorker(WorkerBase):
         if not is_first_pp_rank:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    "[ProfilingChunk] PP rank %d: profiled %d tokens, latency=%.2f ms (not used)",
+                    "[ProfilingChunk] PP rank %s: profiled %s tokens, latency=%.2f ms (not used)",
                     get_pp_group().rank_in_group,
                     num_tokens,
                     latency_ms,
@@ -923,7 +940,7 @@ class NPUWorker(WorkerBase):
         self.model_config.max_model_len = max_model_len
         if self.model_runner is not None:
             self.model_runner.update_max_model_len(max_model_len)
-        logger.debug("Updated max_model_len to %d", max_model_len)
+        logger.debug("Updated max_model_len to %s", max_model_len)
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
@@ -1026,7 +1043,7 @@ class NPUWorker(WorkerBase):
     def check_health(self) -> None:
         import subprocess
 
-        logger.info("check_health Start!")
+        logger.debug("check_health starting for rank %s...", self.local_rank)
         try:
             result = subprocess.run(
                 ["npu-smi", "info", "-i", str(self.local_rank), "-t", "health"],
@@ -1037,15 +1054,15 @@ class NPUWorker(WorkerBase):
 
             if result.returncode == 0:
                 parse_text_output(result.stdout)
-                logger.info("check_health success!")
+                logger.debug("check_health success for rank %s.", self.local_rank)
             else:
-                logger.info("query NPU card %s fail: %s", self.local_rank, result.stderr)
+                logger.warning("query NPU card %s fail: %s", self.local_rank, result.stderr)
         except subprocess.TimeoutExpired:
-            logger.info("query NPU card  %s timeout.", self.local_rank)
+            logger.warning("query NPU card %s timeout.", self.local_rank)
         except FileNotFoundError:
-            logger.info("npu-smi tool not found.")
+            logger.warning("npu-smi tool not found.")
         except Exception as e:
-            logger.info("query NPU card %s fail: %s", self.local_rank, e)
+            logger.error("query NPU card %s fail: %s", self.local_rank, e)
         return
 
 

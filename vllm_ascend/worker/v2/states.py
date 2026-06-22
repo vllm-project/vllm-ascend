@@ -18,6 +18,7 @@
 #
 
 import torch
+from vllm.logger import logger
 from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -50,6 +51,12 @@ class AscendRequestState(RequestState):
             self.max_num_reqs,
             dtype=torch.int32,
             device="cpu",
+        )
+        logger.debug(
+            "AscendRequestState: max_num_reqs=%d, max_model_len=%d, max_num_batched_tokens=%d",
+            max_num_reqs,
+            max_model_len,
+            max_num_batched_tokens,
         )
 
     def add_request(

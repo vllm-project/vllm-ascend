@@ -93,7 +93,7 @@ class ProfilingChunkScheduler(Scheduler):
         self._profiling_initialized = False
 
         logger.info(
-            "[ProfilingChunk] Scheduler initialized. base_chunk=%d, page_size=%d, smooth_factor=%.2f, min_chunk=%d",
+            "[ProfilingChunk] Scheduler initialized. base_chunk=%s, page_size=%s, smooth_factor=%.2f, min_chunk=%s",
             base_chunk,
             self.cache_config.block_size,
             profiling_cfg.smooth_factor,
@@ -141,7 +141,7 @@ class ProfilingChunkScheduler(Scheduler):
             if i % log_interval == 0 or i == total_steps - 1:
                 elapsed = time.perf_counter() - t_start
                 logger.info(
-                    "[ProfilingChunk] Profiling prefill latency: %d/%d samples done (chunk=%d, elapsed=%.1fs)",
+                    "[ProfilingChunk] Profiling prefill latency: %s/%s samples done (chunk=%s, elapsed=%.1fs)",
                     max(i - 1, 0),
                     num_samples,
                     chunk_size,
@@ -168,7 +168,7 @@ class ProfilingChunkScheduler(Scheduler):
 
             except Exception as e:
                 logger.debug(
-                    "[ProfilingChunk] Forward failed for chunk=%d: %s",
+                    "[ProfilingChunk] Forward failed for chunk=%s: %s",
                     chunk_size,
                     e,
                 )
@@ -176,13 +176,13 @@ class ProfilingChunkScheduler(Scheduler):
 
         if len(seq_lens) < 8:
             logger.warning(
-                "[ProfilingChunk] Profiling failed: only %d samples collected",
+                "[ProfilingChunk] Profiling failed: only %s/8 samples collected",
                 len(seq_lens),
             )
             return
 
         logger.info(
-            "[ProfilingChunk] Collected %d samples. Latency range: [%.2f, %.2f] ms",
+            "[ProfilingChunk] Collected %s samples. Latency range: [%.2f, %.2f] ms",
             len(seq_lens),
             min(latencies),
             max(latencies),
@@ -321,6 +321,13 @@ class ProfilingChunkScheduler(Scheduler):
                     target_time=time_budget,
                 )
                 if predicted_chunk is not None and predicted_chunk > 0:
+                    logger.debug(
+                        "[ProfilingChunk] Dynamic chunk for %s: %s -> %s (predicted=%s)",
+                        request.request_id,
+                        num_new_tokens,
+                        min(predicted_chunk, num_new_tokens),
+                        predicted_chunk,
+                    )
                     num_new_tokens = min(predicted_chunk, num_new_tokens)
                 else:
                     break
@@ -369,6 +376,12 @@ class ProfilingChunkScheduler(Scheduler):
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
                     preempted_reqs.append(preempted_req)
+                    logger.info(
+                        "[ProfilingChunk] Preempted request %s. running_count=%s, token_budget=%s",
+                        preempted_req.request_id,
+                        len(self.running),
+                        token_budget,
+                    )
                     if preempted_req == request:
                         break
 
@@ -446,7 +459,7 @@ class ProfilingChunkScheduler(Scheduler):
                 ):
                     if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                         logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                            "[ProfilingChunk] %s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
                     request_queue.pop_request()

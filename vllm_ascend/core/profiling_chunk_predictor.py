@@ -65,10 +65,11 @@ class ChunkSizePredictor:
         terms should not be negative. Can perform zero clamping for inaccurate fitting
         """
         if fitted_a < 0:
-            logger.warning("Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
+            logger.warning("[ProfilingChunk] Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
             fitted_a = 1e-9
         if fitted_b < 0:
-            logger.warning("Fitted b=%.2e is not positive. The performance may deteriorate..", fitted_b)
+            logger.warning("[ProfilingChunk] Fitted b=%.2e is not positive. Setting b=1e-9.", fitted_b)
+            fitted_b = 1e-9
 
         return fitted_a
 
@@ -84,7 +85,7 @@ class ChunkSizePredictor:
 
         if len(L) < MIN_FIT_POINTS_NO_CHUNK:
             logger.warning(
-                "Not enough data points for quadratic fitting (%d < 8)",
+                "[ProfilingChunk] Not enough data points for quadratic fitting (%s < 8)",
                 len(L),
             )
             return False
@@ -105,11 +106,11 @@ class ChunkSizePredictor:
                 fitted_b = float(poly[1])
                 fitted_c = float(poly[2])
                 logger.warning(
-                    "Least-squares fitting failed (%s), fallback to polyfit succeeded.",
+                    "[ProfilingChunk] Least-squares fitting failed (%s), fallback to polyfit succeeded.",
                     e,
                 )
             except Exception as fallback_error:
-                logger.warning("Failed to fit quadratic model: %s", fallback_error)
+                logger.warning("[ProfilingChunk] Failed to fit quadratic model: %s", fallback_error)
                 return False
 
         fitted_a = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
@@ -140,8 +141,9 @@ class ChunkSizePredictor:
         MAX_FIT_POINTS_CHUNK = 30
         if num_points < MIN_FIT_POINTS_CHUNK:
             logger.warning(
-                "Not enough data points for chunked data fitting (%d < 5)",
+                "[ProfilingChunk] Not enough data points for chunked data fitting (%s < %s)",
                 num_points,
+                MIN_FIT_POINTS_CHUNK,
             )
             return False
         if num_points > MAX_FIT_POINTS_CHUNK:
@@ -158,7 +160,7 @@ class ChunkSizePredictor:
             fitted_b = float(params[1])
             fitted_c = float(params[2])
         except np.linalg.LinAlgError as e:
-            logger.warning("Failed to fit chunked model: %s", e)
+            logger.warning("[ProfilingChunk] Failed to fit chunked model: %s", e)
             return False
 
         fitted_a = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
@@ -189,7 +191,7 @@ class ChunkSizePredictor:
             self.target_latency = 1.0
 
         logger.info(
-            "[ProfilingChunk] Target latency: %.2f ms (base_chunk=%d)",
+            "[ProfilingChunk] Target latency: %.2f ms (base_chunk=%s)",
             self.target_latency,
             base_chunk_size,
         )
@@ -277,7 +279,7 @@ class ChunkSizePredictor:
         if chunk_size < align:
             chunk_size = align
 
-        logger.debug("[ProfilingChunk] Predicted chunk_size=%d", chunk_size)
+        logger.debug("[ProfilingChunk] Predicted chunk_size=%s", chunk_size)
         return chunk_size if chunk_size >= align else None
 
     def predict_with_history(

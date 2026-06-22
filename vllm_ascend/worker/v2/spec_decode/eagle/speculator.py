@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+
 from contextlib import contextmanager
 from copy import copy
 from typing import Any, cast
@@ -24,6 +25,7 @@ import torch
 import vllm
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -332,6 +334,7 @@ def build_attn_metadata_wrapper():
 # the bug is reported to huawei CANN team, but not fixed yet.
 # NOTE(drslark): make a temporary patch only for `torch.gather`
 _original_gather = torch.gather
+logger.info("Patching torch.gather for CANN cache bug workaround (torch.gather pollutes buffer caches).")
 
 
 def gather(input, dim, index, *, sparse_grad=False, out=None):
