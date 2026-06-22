@@ -2733,9 +2733,10 @@ class NPUModelRunner(GPUModelRunner):
                 use_padded_batch,
             )
             if self.speculative_config and not skip_pp_token_state:
-                if use_padded_batch:
-                    # Padded draft-model/MTP paths must see the request state
-                    # before async bookkeeping appends -1 placeholders.
+                if use_pp_async_token_state and use_padded_batch:
+                    # PP+async padded draft-model/MTP paths must see the
+                    # request state before async bookkeeping appends -1
+                    # placeholders.
                     propose_draft_token_ids(sampler_output.sampled_token_ids)
                 else:
                     propose_drafts_after_bookkeeping = True
@@ -2767,7 +2768,10 @@ class NPUModelRunner(GPUModelRunner):
         if propose_drafts_after_bookkeeping:
             with record_function_or_nullcontext("draft_token"):
                 if self.speculative_config and not skip_pp_token_state:
-                    propose_draft_token_ids(valid_sampled_token_ids)
+                    if use_padded_batch:
+                        propose_draft_token_ids(sampler_output.sampled_token_ids)
+                    else:
+                        propose_draft_token_ids(valid_sampled_token_ids)
 
         # vLLM v0.18 defers KV connector finalization during target-model
         # forward when speculative decoding is enabled. Finalize here after
@@ -2850,16 +2854,13 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
         self._finalize_dump_data()
-        if not use_pp_async_token_state:
-            if self.need_accepted_tokens:
-                assert self.sampling_done_event is not None
-                with (
-                    record_function_or_nullcontext("async_state_update"),
-                    torch.npu.stream(global_stream()),
-                ):
-                    global_stream().wait_event(self.sampling_done_event)
-                    self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
-            else:
+        if self.need_accepted_tokens and not use_pp_async_token_state:
+            assert self.sampling_done_event is not None
+            with (
+                record_function_or_nullcontext("async_state_update"),
+                torch.npu.stream(global_stream()),
+            ):
+                global_stream().wait_event(self.sampling_done_event)
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
         logger.info(
             "%s sample_tokens output_ready async=%s req_ids=%s sampled_len=%s invalid_req_indices=%s",
