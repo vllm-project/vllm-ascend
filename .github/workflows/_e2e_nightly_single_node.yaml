@@ -119,7 +119,7 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         if: ${{ inputs.request_id != '' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.vllm_ascend_ref }}
           path: ./temp-vllm-ascend
