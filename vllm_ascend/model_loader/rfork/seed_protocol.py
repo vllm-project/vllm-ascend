@@ -39,7 +39,8 @@ def get_local_seed_key(
             f"RFork seed key is not set: model_url={model_url!r}, "
             f"model_deploy_strategy_name={model_deploy_strategy_name!r}. "
             "Ensure model_loader_extra_config contains "
-            "`model_url` and `model_deploy_strategy_name`."
+            "`model_url` and `model_deploy_strategy_name`, or set "
+            "MODEL_URL and MODEL_DEPLOY_STRATEGY_NAME."
         )
         logger.error(err_msg)
         raise RuntimeError(err_msg)
@@ -92,7 +93,9 @@ class RForkSeedProtocol:
 
     def _ensure_scheduler_url_set(self) -> None:
         if not self.scheduler_url:
-            raise RuntimeError("rfork_scheduler_url is not set. Cannot interact with the scheduler.")
+            raise RuntimeError(
+                "rfork_scheduler_url is not set. Set it through model_loader_extra_config or RFORK_SCHEDULER_URL."
+            )
 
     def get_seed(self):
         try:

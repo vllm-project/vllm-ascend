@@ -15,6 +15,7 @@
 #
 
 import gc
+import os
 import time
 
 import torch
@@ -40,17 +41,23 @@ class RForkModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         config = load_config.model_loader_extra_config
-        if not isinstance(config, dict):
+        if config is None:
+            config = {}
+        elif not isinstance(config, dict):
             err_msg = "RFork requires --model-loader-extra-config to be a JSON object."
             logger.error(err_msg)
             raise RuntimeError(err_msg)
 
         def _get_extra_config(key: str, default: str = "") -> str:
             value = config.get(key)
+            if value is None or not isinstance(value, str):
+                value = os.environ.get(key.upper())
             return value if isinstance(value, str) and value else default
 
         def _get_extra_config_float(key: str, default: float) -> float:
             value = config.get(key)
+            if value is None:
+                value = os.environ.get(key.upper())
             parsed_value = default
             if isinstance(value, (int, float)):
                 parsed_value = float(value)

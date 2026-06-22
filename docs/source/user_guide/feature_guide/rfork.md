@@ -31,7 +31,9 @@ The RFork loading flow in the current implementation is:
 
 ## Usage
 
-To enable RFork, pass `--load-format rfork` and provide RFork settings through `--model-loader-extra-config` as a JSON string.
+To enable RFork, pass `--load-format rfork` and provide RFork settings through `--model-loader-extra-config` as a JSON string, or through the corresponding environment variables.
+
+When both are set, `--model-loader-extra-config` takes precedence. Environment variables are used only when the matching JSON field is absent or has an unsupported type.
 
 ### RFork Prerequisites
 
@@ -40,13 +42,13 @@ To enable RFork, pass `--load-format rfork` and provide RFork settings through `
 
 ### Configuration Fields
 
-| Field Name | Type | Description | Allowed Values / Notes |
-|------------|------|-------------|------------------------|
-| **model_url** | String | Logical model identifier used to build the RFork seed key. | Required for RFork transfer. Instances that should share seeds must use the same value. |
-| **model_deploy_strategy_name** | String | Deployment strategy identifier used together with `model_url` to build the seed key. | Required for RFork transfer. Instances that should share seeds must use the same value. |
-| **rfork_scheduler_url** | String | Base URL of the planner service used for seed allocation, release, and heartbeat. | Required for planner-based matching. Example: `http://127.0.0.1:1223`. |
-| **rfork_seed_timeout_sec** | Number | Timeout for waiting until the local seed HTTP service becomes healthy after startup. | Optional. Default: `30`. Must be greater than `0`. |
-| **rfork_seed_key_separator** | String | Separator used when building the RFork seed key string. | Optional. Default: `$`. Keep the same value across compatible instances. |
+| Field Name | Environment Variable | Type | Description | Allowed Values / Notes |
+|------------|----------------------|------|-------------|------------------------|
+| **model_url** | `MODEL_URL` | String | Logical model identifier used to build the RFork seed key. | Required for RFork transfer. Instances that should share seeds must use the same value. |
+| **model_deploy_strategy_name** | `MODEL_DEPLOY_STRATEGY_NAME` | String | Deployment strategy identifier used together with `model_url` to build the seed key. | Required for RFork transfer. Instances that should share seeds must use the same value. |
+| **rfork_scheduler_url** | `RFORK_SCHEDULER_URL` | String | Base URL of the planner service used for seed allocation, release, and heartbeat. | Required for planner-based matching. Example: `http://127.0.0.1:1223`. |
+| **rfork_seed_timeout_sec** | `RFORK_SEED_TIMEOUT_SEC` | Number | Timeout for waiting until the local seed HTTP service becomes healthy after startup. | Optional. Default: `5.0`. Must be greater than `0`. Invalid values fall back to the default. |
+| **rfork_seed_key_separator** | `RFORK_SEED_KEY_SEPARATOR` | String | Separator used when building the RFork seed key string. | Optional. Default: `$`. Keep the same value across compatible instances. |
 
 ### How RFork Matches Seeds
 
@@ -91,17 +93,33 @@ For the first instance, the planner usually has no compatible seed yet, so RFork
 
 For later instances, if the planner can allocate a compatible seed, RFork will try to transfer weights from the existing seed instance before falling back to the default loader.
 
+Using environment variables:
+
+```shell
+export MODEL_URL="<model_url>"
+export MODEL_DEPLOY_STRATEGY_NAME="<deploy_strategy>"
+export RFORK_SCHEDULER_URL="http://<planner_ip>:<planner_port>"
+
+vllm serve <model_path> \
+  --tensor-parallel-size 1 \
+  --served-model-name <served_model_name> \
+  --port <port> \
+  --load-format rfork
+```
+
+Using `--model-loader-extra-config`:
+
 ```shell
 export RFORK_CONFIG='{
-  "model_url": "`<model_url>`",
-  "model_deploy_strategy_name": "`<deploy_strategy>`",
-  "rfork_scheduler_url": "http://`<planner_ip>`:`<planner_port>`"
+  "model_url": "<model_url>",
+  "model_deploy_strategy_name": "<deploy_strategy>",
+  "rfork_scheduler_url": "http://<planner_ip>:<planner_port>"
 }'
 
 vllm serve <model_path> \
   --tensor-parallel-size 1 \
-  --served-model-name `<served_model_name>` \
-  --port `<port>` \
+  --served-model-name <served_model_name> \
+  --port <port> \
   --load-format rfork \
   --model-loader-extra-config "${RFORK_CONFIG}"
 ```
