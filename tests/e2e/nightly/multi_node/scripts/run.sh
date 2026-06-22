@@ -223,13 +223,15 @@ sys.exit(1)
         ret=$?
         echo "pytest exit code: ret=${ret}"
         if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
+            echo "Leader: waiting 10s for worker logs..."
+            sleep 10
             if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
                 set +e; aop_pipeline; set -e
             fi
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
             exit 1
         elif [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
-            echo "Worker: waiting for leader AOP..."
+            echo "Worker: test mode done, exiting"
             exit 1
         fi
         return
@@ -397,19 +399,18 @@ backup_ascend_logs() {
 main() {
     trap backup_ascend_logs EXIT
 
-    # TODO: remove this block after AOP testing.
-    if [[ "${CONFIG_YAML_PATH:-}" == *"Kimi-K2_5-W4A8-A2-dual-nodes"* ]]; then
-        echo "====> TEST MODE: skip setup, go straight to run_tests_with_log ===="
-        cd "$WORKSPACE/vllm-ascend"
-        run_tests_with_log
-        return
-    fi
-
     check_npu_info
     clear_logs
     check_and_config
     if [[ "$IS_PR_TEST" == "true" ]]; then
         checkout_src
+        # TODO: remove this block after AOP testing
+        if [[ "${CONFIG_YAML_PATH:-}" == *"Kimi-K2_5-W4A8-A2-dual-nodes"* ]]; then
+            echo "====> TEST MODE: skip install, go straight to failure ===="
+            cd "$WORKSPACE/vllm-ascend"
+            run_tests_with_log
+            return
+        fi
         install_vllm_ascend
         install_aisbench
     fi
