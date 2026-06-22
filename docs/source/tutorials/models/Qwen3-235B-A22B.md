@@ -257,181 +257,328 @@ If the service starts successfully, the following startup log will be displayed:
 ```
 
 ### 5.2 Multi-Node PD Separation Deployment
+PD (Prefill-Decode) separation splits the Prefill and Decode phases across different nodes for better throughput. The following example shows the parameter configuration for a three-node A3 PD disaggregation scenario (one Prefill node + two Decode nodes):
 
-The complete PD disaggregation deployment process involves multi-node communication, KV cache transfer, and proxy configuration. For the detailed deployment guide, please refer to [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](../features/pd_disaggregation_mooncake_multi_node.md).
+For the detailed deployment guide, please refer to [Prefill-Decode Disaggregation Mooncake Verification (Qwen)](../features/pd_disaggregation_mooncake_multi_node.md).
 
-The following example shows the parameter configuration for a three-node A3 PD disaggregation scenario (one Prefill node + two Decode nodes):
+**Hardware**: 3 × Atlas 800 A3 (64G × 16), one for Prefill, two for Decode.
 
-**Prefill Node:**
+First, prepare `launch_online_dp.py` on each node:
 
-```shell
-#!/bin/sh
-export HCCL_IF_IP=prefill_node_1_ip
+```python
+import argparse
+import multiprocessing
+import os
+import subprocess
+import sys
 
-# Set ifname according to your network setting
-ifname=""
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
+    parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+    parser.add_argument("--dp-size-local", type=int, default=-1, help="Local data parallel size.")
+    parser.add_argument("--dp-rank-start", type=int, default=0, help="Starting rank for data parallel.")
+    parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
+    parser.add_argument("--dp-rpc-port", type=str, default=12345, help="Port for data parallel master node.")
+    parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
+    return parser.parse_args()
 
-export GLOO_SOCKET_IFNAME=${ifname}
-export TP_SOCKET_IFNAME=${ifname}
-export HCCL_SOCKET_IFNAME=${ifname}
+args = parse_args()
+dp_size = args.dp_size
+tp_size = args.tp_size
+dp_size_local = args.dp_size_local
+if dp_size_local == -1:
+    dp_size_local = dp_size
+dp_rank_start = args.dp_rank_start
+dp_address = args.dp_address
+dp_rpc_port = args.dp_rpc_port
+vllm_start_port = args.vllm_start_port
 
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+def run_command(visible_devices, dp_rank, vllm_engine_port):
+    command = [
+        "bash",
+        "./run_dp_template.sh",
+        visible_devices,
+        str(vllm_engine_port),
+        str(dp_size),
+        str(dp_rank),
+        dp_address,
+        dp_rpc_port,
+        str(tp_size),
+    ]
+    subprocess.run(command, check=True)
+
+if __name__ == "__main__":
+    template_path = "./run_dp_template.sh"
+    if not os.path.exists(template_path):
+        print(f"Template file {template_path} does not exist.")
+        sys.exit(1)
+
+    processes = []
+    num_cards = dp_size_local * tp_size
+    for i in range(dp_size_local):
+        dp_rank = dp_rank_start + i
+        vllm_engine_port = vllm_start_port + i
+        visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+        process = multiprocessing.Process(target=run_command, args=(visible_devices, dp_rank, vllm_engine_port))
+        processes.append(process)
+        process.start()
+
+    for process in processes:
+        process.join()
+```
+
+Then prepare `run_dp_template.sh` on each node.
+
+**Prefill node** (set `nic_name` and `local_ip` to your own):
+
+```bash
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+
 export HCCL_BUFFSIZE=512
 export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 export OMP_NUM_THREADS=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=2
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-vllm serve your_model_path \
-    --host <host_ip> \
-    --port <port> \
-    --tensor-parallel-size 8 \
-    --data-parallel-size 2 \
-    --data-parallel-size-local 2 \
-    --data-parallel-start-rank 0 \
-    --data-parallel-address prefill_node_1_ip \
-    --data-parallel-rpc-port prefill_node_dp_port \
-    --seed 1024 \
-    --quantization ascend \
-    --served-model-name qwen3 \
-    --max-num-seqs 24 \
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+export ASCEND_RT_VISIBLE_DEVICES=$1
+
+vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --enable-expert-parallel \
+    --served-model-name qwen3_235b \
     --max-model-len 40960 \
     --max-num-batched-tokens 16384 \
-    --enable-expert-parallel \
+    --max-num-seqs 24 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.9 \
+    --quantization ascend \
+    --no-enable-prefix-caching \
     --enforce-eager \
-    --trust-remote-code \
-    --gpu-memory-utilization 0.9 \
-    --no-enable-prefix-caching \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
-          "kv_role": "kv_producer",
-          "kv_port": "30000",
-          "engine_id": "0",
-          "kv_connector_extra_config": {
-              "prefill": {"dp_size": 2, "tp_size": 8},
-              "decode": {"dp_size": 8, "tp_size": 4}
-          }}'
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "engine_id": "0",
+        "kv_connector_extra_config": {
+             "use_ascend_direct": true,
+             "prefill": {
+                    "dp_size": 2,
+                    "tp_size": 8
+             },
+             "decode": {
+                    "dp_size": 8,
+                    "tp_size": 4
+             }
+        }
+        }'
 ```
 
-**Decode Node 1:**
+**Decode node 0** (set `nic_name` and `local_ip` to your own):
 
-```shell
-#!/bin/sh
-export HCCL_IF_IP=decode_node_1_ip
+```bash
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
 
-ifname=""
-
-export GLOO_SOCKET_IFNAME=${ifname}
-export TP_SOCKET_IFNAME=${ifname}
-export HCCL_SOCKET_IFNAME=${ifname}
-
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 export OMP_NUM_THREADS=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=2
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-vllm serve your_model_path \
-    --host <host_ip> \
-    --port <port> \
-    --tensor-parallel-size 4 \
-    --data-parallel-size 8 \
-    --data-parallel-size-local 4 \
-    --data-parallel-start-rank 0 \
-    --data-parallel-address decode_node_1_ip \
-    --data-parallel-rpc-port decode_node_dp_port \
-    --seed 1024 \
-    --quantization ascend \
-    --served-model-name qwen3 \
-    --max-num-seqs 128 \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 256 \
+export VLLM_ASCEND_ENABLE_FUSED_MC2=2
+export VLLM_TORCH_PROFILER_WITH_STACK=0
+export ASCEND_RT_VISIBLE_DEVICES=$1
+
+vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
     --enable-expert-parallel \
+    --served-model-name qwen3_235b \
+    --max-model-len 40960 \
+    --max-num-batched-tokens 512 \
+    --max-num-seqs 128 \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --async-scheduling \
+    --quantization ascend \
     --no-enable-prefix-caching \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
-          "kv_role": "kv_consumer",
-          "kv_port": "30100",
-          "engine_id": "1",
-          "kv_connector_extra_config": {
-              "prefill": {"dp_size": 2, "tp_size": 8},
-              "decode": {"dp_size": 8, "tp_size": 4}
-          }}'
+        "kv_role": "kv_consumer",
+        "kv_port": "30100",
+        "engine_id": "1",
+        "kv_connector_extra_config": {
+             "use_ascend_direct": true,
+             "prefill": {
+                    "dp_size": 2,
+                    "tp_size": 8
+             },
+             "decode": {
+                    "dp_size": 8,
+                    "tp_size": 4
+             }
+        }
+        }'
 ```
 
-**Decode Node 2:**
+**Decode node 1** (set `nic_name` and `local_ip` to your own):
 
-```shell
-#!/bin/sh
-export HCCL_IF_IP=decode_node_2_ip
+```bash
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
 
-ifname=""
-
-export GLOO_SOCKET_IFNAME=${ifname}
-export TP_SOCKET_IFNAME=${ifname}
-export HCCL_SOCKET_IFNAME=${ifname}
-
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-# To reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 export OMP_NUM_THREADS=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=2
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-vllm serve your_model_path \
-    --host <host_ip> \
-    --port <port> \
-    --headless \
-    --tensor-parallel-size 4 \
-    --data-parallel-size 8 \
-    --data-parallel-size-local 4 \
-    --data-parallel-start-rank 4 \
-    --data-parallel-address decode_node_1_ip \
-    --data-parallel-rpc-port decode_node_dp_port \
-    --seed 1024 \
-    --quantization ascend \
-    --served-model-name qwen3 \
-    --max-num-seqs 128 \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 256 \
+export VLLM_ASCEND_ENABLE_FUSED_MC2=2
+export VLLM_TORCH_PROFILER_WITH_STACK=0
+export ASCEND_RT_VISIBLE_DEVICES=$1
+
+vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
     --enable-expert-parallel \
+    --served-model-name qwen3_235b \
+    --max-model-len 40960 \
+    --max-num-batched-tokens 512 \
+    --max-num-seqs 128 \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --async-scheduling \
+    --quantization ascend \
     --no-enable-prefix-caching \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
-          "kv_role": "kv_consumer",
-          "kv_port": "30100",
-          "engine_id": "1",
-          "kv_connector_extra_config": {
-              "prefill": {"dp_size": 2, "tp_size": 8},
-              "decode": {"dp_size": 8, "tp_size": 4}
-          }}'
+        "kv_role": "kv_consumer",
+        "kv_port": "30100",
+        "engine_id": "1",
+        "kv_connector_extra_config": {
+             "use_ascend_direct": true,
+             "prefill": {
+                    "dp_size": 2,
+                    "tp_size": 8
+             },
+             "decode": {
+                    "dp_size": 8,
+                    "tp_size": 4
+             }
+        }
+        }'
+```
+
+Once the scripts are ready, start the servers on each node.
+
+**Prefill node:**
+
+```bash
+python launch_online_dp.py \
+    --dp-size 2 --tp-size 8 \
+    --dp-size-local 2 --dp-rank-start 0 \
+    --dp-address <prefill_ip> --dp-rpc-port 54951 \
+    --vllm-start-port 9123
+```
+
+**Decode node 0:**
+
+```bash
+python launch_online_dp.py \
+    --dp-size 8 --tp-size 4 \
+    --dp-size-local 4 --dp-rank-start 0 \
+    --dp-address <decode_ip> --dp-rpc-port 54951 \
+    --vllm-start-port 9123
+```
+
+**Decode node 1:**
+
+```bash
+python launch_online_dp.py \
+    --dp-size 8 --tp-size 4 \
+    --dp-size-local 4 --dp-rank-start 4 \
+    --dp-address <decode_ip> --dp-rpc-port 54951 \
+    --vllm-start-port 9123
+```
+
+#### Request Forwarding
+
+Run the proxy on any machine that can reach both nodes. You can get the proxy script from the repository: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
+
+```bash
+unset http_proxy https_proxy
+
+python load_balance_proxy_server_example.py \
+  --port 38085 \
+  --host <prefill_ip> \
+  --prefiller-hosts \
+    <prefill_ip> <prefill_ip> \
+  --prefiller-ports \
+    9123 9124 \
+  --decoder-hosts \
+    <decode0_ip> <decode0_ip> <decode0_ip> <decode0_ip> \
+    <decode1_ip> <decode1_ip> <decode1_ip> <decode1_ip> \
+  --decoder-ports \
+    9123 9124 9125 9126 \
+    9123 9124 9125 9126 \
 ```
 
 :::{note}
@@ -603,11 +750,11 @@ After several minutes, you will get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | Configuration | #NPUs | TP | DP | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|-------------|--------------------|-----------|-----------|--------------|------------------|
-| High Throughput | Single-Node | 16 | 4 | 4 | none | On | On | On | On |
-| Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On | On |
-| Long Context | Single-Node | 16 | 8 | 1 | none | On | On | On | Off |
+| Scenario | Configuration | #NPUs | TP | DP | MTP Speculation Num | FUSED_MC2 | EP Switch | Async Scheduling |
+|----------|---------------|-------|----|-------------|--------------------|-----------|-----------|--------------|
+| High Throughput | Single-Node | 16 | 4 | 4 | none | On | On  | On |
+| Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On |
+| Long Context | Single-Node | 16 | 8 | 1 | none | On | On | Off |
 
 > For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment) 
 
