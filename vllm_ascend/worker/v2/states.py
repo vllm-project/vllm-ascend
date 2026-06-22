@@ -18,7 +18,6 @@
 #
 
 import torch
-from vllm.logger import logger
 from vllm.v1.worker.gpu.states import RequestState
 
 
