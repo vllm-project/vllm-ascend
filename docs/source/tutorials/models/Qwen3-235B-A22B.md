@@ -24,13 +24,13 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A5 (112G × 4), 1 Atlas 800I A3 (64G × 16) node, 1 Atlas 800I A2 (64G × 8) node, or 2 Atlas 800I A2 (32G × 8) nodes | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
+| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A5 (112G × 8), 1 Atlas 800I A3 (64G × 16), 1 Atlas 800I A2 (64G × 8)| [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
 
 **Quantized Version (Pre-converted):**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-235B-A22B-W8A8 | W8A8 | 1 Atlas 800I A3 (64G × 16) node, 1 Atlas 800I A2 (64G × 8) node, or 2 Atlas 800I A2 (32G × 8) nodes | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8) |
+| Qwen3-235B-A22B-W8A8 | W8A8 | 1 Atlas 800I A3 (64G × 16), 1 Atlas 800I A2 (64G × 8)| [Download](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -62,6 +62,9 @@ python3 quant_qwen_moe_w8a8.py --model_path /path/to/your/Qwen3-235B-A22B \
     --trust_remote_code True \
     --rot
 ```
+### 3.3 Verify Multi-node Communication (Optional)
+
+If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
 
 ## 4 Installation
 
@@ -169,24 +172,21 @@ Expected result: The version information is displayed, matching the pulled image
 
 If you prefer not to use the Docker image, you can build from source:
 
-1. Install vLLM:
+1. Clone and install vLLM:
 
-    ```bash
-    pip install vllm
-    ```
+   ```bash
+   git clone https://github.com/vllm-project/vllm.git
+   cd vllm
+   pip install -e .
+   ```
 
-2. Clone the vLLM-Ascend repository:
+2. Clone and install the vLLM-Ascend repository:
 
-    ```bash
-    git clone https://github.com/vllm-project/vllm-ascend.git
-    cd vllm-ascend
-    ```
-
-3. Install in development mode:
-
-    ```bash
-    pip install -e .
-    ```
+   ```bash
+   git clone https://github.com/vllm-project/vllm-ascend.git
+   cd vllm-ascend
+   pip install -e .
+   ```
 
 **Installation Verification:**
 
@@ -199,6 +199,8 @@ Expected result: The version information is displayed, confirming a successful i
 :::{note}
 If deploying a multi-node environment, set up the environment on each node.
 :::
+
+For more details, please refer to the [Installation Guide](../../installation.md).
 
 ## 5 Online Service Deployment
 
@@ -507,7 +509,7 @@ models = [
     )
 ]
 ```
-**Run the accuracy evaluation using the aime2025 dataset as an example:**
+**Run the accuracy evaluation using the aime2024 dataset as an example:**
 
 ```bash
 ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt --debug
@@ -521,6 +523,40 @@ ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_pro
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 The following is an example configuration for the accuracy evaluation config file:
+
+```bash
+# Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py
+from ais_bench.benchmark.models import VLLMCustomAPIChat
+from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
+
+models = [
+    dict(
+        attr="service",
+        type=VLLMCustomAPIChat,
+        abbr="vllm-api-stream-chat",
+        path="your_model_path",
+        model="qwen",
+        stream=True,
+        request_rate=0,
+        use_timestamp=False,
+        retry=2,
+        host_ip="localhost",
+        host_port=20002,
+        max_out_len=1500,
+        batch_size=140,
+        trust_remote_code=False,
+        generation_kwargs=dict(
+            temperature=0,
+            ignore_eos = True
+        ),
+    )
+]
+```
+**Run the performance evaluation using the GSM8K dataset as an example:**
+
+```bash
+ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf --num-prompts 560
+```
 
 ### Using vLLM Benchmark
 
@@ -561,7 +597,7 @@ After several minutes, you will get the performance evaluation result.
 | High Throughput | Single-Node (TP4, DP4) | 16 (A3) | W8A8 | DP and TP distribute MoE experts across 16 NPUs for maximum throughput |
 | High Throughput | PD Disaggregation (3 nodes) | 48 (3×A3) | W8A8 | 3-node PD separation balances prefill and decode resources for high throughput |
 | Low Latency | Single-Node (TP16) | 16 (A3) | W8A8 | 16-NPU TP minimizes per-token latency with speculative decoding |
-| Long Context | Single-Node (TP8, CP2) | 8 (A3) | W8A8 | 8-NPU TP with Context Parallelism extends context to 135K tokens |
+| Long Context | Single-Node (TP8, CP2) | 16 (A3) | W8A8 | 16-NPU TP with Context Parallelism extends context to 135K tokens |
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
@@ -571,7 +607,7 @@ After several minutes, you will get the performance evaluation result.
 |----------|---------------|-------|----|-------------|--------------------|-----------|-----------|--------------|------------------|
 | High Throughput | Single-Node | 16 | 4 | 4 | none | On | On | On | On |
 | Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On | On |
-| Long Context | Single-Node | 8 | 8 | 1 | none | On | On | On | Off |
+| Long Context | Single-Node | 16 | 8 | 1 | none | On | On | On | Off |
 
 > For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment) 
 
@@ -601,7 +637,7 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve your_model_path \
-    --served-model-name "qwen" \
+    --served-model-name qwen3 \
     --host <host_ip> \
     --port <port> \
     --async-scheduling \
@@ -647,7 +683,7 @@ export TASK_QUEUE_ENABLE=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve your_model_path \
-    --served-model-name "qwen" \
+    --served-model-name qwen3 \
     --host <host_ip> \
     --port <port> \
     --async-scheduling \
@@ -696,7 +732,7 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve your_model_path \
-    --served-model-name "qwen" \
+    --served-model-name qwen3 \
     --host <host_ip> \
     --port <port> \
     --tensor-parallel-size 8 \
