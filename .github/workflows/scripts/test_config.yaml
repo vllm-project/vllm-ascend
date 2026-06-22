@@ -739,7 +739,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 570
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 220
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 1030
-  tests/e2e/pull_request/four_card/test_qwen3_next.py: 4090
+  tests/e2e/pull_request/four_card/test_qwen3_next.py: 2000
   tests/ut/attention/a2/test_attention_cp.py: 30
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30
