@@ -34,7 +34,9 @@ permissions:
 jobs:
   e2e-test:
     name: Run /e2e tests
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
       pr_sha: ${{ steps.resolve.outputs.pr_sha }}
       test_groups: ${{ steps.groups.outputs.test_groups }}
@@ -43,6 +45,15 @@ jobs:
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
       - name: Check user authorization
         id: auth
         env:
@@ -151,7 +162,7 @@ jobs:
       - name: Categorize tests by runner
         id: groups
         run: |
-          pip install regex
+          pip install regex pyyaml
           TESTS=$(echo "${{ steps.validate.outputs.tests }}" | tr '\n' ' ')
           read -ra TEST_ARRAY <<< "$TESTS"
           python3 .github/workflows/scripts/select_tests.py \
@@ -183,7 +194,7 @@ jobs:
     name: Report result
     needs: [e2e-test, trigger-selected-tests]
     if: always() && needs.e2e-test.result == 'success' && needs.e2e-test.outputs.notify_comment_id != ''
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Update comment with result
         uses: peter-evans/create-or-update-comment@v5

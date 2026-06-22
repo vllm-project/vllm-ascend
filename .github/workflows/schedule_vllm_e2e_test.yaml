@@ -35,7 +35,7 @@ concurrency:
 
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: https://repo.huaweicloud.com/ascend/repos/pypi
+  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_HTTP_TIMEOUT: 120
@@ -43,23 +43,33 @@ env:
   UV_SYSTEM_PYTHON: 1
 
 jobs:
+    resolve-tag:
+        runs-on: ubuntu-latest
+        outputs:
+            release_tag: ${{ steps.vllm.outputs.release_tag }}
+        steps:
+          - uses: actions/checkout@v6
+          - name: Read vLLM release tag
+            id: vllm
+            uses: ./.github/actions/read-vllm-release-tag
+
     e2e-upstream_singlecard:
         runs-on: linux-aarch64-a2b3-1
+        needs: resolve-tag
         strategy:
           fail-fast: false
           matrix:
             part: [0, 1, 2, 3]
+            image_tag: [9.0.0-910b-ubuntu22.04-py3.12]
+            num_npus: [1]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v6
-          - name: Read vLLM release tag
-            id: vllm
-            uses: ./.github/actions/read-vllm-release-tag
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -86,7 +96,7 @@ jobs:
             uses: actions/checkout@v6
             with:
               repository: vllm-project/vllm
-              ref: ${{ steps.vllm.outputs.release_tag }}
+              ref: ${{ needs.resolve-tag.outputs.release_tag }}
               path: ./vllm-empty
               fetch-depth: 1
 
@@ -99,19 +109,54 @@ jobs:
               pip install -e tests/plugins/prithvi_io_processor_plugin
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
-          - name: Install vllm-project/vllm-ascend
-            env:
-              MAX_JOBS: "23"
+          - name: Get csrc hash
+            id: get_csrc_hash
             run: |
+              CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+                -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+              echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+          - name: Get architecture
+            id: get_arch
+            run: |
+              ARCH=$(uname -m)
+              case "$ARCH" in
+                x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
+                aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
+                *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+              esac
+          
+          - name: Restore vllm-ascend csrc cache
+            id: cache-csrc
+            uses: runs-on/cache@v5
+            with:
+              path: |
+                vllm_ascend/_cann_ops_custom
+                vllm_ascend/*.so
+                vllm_ascend/lib
+                vllm_ascend/include
+              key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+              restore-keys: |
+                vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+           
+          - name: Install vllm-project/vllm-ascend with device
+            run: |
+              export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
               pip install uc-manager
-              uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --extra-index-url  http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/
               uv pip install -r requirements-dev.txt
               uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-              uv pip install -e .
+              if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+                echo "CSRC cache hit: .so files found, skip kernel compilation"
+                COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+              else
+                echo "CSRC cache miss: no .so files found, compile kernels"
+                uv pip install -e . --no-build-isolation
+              fi
               uv pip install tblib 
-              uv pip install runai_model_streamer pqdm timm schemathesis==3.39.15 "vllm[helion]" "runai-model-streamer[s3,gcs]"
+              uv pip install pqdm timm schemathesis==3.39.15 "vllm[helion]" "runai-model-streamer[s3,gcs]"
               uv pip install "mteb[bm25s]" open_clip_torch terratorch==1.2.2 imagehash
               uv pip install "lm-eval[api]" num2words "vllm[grpc]" "vllm[audio]"
+
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
@@ -127,24 +172,24 @@ jobs:
                 --auto-partition-id "${{ matrix.part }}" \
                 --auto-partition-size 4 \
                 --continue-on-error
-              
-    e2e-upstream_a2_2:
-        runs-on: linux-aarch64-a2b3-2
+
+    e2e-upstream_multicard:
+        runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        needs: resolve-tag
         strategy:
           fail-fast: false
           matrix:
             part: [0]
+            image_tag: [9.0.0-910b-ubuntu22.04-py3.12]
+            num_npus: [2, 4]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v6
-          - name: Read vLLM release tag
-            id: vllm
-            uses: ./.github/actions/read-vllm-release-tag
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -171,7 +216,7 @@ jobs:
             uses: actions/checkout@v6
             with:
               repository: vllm-project/vllm
-              ref: ${{ steps.vllm.outputs.release_tag }}
+              ref: ${{ needs.resolve-tag.outputs.release_tag }}
               path: ./vllm-empty
               fetch-depth: 1
 
@@ -182,16 +227,51 @@ jobs:
               pip uninstall -y triton
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
-          - name: Install vllm-project/vllm-ascend
-            env:
-              MAX_JOBS: "46"
+          - name: Get csrc hash
+            id: get_csrc_hash
             run: |
+              CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+                -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+              echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+          - name: Get architecture
+            id: get_arch
+            run: |
+              ARCH=$(uname -m)
+              case "$ARCH" in
+                x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
+                aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
+                *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+              esac
+          
+          - name: Restore vllm-ascend csrc cache
+            id: cache-csrc
+            uses: runs-on/cache@v5
+            with:
+              path: |
+                vllm_ascend/_cann_ops_custom
+                vllm_ascend/*.so
+                vllm_ascend/lib
+                vllm_ascend/include
+              key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+              restore-keys: |
+                vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+           
+          - name: Install vllm-project/vllm-ascend with device
+            run: |
+              export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
               pip install uc-manager
               uv pip install -r requirements-dev.txt
               uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-              uv pip install -e .
-              uv pip install tblib
-              
+              if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+                echo "CSRC cache hit: .so files found, skip kernel compilation"
+                COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+              else
+                echo "CSRC cache miss: no .so files found, compile kernels"
+                uv pip install -e . --no-build-isolation
+              fi
+              uv pip install tblib 
+
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
@@ -199,28 +279,28 @@ jobs:
               VLLM_WORKER_MULTIPROC_METHOD: spawn
             run: |
               python3 ../.github/workflows/scripts/run_suite.py \
-                --suite e2e-upstream_a2_2 \
+                --suite e2e-upstream_a2_${{ matrix.num_npus }} \
                 --auto-partition-id "${{ matrix.part }}" \
                 --auto-partition-size 1 \
                 --continue-on-error
-
-    e2e-upstream_a2_4:
-        runs-on: linux-aarch64-a2b3-4
+              
+    e2e-upstream_online:
+        runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        needs: resolve-tag
         strategy:
           fail-fast: false
           matrix:
             part: [0]
+            image_tag: [9.0.0-910b-ubuntu22.04-py3.12]
+            num_npus: [1]
         container:
-          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
+          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
-            HF_HUB_OFFLINE: 1
+            HF_HUB_OFFLINE: 0
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v6
-          - name: Read vLLM release tag
-            id: vllm
-            uses: ./.github/actions/read-vllm-release-tag
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -247,7 +327,7 @@ jobs:
             uses: actions/checkout@v6
             with:
               repository: vllm-project/vllm
-              ref: ${{ steps.vllm.outputs.release_tag }}
+              ref: ${{ needs.resolve-tag.outputs.release_tag }}
               path: ./vllm-empty
               fetch-depth: 1
 
@@ -258,15 +338,53 @@ jobs:
               pip uninstall -y triton
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
-          - name: Install vllm-project/vllm-ascend
-            env:
-              MAX_JOBS: "92"
+          - name: Get csrc hash
+            id: get_csrc_hash
             run: |
+              CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+                -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+              echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+          - name: Get architecture
+            id: get_arch
+            run: |
+              ARCH=$(uname -m)
+              case "$ARCH" in
+                x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
+                aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
+                *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+              esac
+          
+          - name: Restore vllm-ascend csrc cache
+            id: cache-csrc
+            uses: runs-on/cache@v5
+            with:
+              path: |
+                vllm_ascend/_cann_ops_custom
+                vllm_ascend/*.so
+                vllm_ascend/lib
+                vllm_ascend/include
+              key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+              restore-keys: |
+                vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+           
+          - name: Install vllm-project/vllm-ascend with device
+            run: |
+              export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
               pip install uc-manager
               uv pip install -r requirements-dev.txt
               uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-              uv pip install -e .
-              uv pip install tblib
+              if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+                echo "CSRC cache hit: .so files found, skip kernel compilation"
+                COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+              else
+                echo "CSRC cache miss: no .so files found, compile kernels"
+                uv pip install -e . --no-build-isolation
+              fi
+              uv pip install tblib 
+              uv pip install pqdm timm schemathesis==3.39.15 "vllm[helion]" "runai-model-streamer[s3,gcs]"
+              uv pip install "mteb[bm25s]" open_clip_torch terratorch==1.2.2 imagehash
+              uv pip install "lm-eval[api]" num2words "vllm[grpc]" "vllm[audio]"
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
@@ -275,7 +393,7 @@ jobs:
               VLLM_WORKER_MULTIPROC_METHOD: spawn
             run: |
               python3 ../.github/workflows/scripts/run_suite.py \
-                --suite e2e-upstream_a2_4 \
+                --suite e2e-upstream_online_${{ matrix.num_npus }} \
                 --auto-partition-id "${{ matrix.part }}" \
                 --auto-partition-size 1 \
                 --continue-on-error
