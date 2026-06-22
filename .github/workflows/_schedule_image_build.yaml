@@ -84,9 +84,11 @@ jobs:
           - arch: linux/amd64
             runner: ubuntu-latest
             tag: amd64
+
           - arch: linux/arm64
             runner: ubuntu-22.04-arm
             tag: arm64
+
     steps:
 
     - name: Validate inputs (workflow_dispatch only)
@@ -206,6 +208,16 @@ jobs:
         DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
         BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
         echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> $GITHUB_OUTPUT
+        
+    - name: Get architecture
+      id: get_arch
+      run: |
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
+          aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
+          *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+        esac
 
     - name: Cache vllm-ascend csrc
       id: cache-csrc
@@ -216,7 +228,7 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-        key: vllm-ascend-build-v1-${{ runner.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+        key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
 
     - name: Build and push

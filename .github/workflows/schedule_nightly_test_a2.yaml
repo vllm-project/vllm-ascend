@@ -189,8 +189,8 @@ jobs:
           )
         }}
     secrets:
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
+      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   multi-node-tests:
     name: multi-node
@@ -236,8 +236,8 @@ jobs:
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
+      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   generate-accuracy-matrix:
     name: Generate accuracy test matrix
