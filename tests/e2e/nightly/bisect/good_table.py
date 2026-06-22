@@ -65,9 +65,34 @@ class GoodEntry:
         return self.status.strip().lower() in ("success", "pass", "passed", "ok")
 
 
-def _norm(row: dict[str, str]) -> dict[str, str]:
-    """Lower/strip header keys so minor header variations still match."""
-    return {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+def _coerce(value: object) -> str:
+    """Normalise a DictReader cell to a stripped string.
+
+    ``csv.DictReader`` yields a *list* under the ``None`` key for surplus columns
+    when a row has more fields than the header (e.g. an unquoted value contains a
+    comma). Joining keeps the data readable; ``None`` (a short row's missing
+    cell) becomes "".
+    """
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ",".join(str(v) for v in value).strip()
+    return str(value).strip()
+
+
+def _norm(row: dict[str, object]) -> tuple[dict[str, str], bool]:
+    """Return (lower-cased/stripped row, had_surplus_columns).
+
+    ``had_surplus_columns`` is True when DictReader produced a ``None`` overflow
+    key, i.e. that data row has more columns than the header (misaligned CSV).
+    """
+    had_surplus = None in row and row[None] not in (None, [], "")
+    normalised: dict[str, str] = {}
+    for key, value in row.items():
+        if key is None:  # surplus-column overflow; not a real named field
+            continue
+        normalised[key.strip().lower()] = _coerce(value)
+    return normalised, had_surplus
 
 
 def _parse_time(value: str) -> datetime:
@@ -91,9 +116,16 @@ class GoodTable:
             logger.warning("Good table not found at %s", self.path)
             return []
         entries: list[GoodEntry] = []
-        with self.path.open(newline="", encoding="utf-8") as f:
-            for raw in csv.DictReader(f):
-                row = _norm(raw)
+        with self.path.open(newline="", encoding="utf-8-sig") as f:
+            for line_no, raw in enumerate(csv.DictReader(f), start=2):
+                row, had_surplus = _norm(raw)
+                if had_surplus:
+                    logger.warning(
+                        "Good table line %d has more columns than the header "
+                        "(misaligned CSV, likely an unquoted comma in a field); "
+                        "parsing the named columns best-effort. name=%r",
+                        line_no, row.get(COL_NAME.lower(), ""),
+                    )
                 name = row.get(COL_NAME.lower(), "")
                 if not name and not row.get(COL_PATH.lower()):
                     continue
