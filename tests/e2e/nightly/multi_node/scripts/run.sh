@@ -220,16 +220,15 @@ print('AssertionError: test failed - forced for AOP testing')
 sys.exit(1)
 " 2>&1 | tee "$log_file"
         ret=$?
-        set -e
         echo "pytest exit code: ret=${ret}"
         if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
             if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
-                aop_pipeline
+                set +e; aop_pipeline; set -e
             fi
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
             exit 1
         elif [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
-            aop_pipeline
+            echo "Worker: waiting for leader AOP..."
             exit 1
         fi
         return
@@ -246,13 +245,13 @@ sys.exit(1)
             print_success "All tests passed!"
         else
             if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
-                aop_pipeline
+                set +e; aop_pipeline; set -e
             fi
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
             exit 1
         fi
     elif [ $ret -ne 0 ] && [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
-        aop_pipeline
+        echo "Worker failure detected, waiting for leader AOP..."
         exit 1
     fi
 }
