@@ -1645,7 +1645,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
-        start = time.perf_counter()
         default_stream = torch.npu.current_stream()
         with torch.npu.stream(self.valid_sampled_token_count_copy_stream): 
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)
@@ -1675,7 +1674,6 @@ class NPUModelRunner(GPUModelRunner):
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
-        propose_start = time.perf_counter()
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
@@ -1771,7 +1769,6 @@ class NPUModelRunner(GPUModelRunner):
                     "sampled_token_ids should be a python list whenpadded-batch is disabled."
                 )
                 assert self.drafter is not None
-                step_start = time.perf_counter()
                 next_token_ids = self.drafter.prepare_next_token_ids_cpu(
                     sampled_token_ids, self.requests, self.input_batch, scheduler_output.num_scheduled_tokens
                 )
@@ -1784,7 +1781,6 @@ class NPUModelRunner(GPUModelRunner):
                     "sampled_token_ids should be a torch.Tensor whenpadded-batch is enabled."
                 )
                 assert self.drafter is not None
-                step_start = time.perf_counter()
                 next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
                     sampled_token_ids,
                     self.requests,
@@ -1849,13 +1845,11 @@ class NPUModelRunner(GPUModelRunner):
                     # NOTE: Currently, MTP-fullgraph is incompatibility with pcp
                     token_indices_to_sample = None
                     assert self.drafter is not None
-                    step_start = time.perf_counter()
                     common_attn_metadata, token_indices = self.drafter.prepare_inputs(
                         common_attn_metadata, sampled_token_ids, spec_decode_metadata.num_draft_tokens
                     )
                 else:
                     assert self.drafter is not None
-                    step_start = time.perf_counter()
                     common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu = (
                         self.drafter.prepare_inputs_padded(
                             common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
@@ -1875,7 +1869,6 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         target_hidden_states = hidden_states[token_indices]
             assert self.drafter is not None
-            step_start = time.perf_counter()
             draft_token_ids = self.drafter._propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -1916,7 +1909,6 @@ class NPUModelRunner(GPUModelRunner):
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_copy_stream is not None
         assert self.draft_token_ids_cpu is not None
-        start = time.perf_counter()
         default_stream = torch.npu.current_stream()
         num_reqs = draft_token_ids.shape[0]
         with torch.npu.stream(self.draft_token_ids_copy_stream):
@@ -2428,14 +2420,12 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits.to(self.device).to(logits_dtype)
 
         with record_function_or_nullcontext("sample_token"):
-            sample_start = time.perf_counter()
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         use_pp_async_token_state = (
             self.use_async_scheduling and get_pp_group().world_size > 1
         )
         if use_pp_async_token_state:
-            update_state_start = time.perf_counter()
             if self.need_accepted_tokens:
                 if self.sampling_done_event is None:
                     self.sampling_done_event = torch.npu.Event()
@@ -2473,7 +2463,6 @@ class NPUModelRunner(GPUModelRunner):
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            nested_start = time.perf_counter()
             self._draft_token_ids = self.propose_draft_token_ids(
                 sampled_token_ids,
                 self.input_batch.sampling_metadata,
@@ -2546,7 +2535,6 @@ class NPUModelRunner(GPUModelRunner):
         # forward when speculative decoding is enabled. Finalize here after
         # draft model runs so KV pool save/put can complete.
         if self.speculative_config is not None:
-            finalize_start = time.perf_counter()
             self.finalize_kv_connector()
 
         routed_experts_lists = None
@@ -2566,7 +2554,6 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
         if need_pp_prev_sampled_broadcast and not skip_pp_token_state:
-            pp_bcast_start = time.perf_counter()
             prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
             if (
                 prev_sampled_token_ids is None
@@ -3602,18 +3589,18 @@ class NPUModelRunner(GPUModelRunner):
 
             need_dummy_logits = not is_profile and lmhead_tp_enable()
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
-            dummy_num_tokens = max_num_reqs_across_dp
+            dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
 
             def dummy_compute_logits(hidden_states):
                 if not need_dummy_logits:
                     return None
-                return self.model.compute_logits(hidden_states[:dummy_num_tokens])
+                return self.model.compute_logits(hidden_states[dummy_indices])
 
             def dummy_drafter_compute_logits(hidden_states):
                 if not need_dummy_logits or self.drafter is None:
                     return
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
-                    return self.drafter.model.compute_logits(hidden_states[:dummy_num_tokens])
+                    return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
             with set_ascend_forward_context(
                 attn_metadata,
