@@ -24,22 +24,26 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-0.6B | 1 Atlas 800I A3 (64G × 2) or 1 Atlas 800I A2 (64G × 1) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
-| Qwen3-1.7B | 1 Atlas 800I A3 (64G × 2) or 1 Atlas 800I A2 (64G × 1) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
-| Qwen3-4B | 1 Atlas 800I A3 (64G × 2) or 1 Atlas 800I A2 (64G × 1) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
-| Qwen3-8B | 1 Atlas 800I A3 (64G × 2) or 1 Atlas 800I A2 (64G × 1) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
-| Qwen3-14B | 1 Atlas 800I A3 (64G × 2) or 2 Atlas 800I A2 (64G × 1) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
-| Qwen3-32B | 1 Atlas 800I A5 (112G × 2), 2 Atlas 800I A3 (64G × 4) or 4 Atlas 800I A2 (64G × 4) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
+| Qwen3-0.6B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
+| Qwen3-1.7B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
+| Qwen3-4B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
+| Qwen3-8B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
+| Qwen3-14B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
+| Qwen3-32B | 1 Atlas 800I A5 (112G × 8), 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
 
 **Quantized Versions:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W4A8 | W4A8 | 1 Atlas 800I A3 (64G × 2) or 1 Atlas 800I A2 (64G × 1) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
-| Qwen3-32B-W4A4 | W4A4 | 1 Atlas 800I A3 (64G × 2) or 1 Atlas 800I A2 (64G × 1) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
-| Qwen3-32B-W8A8 | W8A8 | 2 Atlas 800I A3 (64G × 4) or 4 Atlas 800I A2 (64G × 4) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
+| Qwen3-8B-W4A8 | W4A8 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8) |
+| Qwen3-32B-W4A4 | W4A4 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
+| Qwen3-32B-W8A8 | W8A8 | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
+
+### 3.2 Verify Multi-node Communication (Optional)
+
+If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
 
 ## 4 Installation
 
@@ -147,24 +151,21 @@ Expected result: The version information is displayed, matching the pulled image
 
 If you prefer not to use the Docker image, you can build from source:
 
-1. Install vLLM:
+1. Clone and install vLLM:
 
-    ```bash
-    pip install vllm
-    ```
+   ```bash
+   git clone https://github.com/vllm-project/vllm.git
+   cd vllm
+   pip install -e .
+   ```
 
-2. Clone the vLLM-Ascend repository:
+2. Clone and install the vLLM-Ascend repository:
 
-    ```bash
-    git clone https://github.com/vllm-project/vllm-ascend.git
-    cd vllm-ascend
-    ```
-
-3. Install in development mode:
-
-    ```bash
-    pip install -e .
-    ```
+   ```bash
+   git clone https://github.com/vllm-project/vllm-ascend.git
+   cd vllm-ascend
+   pip install -e .
+   ```
 
 **Installation Verification:**
 
@@ -178,6 +179,7 @@ Expected result: The version information is displayed, confirming a successful i
 If deploying a multi-node environment, set up the environment on each node.
 :::
 
+For more details, please refer to the [Installation Guide](../../installation.md).
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
@@ -222,7 +224,7 @@ vllm serve your_model_path \
     --port 8004 \
     --data-parallel-size 1 \
     --tensor-parallel-size 2 \
-    --served-model-name Qwen3-32B-w4a4-vllm \
+    --served-model-name qwen3 \
     --distributed_executor_backend "mp" \
     --max-model-len 40960 \
     --max-num-batched-tokens 16384 \
@@ -236,10 +238,10 @@ vllm serve your_model_path \
 Atlas 800I A2/A3：
 Qwen3-8B-W4A8:  
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=8,9
+export ASCEND_RT_VISIBLE_DEVICES=0,1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 vllm serve your_model_path \
-    --served-model-name "qwen3-8b-w4a8" \
+    --served-model-name qwen3 \
     --max-model-len 4096 \
     --port 20001 \
     --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}' \
@@ -342,6 +344,40 @@ For setup details, including installation, dataset download, and configuration, 
 
 The following is an example configuration for the accuracy evaluation config file:
 
+```bash
+# Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py
+from ais_bench.benchmark.models import VLLMCustomAPIChat
+from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
+
+models = [
+    dict(
+        attr="service",
+        type=VLLMCustomAPIChat,
+        abbr="vllm-api-stream-chat",
+        path="your_model_path",
+        model="qwen3",
+        stream=True,
+        request_rate=0,
+        use_timestamp=False,
+        retry=2,
+        host_ip="127.0.0.1",
+        host_port=8004,
+        max_out_len=1500,
+        batch_size=90,
+        trust_remote_code=False,
+        generation_kwargs=dict(
+            temperature=0,
+            ignore_eos = True
+        ),
+    )
+]
+```
+**Run the performance evaluation using the GSM8K dataset as an example:**
+
+```bash
+ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf --num-prompts 360
+```
+
 ### Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
@@ -434,7 +470,7 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 vllm serve your_model_path \
   --host <host_ip> \
   --port <port> \
-  --served-model-name qwen \
+  --served-model-name qwen3 \
   --trust-remote-code \
   --seed 1024 \
   --max-model-len 135000 \
