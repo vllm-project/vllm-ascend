@@ -59,4 +59,4 @@ vllm_ascend_loaders = [
 for loader_module in vllm_ascend_loaders:
     loader = sys.modules.get(loader_module)
     if loader is not None:
-        loader.process_weights_after_loading = ascend_process_weights_after_loading
+        loader.__dict__["process_weights_after_loading"] = ascend_process_weights_after_loading
