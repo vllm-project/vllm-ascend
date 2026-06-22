@@ -1449,7 +1449,7 @@ def custom_kv_rmsnorm_rope(
 ):
     # Split KV into RMSNorm and RoPE parts for sparse C8 cache preparation.
     rms_in, rope_in = kv.split([512, 64], dim=-1)
-    k_nope, _ = torch_npu.npu_rms_norm(rms_in, gamma)
+    k_nope, _ = torch_npu.npu_rms_norm(rms_in, gamma, epsilon=epsilon)
     k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin)
 
     # Store k_nope with block FP8 scales for the sparse C8 cache layout.
