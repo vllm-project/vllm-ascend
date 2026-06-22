@@ -27,7 +27,7 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 
 # ---------------------------------------------------------------------------
 # Per–encoder-budget ACL graph bookkeeping (ViT FIA tasks)
@@ -288,6 +288,8 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         else:
             super().capture(graph_pool=encoder_graph_pool)
 
+        weak_ref_workspaces()
+
     def _capture_budget_graph(self, token_budget: int):
         logger.debug(
             "Capturing encoder aclgraph for budget=%d, max_batch_size=%d, max_frames_per_batch=%d",
@@ -325,7 +327,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
                 max_frames_per_batch=self.max_frames_per_batch,
                 graph=graph,
                 input_buffers=values,
-                output_buffer=output_buffer,
+                output_buffer=weak_ref_tensors(output_buffer),
             )
         else:
             mm_kwargs = capture_inputs.mm_kwargs
@@ -352,7 +354,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
                 graph=graph,
                 input_buffer=mm_kwargs[input_key],
                 metadata_buffers=buffers,
-                output_buffer=output_buffer,
+                output_buffer=weak_ref_tensors(output_buffer),
             )
 
     def _copy_replay_buffers_unified(
@@ -447,3 +449,13 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
 
         self.graph_hits += num_items
         return graph_meta.output_buffer
+
+
+def weak_ref_workspaces() -> None:
+    params = get_encoder_graph_params()
+    if params is None:
+        return
+    for budget, ws in list(params.workspaces.items()):
+        if ws is None:
+            continue
+        params.workspaces[budget] = weak_ref_tensors(ws)
