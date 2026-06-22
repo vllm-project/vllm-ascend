@@ -776,38 +776,25 @@ class NPUWorker(WorkerBase):
             suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
             suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
             msg = (
-                "Free memory on device "
-                "(%s/%s GiB) on startup. "
-                "Desired GPU memory utilization is "
-                "(%s, %s GiB). "
-                "Actual usage: %s GiB "
-                "for weights, %s GiB for peak "
-                "activation, %s GiB for non-torch "
-                "memory, %s GiB for NPU graph memory. "
-                "Replace gpu_memory_utilization with "
-                "`--kv-cache-memory=%s` "
-                "(%s GiB) to fit into requested "
-                "memory, or `--kv-cache-memory=%s` "
-                "(%s GiB) to fully utilize NPU "
-                "free memory. Current KV cache memory: "
-                "%s GiB."
+                f"Free memory on device "
+                f"({format_gib(self.init_snapshot.free_memory)}/"
+                f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
+                f"Desired GPU memory utilization is "
+                f"({self.cache_config.gpu_memory_utilization}, "
+                f"{format_gib(self.requested_memory)} GiB). "
+                f"Actual usage: {format_gib(self.model_runner.model_memory_usage)} GiB "
+                f"for weights, {format_gib(self.peak_activation_memory)} GiB for peak "
+                f"activation, {format_gib(self.non_torch_memory)} GiB for non-torch "
+                f"memory, {format_gib(npugraph_memory_bytes)} GiB for NPU graph memory. "
+                f"Replace gpu_memory_utilization with "
+                f"`--kv-cache-memory={suggested_to_requested}` "
+                f"({format_gib(suggested_to_requested)} GiB) to fit into requested "
+                f"memory, or `--kv-cache-memory={suggested_to_gpu_limit}` "
+                f"({format_gib(suggested_to_gpu_limit)} GiB) to fully utilize NPU "
+                f"free memory. Current KV cache memory: "
+                f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
             )
-            logger.info(
-                msg,
-                format_gib(self.init_snapshot.free_memory),
-                format_gib(self.init_snapshot.total_memory),
-                self.cache_config.gpu_memory_utilization,
-                format_gib(self.requested_memory),
-                format_gib(self.model_runner.model_memory_usage),
-                format_gib(self.peak_activation_memory),
-                format_gib(self.non_torch_memory),
-                format_gib(npugraph_memory_bytes),
-                suggested_to_requested,
-                format_gib(suggested_to_requested),
-                suggested_to_gpu_limit,
-                format_gib(suggested_to_gpu_limit),
-                format_gib(self.available_kv_cache_memory_bytes),
-            )
+            logger.info(msg)
 
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
