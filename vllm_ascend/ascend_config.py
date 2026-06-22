@@ -94,6 +94,13 @@ class AscendConfig:
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = self._resolve_dump_config_path(additional_config)
+
+        # Log configuration
+        self.ascend_log_path = additional_config.get(
+            "ascend_log_path",
+            os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend"),
+        )
+
         self.layer_sharding = additional_config.get("layer_sharding", None)
         if self.layer_sharding:
             logger.info_once(
@@ -133,9 +140,8 @@ class AscendConfig:
         # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
-        self.multistream_dsa_preprocess = additional_config.get("multistream_dsa_preprocess", False)
-        self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", False)
-        self.prefill_comm_compute_overlap = additional_config.get("prefill_comm_compute_overlap", False)
+        self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
+        self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
 
         self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
@@ -719,6 +725,7 @@ class EplbConfig:
         "expert_map_record_path": None,
         "num_redundant_experts": 0,
         "eplb_policy_type": 1,
+        "eplb_heat_collection_stage": "all",
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -764,6 +771,8 @@ class EplbConfig:
                 os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
                 or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
             ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
+        if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
+            raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])

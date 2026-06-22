@@ -1,5 +1,4 @@
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 
@@ -38,13 +37,12 @@ def triton_q_rms(
     q,  # bs, 64, 512
     variance_epsilon,
 ):
-    logger.debug("[TritonOps] triton_q_rms: q.shape=%s, variance_epsilon=%s", q.shape, variance_epsilon)
     bs, head_num, dim = q.shape
     total_batch = bs * head_num
     q = q.view(total_batch, dim)
 
     if dim > 2048:
-        raise NotImplementedError("dim > 2048 not supported")
+        raise NotImplementedError(f"triton_q_rms: dim > 2048 not supported, got {dim}")
 
     device_properties = triton.runtime.driver.active.utils.get_device_properties(q.device)
     num_vectorcore = device_properties.get("num_vectorcore", -1)

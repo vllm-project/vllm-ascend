@@ -24,7 +24,7 @@ Batch invariance is crucial for several use cases:
 ## Hardware Requirements
 
 Batch invariance currently requires Ascend Atlas A2 and A3 inference products NPUs.
-We will support Atlas A5 and other NPUs in the future.
+We will support Ascend 950 Products and other NPUs in the future.
 
 ## Software Requirements
 
