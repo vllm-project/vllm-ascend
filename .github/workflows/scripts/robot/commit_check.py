@@ -40,17 +40,25 @@ def run_git_log(base_sha: str, head_sha: str) -> list[dict]:
         head_sha: The head commit SHA.
 
     Returns:
-        List of dicts with keys ``sha``, ``subject``, ``body``.
+        List of dicts with keys ``sha``, ``subject``, ``body``, ``has_signoff``.
     """
-    cmd = ["git", "log", f"{base_sha}..{head_sha}", "--format=%H|||%s|||%B"]
+    cmd = [
+        "git", "log", f"{base_sha}..{head_sha}",
+        "--format=%H|||%s|||%(trailers:key=Signed-off-by,only,valueonly)|||%B",
+    ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     commits = []
     for line in result.stdout.strip().split("\n"):
         if not line:
             continue
-        parts = line.split("|||", 2)
-        if len(parts) == 3:
-            commits.append({"sha": parts[0], "subject": parts[1], "body": parts[2]})
+        parts = line.split("|||", 3)
+        if len(parts) >= 4:
+            commits.append({
+                "sha": parts[0],
+                "subject": parts[1],
+                "signoff": parts[2],
+                "body": parts[3],
+            })
     return commits
 
 
@@ -100,18 +108,20 @@ def check_description(subject: str) -> tuple[bool, str]:
     return True, ""
 
 
-def check_signoff(body: str) -> tuple[bool, str]:
-    """Check that the commit body contains a ``Signed-off-by:`` trailer.
+def check_signoff(commit: dict) -> tuple[bool, str]:
+    """Check that the commit has a ``Signed-off-by:`` trailer.
+
+    Uses the git trailer value extracted via ``%(trailers:key=Signed-off-by)``.
 
     Args:
-        body: The full commit body text.
+        commit: Commit dict with ``signoff`` key.
 
     Returns:
         A ``(ok, message)`` tuple.
     """
     if not REQUIRE_SIGNOFF:
         return True, ""
-    if "Signed-off-by:" in body:
+    if commit.get("signoff", "").strip():
         return True, ""
     return False, "缺少 `Signed-off-by:` 签名行（可通过 `git commit -s` 添加）"
 
@@ -133,7 +143,7 @@ def hard_check(commit: dict) -> tuple[str, list[str]]:
     ok, msg = check_description(commit["subject"])
     if not ok:
         issues.append(msg)
-    ok, msg = check_signoff(commit["body"])
+    ok, msg = check_signoff(commit)
     if not ok:
         issues.append(msg)
     return (HARD_FAIL if issues else HARD_PASS, issues)
@@ -286,8 +296,7 @@ def main() -> None:
     failed_hard: list[dict] = []
     for c in commits:
         status, issues = hard_check(c)
-        print(f"  DEBUG sha={c['sha'][:7]} subject={c['subject'][:80]!r} body_has_signoff={'Signed-off-by:' in c['body']}")
-        if status == HARD_FAIL:
+        print(f"  DEBUG sha={c['sha'][:7]} subject={c['subject'][:80]!r} signoff={c['signoff']!r}")
             failed_hard.append(c)
             print(f"  HARD FAIL {c['sha'][:7]}: {c['subject'][:50]} — issues={issues}")
         else:
