@@ -82,9 +82,9 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
     RoutedExpertsLists,
+    RoutedExpertsTensors,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
-    RoutedExpertsTensors,
 )
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
