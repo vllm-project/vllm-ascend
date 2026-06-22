@@ -1977,10 +1977,11 @@ class NPUModelRunner(GPUModelRunner):
         )):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        self._pp_current_batch_has_spec_decode = bool(
-            getattr(scheduler_output, "scheduled_spec_decode_tokens", None)
-        )
-        self._pp_prepare_async_token_state_for_execute(scheduler_output)
+        if get_pp_group().world_size > 1:
+            self._pp_current_batch_has_spec_decode = bool(
+                getattr(scheduler_output, "scheduled_spec_decode_tokens", None)
+            )
+            self._pp_prepare_async_token_state_for_execute(scheduler_output)
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 # Fix up prev_req_id_to_index for requests that were discarded
@@ -2418,13 +2419,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
-
-            assert self.sampling_done_event is not None
-            self.sampling_done_event.record()
-
-        if self.need_accepted_tokens:
-            if self.sampling_done_event is None:
-                self.sampling_done_event = torch.npu.Event()
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
             with (
@@ -2444,12 +2438,13 @@ class NPUModelRunner(GPUModelRunner):
                 and get_pp_group().is_last_rank
             )
 
-        self._draft_token_ids = None
-        if hasattr(self, "_draft_token_req_ids"):
-            self._draft_token_req_ids = None
+        if get_pp_group().world_size > 1:
+            self._draft_token_ids = None
+            if hasattr(self, "_draft_token_req_ids"):
+                self._draft_token_req_ids = None
+            self.input_batch.prev_sampled_token_ids = None
 
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None  # type: ignore[no-redef]
-        self.input_batch.prev_sampled_token_ids = None
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -2470,6 +2465,7 @@ class NPUModelRunner(GPUModelRunner):
 
         skip_pp_token_state = (
             self.use_async_scheduling
+            and get_pp_group().world_size > 1
             and self._async_spec_state_can_be_skipped(
                 include_current_sample=True
             )
