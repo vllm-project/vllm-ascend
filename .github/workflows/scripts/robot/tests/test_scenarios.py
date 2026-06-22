@@ -113,27 +113,23 @@ def get_bot_comments(api_base: str, number: int) -> list[dict]:
 
 
 def _poll_bot(api_base: str, number: int, max_wait: int = MAX_WAIT,
-              expect_new_comment: bool = True) -> tuple[list[str], list[dict], int]:
+              expect_new_comment: bool = True,
+              prev_comment_count: int = 0) -> tuple[list[str], list[dict], int]:
     start = time.time()
-    last_labels = []
-    last_comments = []
     while time.time() - start < max_wait:
         labels = get_labels(api_base, number)
         comments = get_bot_comments(api_base, number)
-        comment_changed = comments != last_comments
         if expect_new_comment:
-            if comment_changed and comments:
+            if len(comments) > prev_comment_count:
                 return labels, comments, int(time.time() - start)
         else:
             elapsed = int(time.time() - start)
-            if elapsed >= 90 and not comment_changed:
+            if elapsed >= 90:
                 return labels, comments, elapsed
         elapsed = int(time.time() - start)
         print(f"  Waiting for bot... ({elapsed}s elapsed)")
-        last_labels = labels
-        last_comments = comments
         time.sleep(POLL_INTERVAL)
-    return last_labels, last_comments, int(time.time() - start)
+    return get_labels(api_base, number), get_bot_comments(api_base, number), int(time.time() - start)
 
 
 # ── Git Helpers ───────────────────────────────────────────────
@@ -245,7 +241,8 @@ def verify_issue_state(api_base: str, number: int, prev_comment_count: int,
                        step_name: str) -> tuple[Result, int]:
     r = Result(step_name)
     labels, comments, elapsed = _poll_bot(api_base, number,
-                                          expect_new_comment=expect_new_comment)
+                                          expect_new_comment=expect_new_comment,
+                                          prev_comment_count=prev_comment_count)
     has_label = LABEL_NAME in labels
     new_comment_count = len(comments)
     got_new_comment = new_comment_count > prev_comment_count
@@ -478,7 +475,8 @@ class PRLifecycle:
                expect_new_comment: bool, step_name: str) -> Result:
         r = Result(step_name)
         labels, comments, elapsed = _poll_bot(self.api_base, self.pr_number,
-                                              expect_new_comment=expect_new_comment)
+                                               expect_new_comment=expect_new_comment,
+                                               prev_comment_count=self.comment_count)
         has_desc = LABEL_NAME in labels
         has_commit = NEED_COMMIT_FIX_LABEL in labels
         new_count = len(comments)
