@@ -279,15 +279,19 @@ def main() -> None:
         Path(args.output).write_text(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
+    print(f"DEBUG valid_types={VALID_TYPES} require_signoff={REQUIRE_SIGNOFF}")
     commits = run_git_log(base_sha, head_sha)
     print(f"Found {len(commits)} commits in {base_sha[:7]}..{head_sha[:7]}")
 
     failed_hard: list[dict] = []
     for c in commits:
         status, issues = hard_check(c)
+        print(f"  DEBUG sha={c['sha'][:7]} subject={c['subject'][:80]!r} body_has_signoff={'Signed-off-by:' in c['body']}")
         if status == HARD_FAIL:
             failed_hard.append(c)
-            print(f"  HARD FAIL {c['sha'][:7]}: {c['subject'][:50]}")
+            print(f"  HARD FAIL {c['sha'][:7]}: {c['subject'][:50]} — issues={issues}")
+        else:
+            print(f"  HARD PASS {c['sha'][:7]}")
 
     if not failed_hard:
         result = {

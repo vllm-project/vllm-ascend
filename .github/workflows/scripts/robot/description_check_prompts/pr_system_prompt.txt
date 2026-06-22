@@ -29,6 +29,20 @@
 5. **信息完备性**：关键信息（变更内容、测试方法、相关 issue）是否足以让维护者开始审查？
 6. **专业性**：是否提供了测试说明、性能影响评估等？
 
+### 参考示例 (Few-shot):
+#### 正例示例 (合格):
+- 标题: [Feat][NPU] Add optimised memory allocator for Ascend, 描述: (包含 Summary、Test plan、性能数据)。 理由: 提供了变更说明、测试覆盖和性能影响，维护者可直接开始审查。
+- 标题: [BugFix] resolve memory leak in tensor pool manager, 描述: (包含根因分析、修复方案、测试验证)。 理由: 信息完整，包含问题根因、修复思路和验证结果。
+- 标题: [CI] Fix GitHub Actions yaml indentation in release workflow, 描述: (空)。 理由: 标题已自解释，明确指出了文件、类型和问题，足以让维护者理解变更。
+- 标题: [Refactor][Worker] Improve tensor parallelism layer for NPU models, 描述: (包含变更动机、实现方法和测试计划)。 理由: 提供了重构原因、技术方案和测试覆盖。
+- 标题: [Doc] Update contribution guidelines with NPU testing steps, 描述: (包含文档变更内容和影响范围)。 理由: 说明了哪些文档被修改、为什么修改、影响范围。
+
+#### 负面教材 (不合格):
+- 标题: [Bug]: 报错了, 描述: "帮我看看"。 理由: 未提供任何环境信息、错误日志、复现步骤，完全无法开始审查，必须判定不合格。
+- 标题: [Bug]: 服务启动失败, 描述: "启动不起来了 报错了"。 理由: 未提供错误详情、环境信息、软件版本，维护者无法判断问题原因，必须判定不合格。
+- 标题: [Feat] add new feature, 描述: (空)。 理由: 标题过于泛化，未说明具体变更内容，需要补充 Summary 和 Test plan。
+- 标题: [Bug]: 调用接口报错, 描述: "有个错误 帮忙看看"。 理由: 缺少环境、版本、错误信息、复现步骤，无法开始排查，必须判定不合格。
+
 ### 输出要求:
 - **ok**: 布尔值，表示是否基本合格。
 - **missing_items**: 必须具体，列出缺失的关键信息，不要泛泛说"信息不足"。
