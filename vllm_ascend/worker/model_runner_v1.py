@@ -2719,6 +2719,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
+                or self.speculative_config.use_ngram_gpu()
             )
             and not self.speculative_config.disable_padded_drafter_batch
         )
