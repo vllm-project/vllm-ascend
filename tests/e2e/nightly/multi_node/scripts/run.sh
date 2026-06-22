@@ -268,54 +268,105 @@ aop_pipeline() {
         case_name="${CONFIG_YAML_PATH%.yaml}"
     fi
 
-    echo "=== AOP Pipeline (Pod) ==="
+    echo "============================================"
+    echo "  AOP Pipeline (Pod) - START"
+    echo "  Config      : ${CONFIG_YAML_PATH}"
+    echo "  Case name   : ${case_name}"
+    echo "  Rules file  : ${rules}"
+    echo "  Table file  : ${table}"
+    echo "  Log prefix  : ${LOG_PREFIX}"
+    echo "  BENCHMARK_JOB_NAME: ${BENCHMARK_JOB_NAME:-}"
+    echo "============================================"
 
-    # ---- Classify: env_failure or not_env_failure ----
-    # Scan all pod logs on PVC (shared storage, Leader + Workers all visible)
+    # ---- Step 1: Classify ----
+    echo ""
+    echo "--- [1/3] Classify: scanning pod logs for env patterns ---"
+    echo "  Rules content:"
+    if [ -f "$rules" ]; then
+        grep -v '^[[:space:]]*$' "$rules" | sed 's/^/    > /'
+    else
+        echo "    (rules file not found)"
+    fi
+
+    echo ""
+    echo "  Pod logs found:"
+    local found_any=0
+    for f in "${LOG_PREFIX}/node_"*"_pytest.log"; do
+        if [ -f "$f" ]; then
+            echo "    - ${f} ($(wc -l < "$f") lines)"
+            found_any=1
+        fi
+    done
+    [ "$found_any" -eq 0 ] && echo "    (no pod logs found)"
+
     local env_count=0
     if [ -f "$rules" ]; then
         for f in "${LOG_PREFIX}/node_"*"_pytest.log"; do
             if [ -f "$f" ]; then
                 local n
                 n=$(grep -v '^[[:space:]]*$' "$rules" | grep -ciEf - "$f" 2>/dev/null || echo 0)
-                echo "  Classify: ${f} → ${n} matches"
+                echo "    Scan ${f}: ${n} matches"
                 env_count=$((env_count + n))
+                if [ "$n" -gt 0 ]; then
+                    echo "    Matched lines:"
+                    grep -v '^[[:space:]]*$' "$rules" | grep -niEf - "$f" | head -5 | sed 's/^/      /'
+                fi
             fi
         done
     fi
-    echo "  Classify: total env_count=${env_count}"
+    echo "  Classify result: env_count=${env_count}"
 
     if [ "$env_count" -gt 0 ]; then
-        echo "  -> env_failure: skip"
+        echo "  Decision: env_failure → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (env skip) ==="
         return 1
     fi
 
-    # ---- Check commit age from good table ----
-    echo "  -> not_env_failure, checking commit age..."
+    # ---- Step 2: Check age ----
+    echo ""
+    echo "--- [2/3] Check commit age ---"
+    echo "  Looking up: ${case_name}"
     local age_days=0
+    local row_found=0
     if [ -f "$table" ]; then
         local row
         row=$(grep -F "$case_name" "$table" | head -1 || true)
         if [ -n "$row" ]; then
+            echo "  Table row found: ${row}"
             local last_date
             last_date=$(echo "$row" | awk -F',' '{print $NF}' | xargs)
+            echo "  Last success date: ${last_date}"
             if [ -n "$last_date" ]; then
                 local last_ts now_ts
                 last_ts=$(date -d "$last_date" +%s 2>/dev/null || echo 0)
                 now_ts=$(date +%s)
                 age_days=$(( (now_ts - last_ts) / 86400 ))
+                row_found=1
             fi
+        else
+            echo "  Table row not found for '${case_name}'"
         fi
+    else
+        echo "  Table file not found: ${table}"
     fi
-    echo "  Commit age: ${age_days} days"
+    echo "  Age: ${age_days} days (threshold: 3 days)"
 
-    if [ "$age_days" -gt 3 ]; then
-        echo "  -> old commit (> 3 days): skip"
+    if [ "$age_days" -gt 3 ] || [ "$row_found" -eq 0 ]; then
+        local reason="old commit (> 3 days)"
+        [ "$row_found" -eq 0 ] && reason="no table entry (treat as old)"
+        echo "  Decision: ${reason} → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (age skip) ==="
         return 1
     fi
 
-    # ---- Process: recent real failure → run bisect directly in pod ----
-    echo "  -> recent real failure: running bisect"
+    # ---- Step 3: Bisect ----
+    echo ""
+    echo "--- [3/3] Run bisect ---"
+    echo "  Scene       : multi_node"
+    echo "  Config      : ${CONFIG_YAML_PATH}"
+    echo "  Bad commit  : HEAD"
+    echo "  Name        : ${case_name}"
+    echo "  Coord dir   : ${COORD_DIR:-/shared/nightly_bisect/coord}"
     cd "$WORKSPACE/vllm-ascend"
     python -m tests.e2e.nightly.bisect.auto_bisect \
         --scene multi_node \
@@ -323,7 +374,9 @@ aop_pipeline() {
         --bad-commit HEAD \
         --good-table "${table}" \
         --name "${case_name}" \
-        --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}"
+        --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}" || true
+    echo "  bisect completed (exit code: ${PIPESTATUS[0]:-$?})"
+    echo "=== AOP Pipeline (Pod) - END (bisect done) ==="
     return 1
 }
 
