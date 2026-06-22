@@ -6,4 +6,4 @@
 
 ## 2. Getting Started
 
-For quick deployment instructions, refer to the [MindIE-PyMotor User Guide](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/docs/en/user_guide/README.md).
+For quick deployment instructions, refer to the [MindIE-PyMotor User Guide](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/docs/zh/user_guide/README.md).
