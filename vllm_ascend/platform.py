@@ -271,11 +271,11 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        '''
-        Do not implement this interface. It causes get_device_name() to be called
-        early, prematurely initializing torch_npu, which cannot be initialized
-        more than once.
-        '''  # fmt: skip
+        """
+        Get the total memory of the NPU device in bytes.
+        DO NOT IMPLEMENT: Implementing it calls get_device_name() in advance and initializes torch_npu too early.
+        torch_npu allows global initialization only once; duplicate initialization causes errors.
+        """
         raise NotImplementedError
 
     def num_compute_units(cls, device_id: int = 0) -> int:
