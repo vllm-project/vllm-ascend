@@ -111,10 +111,15 @@ class Bisector:
         return result
 
     def _judge(self, candidate: Candidate, state: BisectState) -> Verdict:
-        """Run + flaky-confirm a candidate, caching the verdict for resume."""
+        """Run + flaky-confirm a candidate, caching the verdict for resume.
+
+        Only a cached PASS/FAIL is reused on resume. A cached SKIP is never
+        honoured: SKIP means "could not be judged" (build break, flaky, transient
+        environment issue), which may no longer hold, so it must be re-attempted.
+        """
         if self.use_cache:
             cached = state.verdicts.get(candidate.commit)
-            if cached:
+            if cached in ("PASS", "FAIL"):
                 logger.info("Using cached verdict %s for %s", cached, candidate.short)
                 return cached  # type: ignore[return-value]
 
@@ -186,7 +191,9 @@ class Bisector:
     def _bisect(self, candidates: list[Candidate], state: BisectState) -> Candidate | None:
         lo = state.lo
         hi = state.hi if state.hi else len(candidates) - 1
-        skipped = {i for i, c in enumerate(candidates) if state.verdicts.get(c.commit) == "SKIP"}
+        # SKIP is tracked in-run only; never pre-seeded from a (possibly stale)
+        # cache, so previously-skipped commits get a fresh attempt on resume.
+        skipped: set[int] = set()
 
         while lo < hi:
             mid = self._pick_mid(lo, hi, skipped)
@@ -216,7 +223,9 @@ class Bisector:
         candidates = git_ops.candidate_list(self.repo, good.commit, bad.commit)
         logger.info("Search space: %d commits", len(candidates))
 
-        state = BisectState.load(self.state_path) or BisectState(hi=len(candidates) - 1)
+        state = BisectState.load(
+            self.state_path, good=good.commit, bad=bad.commit
+        ) or BisectState(good=good.commit, bad=bad.commit, hi=len(candidates) - 1)
 
         if not self._verify_endpoints(good, candidates, state):
             self.runner.finish()
