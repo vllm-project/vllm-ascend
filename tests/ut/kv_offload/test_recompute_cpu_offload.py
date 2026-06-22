@@ -1,29 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
+import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 
-from vllm_ascend.core.recompute_scheduler import RecomputeScheduler
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.manager import (
+# Clean up stale mock modules installed by other kv offload tests that replace
+# real kv_transfer packages with fake modules, breaking imports of this package.
+_kv_xfer = "vllm_ascend.distributed.kv_transfer"
+_vllm_kv_xfer = "vllm.distributed.kv_transfer"
+_saved_modules: dict[str, types.ModuleType] = {}
+_to_remove = []
+for _module_name in list(sys.modules):
+    if _module_name.startswith(_kv_xfer) or _module_name.startswith(_vllm_kv_xfer):
+        _to_remove.append(_module_name)
+for _module_name in _to_remove:
+    _saved_modules[_module_name] = sys.modules.pop(_module_name)
+
+from vllm_ascend.core.recompute_scheduler import RecomputeScheduler  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.manager import (  # noqa: E402
     PreemptedRequestState,
     RecomputeCPUOffloadScheduler,
     TransferMeta,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (  # noqa: E402
     INVALID_JOB_ID,
     RecomputeCPUOffloadMetadata,
     RecomputeCPUOffloadWorkerMetadata,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector import (  # noqa: E402
     RecomputeCPUOffloadConnectorV1,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.worker import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.worker import (  # noqa: E402
     RecomputeCPUOffloadWorker,
 )
+
+for _module_name, _module in _saved_modules.items():
+    sys.modules[_module_name] = _module
 
 
 def test_recompute_cpu_offload_worker_metadata_aggregate():
