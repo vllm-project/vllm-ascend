@@ -246,10 +246,10 @@ sys.exit(1)
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
+            echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
             if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
                 aop_pipeline
             fi
-            echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
             exit 1
         fi
     elif [ $ret -ne 0 ] && [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
