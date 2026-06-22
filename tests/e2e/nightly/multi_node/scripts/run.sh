@@ -213,6 +213,7 @@ run_tests_with_log() {
     # TODO: remove this block after AOP testing
     if [[ "${CONFIG_YAML_PATH:-}" == *"Kimi-K2_5-W4A8-A2-dual-nodes"* ]]; then
         echo "====> TEST MODE: forced failure ===="
+        mkdir -p "${LOG_PREFIX}"
         local log_file="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-?}_pytest.log"
         python -c "
 import sys
