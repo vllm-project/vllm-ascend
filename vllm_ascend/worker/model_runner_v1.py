@@ -3776,12 +3776,11 @@ class NPUModelRunner(GPUModelRunner):
             )
         ):
             # The drafter is only initialized on the last PP rank.
-            # On non-last ranks (PP > 1) it is absent — skip setup.
-            if hasattr(self, "drafter") and self.drafter is not None:
-                assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
-                block_size = (self.kernel_block_sizes[0] if isinstance(
-                self.kernel_block_sizes, list) else self.kernel_block_sizes)
-                self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            # On non-last ranks (PP > 1) it is absent via self.drafter is None.
+            assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
+            block_size = (self.kernel_block_sizes[0] if isinstance(
+            self.kernel_block_sizes, list) else self.kernel_block_sizes)
+            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group() and not is_profiling:
             get_kv_transfer_group().register_kv_caches(kv_caches)

@@ -178,14 +178,14 @@ def _patch_speculative_minimax_whitelist() -> None:
     def _patched_verify_args(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         try:
             return inner_verify(self, *args, **kwargs)
-        except (ValueError, NotImplementedError) as e:
+        except ValueError as e:
             method = getattr(self, "method", None)
-            if method not in ("eagle3", "extract_hidden_states", "mtp", "deepseek_mtp"):
+            if method not in ("eagle3", "extract_hidden_states"):
                 raise
 
             target_cfg = getattr(self, "target_model_config", None)
             model_type = getattr(getattr(target_cfg, "hf_text_config", None), "model_type", "")
-            if "minimax" not in str(model_type).lower() and method not in ("mtp", "deepseek_mtp"):
+            if "minimax" not in str(model_type).lower():
                 logger.debug(
                     "Model type %s is not a MiniMax-M2 model, skip eagle3/extract_hidden_states checks.",
                     model_type,
@@ -196,13 +196,6 @@ def _patch_speculative_minimax_whitelist() -> None:
             if "only supported for" in msg and "models" in msg:
                 # Upstream `_verify_args` calls `verify_equal_vocab_size_if_draft_model` after
                 # the aux-hidden allowlist; returning here would skip it.
-                verify_vocab = getattr(self, "verify_equal_vocab_size_if_draft_model", None)
-                if callable(verify_vocab):
-                    verify_vocab()
-                return self
-            if "pipeline parallelism" in msg and "not supported" in msg:
-                # PP check for draft model — the draft model runs only
-                # on the last PP rank and does not need native PP support.
                 verify_vocab = getattr(self, "verify_equal_vocab_size_if_draft_model", None)
                 if callable(verify_vocab):
                     verify_vocab()

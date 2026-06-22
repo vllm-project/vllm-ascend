@@ -1754,15 +1754,7 @@ class MooncakeConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
-        # Use global hidden layer count (not PP-sliced) for MTP index assignment,
-        # ensuring consistent MTP layer indices between P and D nodes in PD+PP mode.
-        try:
-            hf_text_config = vllm_config.model_config.hf_text_config
-            if hf_text_config is None:
-                raise AttributeError
-        except AttributeError:
-            hf_text_config = vllm_config.model_config.hf_config
-        self.total_layers = hf_text_config.num_hidden_layers
+        self.total_layers = vllm_config.model_config.get_total_num_hidden_layers()
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
