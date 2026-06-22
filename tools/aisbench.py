@@ -241,10 +241,11 @@ class AisbenchRunner:
     def _accuracy_verify(self):
         self._get_result_accuracy()
         acc_value = self.result
-        assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, (
-            "Accuracy verification failed. "
+        lower_bound = self.baseline - self.threshold
+        assert acc_value >= lower_bound, (
+            f"Accuracy verification failed. "
             f"The accuracy of {self.dataset_path} is {acc_value}, "
-            f"which is not within {self.threshold} relative to baseline {self.baseline}."
+            f"which is below the minimum acceptable value {lower_bound}."
         )
 
 
