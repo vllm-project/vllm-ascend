@@ -746,7 +746,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
-    ) -> tuple[torch.Tensor, SpecDecodeMetadata | None, int, list[np.ndarray[Any, Any]]]:
+    ) -> tuple[torch.Tensor, SpecDecodeMetadata | None, int]:
         """
         :return: tuple[
             logits_indices,
@@ -1214,49 +1214,15 @@ class NPUModelRunner(GPUModelRunner):
         else:
             self._seq_lens_cpu_event_pending = False
 
-        num_computed_tokens_for_compress = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-        )
-        if (
-            self.use_compress
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
-            and prev_req_id_to_index
-        ):
-            # Async spec decode keeps the CPU counter optimistic until after
-            # target forward is launched. DSV4 compressed KV slot mapping is
-            # CPU-built today, so use the GPU-corrected counter before
-            # computing compressed cache positions.
-            if (
-                self._seq_lens_cpu_event_pending
-                and self._seq_lens_cpu_event is not None
-            ):
-                self._seq_lens_cpu_event.synchronize()
-                self._seq_lens_cpu_event_pending = False
-                num_computed_tokens_for_compress = (
-                    self.optimistic_seq_lens_cpu[:num_reqs].numpy()
-                    - num_scheduled_tokens[:num_reqs]
-                )
-            else:
-                num_computed_tokens_for_compress = (
-                    self.num_computed_tokens[:num_reqs].to("cpu").numpy()
-                )
-
-        (positions_compressed_list, req_indices_compressed_list,
-         num_scheduled_tokens_compressed_list) = get_compressed_pos_and_indices(
-            num_computed_tokens_for_compress,
-            num_scheduled_tokens[:num_reqs], self.arange_np[:num_reqs],
-            self.use_compress,
-            self.kv_cache_config.kv_cache_groups)
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
-        # already computed on GPU before PCP split the positions.
-        if self.pcp_size <= 1:
+        # already computed on GPU before PCP split the positions. Compressed
+        # slot mapping is built later after deferred async-spec state
+        # corrections update the CPU counters used by the existing DSV4 helper.
+        if self.pcp_size <= 1 and not self.use_compress:
             self.input_batch.block_table.compute_slot_mapping(
                 num_reqs,
                 self.query_start_loc.gpu[: num_reqs + 1],
                 self.positions[:total_num_scheduled_tokens],
-                positions_compressed_list,
-                req_indices_compressed_list,
             )
 
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
@@ -1344,7 +1310,6 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
-            num_scheduled_tokens_compressed_list
         )
 
     def _rebuild_input_ids_with_corrected_positions(
@@ -2024,11 +1989,11 @@ class NPUModelRunner(GPUModelRunner):
                     logits_indices,
                     spec_decode_metadata,
                     total_num_scheduled_tokens,
-                    num_scheduled_tokens_compressed_list,
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
                 )
+                num_scheduled_tokens_compressed_list = None
 
                 num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
                 if self.pcp_size > 1:
@@ -2134,6 +2099,27 @@ class NPUModelRunner(GPUModelRunner):
                         self.query_pos.np[:total_num_scheduled_tokens],
                         out=dsa_positions_np,
                     )
+                    # Build the existing compact compressor metadata after
+                    # deferred async-spec corrections have updated CPU token
+                    # counts. Doing it here removes the earlier event
+                    # synchronize from _prepare_inputs without changing the
+                    # downstream DSA/compressor contract.
+                    (positions_compressed_list, req_indices_compressed_list,
+                     num_scheduled_tokens_compressed_list) = get_compressed_pos_and_indices(
+                        self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                        num_scheduled_tokens_np[:num_reqs],
+                        self.arange_np[:num_reqs],
+                        self.use_compress,
+                        self.kv_cache_config.kv_cache_groups,
+                    )
+                    if self.pcp_size <= 1:
+                        self.input_batch.block_table.compute_slot_mapping(
+                            num_reqs,
+                            self.query_start_loc.gpu[: num_reqs + 1],
+                            self.positions[:total_num_scheduled_tokens],
+                            positions_compressed_list,
+                            req_indices_compressed_list,
+                        )
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
