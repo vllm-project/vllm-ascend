@@ -108,6 +108,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
+        lora_capture_hook: Any | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
@@ -123,6 +124,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 kv_cache_config,
                 has_lora,
                 use_aux_hidden_state_outputs,
+                lora_capture_hook,
                 progress_bar_desc,
             )
 
