@@ -81,6 +81,14 @@ jobs:
           echo "✓ PR title prefix is valid"
 
       - name: Checkout vllm-project/vllm-ascend repo
+        id: checkout_ascend_1
+        uses: actions/checkout@v6
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+
+      - name: Checkout vllm-project/vllm-ascend repo (Retry when failure)
+        if: steps.checkout_ascend_1.outcome == 'failure'
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -114,8 +122,20 @@ jobs:
       - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
 
       - name: Checkout vllm-project/vllm repo
+        id: checkout_vllm_1
+        uses: actions/checkout@v6
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+          ref: 9090368b650896bf5fc990c921df7eb4c20355a5
+
+      - name: Checkout vllm-project/vllm repo (Retry when failure)
+        if: steps.checkout_vllm_1.outcome == 'failure'
         uses: actions/checkout@v6
         with:
+          fetch-depth: 0
           repository: vllm-project/vllm
           path: ./vllm-empty
           ref: ${{ steps.vllm.outputs.main_commit }}
