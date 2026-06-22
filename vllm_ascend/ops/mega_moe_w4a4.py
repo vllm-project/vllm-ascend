@@ -251,21 +251,22 @@ def _get_stream(device: torch.device):
 def routing_prep(topk_ids: torch.Tensor, num_experts: int):
     """Sort-by-expert permutation, replacing ``npu_moe_init_routing_v2``.
 
-    Returns ``(group_list, expanded_row_idx, sort_idx)``:
+    Returns ``(group_list, sort_idx)``:
       * ``group_list`` [E] int64 — cumulative per-expert token counts.
-      * ``expanded_row_idx`` [M] int32 — vendor convention; for original flat
-        index ``i`` it is the expanded slot token ``i`` landed at (combine stage).
-      * ``sort_idx`` [M] int32 — inverse: expanded slot -> original flat index
-        (the quant stage reads ``x[sort_idx[m] // top_k]``).
+      * ``sort_idx`` [M] int32 — expanded slot -> original flat index; the quant
+        stage reads ``x[sort_idx[m] // top_k]`` and the combine stage scatters by it.
 
-    Done on fp32 so both argsorts stay on AICore (int sort falls back to AICpu).
+    The vendor-convention inverse permutation (``expanded_row_idx``) is intentionally
+    NOT computed: the fused kernel only consumes ``sort_idx`` (both the Stage-1 gather
+    and the Stage-5 scatter-combine), so the extra O(M log M) ``argsort`` it would cost
+    per MoE layer — significant at prefill where M = T*top_k — is pure waste. Done on
+    fp32 so the sort stays on AICore (int sort falls back to AICpu).
     """
     flat = topk_ids.reshape(-1).to(torch.float32)
     sorted_ids, sort_idx = torch.sort(flat)
-    eri = torch.argsort(sort_idx.to(torch.float32))
     expert_ids = torch.arange(num_experts, device=topk_ids.device, dtype=torch.float32)
     group_list = torch.searchsorted(sorted_ids, expert_ids, right=True).to(torch.int64)
-    return group_list, eri.to(torch.int32), sort_idx.to(torch.int32)
+    return group_list, sort_idx.to(torch.int32)
 
 
 def pack_nz_int4(w_kn: torch.Tensor) -> torch.Tensor:
@@ -468,7 +469,6 @@ def mega_moe_forward(
     w2_nz: torch.Tensor,
     w2_scale: torch.Tensor,
     group_list: torch.Tensor,
-    expanded_row_idx: torch.Tensor,
     sort_idx: torch.Tensor,
     topk_weights: torch.Tensor,
     top_k: int,
@@ -477,12 +477,12 @@ def mega_moe_forward(
     n_gu: int,
 ) -> torch.Tensor:
     """One fused launch of the full expert path. ``x`` is the UN-permuted
-    ``[T, H]`` fp16 input (the kernel scatters by ``expanded_row_idx``); weights
+    ``[T, H]`` fp16 input (the kernel gathers/scatters by ``sort_idx``); weights
     are FRACTAL_NZ int4 with uint64-packed scales. Returns ``[T, H]`` fp16."""
     device = x.device
     T_orig = x.shape[0]
     E = int(group_list.shape[0])
-    M_total = expanded_row_idx.shape[0]
+    M_total = sort_idx.shape[0]
 
     y, ws = _get_workspaces(device, M_total, T_orig, H, i_dim)
     y[:T_orig].zero_()  # the combine stage atomic-adds into pre-zeroed y
@@ -498,7 +498,7 @@ def mega_moe_forward(
         _cached_void_p(w2_nz),
         pack_scale_uint64(w2_scale),
         ctypes.c_void_p(group_list.data_ptr()),
-        ctypes.c_void_p(expanded_row_idx.data_ptr()),
+        ctypes.c_void_p(sort_idx.data_ptr()),  # eri_gm slot: unused by the kernel, sort_idx is a valid placeholder
         ctypes.c_void_p(sort_idx.data_ptr()),
         ctypes.c_void_p(topk_weights.data_ptr()),
         ws[0],

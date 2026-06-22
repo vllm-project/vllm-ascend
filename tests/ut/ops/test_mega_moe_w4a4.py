@@ -44,18 +44,14 @@ class TestMegaMoeW4A4Host(TestBase):
         # flat top-k ids = [0,2, 1,2, 0,1]; each expert appears twice.
         topk_ids = torch.tensor([[0, 2], [1, 2], [0, 1]], dtype=torch.int32)
         num_experts = 3
-        group_list, eri, sort_idx = routing_prep(topk_ids, num_experts)
+        group_list, sort_idx = routing_prep(topk_ids, num_experts)
 
         # group_list = cumulative per-expert counts.
         self.assertEqual(group_list.tolist(), [2, 4, 6])
         self.assertEqual(group_list.dtype, torch.int64)
 
         m = topk_ids.numel()
-        # sort_idx is a permutation of [0, M).
+        # sort_idx is a permutation of [0, M) (the only routing output the kernel consumes;
+        # the inverse permutation is intentionally not computed — see routing_prep).
         self.assertEqual(sorted(sort_idx.tolist()), list(range(m)))
-        # eri is the inverse permutation of sort_idx.
-        inv = torch.empty(m, dtype=torch.long)
-        inv[sort_idx.long()] = torch.arange(m)
-        self.assertEqual(eri.long().tolist(), inv.tolist())
-        self.assertEqual(eri.dtype, torch.int32)
         self.assertEqual(sort_idx.dtype, torch.int32)

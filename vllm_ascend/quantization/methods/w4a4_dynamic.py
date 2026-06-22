@@ -214,7 +214,7 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW4A8DynamicFusedMoEMethod):
             rnd = torch.rand(topk_ids.shape[0], E, device=topk_ids.device)
             topk_ids = torch.argsort(rnd, dim=1)[:, : topk_ids.shape[1]].to(topk_ids.dtype)
 
-        group_list, expanded_row_idx, sort_idx = _mega.routing_prep(topk_ids.to(torch.int32), E)
+        group_list, sort_idx = _mega.routing_prep(topk_ids.to(torch.int32), E)
         out = _mega.mega_moe_forward(
             x_2d,
             layer.w13_nz,
@@ -222,7 +222,6 @@ class AscendW4A4DynamicFusedMoEMethod(AscendW4A8DynamicFusedMoEMethod):
             layer.w2_nz,
             layer.w2_scale_mega,
             group_list,
-            expanded_row_idx,
             sort_idx,
             topk_weights.to(torch.float16),
             top_k=top_k,
