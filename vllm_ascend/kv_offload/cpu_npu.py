@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from typing_extensions import override
-
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available

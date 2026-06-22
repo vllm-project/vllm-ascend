@@ -3,7 +3,6 @@ from typing import Any
 
 import torch
 from typing_extensions import override
-
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -14,8 +13,8 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec as _CPUOffloadingSpec
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec as _CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec as _TieringOffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
