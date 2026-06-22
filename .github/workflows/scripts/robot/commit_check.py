@@ -24,6 +24,21 @@ VALID_TYPES = [t.strip() for t in os.environ.get("VALID_TYPES", "feat,fix,perf,r
 REQUIRE_SIGNOFF = os.environ.get("REQUIRE_SIGNOFF", "true").lower() == "true"
 
 COMMIT_PATTERN = re.compile(r"^(\w+)(\([^)]+\))?!?:\s+(.+)$")
+BRACKET_PATTERN = re.compile(r"^\[(\w+)\]\s+(.+?)(?:\s+\(#\d+\))?$")
+
+# Map [Type] bracket prefixes to Conventional Commits types
+BRACKET_TYPE_MAP: dict[str, str] = {
+    "BugFix": "fix",
+    "Feature": "feat",
+    "Perf": "perf",
+    "Performance": "perf",
+    "Test": "test",
+    "CI": "ci",
+    "Doc": "docs",
+    "Misc": "chore",
+    "Community": "chore",
+    "Refactor": "refactor",
+}
 
 HARD_FAIL = "hard_fail"
 HARD_PASS = "hard_pass"
@@ -63,7 +78,10 @@ def run_git_log(base_sha: str, head_sha: str) -> list[dict]:
 
 
 def check_type_format(subject: str) -> tuple[bool, str]:
-    """Validate the Conventional Commits type prefix.
+    """Validate the commit message type prefix.
+
+    Accepts both Conventional Commits (``type: desc``) and bracket
+    format (``[Type] desc``).
 
     Args:
         subject: The commit subject line.
@@ -72,9 +90,18 @@ def check_type_format(subject: str) -> tuple[bool, str]:
         A ``(ok, message)`` tuple.
     """
     m = COMMIT_PATTERN.match(subject)
-    if not m:
-        return False, "提交信息不以 `<type>: <description>` 格式开头（如 feat: add feature）"
-    commit_type = m.group(1).lower()
+    if m:
+        commit_type = m.group(1).lower()
+    else:
+        m = BRACKET_PATTERN.match(subject)
+        if m:
+            raw_type = m.group(1)
+            commit_type = BRACKET_TYPE_MAP.get(raw_type)
+            if commit_type is None:
+                return False, f"[{raw_type}] 不在允许的类型映射中（允许: {', '.join(BRACKET_TYPE_MAP.keys())}）"
+        else:
+            return False, "提交信息不以 `<type>: <description>` 或 `[Type] description` 格式开头"
+
     if commit_type not in VALID_TYPES:
         return False, f"type `{commit_type}` 不在允许列表中（允许: {', '.join(VALID_TYPES)}）"
     return True, ""
@@ -82,6 +109,8 @@ def check_type_format(subject: str) -> tuple[bool, str]:
 
 def check_description(subject: str) -> tuple[bool, str]:
     """Validate commit description quality (length, specificity).
+
+    Handles both Conventional Commits and ``[Type] description`` formats.
 
     Args:
         subject: The commit subject line.
@@ -94,9 +123,14 @@ def check_description(subject: str) -> tuple[bool, str]:
     MAX_VAGUE_LENGTH = 20
 
     m = COMMIT_PATTERN.match(subject)
-    if not m:
-        return False, "无法解析描述字段"
-    desc = m.group(3).strip()
+    if m:
+        desc = m.group(3).strip()
+    else:
+        m = BRACKET_PATTERN.match(subject)
+        if m:
+            desc = m.group(2).strip()
+        else:
+            return False, "无法解析描述字段"
     if not desc:
         return False, "描述不能为空"
     if len(desc) < MIN_DESC_LENGTH:
