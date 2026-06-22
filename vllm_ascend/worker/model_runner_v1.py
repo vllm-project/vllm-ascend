@@ -1032,16 +1032,6 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        # Keep discard_request_mask in sync for PP+async helpers.
-        # Required when PP>1 with async scheduling: non-last PP ranks use
-        # this mask to build prev_req_id_to_index. Without the sync, the
-        # mask stays all-False on Ascend, causing non-last ranks to include
-        # discarded prefill chunks in the mapping, diverging from the last
-        # rank and breaking PP collective symmetry.
-        if self.use_async_scheduling and get_pp_group().world_size > 1:
-            self.discard_request_mask.np[:num_reqs] = discard_requests_mask
-            self.discard_request_mask.copy_to_gpu(num_reqs)
-
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
@@ -5271,10 +5261,16 @@ class NPUModelRunner(GPUModelRunner):
 
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
+    """
+    Synchronize cudagraph_mode across DP ranks by taking the minimum.
+    If any rank has NONE (0), all ranks use NONE.
+    This ensures all ranks send consistent values (all padded or all unpadded).
+    """
     return int(tensor[1, :].min().item())
 
 
 def _get_gpu_model_runner_module_name(model_runner) -> str:
+    """Return the module name of GPUModelRunner found in the MRO."""
     gpu_model_runner_cls = next(
         (cls for cls in model_runner.__class__.__mro__ if cls.__name__ == "GPUModelRunner"),
         None,
@@ -5301,6 +5297,7 @@ def _torch_cuda_wrapper():
             pass
 
     try:
+        # replace cuda APIs with xpu APIs, this should work by default
         torch.Event = torch.npu.Event
         torch.cuda.Event = torch.npu.Event
         torch.cuda.Stream = torch.npu.Stream
@@ -5320,6 +5317,7 @@ def _torch_cuda_wrapper():
         torch.cuda.mem_get_info = _StreamPlaceholder
         raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
     finally:
+        # if anything goes wrong, just patch it with a placeholder
         torch.cuda.Event = _EventPlaceholder
         torch.cuda.Stream = torch.cuda.Stream
         torch.cuda.default_stream = torch.npu.default_stream
@@ -5329,18 +5327,36 @@ def _torch_cuda_wrapper():
         torch.cuda.mem_get_info = torch.npu.mem_get_info
 
 
+# TODO: This method will be removed subsequently and implemented in platform.
 @contextmanager
 def _replace_gpu_model_runner_function_wrapper(target_module_name):
+    import vllm.v1.worker.encoder_cudagraph as _vllm_encoder_cudagraph
+
+    from vllm_ascend.worker.encoder_acl_graph import EncoderAclGraphManager
+
+    _encoder_mgr_orig = _vllm_encoder_cudagraph.EncoderCudaGraphManager
+    _vllm_encoder_cudagraph.EncoderCudaGraphManager = EncoderAclGraphManager
+    target_module = None
+    original_attrs = {}
     try:
         target_module = sys.modules[target_module_name]
-        setattr(target_module, "graph_capture", graph_capture)
+        if hasattr(target_module, "graph_capture"):
+            original_attrs["graph_capture"] = target_module.graph_capture
+        setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
+        if hasattr(target_module, "CUDAGraphWrapper"):
+            original_attrs["CUDAGraphWrapper"] = target_module.CUDAGraphWrapper
+            setattr(target_module, "CUDAGraphWrapper", ACLGraphWrapper)  # noqa: B010
         yield
     except Exception as e:
-        raise RuntimeError(f"NPUModelRunner failed, error is {e}")
+        raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
     finally:
-        setattr(target_module, "graph_capture", graph_capture)
+        _vllm_encoder_cudagraph.EncoderCudaGraphManager = _encoder_mgr_orig
+        if target_module is not None:
+            for attr_name, attr_value in original_attrs.items():
+                setattr(target_module, attr_name, attr_value)  # noqa: B010
 
 
+# TODO: remove it when flash_comm1 is removed
 @contextmanager
 def update_pass_config(model_runner):
     try:
