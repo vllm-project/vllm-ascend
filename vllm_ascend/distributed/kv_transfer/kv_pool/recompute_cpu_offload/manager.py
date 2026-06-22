@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import SlidingWindowSpec, UniformTypeKVCacheSpecs
 from vllm.v1.outputs import KVConnectorOutput
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
@@ -70,6 +71,7 @@ class RecomputeCPUOffloadScheduler:
         self.enable_offload_prefix_caching = enable_offload_prefix_caching
         self.cpu_kv_cache_config = self._derive_cpu_config(kv_cache_config, cpu_capacity_bytes)
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
+        self._group_is_sliding_window = self._get_group_is_sliding_window(kv_cache_config)
         self.enable_kv_cache_events = (
             vllm_config.kv_events_config is not None and vllm_config.kv_events_config.enable_kv_cache_events
         )
@@ -113,6 +115,21 @@ class RecomputeCPUOffloadScheduler:
         self._store_event_pending_counts: dict[int, int] = {}
 
     @staticmethod
+    def _get_group_is_sliding_window(kv_cache_config: "KVCacheConfig") -> list[bool]:
+        group_is_sliding_window: list[bool] = []
+        for group in kv_cache_config.kv_cache_groups:
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+                group_is_sliding_window.append(
+                    any(
+                        isinstance(spec, SlidingWindowSpec)
+                        for spec in group.kv_cache_spec.kv_cache_specs.values()
+                    )
+                )
+            else:
+                group_is_sliding_window.append(isinstance(group.kv_cache_spec, SlidingWindowSpec))
+        return group_is_sliding_window
+
+    @staticmethod
     def _derive_cpu_config(gpu_config: "KVCacheConfig", cpu_capacity_bytes: int) -> "KVCacheConfig":
         from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
         from vllm.v1.kv_cache_interface import KVCacheTensor
@@ -137,6 +154,21 @@ class RecomputeCPUOffloadScheduler:
             kv_cache_tensors=cpu_tensors,
             kv_cache_groups=gpu_config.kv_cache_groups,
         )
+
+    def _align_group_block_ids(
+        self,
+        group_idx: int,
+        group_block_ids: list[int],
+        logical_num_blocks: int,
+    ) -> list[int]:
+        if logical_num_blocks <= 0:
+            return []
+        aligned_group_block_ids = list(group_block_ids)
+        if self._group_is_sliding_window[group_idx] and len(aligned_group_block_ids) < logical_num_blocks:
+            aligned_group_block_ids = (
+                [0] * (logical_num_blocks - len(aligned_group_block_ids)) + aligned_group_block_ids
+            )
+        return aligned_group_block_ids[:logical_num_blocks]
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
@@ -211,25 +243,26 @@ class RecomputeCPUOffloadScheduler:
             return False
 
         kv_cache_groups = self.cpu_kv_cache_config.kv_cache_groups
-        group_gpu_blocks: list[list[KVCacheBlock]] = []
+        group_gpu_blocks: list[list[KVCacheBlock | None]] = []
         group_gpu_hashes: list[list[BlockHashWithGroupId | None]] = []
         missing_hashes: set[BlockHashWithGroupId] = set()
         num_unhashed = 0
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
             group_block_size = kv_cache_groups[g].kv_cache_spec.block_size
-            available_group_gpu_ids = []
-            for bid in group_gpu_ids:
-                if bid > 0:
-                    available_group_gpu_ids.append(bid)
-            num_blocks = min(
-                len(available_group_gpu_ids),
-                cdiv(num_computed_tokens, group_block_size),
+            logical_num_blocks = cdiv(num_computed_tokens, group_block_size)
+            aligned_group_gpu_ids = self._align_group_block_ids(g, group_gpu_ids, logical_num_blocks)
+            eviction_group_gpu_ids = self._align_group_block_ids(
+                g,
+                group_gpu_ids,
+                max(logical_num_blocks, len(group_gpu_ids)),
             )
-            gpu_blocks = [self._gpu_block_pool.blocks[block_id] for block_id in available_group_gpu_ids[:num_blocks]]
-            group_gpu_blocks.append(gpu_blocks)
+            gpu_blocks: list[KVCacheBlock | None] = []
             effective_hashes: list[BlockHashWithGroupId | None] = []
-            for block_idx, block_id in enumerate(available_group_gpu_ids):
+
+            for block_idx, block_id in enumerate(eviction_group_gpu_ids):
+                if block_id <= 0:
+                    continue
                 gpu_block = self._gpu_block_pool.blocks[block_id]
                 block_is_computed = (block_idx + 1) * group_block_size <= num_computed_tokens
                 if not block_is_computed and gpu_block.block_hash is not None:
@@ -238,10 +271,17 @@ class RecomputeCPUOffloadScheduler:
                     # preempted before forward, that block does not contain the
                     # hashed KV and must not remain in the GPU prefix cache.
                     self._gpu_block_pool._maybe_evict_cached_block(gpu_block)
-                if block_idx >= num_blocks:
+
+            for block_idx, block_id in enumerate(aligned_group_gpu_ids):
+                if block_id <= 0:
+                    gpu_blocks.append(None)
+                    effective_hashes.append(None)
                     continue
 
+                gpu_block = self._gpu_block_pool.blocks[block_id]
+                block_is_computed = (block_idx + 1) * group_block_size <= num_computed_tokens
                 block_hash = gpu_block.block_hash if block_is_computed and self.enable_offload_prefix_caching else None
+                gpu_blocks.append(gpu_block)
                 effective_hashes.append(block_hash)
                 if block_hash is None:
                     num_unhashed += 1
@@ -250,10 +290,11 @@ class RecomputeCPUOffloadScheduler:
                     and block_hash not in self._pending_hash_blocks
                 ):
                     missing_hashes.add(block_hash)
+            group_gpu_blocks.append(gpu_blocks)
             group_gpu_hashes.append(effective_hashes)
 
         num_needed = num_unhashed + len(missing_hashes)
-        if not any(group_gpu_blocks):
+        if not any(any(gpu_block is not None for gpu_block in group) for group in group_gpu_blocks):
             return False
         if num_needed > self.cpu_block_pool.get_num_free_blocks():
             logger.warning(
@@ -273,6 +314,10 @@ class RecomputeCPUOffloadScheduler:
         for gpu_blocks, effective_hashes in zip(group_gpu_blocks, group_gpu_hashes):
             group_cpu_ids: list[int] = []
             for gpu_block, block_hash in zip(gpu_blocks, effective_hashes):
+                if gpu_block is None:
+                    group_cpu_ids.append(0)
+                    continue
+
                 cpu_block = None
 
                 if block_hash is not None:
@@ -369,7 +414,16 @@ class RecomputeCPUOffloadScheduler:
             start_block = load_start_tokens // group_block_size
             end_block = min(
                 len(group_cpu_ids),
-                len(block_ids_by_group[g]),
+                len(
+                    self._align_group_block_ids(
+                        g,
+                        block_ids_by_group[g],
+                        max(
+                            cdiv(load_end_tokens, group_block_size),
+                            len(block_ids_by_group[g]),
+                        ),
+                    )
+                ),
                 cdiv(load_end_tokens, group_block_size),
             )
             if end_block <= start_block:
@@ -380,8 +434,19 @@ class RecomputeCPUOffloadScheduler:
                     f"gpu_blocks={len(block_ids_by_group[g])}, "
                     f"cpu_blocks={len(group_cpu_ids)}"
                 )
-            cpu_block_ids.extend(group_cpu_ids[start_block:end_block])
-            gpu_block_ids.extend(block_ids_by_group[g][start_block:end_block])
+
+            aligned_group_gpu_ids = self._align_group_block_ids(
+                g,
+                block_ids_by_group[g],
+                end_block,
+            )
+            for block_idx in range(start_block, end_block):
+                cpu_block_id = group_cpu_ids[block_idx]
+                gpu_block_id = aligned_group_gpu_ids[block_idx]
+                if cpu_block_id <= 0 or gpu_block_id <= 0:
+                    continue
+                cpu_block_ids.append(cpu_block_id)
+                gpu_block_ids.append(gpu_block_id)
 
         if not cpu_block_ids or len(cpu_block_ids) != len(gpu_block_ids):
             raise RuntimeError(
@@ -553,7 +618,10 @@ class RecomputeCPUOffloadScheduler:
         if state is None:
             return
         self.cpu_block_pool.free_blocks(
-            self.cpu_block_pool.blocks[block_id] for group_cpu_ids in state.cpu_block_ids for block_id in group_cpu_ids
+            self.cpu_block_pool.blocks[block_id]
+            for group_cpu_ids in state.cpu_block_ids
+            for block_id in group_cpu_ids
+            if block_id > 0
         )
 
     def take_events(self) -> Iterable[KVCacheEvent]:

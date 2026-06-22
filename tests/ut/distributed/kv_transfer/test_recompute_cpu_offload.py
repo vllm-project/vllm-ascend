@@ -163,6 +163,118 @@ def test_recompute_cpu_offload_scheduler_update_state_after_alloc_errors():
     scheduler._prepare_preempt_load_after_alloc.assert_called_once_with(request, ([1, 2],), 2)
 
 
+def test_recompute_cpu_offload_scheduler_aligns_sliding_window_blocks():
+    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+    scheduler._group_is_sliding_window = [True, False]
+
+    assert scheduler._align_group_block_ids(0, [7, 8], 4) == [0, 0, 7, 8]
+    assert scheduler._align_group_block_ids(0, [5, 6, 7, 8, 9], 4) == [
+        5,
+        6,
+        7,
+        8,
+    ]
+    assert scheduler._align_group_block_ids(1, [7, 8], 4) == [7, 8]
+    assert scheduler._align_group_block_ids(0, [7, 8], 0) == []
+
+
+def test_recompute_cpu_offload_scheduler_d2h_keeps_sliding_window_offsets():
+    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+    scheduler._group_is_sliding_window = [True]
+    scheduler.cpu_kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    )
+    scheduler.enable_offload_prefix_caching = False
+    scheduler._pending_hash_blocks = {}
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={
+            20: SimpleNamespace(block_id=20, block_hash=None),
+            21: SimpleNamespace(block_id=21, block_hash=None),
+        },
+        _maybe_evict_cached_block=MagicMock(),
+    )
+    cpu_blocks = [
+        SimpleNamespace(block_id=101, _block_hash=None),
+        SimpleNamespace(block_id=102, _block_hash=None),
+    ]
+    scheduler.cpu_block_pool = SimpleNamespace(
+        get_num_free_blocks=MagicMock(return_value=8),
+        get_new_blocks=MagicMock(return_value=cpu_blocks),
+        cached_block_hash_to_block=SimpleNamespace(get_one_block=MagicMock(return_value=None)),
+    )
+    scheduler._preempted_req_states = {}
+
+    assert scheduler._create_preempt_state("req-1", ([20, 21],), 64) is True
+
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.cpu_block_ids == ([0, 0, 101, 102],)
+    assert state.store_transfer_meta == TransferMeta([20, 21], [101, 102])
+    assert state.ready is False
+
+
+def test_recompute_cpu_offload_scheduler_h2d_skips_sliding_window_null_blocks():
+    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+    scheduler._group_is_sliding_window = [True]
+    scheduler.cpu_kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    )
+    scheduler._gpu_block_pool = SimpleNamespace(blocks={30: "gpu30", 31: "gpu31"}, touch=MagicMock())
+    scheduler._preempted_req_states = {
+        "req-1": PreemptedRequestState(
+            req_id="req-1",
+            cpu_block_ids=([0, 0, 4, 5],),
+            num_computed_tokens=64,
+            store_transfer_meta=TransferMeta([20, 21], [4, 5]),
+            load_start_tokens=0,
+            ready=True,
+        )
+    }
+
+    prepared = scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1"),
+        ([30, 31],),
+        num_external_tokens=64,
+    )
+
+    assert prepared is True
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.load_transfer_meta == TransferMeta([30, 31], [4, 5])
+    touched = list(scheduler._gpu_block_pool.touch.call_args.args[0])
+    assert touched == ["gpu30", "gpu31"]
+
+
+def test_recompute_cpu_offload_scheduler_h2d_clips_mtp_tail_blocks():
+    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+    scheduler._group_is_sliding_window = [False]
+    scheduler.cpu_kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    )
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={10: "gpu10", 11: "gpu11", 12: "gpu12"},
+        touch=MagicMock(),
+    )
+    scheduler._preempted_req_states = {
+        "req-1": PreemptedRequestState(
+            req_id="req-1",
+            cpu_block_ids=([1, 2, 3, 4],),
+            num_computed_tokens=64,
+            store_transfer_meta=TransferMeta([20, 21, 22, 23], [1, 2, 3, 4]),
+            load_start_tokens=0,
+            ready=True,
+        )
+    }
+
+    prepared = scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1"),
+        ([10, 11, 12],),
+        num_external_tokens=64,
+    )
+
+    assert prepared is True
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.load_transfer_meta == TransferMeta([10, 11, 12], [1, 2, 3])
+
+
 def test_recompute_cpu_offload_scheduler_build_connector_meta_assigns_events():
     scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
     scheduler._store_event_counter = 4
@@ -352,6 +464,25 @@ def test_recompute_cpu_offload_scheduler_cleanup_preempt_load_request():
     freed = list(scheduler._gpu_block_pool.free_blocks.call_args.args[0])
     assert freed == ["gpu10", "gpu11"]
     scheduler._cleanup_preempt_cache_request.assert_called_once_with("req-1")
+
+
+def test_recompute_cpu_offload_scheduler_cleanup_skips_null_cpu_blocks():
+    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+    scheduler._preempted_req_states = {
+        "req-1": PreemptedRequestState(
+            req_id="req-1",
+            cpu_block_ids=([0, 4], [0]),
+            num_computed_tokens=32,
+            store_transfer_meta=TransferMeta([10], [4]),
+            ready=True,
+        )
+    }
+    scheduler.cpu_block_pool = SimpleNamespace(blocks={4: "cpu4"}, free_blocks=MagicMock())
+
+    scheduler._cleanup_preempt_cache_request("req-1")
+
+    freed = list(scheduler.cpu_block_pool.free_blocks.call_args.args[0])
+    assert freed == ["cpu4"]
 
 
 def test_recompute_cpu_offload_worker_metadata_and_empty_transfers():
