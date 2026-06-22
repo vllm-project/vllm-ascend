@@ -17,7 +17,7 @@
 #
 """DeepSeek-V2-Lite prefix-cache CP guard.
 
-Run `pytest tests/e2e/pull_request/four_card/long_sequence/test_prefix_caching_cp.py`.
+Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py`.
 """
 
 import os
