@@ -19,7 +19,6 @@ name: PR Create
 
 on:
   pull_request_target:
-  pull_request:
 
 permissions:
   pull-requests: write
