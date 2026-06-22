@@ -45,6 +45,8 @@ spec:
                 value: {{ runner | default("linux-aarch64-a3-0") }}
               - name: VLLM_ASCEND_VERSION
                 value: {{ vllm_ascend_ref | default("main") }}
+              - name: AOP_HOLD_ON_FAILURE
+                value: "{{ aop_hold_on_failure | default("false") }}"
             command:
               - sh
               - -c
@@ -116,6 +118,8 @@ spec:
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
                 value: {{ runner | default("linux-aarch64-a3-0") }}
+              - name: AOP_HOLD_ON_FAILURE
+                value: "{{ aop_hold_on_failure | default("false") }}"
             command:
               - sh
               - -c
