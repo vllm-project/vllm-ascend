@@ -1598,6 +1598,7 @@ class NPUModelRunner(GPUModelRunner):
         # while pcp > 1, decode results may contain padding (from pcp all-gather),
         # update logits_indices after getting draft_token_ids from ori logits_indices
         if self.pcp_size > 1:
+            assert num_pcp_pads is not None
             if self.pcp_manager.pcp_use_hybrid_attn:
                 if self.pcp_manager.num_prefill_reqs > 0:
                     cu_num_scheduled_tokens = (
