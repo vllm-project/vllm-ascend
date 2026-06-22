@@ -22,16 +22,21 @@ Run `pytest tests/e2e/pull_request/four_card/long_sequence/test_accuracy.py`.
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+from PIL import Image
+from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 DEEPSEEK_MTP = "wemaster/deepseek_mtp_main_random_bf16"
 MAX_NUM_SEQS = 4
+E2E_ROOT = Path(__file__).resolve().parents[3]
+QWEN_IMAGE_PATH = E2E_ROOT / "prompts" / "qwen.png"
 
 FULL_DECODE_GRAPH = {
     "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -150,6 +155,73 @@ def match_outputs_with_goldens(outputs: list[tuple[list[int], str]], goldens: Se
         assert isinstance(output, str) and isinstance(golden, str), "Both output and golden must be strings"
         assert output and golden, "Output and golden should not be empty"
         assert output.strip() == golden.strip()
+
+
+@patch.dict(
+    os.environ,
+    {
+        "HCCL_BUFFSIZE": "768",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "OMP_NUM_THREADS": "1",
+        "OMP_PROC_BIND": "false",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_qwen3_vl_multimodal_pcp_accuracy_guard() -> None:
+    image = Image.open(QWEN_IMAGE_PATH).convert("RGB")
+    single_image_prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n"
+        "<|vision_start|><|image_pad|><|vision_end|>"
+        "Describe this image in detail.<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    multi_image_prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n"
+        "<|vision_start|><|image_pad|><|vision_end|>"
+        "<|vision_start|><|image_pad|><|vision_end|>"
+        "Compare these two images and describe similarities.<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    inputs = [
+        {
+            "prompt": single_image_prompt,
+            "multi_modal_data": {"image": image},
+        },
+        {
+            "prompt": multi_image_prompt,
+            "multi_modal_data": {"image": [image, image.copy()]},
+        },
+    ]
+    sampling_params = SamplingParams(max_tokens=16, temperature=0.0)
+
+    with VllmRunner(
+        "Qwen/Qwen3-VL-8B-Instruct",
+        enforce_eager=False,
+        max_model_len=4096,
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=1,
+        max_num_batched_tokens=1024,
+        block_size=128,
+        limit_mm_per_prompt={"image": 2},
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [MAX_NUM_SEQS],
+        },
+    ) as runner:
+        outputs = runner.model.generate(inputs, sampling_params=sampling_params)
+
+    assert len(outputs) == len(inputs)
+    for output in outputs:
+        assert output.outputs and output.outputs[0].text.strip()
 
 
 DSV2_COMMON_KWARGS: dict[str, Any] = {
