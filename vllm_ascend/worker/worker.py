@@ -893,7 +893,9 @@ class NPUWorker(WorkerBase):
             return None
         tp_rank = get_tp_group().rank_in_group
         if vllm_version_is("0.22.1"):
-            return {tp_rank: metadata}
+            pp_rank = get_pp_group().rank_in_group
+            tp_size = get_tp_group().world_size
+            return {pp_rank * tp_size + tp_rank: metadata}
 
         pp_rank = get_pp_group().rank_in_group
         return {(pp_rank, tp_rank): metadata}
