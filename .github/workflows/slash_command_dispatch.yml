@@ -24,7 +24,7 @@ on:
 jobs:
   slashCommandDispatch:
     if: github.event.issue.pull_request != null && github.event.comment.user.type == 'User'
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Slash Command Dispatch
         uses: peter-evans/slash-command-dispatch@v5

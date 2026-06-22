@@ -19,6 +19,7 @@ name: PR Create
 
 on:
   pull_request_target:
+  pull_request:
 
 permissions:
   pull-requests: write
@@ -29,11 +30,12 @@ jobs:
       contents: read
       pull-requests: write
     name: PR create action
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     steps:
       - name: Install system dependencies
         run: |
-          sudo apt-get update -y && sudo apt-get install -y jq curl
           sudo mkdir -p -m 755 /etc/apt/keyrings
           curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
           sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
@@ -107,20 +109,44 @@ jobs:
           configuration-path: .github/labeler.yml
           sync-labels: true
 
-      - name: Remind to run full CI on PR
+      - name: Remind contributors on PR open
         if: github.event.action == 'opened'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            github.rest.issues.createComment({
+            const title = context.payload.pull_request.title.toLowerCase();
+            const isBugFix = title.includes('[bugfix]');
+            const isFeature = title.includes('[feature]');
+            const typeLabel = isBugFix && isFeature ? '[BugFix]/[Feature]' : (isBugFix ? '[BugFix]' : '[Feature]');
+
+            let body = '👋 Hi! Thank you for contributing to the vLLM Ascend project. The following points will speed up your PR merge:‌‌\n\n' +
+              '- A PR should do only one thing, smaller PRs enable faster reviews.\n' +
+              '- Every PR should include unit tests and end-to-end tests ‌to ensure it works and is not broken by other future PRs.\n' +
+              '- Write the commit message by fulfilling the PR description to help reviewer and future developers understand.\n\n' +
+              'If CI fails, you can run linting and testing checks locally according [Contributing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/testing.html).\n';
+
+            if (isBugFix || isFeature) {
+              body += '\n---\n\n' +
+                '> [!TIP]\n' +
+                '> ## :bulb: Consider Linking a Related Issue or RFC\n' +
+                '>\n' +
+                '> Your PR title contains the **' + typeLabel + '** tag, indicating a bug fix or new feature.\n' +
+                '>\n' +
+                '> Linking a related issue or RFC in the PR description is **strongly encouraged** — it gives reviewers helpful context and speeds up the review. You can use any of these keywords:\n' +
+                '>\n' +
+                '> - `Fixes #<issue_number>`\n' +
+                '> - `Closes #<issue_number>`\n' +
+                '> - `Resolves #<issue_number>`\n' +
+                '> - `Refs #<rfc_or_issue_number>` (for RFCs)\n' +
+                '>\n' +
+                '> :pray: Thanks for helping us keep the project well-organized!\n';
+            }
+
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: '👋 Hi! Thank you for contributing to the vLLM Ascend project. The following points will speed up your PR merge:‌‌\n\n' +
-                '- A PR should do only one thing, smaller PRs enable faster reviews.\n' +
-                '- Every PR should include unit tests and end-to-end tests ‌to ensure it works and is not broken by other future PRs.\n' +
-                '- Write the commit message by fulfilling the PR description to help reviewer and future developers understand.\n\n' +
-                'If CI fails, you can run linting and testing checks locally according [Contributing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://docs.vllm.ai/projects/ascend/zh-cn/latest/developer_guide/contribution/testing.html).'
-            })
+              body: body
+            });
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

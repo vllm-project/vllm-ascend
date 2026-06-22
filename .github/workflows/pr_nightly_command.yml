@@ -30,7 +30,9 @@ permissions:
 jobs:
   authorize:
     name: Check user authorization
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
       test_cases: ${{ steps.resolve.outputs.test_cases }}
       branch: ${{ steps.resolve.outputs.branch }}
@@ -41,18 +43,12 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          sudo apt-get update -y && sudo apt-get install -y curl
           sudo mkdir -p -m 755 /etc/apt/keyrings
           curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
           sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
           sudo apt-get update -y
           sudo apt-get install gh -y
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
 
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -170,13 +166,14 @@ jobs:
     name: Trigger Nightly-A2
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.dispatch_a2 == 'true'
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
       a2_run_id: ${{ steps.dispatch_a2.outputs.a2_run_id }}
     steps:
       - name: Install system dependencies
         run: |
-          sudo apt-get update -y && sudo apt-get install -y curl
           sudo mkdir -p -m 755 /etc/apt/keyrings
           curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
           sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
@@ -209,13 +206,14 @@ jobs:
     name: Trigger Nightly-A3
     needs: [authorize]
     if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.dispatch_a3 == 'true'
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:
       a3_run_id: ${{ steps.dispatch_a3.outputs.a3_run_id }}
     steps:
       - name: Install system dependencies
         run: |
-          sudo apt-get update -y && sudo apt-get install -y curl
           sudo mkdir -p -m 755 /etc/apt/keyrings
           curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
           sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
@@ -248,7 +246,7 @@ jobs:
     name: Post nightly workflow links
     needs: [authorize, dispatch-a2, dispatch-a3]
     if: always() && needs.authorize.outputs.is_authorized == 'true'
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Build comment body
         id: body
