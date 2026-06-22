@@ -78,7 +78,7 @@ class ChunkSizePredictor:
 
         if len(L) < MIN_FIT_POINTS_NO_CHUNK:
             logger.warning(
-                "Not enough data points for quadratic fitting (%d < 8)",
+                "[ProfilingChunk] Not enough data points for quadratic fitting (%d < 8)",
                 len(L),
             )
             return False
@@ -99,11 +99,11 @@ class ChunkSizePredictor:
                 fitted_b = float(poly[1])
                 fitted_c = float(poly[2])
                 logger.warning(
-                    "Least-squares fitting failed (%s), fallback to polyfit succeeded.",
+                    "[ProfilingChunk] Least-squares fitting failed (%s), fallback to polyfit succeeded.",
                     e,
                 )
             except Exception as fallback_error:
-                logger.warning("Failed to fit quadratic model: %s", fallback_error)
+                logger.warning("[ProfilingChunk] Failed to fit quadratic model: %s", fallback_error)
                 return False
 
         self.quadratic_coeff_a = fitted_a
@@ -132,8 +132,9 @@ class ChunkSizePredictor:
         MAX_FIT_POINTS_CHUNK = self.max_fit_chunk
         if num_points < MIN_FIT_POINTS_CHUNK:
             logger.warning(
-                "Not enough data points for chunked data fitting (%d < 5)",
+                "[ProfilingChunk] Not enough data points for chunked data fitting (%d < %d)",
                 num_points,
+                MIN_FIT_POINTS_CHUNK,
             )
             return False
         if num_points > MAX_FIT_POINTS_CHUNK:
@@ -150,7 +151,7 @@ class ChunkSizePredictor:
             fitted_b = float(params[1])
             fitted_c = float(params[2])
         except np.linalg.LinAlgError as e:
-            logger.warning("Failed to fit chunked model: %s", e)
+            logger.warning("[ProfilingChunk] Failed to fit chunked model: %s", e)
             return False
 
         self.quadratic_chunk_a = fitted_a
@@ -179,7 +180,7 @@ class ChunkSizePredictor:
             self.target_latency = 1.0
 
         logger.info(
-            "[ProfilingChunk] Target latency: %.2f ms (base_chunk=%d)",
+            "[ProfilingChunk] Target latency: %.2f ms (base_chunk=%s)",
             self.target_latency,
             base_chunk_size,
         )

@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 import torch
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 

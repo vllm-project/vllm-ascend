@@ -8,13 +8,14 @@ on:
 jobs:
   remove-wait-feedback-on-comment:
     if: ${{ github.event_name == 'issue_comment' && contains(github.event.issue.labels.*.name, 'wait-feedback') }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     permissions:
       issues: write
     steps:
       - name: Install system dependencies
         run: |
-          sudo apt-get update -y && sudo apt-get install -y curl
           sudo mkdir -p -m 755 /etc/apt/keyrings
           curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
           sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
@@ -27,7 +28,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   stale:
     if: ${{ github.event_name == 'schedule' }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     permissions:
       actions: write
       issues: write

@@ -59,3 +59,20 @@ class AscendSwigluOAIAndMul:
 
         layer = MinimalSwigluOAIAndMul()
         return SwigluOAIAndMul.forward_native(layer, x)
+
+
+def swiglustep_and_mul(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
+    """Out-variant of swiglustep activation.
+
+    Computes:
+     silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
+
+    This is the custom activation used by Step-3.7-Flash's final MoE layers
+    (layers 43-44) to prevent numerical overflow via clamp truncation.
+    """
+    gate, up = x.chunk(2, dim=-1)
+    gate = torch.nn.functional.silu(gate)
+    gate = gate.clamp(max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    out = gate * up
+    return out

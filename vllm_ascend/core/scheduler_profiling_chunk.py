@@ -177,7 +177,7 @@ class ProfilingChunkScheduler(Scheduler):
 
         if len(seq_lens) < 8:
             logger.warning(
-                "[ProfilingChunk] Profiling failed: only %d samples collected",
+                "[ProfilingChunk] Profiling failed: only %d/8 samples collected",
                 len(seq_lens),
             )
             return
@@ -322,6 +322,13 @@ class ProfilingChunkScheduler(Scheduler):
                     target_time=time_budget,
                 )
                 if predicted_chunk is not None and predicted_chunk > 0:
+                    logger.debug(
+                        "[ProfilingChunk] Dynamic chunk for %s: %s -> %s (predicted=%s)",
+                        request.request_id,
+                        num_new_tokens,
+                        min(predicted_chunk, num_new_tokens),
+                        predicted_chunk,
+                    )
                     num_new_tokens = min(predicted_chunk, num_new_tokens)
                 elif self.profiling_chunk_config.need_timing:
                     logger.info("[Dynamic Chunk] Online calibration stage. Long requests are better")
@@ -377,6 +384,12 @@ class ProfilingChunkScheduler(Scheduler):
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
                     preempted_reqs.append(preempted_req)
+                    logger.info(
+                        "[ProfilingChunk] Preempted request %s. running_count=%s, token_budget=%s",
+                        preempted_req.request_id,
+                        len(self.running),
+                        token_budget,
+                    )
                     if preempted_req == request:
                         break
 
@@ -454,7 +467,7 @@ class ProfilingChunkScheduler(Scheduler):
                 ):
                     if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                         logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                            "[ProfilingChunk] %s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
                         )
                     request_queue.pop_request()
