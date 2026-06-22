@@ -39,13 +39,21 @@ class BlockTable:
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
         self.dcp_world_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
+        raw_kv_cache_spec = (
+            kv_cache_group.kv_cache_spec
+            if kv_cache_group is not None and hasattr(kv_cache_group, "kv_cache_spec")
+            else None
+        )
         kv_cache_spec = _get_group_kv_cache_spec(kv_cache_group)
-        compress_ratio = getattr(kv_cache_spec, "compress_ratio", 1)
-        self.compress_ratio = compress_ratio
+        self.compress_ratio = getattr(kv_cache_spec, "compress_ratio", 1)
         if (self.pcp_world_size * self.dcp_world_size > 1) and isinstance(kv_cache_spec, MambaSpec):
             max_num_blocks_per_req = max_num_blocks_per_req * self.pcp_world_size * self.dcp_world_size
-        effective_compress_ratio = compress_ratio if compress_ratio > 1 else 1
-        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, effective_compress_ratio), 1)
+        # Keep the exposed block_table tensor shape identical to the historical
+        # top-level KV spec contract. UniformTypeKVCacheSpecs unwrapping is only
+        # needed to choose the compact slot_mapping path, not to shrink metadata.
+        table_compress_ratio = getattr(raw_kv_cache_spec, "compress_ratio", 1)
+        effective_table_compress_ratio = table_compress_ratio if table_compress_ratio > 1 else 1
+        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, effective_table_compress_ratio), 1)
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
