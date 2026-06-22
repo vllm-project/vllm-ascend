@@ -469,6 +469,8 @@ class SchedulerDynamicBatch(Scheduler):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    step_skipped_waiting.prepend_request(request)
+                    request.num_computed_tokens = num_computed_tokens
                     continue
 
                 req_index += 1
