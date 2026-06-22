@@ -39,7 +39,8 @@ def get_local_seed_key(
             f"RFork seed key is not set: model_url={model_url!r}, "
             f"model_deploy_strategy_name={model_deploy_strategy_name!r}. "
             "Ensure model_loader_extra_config contains "
-            "`model_url` and `model_deploy_strategy_name`."
+            "`model_url` and `model_deploy_strategy_name`, or set "
+            "MODEL_URL and MODEL_DEPLOY_STRATEGY_NAME."
         )
         logger.error(err_msg)
         raise RuntimeError(err_msg)
@@ -92,20 +93,25 @@ class RForkSeedProtocol:
 
     def _ensure_scheduler_url_set(self) -> None:
         if not self.scheduler_url:
-            raise RuntimeError("rfork_scheduler_url is not set. Cannot interact with the scheduler.")
+            raise RuntimeError(
+                "rfork_scheduler_url is not set. Set it through model_loader_extra_config or RFORK_SCHEDULER_URL."
+            )
 
     def get_seed(self):
         try:
             self._ensure_scheduler_url_set()
+            seed_key = self.get_local_seed_key()
             response = requests.get(
                 f"{self.scheduler_url}/get_seed",
                 headers={
-                    "SEED_KEY": self.get_local_seed_key(),
+                    "SEED_KEY": seed_key,
                 },
                 timeout=self._request_timeout_sec(),
             )
             if response.status_code != 200:
-                raise RuntimeError(f"Failed to get seed from the planner, {response.status_code}")
+                raise RuntimeError(
+                    f"Failed to get seed from the planner, {response.status_code}, seed_key={seed_key!r}"
+                )
 
             seed_ip = response.headers.get("SEED_IP")
             seed_port = response.headers.get("SEED_PORT")
@@ -174,6 +180,7 @@ class RForkSeedProtocol:
             self._ensure_scheduler_url_set()
             seed_ip = get_ip()
             seed_key = self.get_local_seed_key()
+            logger.debug("[rfork_heartbeat] reporting seed key: %s", seed_key)
         except Exception as e:
             logger.exception("report_seed setup Exception: %s", e)
             return
@@ -196,17 +203,27 @@ class RForkSeedProtocol:
                 if response.status_code == 200:
                     result = True
             except HTTPError as e:
-                logger.exception("report_seed to planner HTTPError: %s", e)
+                logger.warning("report_seed to planner HTTPError: %s", e)
             except Exception as e:
-                logger.exception("report_seed to planner Exception: %s", e)
+                logger.warning("report_seed to planner Exception: %s", e)
 
             # Keep heartbeat frequency unchanged, but reduce log noise.
-            # Always print failures immediately; print success once every N times.
-            if (not result) or (heartbeat_idx % log_every_n == 0):
-                logger.info(
-                    "[rfork_heartbeat] report seed to planner result: %s (%d/%d)",
+            # Always print failures immediately; keep success in debug logs.
+            if result:
+                if heartbeat_idx % log_every_n == 0:
+                    logger.debug(
+                        "[rfork_heartbeat] report seed to planner result: %s (%d/%d), seed_key=%s",
+                        result,
+                        heartbeat_idx % log_every_n if heartbeat_idx % log_every_n != 0 else log_every_n,
+                        log_every_n,
+                        seed_key,
+                    )
+            else:
+                logger.warning(
+                    "[rfork_heartbeat] report seed to planner result: %s (%d/%d), seed_key=%s",
                     result,
                     heartbeat_idx % log_every_n if heartbeat_idx % log_every_n != 0 else log_every_n,
                     log_every_n,
+                    seed_key,
                 )
             time.sleep(sleep_interval)
