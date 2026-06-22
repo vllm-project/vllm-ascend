@@ -23,20 +23,22 @@
 # limitations under the License.
 """Inference-only MiniMaxM3 model."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from itertools import islice
 from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import BatchFeature, PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -62,6 +64,20 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -954,6 +970,178 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
         return self.model.get_expert_mapping()
 
 
+def _get_minimax_m3_image_size(image_processor: object) -> ImageSize:
+    patch_size = int(getattr(image_processor, "patch_size", 14))
+    merge_size = int(getattr(image_processor, "merge_size", 2))
+    factor = patch_size * merge_size
+
+    max_pixels = getattr(image_processor, "max_pixels", None)
+    if not isinstance(max_pixels, int):
+        size = getattr(image_processor, "size", None)
+        if isinstance(size, Mapping):
+            height = int(size.get("height") or size.get("shortest_edge") or 672)
+            width = int(size.get("width") or size.get("longest_edge") or height)
+            max_pixels = height * width
+        elif isinstance(size, Sequence) and len(size) >= 2:
+            max_pixels = int(size[0]) * int(size[1])
+        else:
+            max_pixels = 672 * 672
+
+    side = max(factor, int(max_pixels**0.5) // factor * factor)
+    return ImageSize(width=side, height=side)
+
+
+def _get_minimax_m3_num_image_tokens(
+    image_processor: object,
+    *,
+    image_width: int,
+    image_height: int,
+) -> int:
+    merge_size = int(getattr(image_processor, "merge_size", 2))
+    if hasattr(image_processor, "get_number_of_image_patches"):
+        num_patches = image_processor.get_number_of_image_patches(
+            image_height, image_width
+        )
+    else:
+        patch_size = int(getattr(image_processor, "patch_size", 14))
+        grid_h = image_height // patch_size
+        grid_w = image_width // patch_size
+        num_patches = grid_h * grid_w
+    return int(num_patches) // (merge_size**2)
+
+
+class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
+    IMAGE_TOKEN = "]<]image[>["
+    VIDEO_TOKEN = "]<]video[>["
+    VISION_START_TOKEN = "]<]start of image[>["
+    VISION_END_TOKEN = "]<]end of image[>["
+
+    def get_hf_processor(self, **kwargs: object):
+        # Do not type-check the processor class here: released MiniMax-M3
+        # checkpoints may expose remote-code MiniMaxVLProcessor, while
+        # transformers main uses MiniMaxM3VLProcessor.
+        return self.ctx.get_hf_processor(**kwargs)
+
+    def get_image_processor(self, **kwargs: object):
+        return self.get_hf_processor(**kwargs).image_processor
+
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {"image": self.get_max_image_tokens()}
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        return _get_minimax_m3_image_size(self.get_image_processor())
+
+    def get_max_image_tokens(self) -> int:
+        image_processor = self.get_image_processor()
+        size = self.get_image_size_with_most_features()
+        return _get_minimax_m3_num_image_tokens(
+            image_processor,
+            image_width=size.width,
+            image_height=size.height,
+        )
+
+
+class MiniMaxM3VLDummyInputsBuilder(
+    BaseDummyInputsBuilder[MiniMaxM3VLProcessingInfo]
+):
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.info.IMAGE_TOKEN * mm_counts.get("image", 0)
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+    ) -> MultiModalDataDict:
+        size = self.info.get_image_size_with_most_features()
+        return {
+            "image": self._get_dummy_images(
+                width=size.width,
+                height=size.height,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
+            ),
+        }
+
+
+class MiniMaxM3VLMultiModalProcessor(
+    BaseMultiModalProcessor[MiniMaxM3VLProcessingInfo]
+):
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, Any],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        image_token = getattr(
+            hf_processor, "image_token", MiniMaxM3VLProcessingInfo.IMAGE_TOKEN
+        )
+        start_token = getattr(
+            hf_processor,
+            "VISION_START_TOKEN",
+            MiniMaxM3VLProcessingInfo.VISION_START_TOKEN,
+        )
+        end_token = getattr(
+            hf_processor,
+            "VISION_END_TOKEN",
+            MiniMaxM3VLProcessingInfo.VISION_END_TOKEN,
+        )
+
+        image_token_id = vocab[image_token]
+        start_token_id = vocab[start_token]
+        end_token_id = vocab[end_token]
+        merge_length = int(getattr(image_processor, "merge_size", 2)) ** 2
+
+        def get_image_replacement(item_idx: int):
+            grid_thw = out_mm_kwargs["image"][item_idx]["image_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            num_tokens = int(grid_thw.prod().item()) // merge_length
+            full = [start_token_id] + [image_token_id] * num_tokens + [
+                end_token_id
+            ]
+            return PromptUpdateDetails.select_token_id(full, image_token_id)
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],
+                replacement=get_image_replacement,
+            )
+        ]
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        image_grid_thw = hf_inputs.get("image_grid_thw")
+        if image_grid_thw is None:
+            image_grid_sizes = torch.empty(0, dtype=torch.long)
+        else:
+            image_grid_sizes = image_grid_thw.prod(-1)
+
+        return {
+            "pixel_values": MultiModalFieldConfig.flat_from_sizes(
+                "image", image_grid_sizes
+            ),
+            "image_grid_thw": MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
+        }
+
+
 class MiniMaxM3VLModel(nn.Module):
     def __init__(
         self,
@@ -999,6 +1187,11 @@ class MiniMaxM3VLModel(nn.Module):
         )
 
 
+@MULTIMODAL_REGISTRY.register_processor(
+    MiniMaxM3VLMultiModalProcessor,
+    info=MiniMaxM3VLProcessingInfo,
+    dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
+)
 class MiniMaxM3SparseForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsEagle3
 ):
