@@ -488,9 +488,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         # correct lora_id for every dispatched token.
         exchanged_lora_indices = None
         if split_lora_indices is not None:
+            lora_dtype = split_lora_indices.dtype
+            split_lora_float = split_lora_indices.to(torch.float32)
+
             # 1st permute: same reordering as tokens
             permuted_lora, _ = torch_npu.npu_moe_token_permute(
-                split_lora_indices.unsqueeze(-1), topk_ids, num_out_tokens=topk_ids.numel()
+                split_lora_float.unsqueeze(-1), topk_ids, num_out_tokens=topk_ids.numel()
             )
             permuted_lora = permuted_lora.squeeze(-1)
 
@@ -507,7 +510,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                     exchanged_lora.unsqueeze(-1), global_input_tokens_local_experts_indices
                 )
                 exchanged_lora = exchanged_lora.squeeze(-1)
-            exchanged_lora_indices = exchanged_lora
+            exchanged_lora_indices = exchanged_lora.to(lora_dtype)
 
         dynamic_scale_after_all2all = None
         if with_quant:
