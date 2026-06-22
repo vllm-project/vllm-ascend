@@ -652,7 +652,12 @@ class TestAscendFusedMoE:
         monkeypatch.setattr(
             fused_moe_module,
             "_EXTRA_CTX",
-            SimpleNamespace(in_profile_run=True, moe_comm_method=moe_comm_method, flash_comm_v1_enabled=True),
+            SimpleNamespace(
+                in_profile_run=True,
+                moe_comm_method=moe_comm_method,
+                flash_comm_v1_enabled=True,
+                eplb_heat_collection_status=True,
+            ),
         )
 
         result = layer.forward_impl(hidden_states, router_logits, return_with_event=return_with_event)
@@ -723,7 +728,12 @@ class TestAscendFusedMoE:
         monkeypatch.setattr(
             fused_moe_module,
             "_EXTRA_CTX",
-            SimpleNamespace(in_profile_run=False, moe_comm_method=moe_comm_method, flash_comm_v1_enabled=False),
+            SimpleNamespace(
+                in_profile_run=False,
+                moe_comm_method=moe_comm_method,
+                flash_comm_v1_enabled=False,
+                eplb_heat_collection_status=True,
+            ),
         )
 
         layer.forward_impl(torch.zeros(2, 4), torch.zeros(2, 2))
