@@ -3658,7 +3658,6 @@ class NPUModelRunner(GPUModelRunner):
                 runtime_mode=CUDAGraphMode.FULL,
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
-                use_breakable_capture=self.use_minimax_m3_sparse,
             )
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
