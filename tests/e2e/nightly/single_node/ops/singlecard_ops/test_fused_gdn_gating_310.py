@@ -73,13 +73,13 @@ def test_fused_gdn_gating_310(batch_size, num_heads, beta, threshold):
     A_log = torch.randn(num_heads, dtype=dtype)
     dt_bias = torch.randn(num_heads, dtype=dtype)
     a = torch.randn(batch_size, num_heads, dtype=dtype)
-    b = torch.randn(batch_size, num_heads, dtype=dtype) 
+    b = torch.randn(batch_size, num_heads, dtype=dtype)
     # 注入边界测试值，强制触发 Softplus 和线性截断分支
     if batch_size >= 4 and num_heads >= 4:
         boundary = threshold / beta
         a[0, 0] = boundary + 2.0
-        a[1, 1] = boundary         
-        a[2, 2] = boundary - 0.5    
+        a[1, 1] = boundary 
+        a[2, 2] = boundary - 0.5
         a[3, 3] = -boundary - 2.0
     # 获取 Golden 参考值
     g_golden, beta_out_golden = golden_fused_gdn_gating(A_log, a, b, dt_bias, beta, threshold)
