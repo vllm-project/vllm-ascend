@@ -285,7 +285,7 @@ aop_pipeline() {
     echo "--- [1/3] Classify: scanning pod logs for env patterns ---"
     echo "  Rules content:"
     if [ -f "$rules" ]; then
-        grep -v '^[[:space:]]*$' "$rules" | sed 's/^/    > /'
+        grep -vE '^[[:space:]]*(#|$)' "$rules" | sed 's/^/    > /'
     else
         echo "    (rules file not found)"
     fi
@@ -306,12 +306,13 @@ aop_pipeline() {
         for f in "${LOG_PREFIX}/node_"*"_pytest.log"; do
             if [ -f "$f" ]; then
                 local n
-                n=$(grep -v '^[[:space:]]*$' "$rules" | grep -ciEf - "$f" 2>/dev/null || echo 0)
+                n=$(grep -vE '^[[:space:]]*(#|$)' "$rules" | grep -ciEf - "$f" 2>/dev/null || echo 0)
+                n=${n%%[!0-9]*}
                 echo "    Scan ${f}: ${n} matches"
                 env_count=$((env_count + n))
                 if [ "$n" -gt 0 ]; then
                     echo "    Matched lines:"
-                    grep -v '^[[:space:]]*$' "$rules" | grep -niEf - "$f" | head -5 | sed 's/^/      /'
+                    grep -vE '^[[:space:]]*(#|$)' "$rules" | grep -niEf - "$f" | head -5 | sed 's/^/      /'
                 fi
             fi
         done
