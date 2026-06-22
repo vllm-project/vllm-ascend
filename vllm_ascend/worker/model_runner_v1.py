@@ -52,7 +52,11 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionMetadata,
+)
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
@@ -494,6 +498,15 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_process = EplbProcess(shared_dict=self.shared_dict, policy_type=self.policy_type, enable_d2d=True)
             self.process = self.eplb_process._launch_process()
             self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)
+            # In pd colocation scenarios, we find that prefill/decode requests result in different
+            # expert workloads. To reduce expert imbalance more effectively, we can coolect eplb
+            # heat exclusively on a single stage rather than both prefill/decode.
+            self.eplb_heat_collection_stage = eplb_config.eplb_heat_collection_stage
+            # Currently, we set the maximum of tokens in decode stage as the threshold to distinguish
+            # prefill with decode.
+            self.eplb_pd_thresholds = self.max_num_reqs * self.uniform_decode_query_len
+            self.eplb_heat_collection_status = True
+
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
         # `initialize_kv_cache` based on the kv cache config. However, as in
@@ -2074,6 +2087,9 @@ class NPUModelRunner(GPUModelRunner):
                     self.parallel_config.num_ubatches,
                 )
 
+                if self.dynamic_eplb:
+                    self.update_eplb_heat_collection_status(num_tokens_padded)
+
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
                 # NOTE(Angazenn): According to https://github.com/vllm-project/vllm/pull/30877,
@@ -2179,9 +2195,7 @@ class NPUModelRunner(GPUModelRunner):
                 ec_connector_output,
             ) = self._preprocess(
                 scheduler_output,
-                num_tokens_padded
-                if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
-                else total_num_scheduled_tokens,
+                num_tokens_padded,
                 intermediate_tensors,
             )
 
@@ -2227,6 +2241,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 input_ids=input_ids,
+                eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -2475,7 +2490,7 @@ class NPUModelRunner(GPUModelRunner):
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
         if self.dynamic_eplb:
-            self.eplb_updator.forward_end()
+            self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
         self._finalize_dump_data()
 
@@ -3363,6 +3378,10 @@ class NPUModelRunner(GPUModelRunner):
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
             num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
+        
+        if self.dynamic_eplb:
+            self.update_eplb_heat_collection_status(num_tokens_padded)
+        
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
@@ -3503,6 +3522,7 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 has_sinks = self._has_sinks,
                 input_ids=input_ids,
+                eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
@@ -3528,8 +3548,8 @@ class NPUModelRunner(GPUModelRunner):
             if is_profile and self.dynamic_eplb:
                 target = self.model.language_model if hasattr(self.model, "language_model") else self.model
                 target.clear_all_moe_loads()
-            if self.dynamic_eplb:
-                self.eplb_updator.forward_end()
+            if not is_profile and self.dynamic_eplb:
+                self.eplb_updator.forward_end(self.eplb_heat_collection_status)
             self._finalize_dump_data(dump=False)
             if self.use_compress and force_attention:
                 self.positions.fill_(0)
@@ -3578,7 +3598,19 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
 
+    def update_eplb_heat_collection_status(self, num_tokens_padded: int):
+        if self.eplb_heat_collection_stage == "prefill":
+            # collect eplb heat for prefill requests.
+            self.eplb_heat_collection_status = num_tokens_padded > self.eplb_pd_thresholds
+        elif self.eplb_heat_collection_stage == "decode":
+            # collect eplb heat for decode requests.
+            self.eplb_heat_collection_status = num_tokens_padded <= self.eplb_pd_thresholds
+        else:
+            # collect eplb heat for all requests.
+            self.eplb_heat_collection_status =  True
+
     def load_model(self) -> None:
+        load_model_start_time = time.perf_counter()
         logger.info("Starting to load model %s...", self.model_config.model)
 
         if self.ascend_config.mix_placement:
@@ -3645,6 +3677,12 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
 
+        load_model_total_time = time.perf_counter() - load_model_start_time
+        logger.info(
+            "Model runner load_model total time: %.2f seconds",
+            load_model_total_time,
+        )
+
     def _start_dump_data(self) -> None:
         if self.debugger is None or self._debugger_started:
             return
@@ -3688,13 +3726,20 @@ class NPUModelRunner(GPUModelRunner):
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
         # TODO: refactor the logic of attention
-        # Initialize drafter attention group initialization
-        if self.speculative_config and (
-            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+            )
         ):
-            assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
+            assert isinstance(
+                self.drafter,
+                AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer,
+            )
             block_size = (self.kernel_block_sizes[0] if isinstance(
-            self.kernel_block_sizes, list) else self.kernel_block_sizes)
+                self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group() and not is_profiling:
@@ -4759,13 +4804,48 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_groups: list[KVCacheGroupSpec],
         is_profiling: bool = False,
     ) -> None:
+        min_cg_support = AttentionCGSupport.ALWAYS
+        min_cg_attn_backend = None
+
+        for attn_backend_set, kv_cache_group in zip(
+            attention_backends, kv_cache_groups
+        ):
+            for attn_backend in attn_backend_set:
+                builder_cls = attn_backend.get_builder_cls()
+                cg_support = builder_cls.get_cudagraph_support(
+                    self.vllm_config, kv_cache_group.kv_cache_spec
+                )
+                if cg_support.value < min_cg_support.value:
+                    min_cg_support = cg_support
+                    min_cg_attn_backend = attn_backend.__name__
+
         with update_pass_config(self):
-            super()._check_and_update_cudagraph_mode(
-                attention_backends,
-                kv_cache_groups,
+            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                min_cg_support,
+                min_cg_attn_backend,
+                self.uniform_decode_query_len,
+                self.parallel_config.tensor_parallel_size,
+                self.kv_cache_config,
+                self.max_num_reqs,
                 is_profiling=is_profiling,
             )
+            self.cudagraph_dispatcher.initialize_cudagraph_keys(
+                cudagraph_mode, self.uniform_decode_query_len
+            )
 
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_extract_hidden_states()
+            )
+        ):
+            assert isinstance(
+                self.drafter,
+                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+            )
+            self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
@@ -4809,7 +4889,13 @@ class NPUModelRunner(GPUModelRunner):
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            return GPUModelRunner.capture_model(self)
+            cuda_graph_size = GPUModelRunner.capture_model(self)
+
+        mgr = self.encoder_cudagraph_manager
+        if mgr is not None and hasattr(self, "update_stream"):
+            mgr.update_stream = self.update_stream
+
+        return cuda_graph_size
 
     def _prepare_multimodal_fields(self):
         """
@@ -4922,6 +5008,12 @@ def _torch_cuda_wrapper():
 # TODO: This method will be removed subsequently and implemented in platform.
 @contextmanager
 def _replace_gpu_model_runner_function_wrapper(target_module_name):
+    import vllm.v1.worker.encoder_cudagraph as _vllm_encoder_cudagraph
+
+    from vllm_ascend.worker.encoder_acl_graph import EncoderAclGraphManager
+
+    _encoder_mgr_orig = _vllm_encoder_cudagraph.EncoderCudaGraphManager
+    _vllm_encoder_cudagraph.EncoderCudaGraphManager = EncoderAclGraphManager
     target_module = None
     original_attrs = {}
     try:
@@ -4936,6 +5028,7 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
     except Exception as e:
         raise RuntimeError(f"NPUModelRunner failed, error is {e}")
     finally:
+        _vllm_encoder_cudagraph.EncoderCudaGraphManager = _encoder_mgr_orig
         if target_module is not None:
             for attr_name, attr_value in original_attrs.items():
                 setattr(target_module, attr_name, attr_value)  # noqa: B010

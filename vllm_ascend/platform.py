@@ -71,6 +71,8 @@ else:
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
+# Delete after the driver is released; temporarily hard-coded to 4
+MAX_CAPTURE_SIZES_FOR_950 = 4
 
 
 def _get_npu_smi_field(lines: list[str], key: str) -> str | None:
@@ -129,6 +131,25 @@ def config_deprecated_logging():
             warnings_logger.addHandler(handler)
 
     warnings_logger.propagate = False
+
+
+def prune_capture_sizes_for_950(vllm_config):
+    original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
+    if not original_sizes:
+        return
+    if len(original_sizes) <= MAX_CAPTURE_SIZES_FOR_950:
+        return
+    step = (len(original_sizes) - 1) / (MAX_CAPTURE_SIZES_FOR_950 - 1)
+    indices = [round(i * step) for i in range(MAX_CAPTURE_SIZES_FOR_950)]
+    indices[0], indices[-1] = 0, len(original_sizes) - 1
+    sampled_sizes = [original_sizes[i] for i in indices]
+    update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
+    logger.warning(
+        "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility"
+        "and this warning will be cleared soon.",
+        len(original_sizes),
+        MAX_CAPTURE_SIZES_FOR_950,
+    )
 
 
 class NPUPlatform(Platform):
@@ -430,6 +451,34 @@ class NPUPlatform(Platform):
                 f"({decode_context_parallel_size})."
             )
 
+    @staticmethod
+    def _is_mtp_speculative_config(speculative_config: Any | None) -> bool:
+        if speculative_config is None:
+            return False
+
+        method = getattr(speculative_config, "method", None)
+        return method is not None and "mtp" in str(method).lower()
+
+    @classmethod
+    def _validate_pd_pp_mtp_config(cls, vllm_config: VllmConfig) -> None:
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        if not cls._is_mtp_speculative_config(speculative_config):
+            return
+
+        parallel_config = vllm_config.parallel_config
+        if getattr(parallel_config, "pipeline_parallel_size", 1) <= 1:
+            return
+
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        if kv_transfer_config is not None and getattr(kv_transfer_config, "kv_role", None) == "kv_producer":
+            return
+
+        raise ValueError(
+            "PP+MTP is only supported on PD-disaggregated P nodes "
+            "(kv_role='kv_producer'). D nodes must use "
+            "pipeline_parallel_size=1 and may combine data parallelism with MTP."
+        )
+
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
@@ -451,6 +500,8 @@ class NPUPlatform(Platform):
         cls._validate_layer_sharding_config(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
+        cls._validate_pd_pp_mtp_config(vllm_config)
+
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
 
@@ -598,6 +649,9 @@ class NPUPlatform(Platform):
                     "vllm::dsa_forward",
                 ]
             )
+            # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                prune_capture_sizes_for_950(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,
