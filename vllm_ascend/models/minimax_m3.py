@@ -48,8 +48,6 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
     MergedColumnParallelLinear,
-    ColumnParallelLinear,
-    ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -64,8 +62,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
-
 from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3, SupportsLoRA, SupportsPP
+from vllm_ascend.attention.msa_m3 import MiniMaxM3SparseAttention
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -78,6 +76,20 @@ from vllm.model_executor.models.utils import (
 
 
 logger = init_logger(__name__)
+
+
+def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
+    cfg = getattr(config, "sparse_attention_config", None)
+    if not cfg:
+        return set()
+    freq = cfg.get("sparse_attention_freq")
+    if freq is None:
+        return set()
+    return {i for i, f in enumerate(freq) if f != 0}
+
+
+def is_minimax_m3_sparse_model(config: PretrainedConfig | None) -> bool:
+    return bool(_sparse_attention_layer_ids(config)) if config is not None else False
 
 
 def _get_text_config(vllm_config: VllmConfig) -> PretrainedConfig:
@@ -274,14 +286,9 @@ class MiniMaxM3Attention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        is_sparse_attention_layer: bool = False,
-        disable_index_value: bool = False,
-        sparse_cfg: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        self.is_sparse_attention_layer = is_sparse_attention_layer
-        self.disable_index_value = is_sparse_attention_layer and disable_index_value
 
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -302,25 +309,6 @@ class MiniMaxM3Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
-
-        if self.is_sparse_attention_layer:
-            assert sparse_cfg is not None
-            self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
-            self.idx_head_dim = sparse_cfg["sparse_index_dim"]
-            # Index heads use a GQA-style sharding (mirrors KV head replication
-            # for num_kv_heads < tp_size). When tp_size > total_idx_heads, each
-            # rank holds one head and `idx_replica_size` ranks share the same
-            # head; idx_o is divided by idx_replica_size in forward_core so the
-            # layer-level all-reduce sums to the correct value (done on the
-            # activation rather than the weight to remain quantization-safe).
-            if self.total_idx_heads >= tp_size:
-                assert self.total_idx_heads % tp_size == 0
-            else:
-                assert tp_size % self.total_idx_heads == 0
-            self.idx_head_tp_size = min(tp_size, self.total_idx_heads)
-            self.idx_replica_size = tp_size // self.idx_head_tp_size
-            self.idx_head_rank = tp_size // self.idx_replica_size
-            self.num_idx_heads = self.total_idx_heads // self.idx_head_tp_size
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -351,57 +339,8 @@ class MiniMaxM3Attention(nn.Module):
             rope_parameters=rope_parameters,
         )
 
-        if self.is_sparse_attention_layer:
-            # Always use Column/RowParallel for index_q_proj / index_o_proj
-            # along the idx-head TP group. When idx_replica_size > 1 (i.e.
-            # total_idx_heads < attn_tp_size), multiple ranks in a replica
-            # group load the same per-head weight slice (GQA-style); the
-            # double-count introduced by the layer-level all-reduce is
-            # compensated by dividing idx_o by idx_replica_size in
-            # forward_core (quantization-safe runtime scaling).
-            self.index_q_proj = ColumnParallelLinear(
-                self.hidden_size,
-                self.total_idx_heads * self.idx_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.index_q_proj",
-            )
-            self.index_k_proj = ReplicatedLinear(
-                self.hidden_size,
-                self.idx_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.index_k_proj",
-            )
-
-            if self.disable_index_value:
-                self.index_v_proj = None
-                self.index_o_proj = None
-            else:
-                self.index_v_proj = ReplicatedLinear(
-                    self.hidden_size,
-                    self.idx_head_dim,
-                    bias=False,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.index_v_proj",
-                )
-                self.index_o_proj = RowParallelLinear(
-                    self.total_idx_heads * self.idx_head_dim,
-                    self.hidden_size,
-                    bias=False,
-                    input_is_parallel=True,
-                    reduce_results=False,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.index_o_proj",
-                )
-            self.index_rotary_emb = self.rotary_emb
-
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
-
-        if self.is_sparse_attention_layer:
-            self.index_q_norm = GemmaRMSNorm(self.idx_head_dim, eps=rms_norm_eps)
-            self.index_k_norm = GemmaRMSNorm(self.idx_head_dim, eps=rms_norm_eps)
 
         self.attn = Attention(
             self.num_heads,
@@ -425,18 +364,6 @@ class MiniMaxM3Attention(nn.Module):
         k = self.k_norm(k).reshape(k_shape)
         return q, k
 
-    def _index_qk_norm(
-        self, idx_q: torch.Tensor, idx_k: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # sparse index branch only supports per_head norm; init asserts this.
-        idx_q_shape = idx_q.shape
-        idx_k_shape = idx_k.shape
-        idx_q = idx_q.reshape(-1, self.idx_head_dim)
-        idx_k = idx_k.reshape(-1, self.idx_head_dim)
-        idx_q = self.index_q_norm(idx_q).reshape(idx_q_shape)
-        idx_k = self.index_k_norm(idx_k).reshape(idx_k_shape)
-        return idx_q, idx_k
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -448,14 +375,6 @@ class MiniMaxM3Attention(nn.Module):
         q, k = self._qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
         
-        if self.is_sparse_attention_layer:
-            # TODO: Replace this dense fallback with the MiniMax-M3 sparse
-            # indexer/top-k path on Ascend. The index projection modules are
-            # still modeled so checkpoint loading succeeds.
-            attn_output = self.attn(q, k, v)
-            output, _ = self.o_proj(attn_output)
-            return output
-
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -480,18 +399,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         sparse_attention_config = getattr(config, "sparse_attention_config", None)
-        # sparse_attention_config=None ##TODO Sparse Attention
 
         if sparse_attention_config is not None:
-            is_sparse_attention_layer = sparse_attention_config["sparse_attention_freq"][layer_idx] == 1
-            disable_index_value = sparse_attention_config["sparse_disable_index_value"][layer_idx] == 1
+            is_sparse_attention_layer = (
+                layer_idx in _sparse_attention_layer_ids(config)
+            )
+            disable_index_value = (
+                sparse_attention_config["sparse_disable_index_value"][layer_idx] == 1
+            )
         else:
             is_sparse_attention_layer = False
             disable_index_value = False
 
-        
-
-        self.self_attn = MiniMaxM3Attention(
+        attn_kwargs = dict(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -503,11 +423,16 @@ class MiniMaxM3DecoderLayer(nn.Module):
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
-            sparse_cfg=sparse_attention_config,
-            is_sparse_attention_layer=is_sparse_attention_layer,
-            disable_index_value=disable_index_value,
             prefix=f"{prefix}.self_attn",
         )
+        if is_sparse_attention_layer:
+            self.self_attn = MiniMaxM3SparseAttention(
+                **attn_kwargs,
+                sparse_cfg=sparse_attention_config,
+                disable_index_value=disable_index_value,
+            )
+        else:
+            self.self_attn = MiniMaxM3Attention(**attn_kwargs)
 
         moe_layer_freq = getattr(config, "moe_layer_freq", None)
         # ``is_layer_sparse`` here means "this layer's MLP is a sparse MoE",
@@ -670,6 +595,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
+            (".qkv_proj", ".index_q_proj", "index_q"),
+            (".qkv_proj", ".index_k_proj", "index_k"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
@@ -713,9 +640,13 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 mark_skipped("spec_decode")
                 continue  # skip spec decode layers for main model
 
-            # In this Ascend bring-up the sparse index projections are modeled
-            # explicitly rather than folded into a five-way qkv projection.
-            if ".index_" in name:
+            # Sparse layers fold index_q/index_k into fused qkv_proj (handled below).
+            # Other index_* weights (e.g. index_v/index_o) load explicitly here.
+            if (
+                ".index_" in name
+                and ".index_q_proj" not in name
+                and ".index_k_proj" not in name
+            ):
                 if name.endswith(".bias") and name not in params_dict:
                     mark_skipped("missing_bias")
                     continue
@@ -925,7 +856,6 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
                 text_tensors += 1
                 yield name, weight
 
-        logger.warning("MiniMax M3 top-level load_weights entered")
         loaded_params = loader.load_weights(
             text_weights(), mapper=self.hf_to_vllm_mapper
         )
