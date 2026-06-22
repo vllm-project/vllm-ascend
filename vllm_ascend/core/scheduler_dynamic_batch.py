@@ -41,8 +41,8 @@ class BudgetRefiner:
         if not self.enabled:
             return
         logger.info(
-            "Dynamic batch is enabled with SLO limit: %s, and chunked prefill is "
-            "forced to be activated because dynamic batch relies on it",
+            "BudgetRefiner: Dynamic batch is enabled with SLO limit=%s. "
+            "Chunked prefill is forced to be activated because dynamic batch relies on it.",
             slo_limit,
         )
         self.lookup: dict[tuple[int, int], int] = {}
@@ -95,7 +95,7 @@ class BudgetRefiner:
             return self.default_budget
         budget = self.lookup.get((aligned_ctx, aligned_dnum), None)
         if budget is None:
-            logger.warning("Table miss for ctx,dnum%s", (aligned_ctx, aligned_dnum))
+            logger.warning("Table miss for ctx=%s, dnum=%s", aligned_ctx, aligned_dnum)
             budget = self.default_budget
         # For debug.
         # logger.info(
@@ -169,7 +169,10 @@ class SchedulerDynamicBatch(Scheduler):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
-        token_budget = self.budget_refiner.refine_budget(self.running, token_budget)
+        refined_budget = self.budget_refiner.refine_budget(self.running, token_budget)
+        if refined_budget != token_budget:
+            logger.debug("Refined token_budget: %s -> %s", token_budget, refined_budget)
+        token_budget = refined_budget
 
         # NOTE: We move the prefill requests to the end of the self.running
         # list and keep the relative order unchanged. This rearrangement makes this
@@ -255,6 +258,13 @@ class SchedulerDynamicBatch(Scheduler):
 
                     self.waiting.prepend_request(preempted_req)
                     preempted_reqs.append(preempted_req)
+                    logger.info(
+                        "Preempted request %s (priority=%s). running_count=%s, token_budget=%s",
+                        preempted_req.request_id,
+                        getattr(preempted_req, "priority", "N/A"),
+                        len(self.running),
+                        token_budget,
+                    )
                     if preempted_req == request:
                         # No more request to preempt.
                         can_schedule = False
@@ -495,13 +505,32 @@ class SchedulerDynamicBatch(Scheduler):
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
+        if total_num_scheduled_tokens > self.max_num_scheduled_tokens:
+            logger.error(
+                "Scheduling constraint violated: total_num_scheduled_tokens=%s > max=%s",
+                total_num_scheduled_tokens,
+                self.max_num_scheduled_tokens,
+            )
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
+        if len(self.running) > self.max_num_running_reqs:
+            logger.error(
+                "Scheduling constraint violated: running=%s > max_running=%s",
+                len(self.running),
+                self.max_num_running_reqs,
+            )
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
-        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
+        scheduled_count = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+        if scheduled_count > len(self.running):
+            logger.error(
+                "Scheduling constraint violated: scheduled=%s > running=%s",
+                scheduled_count,
+                len(self.running),
+            )
+        assert scheduled_count <= len(self.running)
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.

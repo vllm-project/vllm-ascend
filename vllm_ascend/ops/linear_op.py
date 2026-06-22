@@ -57,6 +57,7 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -505,6 +506,10 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         except AssertionError:
             flash_comm_v1_enabled = False
             mmrs_fusion = False
+            logger.debug(
+                "matmul_and_reduce: _EXTRA_CTX access failed (profile_run?), "
+                "using defaults: flash_comm_v1=False, mmrs_fusion=False",
+            )
 
         x = input_parallel
 
@@ -718,6 +723,14 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         custom_op = _get_column_parallel_op(prefix, layer)
 
     if custom_op is not None:
+        logger.debug(
+            "get_parallel_op: prefix=%s, direct=%s -> %s (tp_rank=%d, tp_size=%d)",
+            prefix,
+            direct,
+            type(custom_op).__name__,
+            custom_op.tp_rank,
+            custom_op.tp_size,
+        )
         return custom_op, custom_op.tp_rank, custom_op.tp_size
 
     return None, get_tp_group().rank_in_group, get_tp_group().world_size

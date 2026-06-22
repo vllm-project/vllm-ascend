@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -156,6 +157,19 @@ class PCPManager:
         self.async_rebuild_req_indices_full = None
         self.async_rebuild_cu_num_tokens_full = None
         self.async_rebuild_num_tokens_full = 0
+
+        logger.debug(
+            "PCP initialized: pcp_world_size=%s, pcp_rank=%s, "
+            "dcp_world_size=%s, dcp_rank=%s, "
+            "use_sparse=%s, use_async_scheduling=%s, hybrid_attn=%s",
+            self.pcp_world_size,
+            self.pcp_world_rank,
+            self.dcp_world_size,
+            self.dcp_world_rank,
+            self.use_sparse,
+            self.use_async_scheduling,
+            self.pcp_use_hybrid_attn,
+        )
 
     def _get_cumsum_and_arange(
         self,

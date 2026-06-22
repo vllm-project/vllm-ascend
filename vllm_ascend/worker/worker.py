@@ -234,7 +234,8 @@ class NPUWorker(WorkerBase):
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
 
         logger.info(
-            "Sleep mode freed %.2f GiB memory, %.2f GiB memory is still in use.",
+            "Sleep mode (level=%s) freed %.2f GiB memory, %.2f GiB memory is still in use.",
+            level,
             freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes,
         )
@@ -561,7 +562,9 @@ class NPUWorker(WorkerBase):
 
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
+            "Available KV cache memory: %.2f GiB",
+            GiB(self.available_kv_cache_memory_bytes),
+            scope="local",
         )
 
         if npugraph_memory_estimate > 0:
@@ -605,11 +608,12 @@ class NPUWorker(WorkerBase):
         """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
         self.torch_reserved = torch.npu.memory_reserved()
         self.torch_allocated = torch.npu.memory_allocated()
-        logger.debug(
-            "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB",
-            self.torch_reserved / GiB_bytes,
-            self.torch_allocated / GiB_bytes,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB",
+                self.torch_reserved / GiB_bytes,
+                self.torch_allocated / GiB_bytes,
+            )
 
     def execute_model(
         self,
@@ -874,7 +878,7 @@ class NPUWorker(WorkerBase):
         if not is_first_pp_rank:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    "[ProfilingChunk] PP rank %d: profiled %d tokens, latency=%.2f ms (not used)",
+                    "[ProfilingChunk] PP rank %s: profiled %s tokens, latency=%.2f ms (not used)",
                     get_pp_group().rank_in_group,
                     num_tokens,
                     latency_ms,
@@ -916,7 +920,7 @@ class NPUWorker(WorkerBase):
         self.model_config.max_model_len = max_model_len
         if self.model_runner is not None:
             self.model_runner.update_max_model_len(max_model_len)
-        logger.debug("Updated max_model_len to %d", max_model_len)
+        logger.debug("Updated max_model_len to %s", max_model_len)
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
@@ -1019,7 +1023,7 @@ class NPUWorker(WorkerBase):
     def check_health(self) -> None:
         import subprocess
 
-        logger.info("check_health Start!")
+        logger.debug("check_health starting for rank %s...", self.local_rank)
         try:
             result = subprocess.run(
                 ["npu-smi", "info", "-i", str(self.local_rank), "-t", "health"],
@@ -1030,15 +1034,15 @@ class NPUWorker(WorkerBase):
 
             if result.returncode == 0:
                 parse_text_output(result.stdout)
-                logger.info("check_health success!")
+                logger.debug("check_health success for rank %s.", self.local_rank)
             else:
-                logger.info("query NPU card %s fail: %s", self.local_rank, result.stderr)
+                logger.warning("query NPU card %s fail: %s", self.local_rank, result.stderr)
         except subprocess.TimeoutExpired:
-            logger.info("query NPU card  %s timeout.", self.local_rank)
+            logger.warning("query NPU card %s timeout.", self.local_rank)
         except FileNotFoundError:
-            logger.info("npu-smi tool not found.")
+            logger.warning("npu-smi tool not found.")
         except Exception as e:
-            logger.info("query NPU card %s fail: %s", self.local_rank, e)
+            logger.error("query NPU card %s fail: %s", self.local_rank, e)
         return
 
 

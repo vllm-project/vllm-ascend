@@ -82,9 +82,9 @@ class PrefillEagleAclGraphManager(PrefillEagleCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         if self.is_draft_model_prefill:
-            logger.info_once(f"draft prefill run_fullgraph with num_tokens={num_tokens}")
+            logger.info_once("PrefillEagleAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens)
         else:
-            logger.info_once(f"draft run_fullgraph with num_tokens={num_tokens}")
+            logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
 
@@ -179,9 +179,9 @@ class DecodeEagleAclGraphManager(DecodeEagleCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         if self.is_draft_model_prefill:
-            logger.info_once(f"draft prefill run_fullgraph with num_tokens={num_tokens}")
+            logger.info_once("PrefillEagleAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens)
         else:
-            logger.info_once(f"draft run_fullgraph with num_tokens={num_tokens}")
+            logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
 
