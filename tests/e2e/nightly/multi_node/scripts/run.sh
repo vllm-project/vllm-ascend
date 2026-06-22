@@ -228,10 +228,16 @@ sys.exit(1)
             if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
                 set +e; aop_pipeline; set -e
             fi
+            local done_file="${LOG_PREFIX}/../done"
+            touch "$done_file"
+            echo "Leader: notifying workers (${done_file})"
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
             exit 1
         elif [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
-            echo "Worker: test mode done, exiting"
+            echo "Worker: waiting for leader to finish..."
+            local release="${LOG_PREFIX}/../done"
+            while [ ! -f "$release" ]; do sleep 5; done
+            echo "Worker: release signal received, exiting"
             exit 1
         fi
         return
@@ -246,15 +252,22 @@ sys.exit(1)
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
+            touch "${LOG_PREFIX}/../done" 2>/dev/null || true
         else
             if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
                 set +e; aop_pipeline; set -e
             fi
+            local done_file="${LOG_PREFIX}/../done"
+            touch "$done_file"
+            echo "Leader: notifying workers (${done_file})"
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
             exit 1
         fi
     elif [ $ret -ne 0 ] && [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
-        echo "Worker failure detected, waiting for leader AOP..."
+        echo "Worker: waiting for leader to finish..."
+        local release="${LOG_PREFIX}/../done"
+        while [ ! -f "$release" ]; do sleep 5; done
+        echo "Worker: release signal received, exiting"
         exit 1
     fi
 }
