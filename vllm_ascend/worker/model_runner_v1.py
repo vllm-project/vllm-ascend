@@ -636,37 +636,6 @@ class NPUModelRunner(GPUModelRunner):
             return True
         return eagle_config.get("use_aux_hidden_state", True)
 
-    def _configure_eagle3_aux_hidden_states(self) -> None:
-        from vllm.model_executor.models.interfaces import supports_eagle3
-
-        if not supports_eagle3(self.model):
-            raise RuntimeError(
-                "Model does not support EAGLE3 interface but "
-                "aux_hidden_state_outputs was requested"
-            )
-
-        aux_layers = self._get_eagle3_aux_layers_from_config()
-        if not aux_layers:
-            aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
-        self.model.set_aux_hidden_state_layers(aux_layers)
-
-        if get_pp_group().world_size > 1:
-            _inner = self.model
-            if hasattr(_inner, "get_language_model"):
-                _inner = _inner.get_language_model()
-            elif hasattr(_inner, "language_model"):
-                _inner = _inner.language_model()
-            if hasattr(_inner, "model"):
-                _inner = _inner.model
-            from vllm_ascend.patch.worker.patch_eagle3_pp_aux import (
-                patch_eagle3_pp_aux_propagation,
-            )
-
-            if patch_eagle3_pp_aux_propagation(_inner):
-                self.model.make_empty_intermediate_tensors = (
-                    _inner.make_empty_intermediate_tensors
-                )
-
     def _use_aclgraph(self) -> bool:
         return (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -3702,8 +3671,47 @@ class NPUModelRunner(GPUModelRunner):
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
 
-            if self._eagle3_uses_aux_hidden_state():
-                self._configure_eagle3_aux_hidden_states()
+            pp_group = get_pp_group()
+            should_configure_aux_hidden_states = (
+                self.use_aux_hidden_state_outputs
+                if pp_group.world_size == 1
+                else self._eagle3_uses_aux_hidden_state()
+            )
+            if should_configure_aux_hidden_states:
+                from vllm.model_executor.models.interfaces import supports_eagle3
+
+                if not supports_eagle3(self.model):
+                    raise RuntimeError(
+                        "Model does not support EAGLE3 interface but "
+                        "aux_hidden_state_outputs was requested"
+                    )
+
+                aux_layers = self._get_eagle3_aux_layers_from_config()
+                if not aux_layers:
+                    aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                self.model.set_aux_hidden_state_layers(aux_layers)
+
+                if pp_group.world_size > 1:
+                    inner_model = self.model
+                    if hasattr(inner_model, "get_language_model"):
+                        inner_model = inner_model.get_language_model()
+                    elif hasattr(inner_model, "language_model"):
+                        language_model = inner_model.language_model
+                        inner_model = (
+                            language_model()
+                            if callable(language_model)
+                            else language_model
+                        )
+                    if hasattr(inner_model, "model"):
+                        inner_model = inner_model.model
+                    from vllm_ascend.patch.worker.patch_eagle3_pp_aux import (
+                        patch_eagle3_pp_aux_propagation,
+                    )
+
+                    if patch_eagle3_pp_aux_propagation(inner_model):
+                        self.model.make_empty_intermediate_tensors = (
+                            inner_model.make_empty_intermediate_tensors
+                        )
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
@@ -3770,11 +3778,18 @@ class NPUModelRunner(GPUModelRunner):
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
         # TODO: refactor the logic of attention
-        # Initialize drafter attention group initialization
-        if self.speculative_config and (
-            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+            )
         ):
-            assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
+            assert isinstance(
+                self.drafter,
+                AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer,
+            )
             block_size = (self.kernel_block_sizes[0] if isinstance(
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
