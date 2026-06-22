@@ -25,7 +25,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, swiglustep_and_mul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -361,6 +361,7 @@ def unquant_apply_mlp(
     group_list_type: int = 1,
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
+    swiglu_limit: float = 0.0,
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
@@ -381,6 +382,9 @@ def unquant_apply_mlp(
     if act_name == "swigluoai":
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
+    elif act_name == "swiglustep":
+        limit = swiglu_limit if swiglu_limit > 0 else 7.0
+        gate_up_out = swiglustep_and_mul(gate_up_out, limit=limit)
     else:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
@@ -437,6 +441,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             group_list_type=group_list_type,
             topk_scales=topk_scales,
             need_trans=need_trans,
+            swiglu_limit=swiglu_limit,
         )
 
     assert w1_scale is not None and w2_scale is not None
