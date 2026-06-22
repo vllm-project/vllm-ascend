@@ -998,7 +998,8 @@ class RecomputeScheduler(Scheduler):
                     req_id, new_token_ids
                 ):
                     logger.error(
-                        "[RecomputeScheduler] Unexpected: grammar rejected tokens %s for request %s. Terminating request.",
+                        "[RecomputeScheduler] Unexpected: grammar rejected tokens %s for request %s."
+                        " Terminating request.",
                         new_token_ids,
                         req_id,
                     )
