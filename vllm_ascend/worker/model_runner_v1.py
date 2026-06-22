@@ -191,7 +191,12 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
 
+@dataclass
+class GraphCaptureContext:
+    stream: torch.npu.Stream
 
+
+@contextmanager
 def graph_capture(device: torch.device):
     """
     `graph_capture` is a context manager which should surround the code that
