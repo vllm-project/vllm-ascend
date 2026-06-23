@@ -147,7 +147,12 @@ class AscendStoreCoordinator:
             ExternalCachedBlockPool(),
             apply_eagle=False,
         )
-        return masks
+        return tuple(
+            [True] * _num_chunks(token_len, self.group_effective_block_sizes[group_id])
+            if not _uses_reachable_mask(self.group_cache_families[group_id])
+            else mask
+            for group_id, mask in enumerate(masks)
+        )
 
     def store_mask(
         self,
@@ -159,8 +164,11 @@ class AscendStoreCoordinator:
         )
         masks: list[list[bool]] = []
         for group_id, spec in enumerate(self.group_effective_specs):
-            manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
             num_chunks = aligned_token_len // self.group_effective_block_sizes[group_id]
+            if not _uses_reachable_mask(self.group_cache_families[group_id]):
+                masks.append([True] * num_chunks)
+                continue
+            manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
             mask = _reachable_block_mask(
                 manager_cls,
                 start_block=0,
@@ -371,3 +379,11 @@ def _cache_family_granularity(block_size: int, cache_family: str | None) -> int:
         return block_size
     ratio = cache_family[1:]
     return block_size * int(ratio) if ratio.isdigit() else block_size
+
+
+def _uses_reachable_mask(cache_family: str | None) -> bool:
+    return cache_family in (None, "default", "c1")
+
+
+def _num_chunks(token_len: int, block_size: int) -> int:
+    return (token_len + block_size - 1) // block_size
