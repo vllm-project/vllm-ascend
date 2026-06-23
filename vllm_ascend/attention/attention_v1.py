@@ -620,12 +620,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[draft_step][key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                         block_tables = attn_metadata[draft_step][key].block_tables
+                        attn_state = attn_metadata[draft_step][key].attn_state
                         attn_count = attn_count + 1
-                        if not attn_metadata[draft_step][key].causal:
+                        is_causal = attn_metadata[draft_step][key].causal
+                        if not is_causal:
                             sparse_mode = 0
                     else:
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        attn_state = attn_metadata[key].attn_state
+                        is_causal = attn_metadata[key].causal
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -637,6 +641,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
                             block_tables = attn_metadata[key].block_tables
 
+                    if (attn_state == AscendAttentionState.DecodeOnly and is_causal
+                            and not hasattr(vllm_config.model_config.hf_text_config, "sliding_window")):
+                        attn_mask, sparse_mode = (None, 0)
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
                     extra_args = {}
@@ -717,6 +724,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
         pre_tokens = self.sliding_window or SWA_INT_MAX
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+        if (attn_metadata.attn_state == AscendAttentionState.DecodeOnly and
+                sparse_mode == 3 and not self.sliding_window):
+            attn_mask, sparse_mode = (None, 0)
 
         extra_args = {}
         if self.enable_c8_quant and layer is not None:
@@ -1145,11 +1155,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=4,
                 )
             else:
+                is_decode = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+                atten_mask, sparse_mode = (None, 0) if is_decode else (attn_metadata.attn_mask, 3)
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=atten_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1158,7 +1170,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale=self.scale,
-                    sparse_mode=3,
+                    sparse_mode=sparse_mode,
                 )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
