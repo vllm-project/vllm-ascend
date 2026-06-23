@@ -1,3 +1,4 @@
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -19,7 +20,9 @@ from vllm_ascend.worker.encoder_acl_graph import (
 )
 
 
-class _FiaMockMixin:
+class FIAMockMixin(TestBase):
+    captured: dict[str, Any]
+
     def _install_vllm_config_mock(self):
         mock_vllm_config = MagicMock(spec=VllmConfig)
         mock_vllm_config.compilation_config = CompilationConfig()
@@ -116,7 +119,7 @@ class _FiaMockMixin:
         mock_fia = MagicMock(side_effect=self._fake_fia)
         mock_fia.out = self._fake_fia_out
 
-        patch_targets = [
+        patch_targets: list[tuple[str, Any]] = [
             (
                 "vllm_ascend.ops.mm_encoder_attention.torch_npu.npu_fused_infer_attention_score",
                 mock_fia,
@@ -161,7 +164,7 @@ class _FiaMockMixin:
             self.addCleanup(patcher.stop)
 
 
-class TestAscendMMEncoderAttentionEager(TestBase, _FiaMockMixin):
+class TestAscendMMEncoderAttentionEager(FIAMockMixin):
     def setUp(self):
         self._install_vllm_config_mock()
         self._install_fia_mocks(capture=False)
@@ -237,7 +240,7 @@ class TestAscendMMEncoderAttentionEager(TestBase, _FiaMockMixin):
         self.assertEqual(self.captured["scale"], custom_scale)
 
 
-class TestAscendMMEncoderAttentionCapture(TestBase, _FiaMockMixin):
+class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
     def setUp(self):
         self._install_vllm_config_mock()
         set_encoder_graph_params([2048])
