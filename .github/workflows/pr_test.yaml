@@ -188,8 +188,7 @@ jobs:
           git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }} \
-            --run-all-modules
+            --diff-base origin/${{ github.base_ref }}
 
       - name: Set no-tests output when source paths unchanged
         id: noop
@@ -207,7 +206,7 @@ jobs:
     strategy:
       matrix:
         vllm_version:
-#          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
+          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
           - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
