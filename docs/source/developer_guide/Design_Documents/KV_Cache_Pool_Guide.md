@@ -53,7 +53,7 @@ The key benefit of doing this is that we can keep the gain in performance by com
 
 To enable this feature, we need to set up both Mooncake Connector and MooncakeStore Connector with a Multi Connector, which is a KV Connector class provided by vLLM that can call multiple KV Connectors in a specific order.
 
-For details, please also refer to the Mooncake Connector Store Deployment Guide.
+For details, please also refer to the [Mooncake connector deployment guide](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/mooncake_connector_deployment_guide.md).
 
 ## How is MooncakeStoreConnectorV1 Implemented?
 

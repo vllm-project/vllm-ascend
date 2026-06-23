@@ -20,15 +20,12 @@
 name: Nightly-A2
 
 on:
-  schedule:
-      # Run test at 23:45 Beijing time (UTC+8)
-      - cron: "45 15 * * *"
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
         description: 'Branch to test'
         required: true
-        default: 'main'
+        default: 'releases/v0.22.1rc'
         type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
@@ -79,7 +76,6 @@ jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
     if: >-
-      github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch'
     runs-on: linux-aarch64-a2b3-0
     outputs:
@@ -89,27 +85,21 @@ jobs:
     steps:
       - name: Parse trigger
         id: parse
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const eventName = context.eventName;
-            const testCases = '${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}'.trim();
+            const testCases = '${{ inputs.test_cases }}'.trim();
 
             core.setOutput('ref', context.sha || 'unknown');
 
-            if (eventName === 'workflow_dispatch' && testCases) {
+            if (testCases) {
               core.setOutput('run', 'true');
               if (testCases === 'all') {
                 core.setOutput('filter', 'all');
               } else {
                 core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
               }
-              return;
-            }
-
-            if (eventName === 'schedule') {
-              core.setOutput('run', 'true');
-              core.setOutput('filter', 'all');
               return;
             }
 
@@ -130,27 +120,19 @@ jobs:
           {
             echo "cann_image=${{ env.CANN_IMAGE }}"
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              input_branch="${{ inputs.vllm_ascend_branch }}"
-              # Normalize branch name for image tag (replace '/' with '-')
-              normalized=$(echo "$input_branch" | tr '/' '-')
-              echo "vllm_ascend_branches=[\"${normalized}\"]"
-            else
-              echo 'vllm_ascend_branches=["main"]'
-            fi
+            input_branch="${{ inputs.vllm_ascend_branch }}"
+            normalized=$(echo "$input_branch" | tr '/' '-')
+            echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
 
   build-image:
     name: Build nightly-a2 image
     if: >-
-      github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
     strategy:
       matrix:
         vllm_ascend_branch: >-
-          ${{ github.event_name == 'workflow_dispatch' 
-              && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
-              || fromJSON('["main"]') }}
+          ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
@@ -183,9 +165,6 @@ jobs:
           - name: qwen3-32b-int8
             os: linux-aarch64-a2b3-4
             config_file_path: Qwen3-32B-Int8-A2.yaml
-          - name: MiniMax-M2.5-w8a8-QuaRot-A2
-            os: linux-aarch64-a2b3-8
-            config_file_path: MiniMax-M2.5-w8a8-QuaRot-A2.yaml
           - name: Qwen3.5-27B-w8a8-A2
             os: linux-aarch64-a2b3-2
             config_file_path: Qwen3.5-27B-w8a8-A2.yaml
@@ -210,8 +189,8 @@ jobs:
           )
         }}
     secrets:
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
+      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   multi-node-tests:
     name: multi-node
@@ -257,8 +236,8 @@ jobs:
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
+      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   generate-accuracy-matrix:
     name: Generate accuracy test matrix
@@ -275,7 +254,7 @@ jobs:
       pr_only_matrix: ${{ steps.set-matrix.outputs.pr_only_matrix }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Read accuracy group config
         id: set-matrix
@@ -347,7 +326,7 @@ jobs:
   clear-pre-logs:
     needs: [parse-trigger, multi-node-tests]
     runs-on: linux-aarch64-a2b3-0
-    if: github.event_name == 'schedule' && needs.multi-node-tests.result != 'skipped'
+    if: needs.multi-node-tests.result != 'skipped'
     steps:
       - name: Clear pre-logs on pvc
         run: |
@@ -359,7 +338,7 @@ jobs:
     needs: [parse-trigger, single-node-tests, multi-node-tests]
     if: >-
       always() &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      github.event_name == 'workflow_dispatch' &&
       needs.parse-trigger.result == 'success'
     runs-on: linux-aarch64-a2b3-0
     steps:

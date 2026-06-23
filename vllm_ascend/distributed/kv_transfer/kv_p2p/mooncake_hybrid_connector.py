@@ -182,7 +182,7 @@ class KVCacheTaskTracker:
         while self.delayed_free_requests:
             request_id = next(iter(self.delayed_free_requests))
             delay_start_time = self.delayed_free_requests[request_id]
-            if current_time - delay_start_time > envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT:
+            if current_time - delay_start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
@@ -1540,6 +1540,7 @@ class MooncakeConnectorWorker:
                 if share_tensor_addr:
                     ptrs.append(min(share_tensor_addr))
                     lengths.append(kv_cache_tensor.size)
+            self.block_stride_per_addr.extend(self.block_len_per_addr)
         elif self.use_compress:
             layer_group_idx = dict[str, int]()
             for i, group in enumerate(self.kv_cache_config.kv_cache_groups):

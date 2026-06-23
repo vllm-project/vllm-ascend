@@ -22,7 +22,6 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
-from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
@@ -79,7 +78,6 @@ def test_qwen3_dense_eager_mode(
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
-@pytest.mark.skipif(vllm_version_is("0.21.0"), reason="v2 model runner patches not supported on v0.21.0")
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_egale_spec_decoding(
     model: str,
@@ -121,7 +119,6 @@ def test_egale_spec_decoding(
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
-@pytest.mark.skipif(vllm_version_is("0.21.0"), reason="v2 model runner patches not supported on v0.21.0")
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_qwen3_dense_graph_mode(
     model: str,

@@ -1,5 +1,4 @@
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num
@@ -65,16 +64,9 @@ def _swiglu_quant_kernel(
 
 
 def swiglu_quant(x, group_list, group_list_type, need_quant=True):
-    logger.debug(
-        "[TritonOps] swiglu_quant: x.shape=%s, group_list.shape=%s, group_list_type=%s, need_quant=%s",
-        x.shape,
-        group_list.shape,
-        group_list_type,
-        need_quant,
-    )
     # group_list_type must be 0 cusum or 1 count
     if group_list_type not in [0, 1]:
-        raise ValueError(f"group_list_type must be 0 or 1, but got {group_list_type}")
+        raise ValueError(f"swiglu_quant: group_list_type must be 0 or 1, but got {group_list_type}")
     s, h = x.shape
     out_dtype = torch.int8 if need_quant else x.dtype
     out = torch.empty((s, h // 2), dtype=out_dtype, device=x.device)
@@ -86,7 +78,9 @@ def swiglu_quant(x, group_list, group_list_type, need_quant=True):
     elif group_list.dtype == torch.int32:
         num_experts_algin = (num_experts + 15) // 16 * 16
     else:
-        raise ValueError(f"group_list dtype must be torch.int32 or torch.int64, but got {group_list.dtype}")
+        raise ValueError(
+            f"swiglu_quant: group_list dtype must be torch.int32 or torch.int64, but got {group_list.dtype}"
+        )
 
     num_vectorcore = get_vectorcore_num()
     _swiglu_quant_kernel[(num_vectorcore,)](

@@ -25,7 +25,6 @@ used in BailingMoELinearAttention:
 
 import torch
 from einops import rearrange
-from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 
@@ -90,6 +89,15 @@ def _fwd_diag_kernel(
 
     # Load query values
     q = tl.load(Q_block_ptr, mask=block_offset + q_index[:, None] < n, other=0.0).to(tl.float32)
+
+    # Re-apply mask to zero out padding elements in the last block.
+    # On Ascend, tl.load(..., other=0.0) may not reliably clear out-of-bound data
+    # due to hardware-specific vector-to-cube loading behavior. If the sequence length
+    # is not a multiple of BLOCK_SIZE, the trailing block may contain garbage values.
+    # These "dirty" elements can cause NaNs during dot-product computation, leading
+    # to corrupted attention outputs and model instability. Explicitly masking here
+    # ensures numerical safety.
+    q = tl.where(block_offset + q_index[:, None] < n, q, 0.0)
     # Initialize output accumulator
     qkv = tl.zeros([CBLOCK, e], dtype=tl.float32)
 
@@ -109,6 +117,9 @@ def _fwd_diag_kernel(
             mask=block_offset + kv_index[:, None] < n,
             other=0.0,
         ).to(tl.float32)
+
+        # Same masking required for k to prevent garbage values in dot product (see above).
+        k = tl.where(block_offset + kv_index[:, None] < n, k, 0.0)
 
         v = tl.load(
             V_block_ptr,
@@ -545,16 +556,6 @@ def lightning_attention_npu(
     kv_history: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """lightning attention forward pass (NPU-friendly)."""
-    logger.debug(
-        "[TritonOps] lightning_attention_npu: q.shape=%s, k.shape=%s, v.shape=%s, ed.shape=%s, "
-        "block_size=%s, kv_history.shape=%s",
-        q.shape,
-        k.shape,
-        v.shape,
-        ed.shape,
-        block_size,
-        kv_history.shape if kv_history is not None else None,
-    )
     d = q.shape[-1]
     e = v.shape[-1]
 

@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
@@ -46,20 +47,16 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
-    vllm_version_is,
 )
 
-if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map
-else:
 
-    def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
-        global_indices = torch.where(expert_map != -1)[0]
-        local_indices = expert_map[global_indices]
-        return ", ".join(
-            f"{local_index.item()}->{global_index.item()}"
-            for local_index, global_index in zip(local_indices, global_indices)
-        )
+def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
+    global_indices = torch.where(expert_map != -1)[0]
+    local_indices = expert_map[global_indices]
+    return ", ".join(
+        f"{local_index.item()}->{global_index.item()}"
+        for local_index, global_index in zip(local_indices, global_indices)
+    )
 
 
 @dataclass
@@ -179,13 +176,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             input_ids=input_ids,
         )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
-            if vllm_version_is("0.21.0"):
-                # In 0.21.0, capturer is a process-wide singleton.
-                from vllm.model_executor.layers.fused_moe.routed_experts_capturer import get_global_experts_capturer
-
-                capturer = get_global_experts_capturer()
-            else:
-                capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
+            capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
             if capturer is not None:
                 capturer.capture(layer_id=layer.layer_id, topk_ids=topk_ids)
 
@@ -292,6 +283,14 @@ class AscendMoERunner(MoERunner):
         # via _maybe_reduce_final_output on the combined (shared + routed)
         # output. Skip any additional reduction here.
         return shared_output
+
+    def _maybe_reduce_final_output(
+        self,
+        states: torch.Tensor,
+        trunc_size: int,
+    ) -> torch.Tensor:
+        states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+        return states[..., :trunc_size]
 
     # TODO: Remove this after drop v0.19.1 support
     def forward_impl(
@@ -416,14 +415,18 @@ class AscendFusedMoE(FusedMoE):
         num_experts += num_shared_experts if self.mix_placement else 0
         self.moe_config.num_experts = num_experts
         self.global_expert_map, self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
-            eplb_config, self.moe_instance_id, self.moe_config, self.mix_placement, num_shared_experts
+            eplb_config,
+            self.moe_instance_id,
+            self.moe_config,
+            self.mix_placement,
+            num_shared_experts,
+            tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
         )
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
         self.local_num_experts = self.global_num_experts // self.ep_size
-        if not vllm_version_is("0.21.0"):
-            self.expert_map_manager._local_num_experts = self.local_num_experts
-            self.expert_map_manager._expert_map = self._expert_map
+        self.expert_map_manager._local_num_experts = self.local_num_experts
+        self.expert_map_manager._expert_map = self._expert_map
         if self._expert_map is not None:
             logger.info_once(
                 "[fused_moe/layer] Expert parallelism is enabled."
@@ -492,6 +495,11 @@ class AscendFusedMoE(FusedMoE):
                 return result
 
             self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+
+        # Register this MoE layer with EPLB for PP compatibility.
+        # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
+        # so only real MoE layers on this rank are registered.
+        VllmEplbAdaptor.register_layer(self)
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated
@@ -699,7 +707,7 @@ class AscendFusedMoE(FusedMoE):
             mc2_mask=mc2_mask,
         )
 
-        if self.dynamic_eplb:
+        if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, (

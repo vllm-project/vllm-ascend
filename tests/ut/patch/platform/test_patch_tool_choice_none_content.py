@@ -3,7 +3,6 @@
 from openai.types.chat.chat_completion import ChatCompletion as OpenAIChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
@@ -18,7 +17,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
 
@@ -48,52 +46,6 @@ class _DummyDelegatingParser(DelegatingParser):
 
     def extract_tool_calls(self, model_output: str, request):
         return None
-
-
-def test_parse_tool_calls_from_content_allows_named_tool_choice_with_none_content():
-    request = ChatCompletionRequest.model_validate(
-        {
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "test"}],
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            ],
-            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
-        }
-    )
-
-    tool_calls, content = OpenAIServing._parse_tool_calls_from_content(
-        request=request,
-        tokenizer=None,
-        enable_auto_tools=True,
-        tool_parser_cls=None,
-        content=None,
-    )
-
-    assert content is None
-    assert tool_calls == []
-    assert not request.tool_choice
-
-    tool_calls, content = OpenAIServing._parse_tool_calls_from_content(
-        request=request,
-        tokenizer=None,
-        enable_auto_tools=True,
-        tool_parser_cls=None,
-        content='{"city": "Beijing"}',
-    )
-
-    assert content is None
-    assert request.tool_choice
-    assert tool_calls is not None
-    assert len(tool_calls) == 1
-    assert tool_calls[0].name == "get_weather"
-    assert tool_calls[0].arguments == '{"city": "Beijing"}'
 
 
 def test_responses_parser_allows_named_tool_choice_with_none_content():

@@ -192,6 +192,13 @@ class CaMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
+        offload_count = sum(1 for data in self.pointer_to_data.values() if data.tag in offload_tags)
+        logger.info(
+            "CaMem sleep: offloading %s/%s allocations (tags=%s)",
+            offload_count,
+            len(self.pointer_to_data),
+            offload_tags,
+        )
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
             if data.tag in offload_tags:
@@ -212,6 +219,13 @@ class CaMemAllocator:
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory."""
+        restore_count = sum(1 for data in self.pointer_to_data.values() if tags is None or data.tag in tags)
+        logger.info(
+            "CaMem wake_up: restoring %s/%s allocations (tags=%s)",
+            restore_count,
+            len(self.pointer_to_data),
+            tags or "all",
+        )
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
                 handle = data.handle

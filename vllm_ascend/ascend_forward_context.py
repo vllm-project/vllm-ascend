@@ -9,6 +9,7 @@ import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
@@ -70,6 +71,7 @@ def set_ascend_forward_context(
     draft_attn_metadatas=None,
     has_sinks=False,
     input_ids=None,
+    eplb_heat_collection_status: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -173,6 +175,8 @@ def set_ascend_forward_context(
 
         forward_context.max_tokens_across_dp = max_tokens_across_dp
         forward_context.max_tokens_across_pcp = max_tokens_across_pcp
+
+        forward_context.eplb_heat_collection_status = eplb_heat_collection_status
 
         if num_tokens is not None:
             if num_actual_tokens is None:
@@ -316,6 +320,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             moe_comm_type = MoECommType.ALLTOALL
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
+    logger.debug(
+        "MoE comm method selected: soc=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
+        soc_version,
+        moe_comm_type,
+        num_tokens,
+        mc2_tokens_capacity,
+    )
     return moe_comm_type
 
 
@@ -346,6 +357,7 @@ class _ExtraForwardContextProxy:
         "in_profile_run",
         "padded_num_tokens",
         "sinks",
+        "eplb_heat_collection_status",
     )
 
     def check_extra_attr(self, name: str):

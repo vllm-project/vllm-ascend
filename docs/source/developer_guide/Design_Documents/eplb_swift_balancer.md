@@ -20,28 +20,26 @@ Please refer to the EPLB section of the user guide for detailed information: [Ho
 vllm_ascend
 ├── eplb
 │   ├── adaptor
-│   │   ├── abstract_adaptor.py
-│   │   ├── vllm_adaptor.py
+│   │   └── vllm_adaptor.py
 │   ├── core
 │   │   ├── policy
 │   │   │   ├── policy_abstract.py
 │   │   │   ├── policy_default_eplb.py
-│   │   │   ├── policy_swift_balancer.py
 │   │   │   ├── policy_factory.py
 │   │   │   ├── policy_flashlb.py
+│   │   │   ├── policy_random.py
+│   │   │   └── policy_swift_balancer.py
 │   │   ├── eplb_device_transfer_loader.py
 │   │   ├── eplb_utils.py
-│   │   ├── eplb_worker.py
+│   │   └── eplb_worker.py
 │   ├── eplb_updator.py
-│   ├── utils.py
+│   └── utils.py
 └───────────
 ```
 
 **1. Adaptor Module**  
 *Handles registration and adaptation for different MoE model types*
 
-- `abstract_adaptor.py`  
-  Abstract base class defining unified registration interfaces for EPLB adapters
 - `vllm_adaptor.py`  
   Implementation supporting Qwen3-MoE and DeepSeek models, standardizing parameter handling for policy algorithms
 
@@ -58,6 +56,8 @@ vllm_ascend
     Enhanced version optimizing expert swaps for low-bandwidth devices (e.g., A2)
     - `policy_flashlb.py`  
     Threshold-based adjustment reducing operational costs through layer-wise fluctuation detection
+    - `policy_random.py`  
+    Random policy for basic testing
     - `policy_factory.py`  
     Strategy factory for automatic algorithm instantiation
 
