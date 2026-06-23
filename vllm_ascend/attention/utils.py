@@ -44,9 +44,11 @@ def split_optional_workspace_and_layer_name(optional_items: tuple) -> tuple[torc
     return workspace, layer_name
 
 
-def is_gemma4_model(vllm_config: VllmConfig) -> bool:
-    # Gemma4 multimodal configs can expose the text model type from different
-    # config objects depending on the vLLM/HF wrapper in use.
+def use_max_workspace_for_fia_graph(vllm_config: VllmConfig) -> bool:
+    # Gemma4 can mix attention variants with different FIA workspace sizes in
+    # the same graph bucket, so graph capture must cache the largest workspace.
+    # Multimodal configs can expose the text model type from different config
+    # objects depending on the vLLM/HF wrapper in use.
     model_config = vllm_config.model_config
     hf_config = getattr(model_config, "hf_config", None)
     hf_text_config = getattr(model_config, "hf_text_config", None)
@@ -66,17 +68,6 @@ def workspace_byte_size(workspace: torch.Tensor | None) -> int:
     return workspace.numel() * workspace.element_size()
 
 
-def choose_larger_workspace(
-    current_workspace: torch.Tensor | None,
-    new_workspace: torch.Tensor,
-) -> torch.Tensor:
-    if current_workspace is None:
-        return new_workspace
-    if workspace_byte_size(new_workspace) > workspace_byte_size(current_workspace):
-        return new_workspace
-    return current_workspace
-
-
 def cache_graph_workspace(
     graph_params: Any,
     num_tokens: int,
@@ -89,7 +80,8 @@ def cache_graph_workspace(
     # can require different FIA workspace sizes under the same num_tokens.
     current_workspace = graph_params.workspaces.get(num_tokens)
     if use_max_workspace:
-        graph_params.workspaces[num_tokens] = choose_larger_workspace(current_workspace, new_workspace)
+        if current_workspace is None or workspace_byte_size(new_workspace) > workspace_byte_size(current_workspace):
+            graph_params.workspaces[num_tokens] = new_workspace
     elif current_workspace is None:
         graph_params.workspaces[num_tokens] = new_workspace
     return graph_params.workspaces[num_tokens]

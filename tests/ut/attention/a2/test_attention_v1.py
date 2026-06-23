@@ -15,8 +15,8 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
     get_attn_metadata_key,
-    is_gemma4_model,
     split_optional_workspace_and_layer_name,
+    use_max_workspace_for_fia_graph,
 )
 
 
@@ -63,7 +63,7 @@ class TestAttentionGraphHelpers(TestBase):
         self.assertEqual(result.numel(), 8)
         self.assertEqual(graph_params.workspaces[1].numel(), 8)
 
-    def test_is_gemma4_model_checks_text_config_model_type(self):
+    def test_use_max_workspace_for_fia_graph_checks_text_config_model_type(self):
         vllm_config = SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_config=SimpleNamespace(
@@ -73,7 +73,7 @@ class TestAttentionGraphHelpers(TestBase):
             )
         )
 
-        self.assertTrue(is_gemma4_model(vllm_config))
+        self.assertTrue(use_max_workspace_for_fia_graph(vllm_config))
 
 
 class TestAscendAttentionBackend(TestBase):

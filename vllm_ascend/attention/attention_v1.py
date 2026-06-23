@@ -53,10 +53,10 @@ from vllm_ascend.attention.utils import (
     enable_cp,
     expand_attn_keys_for_graph_params,
     get_attn_metadata_key,
-    is_gemma4_model,
     notify_kv_cache_written,
     split_decodes_and_prefills,
     split_optional_workspace_and_layer_name,
+    use_max_workspace_for_fia_graph,
     using_paged_attention,
 )
 from vllm_ascend.compilation.acl_graph import (
@@ -758,7 +758,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output = output.unsqueeze(2)
             attn_mask = None
             sparse_mode = 0
-        use_max_workspace = is_gemma4_model(self.vllm_config)
+        use_max_workspace = use_max_workspace_for_fia_graph(self.vllm_config)
         workspace = graph_params.workspaces.get(num_tokens)
         if workspace is None or use_max_workspace:
             # Gemma4 mixes attention layer shapes under the same graph size.
@@ -877,7 +877,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
-        use_max_workspace = is_gemma4_model(self.vllm_config)
+        use_max_workspace = use_max_workspace_for_fia_graph(self.vllm_config)
         workspace = graph_params.workspaces.get(num_tokens)
         if workspace is None or use_max_workspace:
             # See full_graph_fia: Gemma4 needs the max workspace across layer
