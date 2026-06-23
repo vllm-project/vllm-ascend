@@ -4,5 +4,5 @@
 :caption: Deployment Guide
 :maxdepth: 1
 using_volcano_kthena
-using_MindIE_PyMotor
+using_mindie_pymotor
 :::
