@@ -2443,25 +2443,25 @@ class NPUModelRunner(GPUModelRunner):
                             for aux_hidden_states_pcp in aux_hidden_states
                         ]
 
-            if not self.broadcast_pp_output:
-                # Common case.
-                if not get_pp_group().is_last_rank:
-                    # Return the intermediate tensors.
-                    assert isinstance(hidden_states, IntermediateTensors)
-                    hidden_states.kv_connector_output = kv_connector_output
-                    self.kv_connector_output = kv_connector_output
-                    self._finalize_dump_data()
-                    if self.dynamic_eplb:
-                        self.eplb_updator.forward_end(self.eplb_heat_collection_status)
-                    return hidden_states
-                if self.is_pooling_model:
-                    # Return the pooling output.
-                    output = self._pool(
-                        hidden_states, num_scheduled_tokens, num_scheduled_tokens_np, kv_connector_output
-                    )
-                    output.kv_connector_output = kv_connector_output
-                    self._finalize_dump_data()
-                    return output
+                if not self.broadcast_pp_output:
+                    # Common case.
+                    if not get_pp_group().is_last_rank:
+                        # Return the intermediate tensors.
+                        assert isinstance(hidden_states, IntermediateTensors)
+                        hidden_states.kv_connector_output = kv_connector_output
+                        self.kv_connector_output = kv_connector_output
+                        self._finalize_dump_data()
+                        if self.dynamic_eplb:
+                            self.eplb_updator.forward_end()
+                        return hidden_states
+                    if self.is_pooling_model:
+                        # Return the pooling output.
+                        output = self._pool(
+                            hidden_states, num_scheduled_tokens, num_scheduled_tokens_np, kv_connector_output
+                        )
+                        output.kv_connector_output = kv_connector_output
+                        self._finalize_dump_data()
+                        return output
 
                     sample_hidden_states = hidden_states[logits_indices]
                     logits = self.model.compute_logits(sample_hidden_states)
