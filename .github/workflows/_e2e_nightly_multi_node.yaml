@@ -73,10 +73,10 @@ on:
         default: 120
         type: string
         description: test case execution timeout period,default:120 minutes
-      aop_hold_on_failure:
+      aop_multi_enabled:
         required: false
         type: string
-        default: 'false'
+        default: 'true'
         description: enable Pod AOP pipeline on failure
     secrets:
       KUBECONFIG_B64:
@@ -240,7 +240,7 @@ jobs:
             -D pvc_name="$pvc_name" \
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
-            -D aop_hold_on_failure="${{ inputs.aop_hold_on_failure || 'false' }}" \
+            -D aop_multi_enabled="${{ inputs.aop_multi_enabled || 'false' }}" \
             --outfile lws.yaml
 
           kubectl apply -f ./lws.yaml

@@ -64,6 +64,11 @@ on:
         default: 120
         type: string
         description: test case execution timeout period,default:120 minutes
+      aop_single_enabled:
+        required: false
+        type: boolean
+        default: false
+        description: enable AOP hooks (capture / classify / skip-or-process)
     secrets:
       OBS_ACCESS_KEY:
         required: false
@@ -263,7 +268,7 @@ jobs:
 
       - name: Capture test result
         id: test-result
-        if: ${{ always() && (inputs.config_file_path != '' || inputs.tests != '') }}
+        if: ${{ always() && inputs.aop_single_enabled && (inputs.config_file_path != '' || inputs.tests != '') }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           bash tests/e2e/nightly/scripts/aop_capture.sh \
@@ -272,7 +277,7 @@ jobs:
 
       - name: Classify failure
         id: classify
-        if: ${{ always() && steps.test-result.outputs.result == 'failure' }}
+        if: ${{ always() && inputs.aop_single_enabled && steps.test-result.outputs.result == 'failure' }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           bash tests/e2e/nightly/scripts/aop_classify.sh \
@@ -286,7 +291,7 @@ jobs:
 
       - name: Skip - env issue
         if: >-
-          ${{ always() &&
+          ${{ always() && inputs.aop_single_enabled &&
           steps.classify.outputs.failure_type == 'env_failure' }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
@@ -297,7 +302,7 @@ jobs:
 
       - name: Check commit age
         id: commit-age
-        if: ${{ always() && steps.classify.outputs.failure_type == 'not_env_failure' }}
+        if: ${{ always() && inputs.aop_single_enabled && steps.classify.outputs.failure_type == 'not_env_failure' }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           bash tests/e2e/nightly/scripts/aop_commit_age.sh \
@@ -306,7 +311,7 @@ jobs:
 
       - name: Skip - old commit
         if: >-
-          ${{ always() &&
+          ${{ always() && inputs.aop_single_enabled &&
           steps.classify.outputs.failure_type == 'not_env_failure' &&
           steps.commit-age.outputs.is_old == 'true' }}
         working-directory: /vllm-workspace/vllm-ascend
@@ -340,7 +345,7 @@ jobs:
           #   ""
 
       - name: On success
-        if: ${{ always() && steps.test-result.outputs.result == 'success' }}
+        if: ${{ always() && inputs.aop_single_enabled && steps.test-result.outputs.result == 'success' }}
         run: |
           echo ">>> All tests passed!"
 

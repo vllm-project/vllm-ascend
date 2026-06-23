@@ -225,7 +225,7 @@ sys.exit(1)
         if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
             echo "Leader: waiting 10s for worker logs..."
             sleep 10
-            if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
+            if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
                 set +e; aop_pipeline; set -e
             fi
             local done_file="${LOG_PREFIX}/../done"
@@ -233,16 +233,17 @@ sys.exit(1)
             echo "Leader: notifying workers (${done_file})"
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
             exit 1
-        elif [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
+        elif [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
             local release="${LOG_PREFIX}/../done"
             echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
             cd "$WORKSPACE/vllm-ascend"
-            python -m tests.e2e.nightly.bisect.auto_bisect \
-                --scene multi_node \
-                --config-yaml "${CONFIG_YAML_PATH}" \
-                --bad-commit HEAD \
-                --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}" \
-                --release-file "${release}" || true
+            # TODO: enable worker bisect after classify+age verification
+            # python -m tests.e2e.nightly.bisect.auto_bisect \
+            #     --scene multi_node \
+            #     --config-yaml "${CONFIG_YAML_PATH}" \
+            #     --bad-commit HEAD \
+            #     --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}" \
+            #     --release-file "${release}" || true
             while [ ! -f "$release" ]; do sleep 5; done
             echo "Worker: release signal received, exiting"
             exit 1
@@ -261,7 +262,7 @@ sys.exit(1)
             print_success "All tests passed!"
             touch "${LOG_PREFIX}/../done" 2>/dev/null || true
         else
-            if [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
+            if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
                 set +e; aop_pipeline; set -e
             fi
             local done_file="${LOG_PREFIX}/../done"
@@ -270,16 +271,17 @@ sys.exit(1)
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
             exit 1
         fi
-    elif [ $ret -ne 0 ] && [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
+    elif [ $ret -ne 0 ] && [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
         local release="${LOG_PREFIX}/../done"
         echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
         cd "$WORKSPACE/vllm-ascend"
-        python -m tests.e2e.nightly.bisect.auto_bisect \
-            --scene multi_node \
-            --config-yaml "${CONFIG_YAML_PATH}" \
-            --bad-commit HEAD \
-            --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}" \
-            --release-file "${release}" || true
+        # TODO: enable worker bisect after classify+age verification
+        # python -m tests.e2e.nightly.bisect.auto_bisect \
+        #     --scene multi_node \
+        #     --config-yaml "${CONFIG_YAML_PATH}" \
+        #     --bad-commit HEAD \
+        #     --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}" \
+        #     --release-file "${release}" || true
         while [ ! -f "$release" ]; do sleep 5; done
         echo "Worker: release signal received, exiting"
         exit 1
@@ -414,15 +416,16 @@ aop_pipeline() {
     echo "  Name        : ${case_name}"
     echo "  Coord dir   : ${COORD_DIR:-/shared/nightly_bisect/coord}"
     cd "$WORKSPACE/vllm-ascend"
-    python -m tests.e2e.nightly.bisect.auto_bisect \
-        --scene multi_node \
-        --config-yaml "${CONFIG_YAML_PATH}" \
-        --bad-commit HEAD \
-        --good-table "${table}" \
-        --name "${case_name}" \
-        --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}" || true
-    echo "  bisect completed (exit code: ${PIPESTATUS[0]:-$?})"
-    echo "=== AOP Pipeline (Pod) - END (bisect done) ==="
+    # TODO: enable bisect after classify+age verification
+    # python -m tests.e2e.nightly.bisect.auto_bisect \
+    #     --scene multi_node \
+    #     --config-yaml "${CONFIG_YAML_PATH}" \
+    #     --bad-commit HEAD \
+    #     --good-table "${table}" \
+    #     --name "${case_name}" \
+    #     --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}" || true
+    echo "  bisect skipped (commented out for classify+age verification)"
+    echo "=== AOP Pipeline (Pod) - END ==="
     return 1
 }
 
