@@ -462,15 +462,12 @@ class AscendFusedMoE(FusedMoE):
         if text_config is None:
             text_config = getattr(hf_config, "text_config", hf_config)
 
-        def get_swiglu_config_value(name: str, default: float) -> float:
-            return getattr(text_config, name, getattr(hf_config, name, default))
-
         if self.swiglu_limit is None:
-            self.swiglu_limit = get_swiglu_config_value("swiglu_limit", 0)
+            self.swiglu_limit = getattr(text_config, "swiglu_limit", getattr(hf_config, "swiglu_limit", 0))
         if getattr(self, "swiglu_alpha", None) is None:
-            self.swiglu_alpha = get_swiglu_config_value("swiglu_alpha", 1.0)
+            self.swiglu_alpha = getattr(text_config, "swiglu_alpha", getattr(hf_config, "swiglu_alpha", 1.0))
         if getattr(self, "swiglu_beta", None) is None:
-            self.swiglu_beta = get_swiglu_config_value("swiglu_beta", 0.0)
+            self.swiglu_beta = getattr(text_config, "swiglu_beta", getattr(hf_config, "swiglu_beta", 0.0))
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
