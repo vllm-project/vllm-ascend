@@ -399,6 +399,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
     o_proj_full_pool: torch.Tensor | None = None
+    o_proj_full_weight_scale_pool: torch.Tensor | None = None
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
@@ -501,6 +502,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # use original TP o_proj weight in PD mix stage, and full gather
         # for o_proj weight for prefill stage.
         self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
+        self._o_proj_dynamic_quant = False
 
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
@@ -575,7 +577,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     if is_hidden_layer(layer):
                         post_process_after_loading_for_shard_weight_series(layer)
             else:
-                self._init_o_proj_tp_full_params()
+                self._maybe_init_o_proj_tp_full_params()
 
         if self.enable_mlapo:
             quant_method = getattr(
@@ -776,6 +778,46 @@ class AscendSFAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
+    def _check_o_proj_dynamic_quant(self) -> bool:
+        return hasattr(self.o_proj, "weight_scale")
+
+    def _maybe_init_o_proj_tp_full_params(self):
+        if self._check_o_proj_dynamic_quant():
+            self._o_proj_dynamic_quant = True
+            self._init_dynamic_quant_o_proj_tp_full_params()
+        else:
+            self._init_o_proj_tp_full_params()
+
+    def _init_dynamic_quant_o_proj_tp_full_params(self):
+        """
+        Initialize TP-mode and Full-mode parameters for o_proj weight,
+        preparing for weight switching in PD mix stage.
+
+        For PD mix stage:
+        - Use original TP o_proj weight for decode phase
+        - Need full-gather o_proj weight from all TP ranks for prefill phase
+        """
+        if AscendSFAImpl.o_proj_full_pool is None:
+            sample = self.o_proj.weight
+            AscendSFAImpl.o_proj_full_pool = torch.empty(
+                (sample.shape[0] * self.tp_size, sample.shape[1]), dtype=sample.dtype, device=sample.device
+            )
+        if AscendSFAImpl.o_proj_full_weight_scale_pool is None:
+            sample = self.o_proj.weight_scale
+            AscendSFAImpl.o_proj_full_weight_scale_pool = torch.empty(
+                (sample.shape[0] * self.tp_size, sample.shape[1], sample.shape[2]),
+                dtype=sample.dtype,
+                device=sample.device,
+            )
+
+        # Save TP-mode parameters (original sharded weights)
+        self.o_proj_tp_weight = self.o_proj.weight.clone().detach()
+        self.o_proj_tp_weight_scale = self.o_proj.weight_scale.clone().detach()
+
+        # Initially switch to TP mode for graph capture
+        self.o_proj.weight.set_(self.o_proj_tp_weight)
+        self.o_proj.weight_scale.set_(self.o_proj_tp_weight_scale)
+
     def _init_o_proj_tp_full_params(self):
         """
         Initialize TP-mode and Full-mode parameters for o_proj weight,
@@ -807,6 +849,51 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.o_proj_full_aclnn_input_scale = self.o_proj.aclnn_input_scale.repeat(self.tp_size)
         self.o_proj_full_aclnn_input_scale_reciprocal = self.o_proj.aclnn_input_scale_reciprocal.repeat(self.tp_size)
         self.o_proj_full_aclnn_input_offset = self.o_proj.aclnn_input_offset.repeat(self.tp_size)
+
+    def _handle_dynamic_quant_o_proj_weight_switch_and_forward(
+        self,
+        attn_output: torch.Tensor,
+        output: torch.Tensor,
+        o_proj_full_handle: torch.distributed.Work | None,
+        o_proj_full_weight_scale_handle: torch.distributed.Work | None,
+        should_shard_weight: bool,
+    ) -> tuple[torch.Tensor, bool]:
+        """
+        Handle o_proj weight switching between TP-mode and Full-mode, and execute forward computation.
+        """
+        # Gather o_proj weight from all TP ranks for Full-mode computation
+        if should_shard_weight:
+            # Wait for the completion of o_proj weight all-gather operation
+            if o_proj_full_handle is not None:
+                o_proj_full_handle.wait()
+            if o_proj_full_weight_scale_handle is not None:
+                o_proj_full_weight_scale_handle.wait()
+
+            # Switch o_proj to Full-mode (gathered weight from all TP ranks)
+            self.o_proj.weight.set_(AscendSFAImpl.o_proj_full_pool)
+            self.o_proj.weight_scale.set_(AscendSFAImpl.o_proj_full_weight_scale_pool)
+
+            # Apply quantization method and execute forward computation
+            output[...] = self.o_proj.quant_method.quant_method.apply(self.o_proj, attn_output)
+
+            # Switch o_proj back to TP-mode for subsequent decode operations
+            self.o_proj.weight.set_(self.o_proj_tp_weight)
+            self.o_proj.weight_scale.set_(self.o_proj_tp_weight_scale)
+
+            return output, False
+        else:
+            # For decode scenario: perform all-to-all communication on o_proj input activations
+            # Reshape for all-to-all: [batch * seq, tp_size, head_dim] -> [tp_size, batch * seq, head_dim]
+            send = (
+                attn_output.view(-1, self.tp_size, self.num_heads * self.v_head_dim)
+                .permute(1, 0, 2)
+                .reshape(-1, self.num_heads * self.v_head_dim)
+            )
+
+            attn_output = torch.empty_like(send)
+            torch.distributed.all_to_all_single(attn_output, send, group=get_tp_group().device_group)
+
+            return attn_output, True
 
     def _handle_o_proj_weight_switch_and_forward(
         self,
@@ -1146,6 +1233,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # all-gather o_proj weight for prefill stage of PD mix node
         o_proj_full_handle = None
+        o_proj_full_weight_scale_handle = None
         # if is PD mix stage, using original TP o_proj weight, and also need to full gather for o_proj
         # weight for prefill stage.
         full_gather_o_proj_enabled = self.enable_dsa_cp_with_o_proj_tp and attn_metadata.attn_state not in {
@@ -1258,6 +1346,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                     _, o_proj_full_handle = all_gather_async(
                         self.o_proj_tp_weight, get_tp_group(), output=AscendSFAImpl.o_proj_full_pool
                     )
+                    if self._o_proj_dynamic_quant:
+                        _, o_proj_full_weight_scale_handle = all_gather_async(
+                            self.o_proj_tp_weight_scale,
+                            get_tp_group(),
+                            output=AscendSFAImpl.o_proj_full_weight_scale_pool,
+                        )
 
                 if kv_cache is not None:
                     assert fused_kv_no_split is not None
@@ -1362,12 +1456,21 @@ class AscendSFAImpl(MLAAttentionImpl):
             # When using SFA-CP with pd mixed, o_proj has two cases:
             # 1. prefill: o_proj is a TP weight, we need to all-gather o_proj weight to switch TP=1.
             # 2. decode: all-to-all the hidden_state before the o_proj forward.
-            result, require_o_proj_forward = self._handle_o_proj_weight_switch_and_forward(
-                attn_output=attn_output,
-                output=output,
-                o_proj_full_handle=o_proj_full_handle,
-                should_shard_weight=full_gather_o_proj_enabled,
-            )
+            if self._o_proj_dynamic_quant:
+                result, require_o_proj_forward = self._handle_dynamic_quant_o_proj_weight_switch_and_forward(
+                    attn_output=attn_output,
+                    output=output,
+                    o_proj_full_handle=o_proj_full_handle,
+                    o_proj_full_weight_scale_handle=o_proj_full_weight_scale_handle,
+                    should_shard_weight=full_gather_o_proj_enabled,
+                )
+            else:
+                result, require_o_proj_forward = self._handle_o_proj_weight_switch_and_forward(
+                    attn_output=attn_output,
+                    output=output,
+                    o_proj_full_handle=o_proj_full_handle,
+                    should_shard_weight=full_gather_o_proj_enabled,
+                )
             if not require_o_proj_forward:
                 return result
             attn_output = result
