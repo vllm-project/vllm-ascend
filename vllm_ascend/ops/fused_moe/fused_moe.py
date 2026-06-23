@@ -456,9 +456,21 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
         self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
-        self.swiglu_limit = getattr(self.vllm_config.model_config.hf_config, "swiglu_limit", 0)
-        self.swiglu_alpha = getattr(self.vllm_config.model_config.hf_config, "swiglu_alpha", 1.0)
-        self.swiglu_beta = getattr(self.vllm_config.model_config.hf_config, "swiglu_beta", 0.0)
+        model_config = self.vllm_config.model_config
+        hf_config = getattr(model_config, "hf_config", None)
+        text_config = getattr(model_config, "hf_text_config", None)
+        if text_config is None:
+            text_config = getattr(hf_config, "text_config", hf_config)
+
+        def get_swiglu_config_value(name: str, default: float) -> float:
+            return getattr(text_config, name, getattr(hf_config, name, default))
+
+        if self.swiglu_limit is None:
+            self.swiglu_limit = get_swiglu_config_value("swiglu_limit", 0)
+        if getattr(self, "swiglu_alpha", None) is None:
+            self.swiglu_alpha = get_swiglu_config_value("swiglu_alpha", 1.0)
+        if getattr(self, "swiglu_beta", None) is None:
+            self.swiglu_beta = get_swiglu_config_value("swiglu_beta", 0.0)
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
