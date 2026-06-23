@@ -76,7 +76,7 @@ on:
       aop_hold_on_failure:
         required: false
         type: string
-        default: 'true'
+        default: 'false'
         description: enable Pod AOP pipeline on failure
     secrets:
       KUBECONFIG_B64:
