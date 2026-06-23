@@ -1018,7 +1018,7 @@ async def handle_completions_impl(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
-            final_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
+            reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
 
             async def release_prefill_kv_once() -> None:
                 nonlocal released_kv
@@ -1061,7 +1061,7 @@ async def handle_completions_impl(api: str, request: Request):
                             continue
                         choices = chunk_json.get("choices", [])
                         if not choices:
-                            if update_cached_tokens_in_chunk(chunk_json, final_prefiller_cached_tokens):
+                            if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
                                 chunk = encode_response_chunk(chunk_json, is_sse)
                             yield chunk
                             continue
@@ -1089,7 +1089,6 @@ async def handle_completions_impl(api: str, request: Request):
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                             instance_info = await reassign_instances(api, req_data, tmp_request_length, instance_info)
-                            final_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
                             released_kv = False
                             break
                         chunk_updated = False
@@ -1099,7 +1098,7 @@ async def handle_completions_impl(api: str, request: Request):
                             else:
                                 choice["text"] = generated_token
                             chunk_updated = True
-                        if update_cached_tokens_in_chunk(chunk_json, final_prefiller_cached_tokens):
+                        if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
                             chunk_updated = True
                         if chunk_updated:
                             chunk = encode_response_chunk(chunk_json, is_sse)
