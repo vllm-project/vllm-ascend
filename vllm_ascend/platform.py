@@ -1049,6 +1049,13 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.cache_config.cpu_kvcache_space_bytes = None
 
+            if getattr(vllm_config.cache_config, "calculate_kv_scales", False):
+                logger.warning(
+                    "Parameter is not supported on Ascend NPU. "
+                    "parameter=calculate_kv_scales, action: resetting to False."
+                )
+                vllm_config.cache_config.calculate_kv_scales = False
+
         # ==================== 3. MultiModal Config ====================
         multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
         if multimodal_config:
@@ -1223,6 +1230,15 @@ class NPUPlatform(Platform):
                     ubatch_size,
                 )
                 vllm_config.parallel_config.ubatch_size = 0
+
+        # ==================== 10. Compilation Config ====================
+        if vllm_config.compilation_config:
+            if getattr(vllm_config.compilation_config, "use_inductor_graph_partition", False):
+                logger.warning(
+                    "Parameter is not supported on Ascend NPU (use_inductor is False). "
+                    "parameter=use_inductor_graph_partition, action: resetting to False."
+                )
+                vllm_config.compilation_config.use_inductor_graph_partition = False
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
