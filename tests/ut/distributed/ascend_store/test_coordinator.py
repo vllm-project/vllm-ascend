@@ -16,6 +16,7 @@
 #
 
 import unittest
+from unittest.mock import patch
 
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
 
@@ -86,6 +87,22 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(masks, ([False, False, False, True],))
 
+    def test_compressed_masks_stay_unmasked(self):
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], SlidingWindowSpec(block_size=128, sliding_window=512))],
+            scheduler_block_size=2048,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c4"],
+        )
+
+        self.assertEqual(coord.store_mask(2048, num_prompt_tokens=2048), ([True] * 4,))
+        with patch.object(
+            coord,
+            "find_longest_cache_hit",
+            return_value=(([False, False, False, True],), 2048),
+        ):
+            self.assertEqual(coord.load_mask(_hashes(16), 2048), ([True] * 4,))
 
 if __name__ == "__main__":
     unittest.main()
