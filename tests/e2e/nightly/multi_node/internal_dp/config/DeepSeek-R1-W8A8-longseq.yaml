@@ -37,7 +37,7 @@ deployment:
           --enable-expert-parallel
           --seed 1024
           --quantization ascend
-          --max-num-seqs 3
+          --max-num-seqs 32
           --max-model-len 32768
           --max-num-batched-tokens 16384
           --trust-remote-code
@@ -75,7 +75,7 @@ deployment:
         --enable-expert-parallel
         --seed 1024
         --quantization ascend
-        --max-num-seqs 8
+        --max-num-seqs 32
         --max-model-len 32768
         --max-num-batched-tokens 256
         --trust-remote-code
@@ -106,7 +106,7 @@ benchmarks:
     dataset_path: vllm-ascend/gsm8k
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 24576
+    max_out_len: 4096
     batch_size: 16
     baseline: 95
     threshold: 5
