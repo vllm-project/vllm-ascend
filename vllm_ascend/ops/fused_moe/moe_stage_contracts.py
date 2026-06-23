@@ -69,8 +69,8 @@ class MoEFusedExpertsInput:
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: float = 0.0
-    swiglu_alpha: float = 1.702
-    swiglu_beta: float = 1.0
+    swiglu_alpha: float = 1.0
+    swiglu_beta: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,8 +143,8 @@ class MoEMlpComputeInput:
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: float = 0.0
-    swiglu_alpha: float = 1.702
-    swiglu_beta: float = 1.0
+    swiglu_alpha: float = 1.0
+    swiglu_beta: float = 0.0
 
 
 __all__ = [

@@ -115,10 +115,6 @@ def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
     return {i for i, f in enumerate(freq) if f != 0}
 
 
-def is_minimax_m3_sparse_model(config: PretrainedConfig | None) -> bool:
-    return bool(_sparse_attention_layer_ids(config)) if config is not None else False
-
-
 def _get_text_config(vllm_config: VllmConfig) -> PretrainedConfig:
     return vllm_config.model_config.hf_text_config
 

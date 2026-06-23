@@ -82,8 +82,8 @@ class FusedExpertsResult:
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
     swiglu_limit: float = 0.0
-    swiglu_alpha: float = 1.702
-    swiglu_beta: float = 1.0
+    swiglu_alpha: float = 1.0
+    swiglu_beta: float = 0.0
 
 
 class MoECommMethod(ABC):
