@@ -3825,6 +3825,7 @@ class TestEagleProposerSetInputsFirstPass:
         self.runner.input_batch.req_ids = req_ids
         # maybe not reasonable just to run test
         self.runner.logits_indices = torch.arange(12, dtype=torch.int32, device=self.device)
+        self.runner.pcp_manager.pcp_use_hybrid_attn = False
 
         proposer, vllm_config = self._create_proposer(
             method="eagle",
