@@ -7,18 +7,6 @@ import torch
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.compilation.breakable_acl_graph import (
-    BreakableACLGraphCapture,
-    breakable_acl_graph_eager,
-)
-
-
-def _in_breakable_graph_capture() -> bool:
-    capture = BreakableACLGraphCapture.current()
-    return capture is not None and capture._capturing
-
-
-@breakable_acl_graph_eager
 def minimax_m3_sparse_forward(
     query: torch.Tensor,
     key: torch.Tensor,

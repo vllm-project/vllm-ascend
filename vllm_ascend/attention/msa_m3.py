@@ -54,7 +54,6 @@ from vllm_ascend.attention.msa_m3_ops import (
 import vllm_ascend.ops.minimax_m3_sparse  # noqa: F401
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
-from vllm_ascend.ops.minimax_m3_sparse import _in_breakable_graph_capture
 
 
 logger = init_logger(__name__)
@@ -164,8 +163,6 @@ class AscendMiniMaxM3IndexerDecodeMetadata:
     block_table: torch.Tensor
     max_seq_len: int
     decode_query_len: int
-    seq_lens_cpu: tuple[int, ...] = ()
-    block_table_cpu: tuple[tuple[int, ...], ...] = ()
 
 
 @dataclass
@@ -251,13 +248,6 @@ class AscendMiniMaxM3IndexerMetadataBuilder(
                 block_table=block_table[:num_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
-                seq_lens_cpu=tuple(
-                    int(x) for x in seq_lens[:num_decodes].detach().cpu().tolist()
-                ),
-                block_table_cpu=tuple(
-                    tuple(int(x) for x in row)
-                    for row in block_table[:num_decodes].detach().cpu().tolist()
-                ),
             )
 
         return AscendMiniMaxM3IndexerMetadata(
@@ -337,8 +327,6 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                 self.num_kv_heads,
                 self.scale,
                 d.decode_query_len,
-                seq_lens_cpu=d.seq_lens_cpu,
-                block_table_cpu=d.block_table_cpu,
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill
@@ -474,9 +462,8 @@ class AscendMiniMaxM3SparsePrefillMetadata:
 class AscendMiniMaxM3SparseDecodeMetadata:
     seq_lens: torch.Tensor
     block_table: torch.Tensor
+    max_seq_len: int
     decode_query_len: int
-    seq_lens_cpu: tuple[int, ...] = ()
-    block_table_cpu: tuple[tuple[int, ...], ...] = ()
 
 
 @dataclass
@@ -567,14 +554,8 @@ class AscendMiniMaxM3SparseMetadataBuilder(
             decode_metadata = AscendMiniMaxM3SparseDecodeMetadata(
                 seq_lens=seq_lens[:num_decodes],
                 block_table=block_table[:num_decodes],
+                max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
-                seq_lens_cpu=tuple(
-                    int(x) for x in seq_lens[:num_decodes].detach().cpu().tolist()
-                ),
-                block_table_cpu=tuple(
-                    tuple(int(x) for x in row)
-                    for row in block_table[:num_decodes].detach().cpu().tolist()
-                ),
             )
 
         return AscendMiniMaxM3SparseMetadata(
@@ -645,8 +626,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 self.scale,
                 out[:nd],
                 d.decode_query_len,
-                seq_lens_cpu=d.seq_lens_cpu,
-                block_table_cpu=d.block_table_cpu,
+                max_seq_len=d.max_seq_len,
             )
 
         if main_md.num_prefills > 0:
@@ -1061,9 +1041,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         index_key: torch.Tensor,
         attn_output: torch.Tensor,
     ) -> None:
-        """Indexer + sparse attend; breakable capture dispatches prefill/decode."""
+        """Insert KV, build sparse top-k indices, then run sparse attention."""
         self._insert_kv(key, value, index_key)
-        if not _in_breakable_graph_capture():
+        if not get_forward_context().capturing:
             torch.npu.current_stream().synchronize()
         topk_idx = self.indexer(index_query)
         self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
