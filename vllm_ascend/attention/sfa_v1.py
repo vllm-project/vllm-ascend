@@ -1325,7 +1325,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                         )
             notify_kv_cache_written(self.layer_name or "")
 
-        topk_num_tokens = num_input_tokens or hidden_states.shape[0]
+        if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
+            topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start
+        else:
+            topk_num_tokens = num_input_tokens or hidden_states.shape[0]
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
         else:
