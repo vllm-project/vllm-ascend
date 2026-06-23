@@ -50,33 +50,6 @@ from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
-from vllm_ascend.utils import vllm_version_is
-
-
-# `spec_manager_map` in single_type_kv_cache_manager is a module-level dict
-# whose keys are class objects bound at import time.  When the async
-# recompute scheduler is enabled, `recompute_scheduler.py` is imported by
-# `check_and_update_config()` (via AsyncScheduler → scheduler.py →
-# kv_cache_coordinator → single_type_kv_cache_manager) *before*
-# this patch file is executed a second time (e.g. triggered by
-# unpickling an AscendMLAAttentionSpec in the EngineCoreProc subprocess).
-# In that case the dict already contains the original MLAAttentionSpec
-# class as a key, so a subsequent lookup with type(AscendMLAAttentionSpec
-# instance) raises KeyError.
-#
-# Fix: whenever this patch is applied, register AscendMLAAttentionSpec as
-# an additional key in spec_manager_map (if the module is already loaded).
-def register_ascend_mla_spec_in_manager():
-    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
-
-    if vllm_version_is("0.22.1"):
-        import sys as _sys
-
-        _stm = _sys.modules.get("vllm.v1.core.single_type_kv_cache_manager")
-        if _stm is not None and AscendMLAAttentionSpec not in _stm.spec_manager_map:
-            _stm.spec_manager_map[AscendMLAAttentionSpec] = FullAttentionManager
-
 
 @dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
@@ -123,8 +96,6 @@ class RecomputeScheduler(Scheduler):
     running: list[Request]
 
     def __init__(self, *args, **kwargs):
-        register_ascend_mla_spec_in_manager()
-
         super().__init__(*args, **kwargs)
         # When is_mtp_kv_consumer is true, we will fill request.spec_token_ids
         # with placeholder tokens to enable full graph when decode nodes pull
@@ -1148,6 +1119,4 @@ class RecomputeScheduler(Scheduler):
 
 class AsyncRecomputeScheduler(AsyncScheduler, RecomputeScheduler):
     def __init__(self, *args, **kwargs):
-        register_ascend_mla_spec_in_manager()
-
         super().__init__(*args, **kwargs)
