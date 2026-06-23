@@ -13,7 +13,7 @@ If possible, please consider writing useful notes for better and faster reviews 
 - Fixes #
 -->
 
-### Does this PR introduce _any_ user-facing change? (必填)
+### Does this PR introduce _any_ user-facing change?
 <!--
 Note that it means *any* user-facing change including all aspects such as API, interface or other behavior changes.
 Documentation-only updates are not considered user-facing changes.
