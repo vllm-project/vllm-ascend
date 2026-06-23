@@ -496,7 +496,12 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_loader = D2DExpertWeightLoader()
             self.manager = Manager()
             self.shared_dict = self.manager.dict({"expert_map": None, "moe_load": None, "expert_maps": None})
-            self.eplb_process = EplbProcess(shared_dict=self.shared_dict, policy_type=self.policy_type, enable_d2d=True)
+            self.eplb_process = EplbProcess(
+                shared_dict=self.shared_dict,
+                policy_type=self.policy_type,
+                enable_d2d=True,
+                tp_size=self.parallel_config.tensor_parallel_size,
+            )
             self.process = self.eplb_process._launch_process()
             self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)
             # In pd colocation scenarios, we find that prefill/decode requests result in different

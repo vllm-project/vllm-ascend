@@ -207,7 +207,10 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.lint-and-select-tests.outputs.main_commit }}
-          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+          # Dropped vLLM v0.22.1 (release-tag) compatibility from main. Uncomment
+          # the line below to re-enable release-tag CI when maintaining a new
+          # release tag (update .github/vllm-release-tag.commit accordingly).
+          # - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
