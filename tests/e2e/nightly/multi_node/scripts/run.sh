@@ -234,8 +234,15 @@ sys.exit(1)
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
             exit 1
         elif [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
-            echo "Worker: waiting for leader to finish..."
             local release="${LOG_PREFIX}/../done"
+            echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
+            cd "$WORKSPACE/vllm-ascend"
+            python -m tests.e2e.nightly.bisect.auto_bisect \
+                --scene multi_node \
+                --config-yaml "${CONFIG_YAML_PATH}" \
+                --bad-commit HEAD \
+                --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}" \
+                --release-file "${release}" || true
             while [ ! -f "$release" ]; do sleep 5; done
             echo "Worker: release signal received, exiting"
             exit 1
@@ -264,8 +271,15 @@ sys.exit(1)
             exit 1
         fi
     elif [ $ret -ne 0 ] && [ "${AOP_HOLD_ON_FAILURE:-}" = "true" ]; then
-        echo "Worker: waiting for leader to finish..."
         local release="${LOG_PREFIX}/../done"
+        echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
+        cd "$WORKSPACE/vllm-ascend"
+        python -m tests.e2e.nightly.bisect.auto_bisect \
+            --scene multi_node \
+            --config-yaml "${CONFIG_YAML_PATH}" \
+            --bad-commit HEAD \
+            --coord-dir "${COORD_DIR:-/shared/nightly_bisect/coord}" \
+            --release-file "${release}" || true
         while [ ! -f "$release" ]; do sleep 5; done
         echo "Worker: release signal received, exiting"
         exit 1
