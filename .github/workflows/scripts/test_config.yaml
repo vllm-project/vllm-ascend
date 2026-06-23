@@ -117,7 +117,7 @@
   source_file_dependencies:
     - vllm_ascend/attention/context_parallel
   tests:
-    - tests/e2e/pull_request/four_card/long_sequence/
+    - tests/e2e/pull_request/four_card/context_parallel/
 
 # Compilation
 - name: compilation_aclgraph
@@ -730,11 +730,8 @@ estimated_times:
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 460
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 990
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 370
-  tests/e2e/pull_request/four_card/long_sequence/test_accuracy.py: 2720
-  tests/e2e/pull_request/four_card/long_sequence/test_basic.py: 3810
-  tests/e2e/pull_request/four_card/long_sequence/test_chunked_prefill_cp.py: 1530
-  tests/e2e/pull_request/four_card/long_sequence/test_mtp.py: 650
-  tests/e2e/pull_request/four_card/long_sequence/test_prefix_caching_cp.py: 1680
+  tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 1800
+  tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 300
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 370
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 410
@@ -742,7 +739,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 570
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 220
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 1030
-  tests/e2e/pull_request/four_card/test_qwen3_next.py: 4090
+  tests/e2e/pull_request/four_card/test_qwen3_next.py: 2000
   tests/ut/attention/a2/test_attention_cp.py: 30
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30

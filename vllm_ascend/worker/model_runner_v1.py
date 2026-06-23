@@ -18,6 +18,7 @@
 #
 
 import gc
+import logging
 import math
 import sys
 import time
@@ -495,7 +496,12 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_loader = D2DExpertWeightLoader()
             self.manager = Manager()
             self.shared_dict = self.manager.dict({"expert_map": None, "moe_load": None, "expert_maps": None})
-            self.eplb_process = EplbProcess(shared_dict=self.shared_dict, policy_type=self.policy_type, enable_d2d=True)
+            self.eplb_process = EplbProcess(
+                shared_dict=self.shared_dict,
+                policy_type=self.policy_type,
+                enable_d2d=True,
+                tp_size=self.parallel_config.tensor_parallel_size,
+            )
             self.process = self.eplb_process._launch_process()
             self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)
             # In pd colocation scenarios, we find that prefill/decode requests result in different
@@ -622,6 +628,19 @@ class NPUModelRunner(GPUModelRunner):
 
     def _get_drafter(self):
         return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
+
+    def _eagle3_uses_aux_hidden_state(self) -> bool:
+        if self.speculative_config is None or self.speculative_config.method != "eagle3":
+            return False
+
+        draft_model_config = self.speculative_config.draft_model_config
+        if draft_model_config is None:
+            return True
+
+        eagle_config = getattr(draft_model_config.hf_config, "eagle_config", None)
+        if eagle_config is None:
+            return True
+        return eagle_config.get("use_aux_hidden_state", True)
 
     def _use_aclgraph(self) -> bool:
         return (
@@ -1964,6 +1983,20 @@ class NPUModelRunner(GPUModelRunner):
             and not self.model_config.is_encoder_decoder
         )):
             scheduler_output = deepcopy(scheduler_output)
+        pp_group = get_pp_group()
+        if pp_group.world_size > 1 and not pp_group.is_last_rank:
+            new_token_ids = scheduler_output.scheduled_cached_reqs.new_token_ids
+            if new_token_ids and all(not token_ids for token_ids in new_token_ids):
+                scheduler_output = deepcopy(scheduler_output)
+                scheduler_output.scheduled_cached_reqs.new_token_ids = []
+
+        if has_kv_transfer_group():
+            kv_connector_metadata = scheduler_output.kv_connector_metadata
+            assert kv_connector_metadata is not None
+            # Preemption stores must run before _update_states() zeroes newly
+            # allocated blocks that may reuse the same physical KV cache IDs.
+            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
@@ -2026,9 +2059,13 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs = self.input_batch.num_reqs
                 req_ids = self.input_batch.req_ids
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+                if (scheduler_output.total_num_scheduled_tokens <= 0
+                        or not tokens or sum(tokens) == 0):
+                    if not has_kv_transfer_group():
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+                    return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
-
                 (
                     logits_indices,
                     spec_decode_metadata,
@@ -2068,14 +2105,15 @@ class NPUModelRunner(GPUModelRunner):
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 )
 
-                logger.debug(
-                    "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
-                    "should_ubatch: %s, num_tokens_across_dp: %s",
-                    cudagraph_mode,
-                    batch_desc,
-                    should_ubatch,
-                    num_tokens_across_dp,
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+                        "should_ubatch: %s, num_tokens_across_dp: %s",
+                        cudagraph_mode,
+                        batch_desc,
+                        should_ubatch,
+                        num_tokens_across_dp,
+                    )
 
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
@@ -2795,6 +2833,11 @@ class NPUModelRunner(GPUModelRunner):
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
                 copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
+                if k not in self.intermediate_tensors.tensors:
+                    base_tensor = self.intermediate_tensors["hidden_states"]
+                    self.intermediate_tensors[k] = v.new_empty(
+                        (base_tensor.shape[0], *v.shape[1:])
+                    )
                 self.intermediate_tensors[k][:copy_len].copy_(
                     v[:copy_len], non_blocking=True
                 )
@@ -3533,7 +3576,7 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = outputs
             dummy_compute_logits(hidden_states)
 
-            if self.drafter:
+            if self.drafter and not profile_cpp:
                 self.drafter.dummy_run(
                     num_tokens=num_tokens_padded,
                     with_prefill=with_prefill,
@@ -3643,17 +3686,48 @@ class NPUModelRunner(GPUModelRunner):
                     patch_load_weights(self.vllm_config)
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
-                if self.use_aux_hidden_state_outputs:
-                    from vllm.model_executor.models.interfaces import supports_eagle3
-                    if not supports_eagle3(self.model):
-                        raise RuntimeError(
-                            "Model does not support EAGLE3 interface but "
-                            "aux_hidden_state_outputs was requested"
+
+            pp_group = get_pp_group()
+            should_configure_aux_hidden_states = (
+                self.use_aux_hidden_state_outputs
+                if pp_group.world_size == 1
+                else self._eagle3_uses_aux_hidden_state()
+            )
+            if should_configure_aux_hidden_states:
+                from vllm.model_executor.models.interfaces import supports_eagle3
+
+                if not supports_eagle3(self.model):
+                    raise RuntimeError(
+                        "Model does not support EAGLE3 interface but "
+                        "aux_hidden_state_outputs was requested"
+                    )
+
+                aux_layers = self._get_eagle3_aux_layers_from_config()
+                if not aux_layers:
+                    aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                self.model.set_aux_hidden_state_layers(aux_layers)
+
+                if pp_group.world_size > 1:
+                    inner_model = self.model
+                    if hasattr(inner_model, "get_language_model"):
+                        inner_model = inner_model.get_language_model()
+                    elif hasattr(inner_model, "language_model"):
+                        language_model = inner_model.language_model
+                        inner_model = (
+                            language_model()
+                            if callable(language_model)
+                            else language_model
                         )
-                    aux_layers = self._get_eagle3_aux_layers_from_config()
-                    if not aux_layers:
-                        aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
-                    self.model.set_aux_hidden_state_layers(aux_layers)
+                    if hasattr(inner_model, "model"):
+                        inner_model = inner_model.model
+                    from vllm_ascend.patch.worker.patch_eagle3_pp_aux import (
+                        patch_eagle3_pp_aux_propagation,
+                    )
+
+                    if patch_eagle3_pp_aux_propagation(inner_model):
+                        self.model.make_empty_intermediate_tensors = (
+                            inner_model.make_empty_intermediate_tensors
+                        )
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
