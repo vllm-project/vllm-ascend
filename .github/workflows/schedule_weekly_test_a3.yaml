@@ -113,10 +113,9 @@ jobs:
 
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger, build-image]
+    needs: [setup-vars, build-image]
     if: >-
       always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
@@ -156,7 +155,7 @@ jobs:
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, build-image]
+    needs: [setup-vars, build-image, multi-node-tests]
     if: >-
       always() &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
