@@ -63,5 +63,45 @@ RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pyp
 
 RUN echo "export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
+RUN echo 'export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/lib64:/root/aicpu_kernels/0/aicpu_kernels_device/sand_box:$LD_LIBRARY_PATH' >> /root/.bashrc
+
+# Initialize driver directories, users and file groups
+RUN mkdir -m 750 /var/driver -m 750 /var/dmp -m 750 /usr/slog && \
+    mkdir -m 755 /home/drv && \
+    mkdir -m 750 /home/drv/hdc_ppc -m 750 -p /var/log/npu/slog && \
+    ldconfig && \
+    ln -sf /lib /lib64 && \
+    groupadd -g 1000 HwHiAiUser && useradd -u 1000 -g HwHiAiUser -d /home/HwHiAiUser -m HwHiAiUser && \
+    groupadd -g 1101 HwDmUser && useradd -u 1101 -g HwDmUser -d /home/HwDmUser -m HwDmUser && \
+    groupadd -g 1102 HwBaseUser && useradd -u 1102 -g HwBaseUser -d /home/HwBaseUser -m HwBaseUser && \
+    groupadd -g 1100 HwSysUser && useradd -u 1100 -g HwSysUser -d /home/HwSysUser -m HwSysUser && \
+    usermod -a -G HwBaseUser HwHiAiUser && \
+    usermod -a -G HwDmUser HwHiAiUser && \
+    usermod -a -G HwBaseUser HwDmUser && \
+    usermod -a -G HwHiAiUser HwDmUser && \
+    usermod -a -G HwSysUser HwSysUser && \
+    chown HwDmUser:HwDmUser /var/dmp && \
+    chown HwHiAiUser:HwHiAiUser /var/driver && \
+    chown HwHiAiUser:HwHiAiUser /usr/slog && \
+    chown HwHiAiUser:HwHiAiUser /home/drv/hdc_ppc && \
+    chown HwHiAiUser:HwHiAiUser /var/log/npu/slog
+
+# Dynamically generate entrypoint.sh for dual mode compatibility
+RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
+    echo 'if lspci 2>/dev/null | grep -qi "accelerators"; then' >> /usr/local/bin/entrypoint.sh && \
+    echo '    :' >> /usr/local/bin/entrypoint.sh && \
+    echo 'else' >> /usr/local/bin/entrypoint.sh && \
+    echo '    su - HwHiAiUser -c "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/:/usr/lib64 && /lib/ld-linux-aarch64.so.1 /var/slogd -d >/dev/null &"' >> /usr/local/bin/entrypoint.sh && \
+    echo '    su - HwDmUser -c "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/:/usr/lib64 && /lib/ld-linux-aarch64.so.1 /var/dmp_daemon -I -M -U 8087 &"' >> /usr/local/bin/entrypoint.sh && \
+    echo '    ' >> /usr/local/bin/entrypoint.sh && \
+    echo '    rm -rf /lib64/ld-linux-aarch64.so.1' >> /usr/local/bin/entrypoint.sh && \
+    echo '    ln -sf /lib/ld-linux-aarch64.so.1 /lib64/ld-linux-aarch64.so.1' >> /usr/local/bin/entrypoint.sh && \
+    echo 'fi' >> /usr/local/bin/entrypoint.sh && \
+    echo '' >> /usr/local/bin/entrypoint.sh && \
+    echo 'exec "$@"' >> /usr/local/bin/entrypoint.sh && \
+    chmod +x /usr/local/bin/entrypoint.sh
+
+# Set entrypoint and default command
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 CMD ["/bin/bash"]
