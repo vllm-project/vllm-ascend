@@ -114,6 +114,10 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.msa_m3 import (
+    AscendMiniMaxM3IndexerCache,
+    MiniMaxM3SparseAttention,
+)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
 
 # yapf conflicts with isort for this block
@@ -350,11 +354,6 @@ class NPUModelRunner(GPUModelRunner):
             vllm_config.model_config.hf_text_config, "index_topk"
         ) and not hasattr(
             vllm_config.model_config.hf_text_config, "compress_ratios"
-        )
-        from vllm_ascend.models.minimax_m3 import is_minimax_m3_sparse_model
-
-        self.use_minimax_m3_sparse = is_minimax_m3_sparse_model(
-            vllm_config.model_config.hf_text_config
         )
         if self.use_sparse:
             if get_ascend_device_type() == AscendDeviceType.A5 and self.ascend_config.enable_sparse_c8:
@@ -4669,7 +4668,10 @@ class NPUModelRunner(GPUModelRunner):
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
-            elif isinstance(attn_module, Attention):
+            elif isinstance(
+                attn_module,
+                (Attention, MiniMaxM3SparseAttention, AscendMiniMaxM3IndexerCache),
+            ):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
@@ -4731,21 +4733,6 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=spec.dtype,
                         cache_dtype_str=spec.cache_dtype_str,
                     )
-                    attn_layer_names.add(layer_name)
-
-            elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                # MiniMax-M3 sparse attention / indexer side caches and other
-                # custom AttentionLayerBase modules that are not handled above.
-                from vllm_ascend.attention.msa_m3 import (
-                    AscendMiniMaxM3IndexerCache,
-                    AscendMiniMaxM3SparseBackend,
-                )
-
-                if attn_module.get_attn_backend() is AscendMiniMaxM3SparseBackend:
-                    kv_cache_spec[layer_name] = spec
-                    attn_layer_names.add(layer_name)
-                elif isinstance(attn_module, AscendMiniMaxM3IndexerCache):
-                    kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
 
         if len(mamba_layers) > 0:
