@@ -28,6 +28,8 @@ static constexpr size_t INPUT_CHUNK_INDICES_IDX = 6;
 
 static constexpr size_t ATTR_SCALE_IDX = 0;
 static constexpr size_t ATTR_CHUNK_SIZE_IDX = 1;
+static constexpr size_t ATTR_K_STRIDE_IDX = 2;
+static constexpr size_t ATTR_V_STRIDE_IDX = 3;
 
 static constexpr size_t DIM_BATCH = 0;
 static constexpr size_t DIM_HEAD_NUM = 1;
@@ -80,6 +82,8 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
     
     auto attrPtr = context->GetAttrs();
     float scale = *(attrPtr->GetAttrPointer<double>(ATTR_SCALE_IDX));
+    int64_t kStride0 = *(attrPtr->GetAttrPointer<int64_t>(ATTR_K_STRIDE_IDX));
+    int64_t vStride0 = *(attrPtr->GetAttrPointer<int64_t>(ATTR_V_STRIDE_IDX));
     int64_t chunkSize = *(attrPtr->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE_IDX));
 
     auto dtype = context->GetInputTensor(0)->GetDataType();
@@ -130,6 +134,8 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
     tiling.set_kHeadDim(kHeadDim);
     tiling.set_vHeadDim(vHeadDim);
     tiling.set_scale(scale);
+    tiling.set_kStride0(kStride0);
+    tiling.set_vStride0(vStride0);
     tiling.set_chunkSize(chunkSize);
     tiling.set_isVariedLen(isVariedLen);
     tiling.set_tokenBatch(tokenBatch);

@@ -21,6 +21,8 @@ const std::array<const aclTensor *, 1> ChunkFwdO(
     const aclTensor *g,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkOffsetsOptional,
+    int64_t kStride0,
+    int64_t vStride0,
     double scale,
     int64_t chunkSize,
     const aclTensor *oOut,
