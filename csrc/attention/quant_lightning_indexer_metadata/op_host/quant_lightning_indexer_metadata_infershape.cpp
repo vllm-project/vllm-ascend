@@ -13,7 +13,7 @@
  * \brief
  */
 #include "register/op_impl_registry.h"
-#include "../../quant_lightning_indexer/op_kernel/quant_lightning_indexer_metadata.h"
+#include "../../quant_lightning_indexer_custom/op_kernel/quant_lightning_indexer_metadata.h"
 
 using namespace ge;
 

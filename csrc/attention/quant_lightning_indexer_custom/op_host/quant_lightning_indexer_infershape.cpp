@@ -33,7 +33,7 @@ constexpr uint32_t DIM_NUM_4 = 4;
 static ge::graphStatus InferShapeQuantLightningIndexer(gert::InferShapeContext *context)
 {
     if (context == nullptr) {
-        OP_LOGE("QuantLightningIndexer", "context is nullptr!");
+        OP_LOGE("QuantLightningIndexerCustom", "context is nullptr!");
         return ge::GRAPH_FAILED;
     }
     const gert::Shape *queryShape = context->GetInputShape(QUERY_INDEX);
@@ -82,25 +82,25 @@ static ge::graphStatus InferShapeQuantLightningIndexer(gert::InferShapeContext *
         sparseValuesShape->SetDim(0, 0);
     }
 
-    OP_LOGD(context->GetNodeName(), "QuantLightningIndexer InferShape end.");
+    OP_LOGD(context->GetNodeName(), "QuantLightningIndexerCustom InferShape end.");
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus InferDataTypeQuantLightningIndexer(gert::InferDataTypeContext *context)
 {
     if (context == nullptr) {
-        OP_LOGE("QuantLightningIndexer", "InferDataTypeContext context is nullptr!");
+        OP_LOGE("QuantLightningIndexerCustom", "InferDataTypeContext context is nullptr!");
         return ge::GRAPH_FAILED;
     }
-    OP_LOGD(context->GetNodeName(), "Enter QuantLightningIndexer InferDataType impl.");
+    OP_LOGD(context->GetNodeName(), "Enter QuantLightningIndexerCustom InferDataType impl.");
     // default index data type is int32
     ge::DataType outputType = ge::DT_INT32;
     context->SetOutputDataType(0, outputType);
-    OP_LOGD(context->GetNodeName(), "QuantLightningIndexer InferDataType end.");
+    OP_LOGD(context->GetNodeName(), "QuantLightningIndexerCustom InferDataType end.");
     return GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(QuantLightningIndexer)
+IMPL_OP_INFERSHAPE(QuantLightningIndexerCustom)
     .InferShape(InferShapeQuantLightningIndexer)
     .InferDataType(InferDataTypeQuantLightningIndexer);
 }  // namespace ops

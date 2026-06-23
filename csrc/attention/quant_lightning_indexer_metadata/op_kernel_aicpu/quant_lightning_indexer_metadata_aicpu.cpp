@@ -10,7 +10,7 @@
 
 #include <cstdio>
 #include <cmath>
-#include "../../quant_lightning_indexer/op_kernel/quant_lightning_indexer_metadata.h"
+#include "../../quant_lightning_indexer_custom/op_kernel/quant_lightning_indexer_metadata.h"
 #include "../../common/aicpu/cpu_context_util.h"
 #include "quant_lightning_indexer_metadata_aicpu.h"
 
