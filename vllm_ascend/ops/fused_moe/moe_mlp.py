@@ -25,6 +25,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -334,63 +335,41 @@ def quant_apply_mlp(
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
         else:
+            w1_scale[0] = w1_scale[0].to(w2_scale[0].dtype)
+            # gmm1: gate_up_proj
+            hidden_states = torch_npu.npu_grouped_matmul(
+                x=[hidden_states],
+                weight=w1,
+                scale=w1_scale,
+                bias=bias1,
+                per_token_scale=[pertoken_scale],
+                split_item=2,
+                group_list_type=group_list_type,
+                group_type=0,
+                group_list=group_list,
+                output_dtype=_output_dtype,
+            )[0]
+            if quantized_hidden_states is not None:
+                dispose_tensor(quantized_hidden_states)
+            # act_fn: swiglu
             if is_swigluoai_uninterleave:
-                hidden_states = torch_npu.npu_grouped_matmul(
-                    x=[hidden_states],
-                    weight=w1,
-                    split_item=3,
-                    group_list_type=group_list_type,
-                    group_type=0,
-                    group_list=group_list,
-                    output_dtype=torch.int32,
-                )[0]
-                if quantized_hidden_states is not None:
-                    dispose_tensor(quantized_hidden_states)
-                weight_scale = _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
-                if weight_scale.dtype != torch.float32:
-                    weight_scale = weight_scale.to(torch.float32)
-                hidden_states, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
-                    x=hidden_states,
-                    weight_scale=weight_scale,
-                    activation_scale=pertoken_scale,
-                    bias=None,
-                    quant_scale=None,
-                    quant_offset=None,
-                    group_index=cumsum_group_list(group_list, group_list_type, 1),
-                    activate_left=True,
-                    quant_mode=1,
-                    swiglu_mode=1,
-                    clamp_limit=swiglu_limit,
-                    glu_alpha=swiglu_alpha,
-                    glu_bias=swiglu_beta,
+                hidden_states = torch_npu.npu_clipped_swiglu(
+                    hidden_states,
+                    alpha=swiglu_alpha,
+                    limit=swiglu_limit,
+                    bias=swiglu_beta,
+                    interleaved=False,
+                )
+                hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            elif HAS_TRITON:
+                from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
+
+                hidden_states, swiglu_out_scale = swiglu_quant(
+                    hidden_states, group_list=group_list, group_list_type=group_list_type
                 )
             else:
-                w1_scale[0] = w1_scale[0].to(w2_scale[0].dtype)
-                # gmm1: gate_up_proj
-                hidden_states = torch_npu.npu_grouped_matmul(
-                    x=[hidden_states],
-                    weight=w1,
-                    scale=w1_scale,
-                    bias=bias1,
-                    per_token_scale=[pertoken_scale],
-                    split_item=2,
-                    group_list_type=group_list_type,
-                    group_type=0,
-                    group_list=group_list,
-                    output_dtype=_output_dtype,
-                )[0]
-                if quantized_hidden_states is not None:
-                    dispose_tensor(quantized_hidden_states)
-                # act_fn: swiglu
-                if HAS_TRITON:
-                    from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
-
-                    hidden_states, swiglu_out_scale = swiglu_quant(
-                        hidden_states, group_list=group_list, group_list_type=group_list_type
-                    )
-                else:
-                    hidden_states = torch_npu.npu_swiglu(hidden_states)
-                    hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
+                hidden_states = torch_npu.npu_swiglu(hidden_states)
+                hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
         before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
@@ -433,6 +412,8 @@ def unquant_apply_mlp(
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
 
+    act_name = activation
+
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],
@@ -443,7 +424,10 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    if activation == "swigluoai_uninterleave":
+    if act_name == "swigluoai":
+        num_experts, _, hidden_size = w1.shape
+        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
+    elif act_name == "swigluoai_uninterleave":
         gate_up_out = torch_npu.npu_clipped_swiglu(
             gate_up_out,
             alpha=swiglu_alpha,
@@ -515,7 +499,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         )
 
     assert w1_scale is not None and w2_scale is not None
-    act_quant_type = torch.int8 if mlp_compute_input.quant.is_int_quant else torch.float8_e4m3fn
+    act_quant_type = torch.float8_e4m3fn
     weight_quant_type = torch.float8_e4m3fn
     scale_type = None
     per_token_scale_type = None
