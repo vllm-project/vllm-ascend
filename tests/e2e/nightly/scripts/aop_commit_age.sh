@@ -38,8 +38,8 @@ if [ ! -f "$CSV_PATH" ]; then
   exit 0
 fi
 
-# Find matching rows, only consider success rows
-ROWS=$(grep -F "$CONFIG_NAME" "$CSV_PATH" | grep -F ',success,' || true)
+# Find matching rows, only consider success rows (match name column only)
+ROWS=$(grep "^${CONFIG_NAME}," "$CSV_PATH" | grep -F ',success,' || true)
 
 if [ -z "$ROWS" ]; then
   echo ">>> No success row for '${CONFIG_NAME}' → skip"
@@ -72,6 +72,7 @@ fi
 LAST_STATUS=$(echo "$BEST_ROW" | cut -d',' -f4 | xargs)
 LAST_DATE="$BEST_DATE"
 
+echo ">>> Matched row: ${BEST_ROW}"
 echo "last_status=${LAST_STATUS}" >> "$GITHUB_OUTPUT"
 echo "last_date=${LAST_DATE}"     >> "$GITHUB_OUTPUT"
 

@@ -352,7 +352,7 @@ aop_pipeline() {
 
     # Only consider success rows
     local success_rows
-    success_rows=$(grep -F "$case_name" "$table" | grep -F ',success,' || true)
+    success_rows=$(grep "^${case_name}," "$table" | grep -F ',success,' || true)
     if [ -z "$success_rows" ]; then
         echo "  No success row found for '${case_name}'"
         echo "  Decision: no success entry → SKIP"
@@ -378,6 +378,7 @@ aop_pipeline() {
         return 1
     fi
 
+    echo "  Matched row: $(grep -m1 "$best_date" <<< "$success_rows")"
     local last_ts now_ts age_days
     last_ts=$(date -d "$best_date" +%s 2>/dev/null || echo 0)
     now_ts=$(date +%s)
