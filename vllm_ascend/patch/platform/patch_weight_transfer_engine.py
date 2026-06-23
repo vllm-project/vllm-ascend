@@ -56,9 +56,18 @@ from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferEngine,
 )
-from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
-    NPUIPCWeightTransferEngine,
-)
+
+if TYPE_CHECKING:
+    from vllm.distributed.weight_transfer.base import WeightTransferEngine
+
+
+def _load_npu_ipc_engine() -> "type[WeightTransferEngine]":
+    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+        NPUIPCWeightTransferEngine,
+    )
+
+    return NPUIPCWeightTransferEngine
+
 
 if TYPE_CHECKING:
     from vllm.distributed.weight_transfer.base import WeightTransferEngine
