@@ -309,7 +309,8 @@ class AscendConfig:
         self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)
 
         # Enable optimized reduce sampling scheme
-        self.enable_reduce_sample = additional_config.get("enable_reduce_sample", True)
+        _reduce_sample_default = (vllm_config.parallel_config.tensor_parallel_size != 1) or (self.finegrained_tp_config.lmhead_tensor_parallel_size > 0)
+        self.enable_reduce_sample = additional_config.get("enable_reduce_sample", _reduce_sample_default)
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
