@@ -46,6 +46,7 @@ from tests.e2e.nightly.bisect.config import (
 )
 from tests.e2e.nightly.bisect.coordinator import Coordinator
 from tests.e2e.nightly.bisect.verdict import RunOutcome
+from tests.e2e.nightly.bisect.vllm_compat import check_compatible, check_compatible_at
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,22 @@ class BaseRunner:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _vllm_skip_outcome(self, rebuilt: bool) -> RunOutcome | None:
+        """After checkout, SKIP the commit if its pinned vLLM != the installed one.
+
+        Returns a SKIP RunOutcome on a confident mismatch, else None (proceed).
+        Avoids wasting a full pytest run on a commit that can only fail to
+        collect/import against the container's vLLM.
+        """
+        compatible, reason = check_compatible(self.repo)
+        if compatible:
+            logger.info("[vllm-compat] %s", reason)
+            return None
+        logger.warning("[vllm-compat] %s -> SKIP", reason)
+        outcome = RunOutcome(exit_code=0, infra_error=True, skip_reason=reason)
+        outcome.rebuilt = rebuilt  # type: ignore[attr-defined]
+        return outcome
+
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         raise NotImplementedError
 
@@ -122,6 +139,12 @@ class SingleNodeRunner(BaseRunner):
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
         decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
+
+        # vLLM/vllm-ascend version skew check: a commit pinned to a different
+        # vLLM than the container's cannot be validly tested -> SKIP cleanly.
+        skip = self._vllm_skip_outcome(decision.rebuild)
+        if skip is not None:
+            return skip
 
         # Run the WHOLE yaml (all test_cases): nightly cannot select a single
         # case, so we don't pass -k. Each case writes its own benchmark JSON
@@ -162,12 +185,24 @@ class MultiNodeRunner(BaseRunner):
 
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
-
-        # 1) tell every node which commit to deploy (rebuild flag included)
         decision = self.builder.decide(candidate.commit)
-        self.coord.publish_command(round_idx, candidate.commit, decision.rebuild)
 
-        # 2) deploy locally (master is also a node)
+        # 1) vLLM/vllm-ascend version skew: read this commit's pinned vLLM tag
+        # *without* checking it out (same container vLLM on every node, so the
+        # decision is identical cluster-wide). On a mismatch publish a SKIP
+        # command so workers consume the round and stay in lockstep, but neither
+        # side deploys or runs.
+        compatible, reason = check_compatible_at(self.repo, candidate.commit)
+        if not compatible:
+            logger.warning("[vllm-compat] %s -> SKIP", reason)
+            self.coord.publish_command(round_idx, candidate.commit, decision.rebuild, action="SKIP")
+            outcome = RunOutcome(exit_code=0, infra_error=True, skip_reason=reason)
+            outcome.rebuilt = False  # type: ignore[attr-defined]
+            return outcome
+        logger.info("[vllm-compat] %s", reason)
+
+        # 2) tell every node to deploy this commit, then deploy locally too.
+        self.coord.publish_command(round_idx, candidate.commit, decision.rebuild, action="RUN")
         try:
             self.builder.prepare(candidate.commit, log_path)
         except BuildError:

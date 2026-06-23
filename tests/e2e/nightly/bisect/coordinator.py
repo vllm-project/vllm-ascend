@@ -56,10 +56,16 @@ class Coordinator:
         return self.root / "DONE"
 
     # ------------------------------------------------------- master writes
-    def publish_command(self, rnd: int, commit: str, rebuild: bool) -> None:
+    def publish_command(self, rnd: int, commit: str, rebuild: bool, action: str = "RUN") -> None:
+        """Publish the per-round command. ``action`` is "RUN" (deploy + run the
+        distributed test) or "SKIP" (this commit is pre-skipped, e.g. vLLM
+        mismatch -- workers consume the command but do not deploy/run, keeping
+        leader/worker rounds in lockstep)."""
         path = self._round_dir(rnd) / "command.json"
-        path.write_text(json.dumps({"round": rnd, "commit": commit, "rebuild": rebuild}))
-        logger.info("[coord] published command round=%d commit=%s", rnd, commit[:12])
+        path.write_text(json.dumps(
+            {"round": rnd, "commit": commit, "rebuild": rebuild, "action": action}))
+        logger.info("[coord] published command round=%d commit=%s action=%s",
+                    rnd, commit[:12], action)
 
     def publish_verdict(self, rnd: int, verdict: str) -> None:
         (self._round_dir(rnd) / "verdict.json").write_text(json.dumps({"verdict": verdict}))
@@ -78,12 +84,21 @@ class Coordinator:
         logger.info("[coord] node %d ready for round %d at %s", self.node_index, rnd, head[:12])
 
     # -------------------------------------------------------------- reads
-    def wait_command(self, rnd: int, timeout_s: float) -> dict | None:
-        """Worker: block until the round command appears, or DONE is set."""
+    def wait_command(self, rnd: int, timeout_s: float, release_file: str | None = None) -> dict | None:
+        """Worker: block until the round command appears, or a stop signal.
+
+        Returns the command dict, or None when the bisect is over -- signalled by
+        either the coordinator DONE sentinel or an external ``release_file`` (the
+        AOP leader's ``done`` file, touched even when it decides not to bisect).
+        """
         path = self._round_dir(rnd) / "command.json"
+        release = Path(release_file) if release_file else None
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             if self.is_done():
+                return None
+            if release is not None and release.exists():
+                logger.info("[coord] external release file %s present; worker exiting", release)
                 return None
             if path.exists():
                 return json.loads(path.read_text())
@@ -101,9 +116,14 @@ class Coordinator:
                 logger.info("[coord] all %d nodes ready for round %d", self.num_nodes, rnd)
                 return
             time.sleep(_POLL_INTERVAL_S)
+        ready_now = sorted(p.name for p in rdir.glob("ready_*.json"))
         raise TimeoutError(
-            f"Barrier timeout: only {len(list(rdir.glob('ready_*.json')))}/"
-            f"{self.num_nodes} nodes ready for round {rnd}"
+            f"Barrier timeout: only {len(ready_now)}/{self.num_nodes} nodes ready "
+            f"for round {rnd} (ready: {ready_now}). The missing node(s) never "
+            "signalled ready -- ensure 'auto_bisect.py --scene multi_node' is "
+            "launched on EVERY node (workers auto-enter the worker loop), all "
+            f"pointing at the same shared --coord-dir ({self.root}). A worker that "
+            "only ran the test (not the bisect agent) will never join this barrier."
         )
 
     def wait_verdict(self, rnd: int, timeout_s: float) -> str | None:

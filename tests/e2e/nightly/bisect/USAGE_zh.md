@@ -88,6 +88,8 @@ python -m tests.e2e.nightly.bisect.auto_bisect \
 - internal / external DP 通过 `--config-base-path`(或 yaml 路径含 `external_dp/config`)自动区分。
 - 所有节点切到同一 commit 后才会开跑(屏障同步)。
 
+> ⚠️ **常见坑(barrier timeout)**:报错 `Barrier timeout: only 1/2 nodes ready` 表示**只有 master 跑了 bisect、worker 节点没跑**。多机 bisect 要求**每个节点都启动 `auto_bisect.py --scene multi_node`**(worker 节点会自动进入 worker 循环:接收 commit→部署→上报 ready→等 master)。如果你的流水线只在 leader 上调了 bisect、worker pod 只跑了用例,worker 永远不会加入屏障,master 就会超时。修法:让流水线在**所有节点**(含 worker)都执行同一条 bisect 命令,且共享同一个 `--coord-dir`。
+
 ---
 
 ## 六、编译判定(只有动了 C++ 才编译)
@@ -108,6 +110,16 @@ python -m tests.e2e.nightly.bisect.auto_bisect \
 
 > bad 端点(==HEAD)因为容器已构建好,默认是 `already built` 直接跳过编译。
 
+### 6.1 vLLM 版本配套检查(自动)
+
+每切到一个 commit,工具会读取该 commit 的 `.github/vllm-release-tag.commit`(它钉死了这个 commit 配套的 vLLM tag,如 `v0.22.1`),与容器实际 vLLM(优先 `VLLM_VERSION` 环境变量,否则 `vllm.__version__`)比对:
+
+- **配套**(release 段一致,忽略 `v` 前缀和 dev/local 后缀)→ 正常跑;
+- **不配套**(如 commit 钉 `v0.22.1`、容器是 `0.21.0`)→ 该 commit **直接判 SKIP**,日志写明 `vllm version mismatch: this commit pins ... but the container has ...`,**不再浪费一次 pytest 跑出莫名的 rc=4**;
+- 容器是无法解析的 dev 构建 → 宽松放行(交给 pytest 判定)。
+
+> 这是为了解决"二分跨过 vLLM 版本变更点时,老 commit 在当前容器里跑不起来"的问题。若某端点因 vLLM 不配套被 SKIP,二分会明确报错中止(见第七节)。
+
 ---
 
 ## 七、好坏判定(verdict)
@@ -117,9 +129,11 @@ python -m tests.e2e.nightly.bisect.auto_bisect \
 - pytest 退出码 `1`(用例断言失败/崩溃)→ **FAIL**;
 - 退出码 `0` 但 `benchmark_results/` 里**任一 case 的 json `pass_fail=fail`**(精度/性能未达基线)→ **FAIL**;
 - 退出码 `0` 且无回归 → **PASS**;
-- 退出码 `2/3/4/5` 或超时(收集失败、conftest ImportError、环境问题等)→ **SKIP**(不作为二分信号,类似 `git bisect skip`)。
+- 退出码 `2/3/4/5` 或超时(收集失败、conftest ImportError、环境问题等)→ **SKIP**;
+- **vLLM 版本不配套**(见 6.1)→ **SKIP**(带明确原因);
+- SKIP 不作为二分信号,类似 `git bisect skip`。
 
-端点校验:开跑前先确认 bad 复现失败、good 确实通过;若任一端点是 SKIP(环境跑不起来),会**明确报错并中止**而不是给错误结论。
+端点校验:开跑前先确认 bad 复现失败、good 确实通过;若任一端点是 SKIP(环境跑不起来 / vLLM 不配套),会**明确报错并中止**而不是给错误结论。
 
 ---
 

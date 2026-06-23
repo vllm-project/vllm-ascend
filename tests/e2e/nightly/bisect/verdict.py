@@ -39,6 +39,7 @@ class RunOutcome:
     # one file per case, so we scan the directory rather than a single file.
     results_dir: Path | None = None
     infra_error: bool = False  # set when the failure is environmental (-> SKIP)
+    skip_reason: str = ""  # human reason when infra_error is set (e.g. vllm skew)
 
 
 def _any_benchmark_failed(results_dir: Path | None) -> bool:
@@ -70,7 +71,7 @@ _INFRA_EXIT_CODES = {2, 3, 4, 5, 124}
 def evaluate(outcome: RunOutcome) -> tuple[Verdict, str]:
     """Map a run outcome to a verdict plus a short human reason."""
     if outcome.infra_error:
-        return "SKIP", "infra/environment error - cannot judge this commit"
+        return "SKIP", outcome.skip_reason or "infra/environment error - cannot judge this commit"
 
     rc = outcome.exit_code
     if rc in _INFRA_EXIT_CODES:

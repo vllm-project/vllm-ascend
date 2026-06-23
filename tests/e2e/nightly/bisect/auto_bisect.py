@@ -227,14 +227,17 @@ class Bisector:
             self.state_path, good=good.commit, bad=bad.commit
         ) or BisectState(good=good.commit, bad=bad.commit, hi=len(candidates) - 1)
 
-        if not self._verify_endpoints(good, candidates, state):
+        # finish() publishes the DONE sentinel that releases multi-node workers;
+        # it must run on every exit path (including a barrier timeout or any
+        # error) so workers never hang waiting for the next round.
+        try:
+            if not self._verify_endpoints(good, candidates, state):
+                report.write_report_json(self.report_path, inp=self.inp, good=good, bad=bad,
+                                         first_bad=None, trials=self.trials)
+                return None
+            first_bad = self._bisect(candidates, state)
+        finally:
             self.runner.finish()
-            report.write_report_json(self.report_path, inp=self.inp, good=good, bad=bad,
-                                     first_bad=None, trials=self.trials)
-            return None
-
-        first_bad = self._bisect(candidates, state)
-        self.runner.finish()
 
         if first_bad is not None:
             # If the culprit fell inside a skipped region it is only a *suspect*
@@ -298,6 +301,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="this node's index; defaults to $LWS_WORKER_INDEX (set by LWS), "
                         "else 0")
     p.add_argument("--coord-dir", default=DEFAULT_COORD_DIR, help="shared barrier dir (multi-node)")
+    p.add_argument("--release-file", default=None,
+                   help="multi-node worker: also exit when this file appears (the AOP "
+                        "leader's 'done' file), so workers don't hang if the leader skips")
     p.add_argument("--fail-confirm-retries", type=int, default=1)
     p.add_argument("--no-verify-good", action="store_true")
     p.add_argument("--no-verify-bad", action="store_true")
@@ -368,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         verify_bad=not args.no_verify_bad,
         num_nodes=num_nodes,
         node_index=args.node_index,
+        release_file=args.release_file,
         trial_timeout_s=args.trial_timeout_s,
         assume_built_head=not args.no_assume_built_head,
         force_initial_build=args.force_initial_build,
