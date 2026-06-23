@@ -78,9 +78,9 @@ echo "last_date=${LAST_DATE}"     >> "$GITHUB_OUTPUT"
 
 LAST_TS=$(date -d "$LAST_DATE" +%s 2>/dev/null || true)
 if [ -z "$LAST_TS" ]; then
-  echo ">>> Could not parse date: ${LAST_DATE}"
-  echo "is_old=false"      >> "$GITHUB_OUTPUT"
-  echo "commit_age_days=0" >> "$GITHUB_OUTPUT"
+  echo ">>> Could not parse date: ${LAST_DATE} → skip"
+  echo "is_old=true"       >> "$GITHUB_OUTPUT"
+  echo "commit_age_days=99" >> "$GITHUB_OUTPUT"
   exit 0
 fi
 
