@@ -479,7 +479,7 @@ vllm serve your_model_path \
   --distributed-executor-backend "mp" \
   --async-scheduling \
   --no-enable-prefix-caching \
-  --speculative-config '{"method": "eagle3", "model":"/mnt/share/weights/qwen-eagle3/qwen3_32B_rot/", "num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "eagle3", "model":"your_eagle3_model_path", "num_speculative_tokens": 3}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":131072}}' \
   --gpu-memory-utilization 0.9 \
@@ -505,7 +505,7 @@ vllm serve your_model_path \
   --async-scheduling \
   --quantization ascend \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}' \
-  --speculative-config '{"method": "eagle3", "model":"/mnt/share/weights/qwen-eagle3/qwen3_32B_rot/", "enforce_eager": true, "num_speculative_tokens": 3}' \
+  --speculative-config '{"method": "eagle3", "model":"your_eagle3_model_path", "enforce_eager": true, "num_speculative_tokens": 3}' \
   --port <port> \
   --block-size 128 \
   --gpu-memory-utilization 0.9
