@@ -16,6 +16,7 @@
 #
 from enum import Enum
 
+import torch
 import torch.distributed as dist
 from vllm.logger import logger
 from vllm.v1.utils import record_function_or_nullcontext
@@ -59,8 +60,10 @@ class D2DExpertWeightLoader:
             dst_rank, global_expert_id_to_send = send_info
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
+                # HCCL does not support float8_e8m0fnu for P2P; bitcast to uint8.
+                send_tensor = src_tensor.view(torch.uint8) if src_tensor.dtype == torch.float8_e8m0fnu else src_tensor
                 self.comm_op_list.append(
-                    dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group)
+                    dist.P2POp(dist.isend, send_tensor, dst_rank, group=self.comm_group.device_group)
                 )
 
         for buffer_tensor_id, recv_info in enumerate(expert_recv_info):

@@ -62,6 +62,9 @@ class VllmEplbAdaptor:
                 complete_name = "model.layers." + str(self.num_dense_layers) + ".mlp.experts." + name
                 expert_tensor = self.param_dict[complete_name][0]
                 buffer_tensor = torch.empty_like(expert_tensor)
+                # HCCL does not support float8_e8m0fnu for P2P; allocate uint8 buffer instead.
+                if buffer_tensor.dtype == torch.float8_e8m0fnu:
+                    buffer_tensor = buffer_tensor.view(torch.uint8)
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
@@ -90,7 +93,7 @@ class VllmEplbAdaptor:
                     "w13_scale_bias_list",
                     "w2_scale_bias_list",
                 ]
-
+            
             elif quant_type in (QuantType.MXFP4, QuantType.MXFP8):
                 self.expert_weight_names = [
                     "w13_weight",
@@ -152,7 +155,9 @@ class VllmEplbAdaptor:
         for expert_tensor, buffer_tensor in zip(
             self.expert_param_per_layer[layer_id][local_expert_to_replace], self.buffer_tensor_list[buffer_tensor_id]
         ):
-            expert_tensor.copy_(buffer_tensor)
+            # Buffer was communicated as uint8; view back to original dtype if needed.
+            src = buffer_tensor.view(expert_tensor.dtype) if expert_tensor.dtype == torch.float8_e8m0fnu else buffer_tensor
+            expert_tensor.copy_(src)
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
