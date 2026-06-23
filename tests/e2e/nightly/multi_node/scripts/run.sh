@@ -342,35 +342,50 @@ aop_pipeline() {
     echo ""
     echo "--- [2/3] Check commit age ---"
     echo "  Looking up: ${case_name}"
-    local age_days=0
-    local row_found=0
-    if [ -f "$table" ]; then
-        local row
-        row=$(grep -F "$case_name" "$table" | head -1 || true)
-        if [ -n "$row" ]; then
-            echo "  Table row found: ${row}"
-            local last_date
-            last_date=$(echo "$row" | awk -F',' '{print $NF}' | xargs)
-            echo "  Last success date: ${last_date}"
-            if [ -n "$last_date" ]; then
-                local last_ts now_ts
-                last_ts=$(date -d "$last_date" +%s 2>/dev/null || echo 0)
-                now_ts=$(date +%s)
-                age_days=$(( (now_ts - last_ts) / 86400 ))
-                row_found=1
-            fi
-        else
-            echo "  Table row not found for '${case_name}'"
-        fi
-    else
+    local skip_age=0
+    if [ ! -f "$table" ]; then
         echo "  Table file not found: ${table}"
+        echo "  Decision: no table → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (age skip) ==="
+        return 1
     fi
-    echo "  Age: ${age_days} days (threshold: 3 days)"
 
-    if [ "$age_days" -gt 3 ] || [ "$row_found" -eq 0 ]; then
-        local reason="old commit (> 3 days)"
-        [ "$row_found" -eq 0 ] && reason="no table entry (treat as old)"
-        echo "  Decision: ${reason} → SKIP"
+    # Only consider success rows
+    local success_rows
+    success_rows=$(grep -F "$case_name" "$table" | grep -F ',success,' || true)
+    if [ -z "$success_rows" ]; then
+        echo "  No success row found for '${case_name}'"
+        echo "  Decision: no success entry → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (age skip) ==="
+        return 1
+    fi
+
+    # Pick most recent success row
+    local best_date=""
+    while IFS= read -r row; do
+        local d
+        d=$(echo "$row" | awk -F',' '{print $NF}' | xargs)
+        [ -z "$d" ] && continue
+        if [ -z "$best_date" ] || [[ "$d" > "$best_date" ]]; then
+            best_date="$d"
+        fi
+    done <<< "$success_rows"
+
+    if [ -z "$best_date" ]; then
+        echo "  No valid date in success rows"
+        echo "  Decision: no date → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (age skip) ==="
+        return 1
+    fi
+
+    local last_ts now_ts age_days
+    last_ts=$(date -d "$best_date" +%s 2>/dev/null || echo 0)
+    now_ts=$(date +%s)
+    age_days=$(( (now_ts - last_ts) / 86400 ))
+    echo "  Last success: ${best_date} (${age_days} days ago, threshold: 3 days)"
+
+    if [ "$age_days" -gt 3 ]; then
+        echo "  Decision: old commit (> 3 days) → SKIP"
         echo "=== AOP Pipeline (Pod) - END (age skip) ==="
         return 1
     fi

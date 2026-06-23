@@ -31,51 +31,40 @@ echo ">>> Looking up config : ${CONFIG_NAME}"
 echo ">>> CSV path          : ${CSV_PATH}"
 
 if [ ! -f "$CSV_PATH" ]; then
-  echo ">>> CSV not found → treating as recent"
-  echo "is_old=false"      >> "$GITHUB_OUTPUT"
-  echo "commit_age_days=0" >> "$GITHUB_OUTPUT"
+  echo ">>> CSV not found → skip"
+  echo "is_old=true"       >> "$GITHUB_OUTPUT"
+  echo "commit_age_days=99" >> "$GITHUB_OUTPUT"
   echo "last_status=unknown" >> "$GITHUB_OUTPUT"
   exit 0
 fi
 
-# Find matching rows, prefer success rows with a date
-ROWS=$(grep -F "$CONFIG_NAME" "$CSV_PATH" || true)
+# Find matching rows, only consider success rows
+ROWS=$(grep -F "$CONFIG_NAME" "$CSV_PATH" | grep -F ',success,' || true)
 
 if [ -z "$ROWS" ]; then
-  echo ">>> Config '${CONFIG_NAME}' not found → treating as recent"
-  echo "is_old=false"      >> "$GITHUB_OUTPUT"
-  echo "commit_age_days=0" >> "$GITHUB_OUTPUT"
+  echo ">>> No success row for '${CONFIG_NAME}' → skip"
+  echo "is_old=true"       >> "$GITHUB_OUTPUT"
+  echo "commit_age_days=99" >> "$GITHUB_OUTPUT"
   echo "last_status=unknown" >> "$GITHUB_OUTPUT"
   exit 0
 fi
 
-# Pick best row: prefer "success" status, then most recent date
+# Pick most recent success row
 BEST_ROW=""
 BEST_DATE=""
 while IFS= read -r row; do
-  status=$(echo "$row" | cut -d',' -f4 | xargs)
   date_str=$(echo "$row" | cut -d',' -f7 | xargs)
-
-  # Skip rows without a date
   [ -z "$date_str" ] && continue
-
-  # Prefer success rows
-  if [ "$status" = "success" ]; then
-    if [ -z "$BEST_DATE" ] || [[ "$date_str" > "$BEST_DATE" ]]; then
-      BEST_ROW="$row"
-      BEST_DATE="$date_str"
-    fi
-  elif [ -z "$BEST_ROW" ]; then
-    # No success row yet, use this as fallback
+  if [ -z "$BEST_DATE" ] || [[ "$date_str" > "$BEST_DATE" ]]; then
     BEST_ROW="$row"
     BEST_DATE="$date_str"
   fi
 done <<< "$ROWS"
 
 if [ -z "$BEST_ROW" ]; then
-  echo ">>> No valid date in matching rows → treating as recent"
-  echo "is_old=false"      >> "$GITHUB_OUTPUT"
-  echo "commit_age_days=0" >> "$GITHUB_OUTPUT"
+  echo ">>> No valid date in success rows → skip"
+  echo "is_old=true"       >> "$GITHUB_OUTPUT"
+  echo "commit_age_days=99" >> "$GITHUB_OUTPUT"
   echo "last_status=unknown" >> "$GITHUB_OUTPUT"
   exit 0
 fi
