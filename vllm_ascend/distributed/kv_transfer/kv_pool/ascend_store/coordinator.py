@@ -303,6 +303,20 @@ def _get_manager_class_cache() -> dict[str, Any]:
 def _get_manager_class(spec: Any) -> Any:
     """Resolve the vLLM manager class across 0.20.x and 0.21.x APIs."""
     cache = _get_manager_class_cache()
+    compress_ratio = getattr(spec, "compress_ratio", None)
+    if compress_ratio is not None and compress_ratio > 1:
+        compress_manager = cache.get("compress_manager", _CACHE_MISSING)
+        if compress_manager is _CACHE_MISSING:
+            try:
+                from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
+            except ImportError:
+                compress_manager = None
+            else:
+                compress_manager = CompressAttentionManager
+            cache["compress_manager"] = compress_manager
+        if compress_manager is not None:
+            return compress_manager
+
     registry = cache.get("registry", _CACHE_MISSING)
     if registry is _CACHE_MISSING:
         try:
