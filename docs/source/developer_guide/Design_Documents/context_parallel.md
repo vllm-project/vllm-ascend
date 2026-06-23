@@ -1,6 +1,6 @@
 # Context Parallel (CP)
 
-TL;DR PCP accelerates prefill via sequence splitting. DCP eliminates KV cache redundancy.
+TL;DR: PCP accelerates prefill via sequence splitting. DCP eliminates KV cache redundancy.
 
 ![ContextParallel](../../assets/cp/overview.png)
 
