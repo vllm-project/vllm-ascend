@@ -102,6 +102,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Config mirrors (ubuntu)
         if: matrix.os == 'ubuntu'
@@ -134,7 +136,7 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: matrix.os == 'openeuler'
         run: |
-          yum install -y gcc gcc-c++ cmake numactl-devel clang
+          yum install -y python3-pip net-tools jemalloc numactl patch clang 
           pip install uv
 
       - name: Get image tag
@@ -182,9 +184,7 @@ jobs:
           source /usr/local/Ascend/nnal/atb/set_env.sh
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
-          if [ "${{ matrix.os }}" = "openeuler" ]; then
-            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
-          fi
+          
           if [ "${{ runner.arch }}" = "X64" ]; then
             export UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL} https://download.pytorch.org/whl/cpu/"
           fi

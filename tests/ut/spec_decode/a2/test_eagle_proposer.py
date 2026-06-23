@@ -21,19 +21,13 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-from vllm_ascend.utils import enable_custom_op, vllm_version_is
+from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
 # vLLM #40732 moved `SpecDecodeBaseProposer` (and its `CpuGpuBuffer` import)
 # out of `vllm.v1.spec_decode.eagle` into `vllm.v1.spec_decode.llm_base_proposer`.
-# Pick the right patch path depending on the installed vllm version so the
-# tests can mock the buffer factory.
-_CPU_GPU_BUFFER_TARGET = (
-    "vllm.v1.spec_decode.eagle.CpuGpuBuffer"
-    if vllm_version_is("0.19.1")
-    else "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
-)
+_CPU_GPU_BUFFER_TARGET = "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
 
 BLOCK_SIZE = 16
 
@@ -2429,12 +2423,9 @@ class TestRunMergedDraft(TestBase):
 
         # `CpuGpuBuffer` was re-exported from `eagle` until vLLM #40732 moved
         # `SpecDecodeBaseProposer` (and the import) into `llm_base_proposer`.
-        if vllm_version_is("0.19.1"):
-            assert hasattr(vllm.v1.spec_decode.eagle, "CpuGpuBuffer")
-        else:
-            import vllm.v1.spec_decode.llm_base_proposer
+        import vllm.v1.spec_decode.llm_base_proposer
 
-            assert hasattr(vllm.v1.spec_decode.llm_base_proposer, "CpuGpuBuffer")
+        assert hasattr(vllm.v1.spec_decode.llm_base_proposer, "CpuGpuBuffer")
         RunnerCls = vllm.v1.spec_decode.eagle.SpecDecodeBaseProposer
         for attr in ("_get_positions", "_set_positions"):
             assert hasattr(RunnerCls, attr), f"SpecDecodeBaseProposer.{attr} not found"

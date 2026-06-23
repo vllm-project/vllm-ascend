@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import (
     get_pcp_group,
@@ -49,31 +50,28 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
+from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 
-if vllm_version_is("0.22.1"):
-    from vllm.distributed.parallel_state import patch_tensor_parallel_group  # type: ignore[import-not-found]
-else:
-    import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
 
-    @contextmanager
-    def patch_tensor_parallel_group(tp_group):
-        """Temporarily swap the global TP group for draft-model spec decode.
+@contextmanager
+def patch_tensor_parallel_group(tp_group):
+    """Temporarily swap the global TP group for draft-model spec decode.
 
-        Backports vllm 0.21's ``patch_tensor_parallel_group`` which was removed
-        on vLLM main. Used so the draft model can run with a TP degree that
-        differs from the target model.
-        """
-        old_tp_group = _ps.get_tp_group()
-        _ps._TP_STATE_PATCHED = True
-        _ps._TP = tp_group
-        try:
-            yield
-        finally:
-            _ps._TP_STATE_PATCHED = False
-            _ps._TP = old_tp_group
+    Backports vllm 0.21's ``patch_tensor_parallel_group`` which was removed
+    on vLLM main. Used so the draft model can run with a TP degree that
+    differs from the target model.
+    """
+    old_tp_group = _ps.get_tp_group()
+    _ps._TP_STATE_PATCHED = True
+    _ps._TP = tp_group
+    try:
+        yield
+    finally:
+        _ps._TP_STATE_PATCHED = False
+        _ps._TP = old_tp_group
 
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
@@ -190,7 +188,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 use_message_queue_broadcaster=True,
                 group_name="tp",
             )
-            self.tp_group_context = patch_tensor_parallel_group(tp_group)
+            self.tp_group_context: AbstractContextManager[Any] = patch_tensor_parallel_group(tp_group)
         else:
             self.tp_group_context = nullcontext()
 
@@ -672,7 +670,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.method in ("eagle3", "dflash"):
             assert isinstance(
-                self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM, Eagle3DeepseekV2ForCausalLM)
+                self.get_model(),
+                (
+                    Eagle3LlamaForCausalLM,
+                    DFlashQwen3ForCausalLM,
+                    Eagle3VwnLlamaForCausalLM,
+                    Eagle3DeepseekV2ForCausalLM,
+                ),
             )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
