@@ -414,6 +414,8 @@ class NPUModelRunner(GPUModelRunner):
             self.pcp_rank = 0
         if self.pcp_size > 1:
             self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
+            if not self.vllm_config.cache_config.enable_prefix_caching:
+                self.vllm_config.cache_config.mamba_block_size = self.model_config.max_model_len
         max_buffer_num_tokens = self.max_num_tokens
         if self.pcp_size * self.dcp_size > 1:
             max_buffer_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_size
@@ -1596,10 +1598,21 @@ class NPUModelRunner(GPUModelRunner):
         # while pcp > 1, decode results may contain padding (from pcp all-gather),
         # update logits_indices after getting draft_token_ids from ori logits_indices
         if self.pcp_size > 1:
-            cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
+            assert num_pcp_pads is not None
+            if self.pcp_manager.pcp_use_hybrid_attn:
+                if self.pcp_manager.num_prefill_reqs > 0:
+                    cu_num_scheduled_tokens = (
+                        self.pcp_manager.adjust_cu_num_scheduled_tokens_for_pcp(
+                            cu_num_scheduled_tokens, num_pcp_pads
+                        )
+                    )
+            else:
+                cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
             logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
             logits_indices_pcp += self._arange_scratch[: cu_num_sampled_tokens[-1]]
             logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(self.device, non_blocking=True)
+
+
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1

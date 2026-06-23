@@ -753,17 +753,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
         )
+
+        self.spec_sequence_masks: torch.Tensor = torch.empty(
+            (sequence_index_capacity,), dtype=torch.bool, device=device
+        )
+
         self.spec_sequence_masks_cpu: torch.Tensor = torch.empty(
             (sequence_index_capacity,),
             dtype=torch.bool,
             device="cpu",
             pin_memory=device.type != "cpu",
         )
-        self.spec_sequence_masks: torch.Tensor = torch.empty(
-            (sequence_index_capacity,),
-            dtype=torch.bool,
-            device=device,
-        )
+
         self.spec_sequence_indices_cpu: torch.Tensor = torch.empty(
             (sequence_index_capacity,),
             dtype=torch.int64,
@@ -796,7 +797,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         super()._init_reorder_batch_threshold(
             reorder_batch_threshold,
             supports_spec_as_decode,
-            supports_dcp_with_varlen,
+            True,
         )
         if self.reorder_batch_threshold != 1:  # type: ignore
             speculative_config = self.vllm_config.speculative_config
@@ -1156,6 +1157,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
             assert spec_sequence_masks is not None
+            self.spec_state_indices_tensor[batch_size:].fill_(NULL_BLOCK_ID)
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor,
                 non_blocking=True,
