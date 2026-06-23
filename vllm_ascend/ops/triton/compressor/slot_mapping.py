@@ -43,11 +43,12 @@ def _build_compressed_slot_mapping_kernel(
     BLOCK_SIZE_: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    if req_idx == NUM_REQS:
+    if req_idx >= NUM_REQS:
         total_compressed_tokens = tl.load(compressed_query_start_loc + NUM_REQS)
-        for row_start in range(total_compressed_tokens, max_output_tokens, BLOCK_SIZE_):
-            offsets = row_start + tl.arange(0, BLOCK_SIZE_)
-            tl.store(slot_mapping + offsets, PAD_ID, mask=offsets < max_output_tokens)
+        fill_idx = req_idx - NUM_REQS
+        row_start = total_compressed_tokens + fill_idx * BLOCK_SIZE_
+        offsets = row_start + tl.arange(0, BLOCK_SIZE_)
+        tl.store(slot_mapping + offsets, PAD_ID, mask=offsets < max_output_tokens)
         return
 
     start = tl.load(query_start_loc + req_idx)
@@ -112,7 +113,8 @@ def build_compressed_slot_mapping(
     # The padding rows must be initialized on device because metadata build no
     # longer knows a CPU total for this compact buffer. Scatter treats PAD_ID as
     # invalid and skips the dirty rows.
-    _build_compressed_slot_mapping_kernel[(num_reqs + 1,)](
+    fill_blocks = triton.cdiv(max_output_tokens, BLOCK_SIZE)
+    _build_compressed_slot_mapping_kernel[(num_reqs + fill_blocks,)](
         max_output_tokens,
         query_start_loc,
         positions,
