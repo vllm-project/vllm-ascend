@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """Collect issues from vllm-project/vllm-ascend and save to CSV.
 
-Stratified sampling across time ranges:
-  - Fetch 400 issues (pages 1-4, newest first)
-  - Stratum 1 (indices 0-99):   select 80  (heavy weight on recent)
-  - Stratum 2 (indices 100-199): select 10
-  - Stratum 3 (indices 200-399): select 10
-  - Total: 100 issues
-
-Within each stratum, issues are picked at regular intervals (average/even
-sampling) to avoid bias toward any contiguous block.
+Uses state-based stratified sampling to ensure a balanced mix of open, solved,
+and closed issues. Fetches pages until enough of each state are collected, then
+evenly samples within each group.
 
 Usage:
     python collect_issues.py --output issues.csv
@@ -26,13 +20,10 @@ import requests
 
 REPO = "vllm-project/vllm-ascend"
 PER_PAGE = 100
+MAX_PAGES = 20
 
-# Sampling config: (start_index, end_index, count_to_pick)
-STRATA = [
-    (0,   100, 80),   # newest 100 → pick 80
-    (100, 200, 10),   # next 100   → pick 10
-    (200, 400, 10),   # older 200  → pick 10
-]
+# Target count per state
+STATE_TARGETS = {"open": 35, "solved": 35, "closed": 30}
 
 
 def fetch_issues(page: int) -> list[dict]:
@@ -46,7 +37,7 @@ def fetch_issues(page: int) -> list[dict]:
 
     resp = requests.get(url, params=params, headers=headers, timeout=30)
     if resp.status_code == 422:
-        return []  # GitHub API limit: max 1000 results
+        return []
     resp.raise_for_status()
     return resp.json()
 
@@ -66,6 +57,15 @@ def extract_prefix(title: str) -> str:
     return "[Misc]"
 
 
+def issue_state(issue: dict) -> str:
+    """Return state: open, solved, or closed."""
+    if issue.get("state") == "open":
+        return "open"
+    if issue.get("state_reason") == "completed":
+        return "solved"
+    return "closed"
+
+
 def average_sample(items: list[dict], count: int) -> list[dict]:
     """Pick `count` items evenly spaced across the list."""
     if count >= len(items):
@@ -79,47 +79,63 @@ def main() -> None:
     parser.add_argument("--output", default="issues.csv", help="Output CSV file")
     args = parser.parse_args()
 
-    # Fetch until we have enough actual issues (API mixes PRs with issues)
-    total_needed = max(end for _, end, _ in STRATA)
-    all_issues = []
+    # Fetch pages until we have enough of each state
+    all_issues: list[dict] = []
+    by_state: dict[str, list[dict]] = {"open": [], "solved": [], "closed": []}
     page = 1
-    while len(all_issues) < total_needed:
+    while page <= MAX_PAGES:
         print(f"Fetching page {page}...")
         raw = fetch_issues(page)
         if not raw:
             break
-        filtered = [i for i in raw if "pull_request" not in i]
-        all_issues.extend(filtered)
-        print(f"  page {page}: {len(raw)} total, {len(filtered)} issues, accumulated {len(all_issues)}/{total_needed}")
+        issues = [i for i in raw if "pull_request" not in i]
+        all_issues.extend(issues)
+        for iss in issues:
+            by_state[issue_state(iss)].append(iss)
+        counts = {s: len(by_state[s]) for s in by_state}
+        print(f"  page {page}: {len(issues)} issues, "
+              f"open={counts['open']} solved={counts['solved']} closed={counts['closed']}")
+        # Stop if we have at least the target for each state
+        if all(counts[s] >= STATE_TARGETS[s] for s in STATE_TARGETS):
+            break
         page += 1
         if len(raw) < PER_PAGE:
             break
         time.sleep(0.5)
 
-    print(f"Fetched {len(all_issues)} issues total")
+    print(f"Fetched {len(all_issues)} issues total "
+          f"(open={len(by_state['open'])} solved={len(by_state['solved'])} closed={len(by_state['closed'])})")
 
-    # Stratified average sampling
+    # State-based stratified sampling
     selected: list[dict] = []
-    for start, end, count in STRATA:
-        pool = all_issues[start:min(end, len(all_issues))]
+    for state, target in STATE_TARGETS.items():
+        pool = by_state[state]
+        count = min(target, len(pool))
         picked = average_sample(pool, count)
         selected.extend(picked)
-        print(f"  Stratum [{start}:{end}]: pool={len(pool)}, picked={len(picked)}")
+        print(f"  State '{state}': pool={len(pool)}, picked={len(picked)}")
 
     print(f"Total selected: {len(selected)}")
 
     # Distribution summary
     by_prefix: dict[str, int] = {}
+    final_by_state: dict[str, int] = {}
     for issue in selected:
         prefix = extract_prefix(issue["title"])
         by_prefix[prefix] = by_prefix.get(prefix, 0) + 1
+        s = issue_state(issue)
+        final_by_state[s] = final_by_state.get(s, 0) + 1
     print("Distribution by type:")
     for prefix, n in sorted(by_prefix.items()):
         print(f"  {prefix}: {n}")
+    print("Distribution by state:")
+    for state, n in sorted(final_by_state.items()):
+        print(f"  {state}: {n}")
 
     # Write CSV
     fieldnames = ["issue_number", "title", "prefix", "state", "labels",
-                  "created_at", "body", "deepseek_v4_flash_output"]
+                  "created_at", "body", "deepseek_v4_flash_output",
+                  "expected_ok_dsv4"]
 
     with open(args.output, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -132,11 +148,12 @@ def main() -> None:
                 "issue_number": issue["number"],
                 "title": issue["title"],
                 "prefix": extract_prefix(issue["title"]),
-                "state": issue["state"],
+                "state": issue_state(issue),
                 "labels": labels,
                 "created_at": issue["created_at"],
                 "body": body,
                 "deepseek_v4_flash_output": "",
+                "expected_ok_dsv4": "",
             })
 
     print(f"Written to {args.output}")

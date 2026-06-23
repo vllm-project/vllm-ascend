@@ -1,0 +1,1245 @@
+pr_number,title,prefix,state,labels,created_at,body,deepseek_v4_flash_output,expected_ok_dsv4
+10854,[BugFix][v0.22.1] Fix Error when GLM5 MTP layer has BF16 weights,[BugFix],open,,2026-06-23T11:37:57Z,"🔄 Backport of https://github.com/vllm-project/vllm-ascend/pull/10842 to releases/v0.22.1rc.
+
+### What this PR does / why we need it?
+
+- Root Cause:
+
+o_proj_full_pool is a class-level attribute of AscendSFAImpl, so a single buffer is shared across every model instance (main model + MTP drafters) and is allocated only once — during the main model's process_weights_after_loading, using self.o_proj.weight.dtype. 
+In the full_gather_o_proj_enabled path this pool is passed explicitly as the output of all_gather_async. The helper only auto-allocates when output is None; when an output is supplied it is used as-is with no dtype check. So the all-gather output is forever locked to the main model's dtype.
+
+The MTP drafter is a separate model instance carrying a different quantization dtype (w8a8 → int8, bf16 → bfloat16). When the drafter runs the same all-gather, dist.all_gather_into_tensor sees output.dtype (int32) != input.dtype (int8 / bfloat16) and aborts:
+
+RuntimeError: output tensor must have the same type as input tensor
+
+- Fix:
+
+Stop passing the shared, fixed-dtype pool as the all-gather output. Let all_gather_async allocate the output internally from input.dtype, then assign the new tensor back to the shared pool for the later set_():
+
+With output=None, the helper runs output = torch.empty(..., dtype=input.dtype, ...), so output.dtype == input.dtype is guaranteed regardless of which instance is running — main model (int32), w8a8 drafter (int8), or bf16 drafter (bfloat16). The dtype mismatch is eliminated at the source rather than worked around, which is why the same change fixes all non-matching drafter dtypes at once.
+
+### Does this PR introduce _any_ user-facing change?
+No
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10851,[BugFix][v0.22.1] Fix Index Cache when DSA_CP is Enable,[BugFix],open,,2026-06-23T11:14:21Z,"> 🔄 Backport of #10827 to `releases/v0.22.1rc`.
+
+### What this PR does / why we need it?
+ 'self._get_indexcache_topk_indices' does not consider DSA-CP scenario, in which  'num_input_token' should be obtained from DSA_CP context
+
+### Does this PR introduce _any_ user-facing change?
+No
+
+### How was this patch tested?
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10849,[BugFix] Pad actual_seq_lengths with 0 for EOD scenario in npu_fusion_attention,[BugFix],open,,2026-06-23T10:03:34Z,"### What this PR does / why we need it?
+On CANN 9.0, a strict validation was added for EOD in npu_fusion_attention. The actual_seq_qlen and actual_seq_kvlen parameters must end with 0 to pass the validation.
+In the current fuse_attention path, when handling EOD scenarios, these parameters may not end with 0, causing npu_fusion_attention call to fail on CANN 9.0.
+
+### Does this PR introduce _any_ user-facing change?
+NO
+
+### How was this patch tested?
+
+- vLLM version: 
+- vLLM main: https://github.com/vllm-project/vllm/commit/
+",,
+10846,[BugFix]mega moe w4a8 assert bias fix,[BugFix],open,module:ops,2026-06-23T09:42:58Z,"What this PR does / why we need it?
+Problem Background
+When MC=2 (MegaMoE fused kernel mode 2), the bias argument is passed as None in the current branch logic, and there is no dedicated judgment branch to handle empty bias. The original valid null-bias handling logic only exists under the MC=1 branch, leading to abnormal weight calculation, incorrect fused GEMM output, or runtime NPU kernel launch failure when enabling MC=2 MegaMoE.
+Solution
+Move the null-bias (bias is None) judgment logic out of the exclusive MC=1 branch, so both MC=1 and MC=2 paths can reuse the same empty bias processing flow. Unify bias parameter preprocessing for two MegaMoE kernel modes, eliminate branch coverage missing, and ensure consistent weight offset calculation whether bias exists or not.
+Does this PR introduce any user-facing change?
+No. This patch only fixes internal branch judgment logic of MegaMoE kernel bias preprocessing. There are no modifications to exposed APIs, startup parameters, model inference behavior or output results visible to end users.
+How was this patch tested?
+Unit test: Added test cases covering MC=1 / MC=2 with bias=None and non-null bias respectively, executed local unit test suite, all cases passed.
+Functional end-to-end test:
+Launch vLLM service with DS-V4 MegaMoE w4a8 model, set VLLM_ASCEND_ENABLE_FUSED_MC2=1 to enable MC=2 mode;
+Verify inference normally runs without kernel exception;
+Compare TTFT / TPOT / generation results between MC=1 and MC=2 with empty bias, output consistency is guaranteed;
+Stress test: Continuous batch inference with mixed long text prompts for 30min, no runtime crash, no accuracy drift, MegaMoE Wave pipeline runs normally without extra communication bubbles.
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10844,[BugFix] Pad actual_seq_lengths with 0 for EOD scenario in fusion attention,[BugFix],closed,,2026-06-23T09:16:34Z,"### What this PR does / why we need it?
+On CANN 9.0, a strict validation was added for EOD in npu_fusion_attention.
+The actual_seq_qlen and actual_seq_kvlen parameters must end with 0 to pass the validation.
+
+In the current fuse_attention path, when handling EOD scenarios, these parameters may not end with 0, causing npu_fusion_attention call to fail on CANN 9.0.
+
+### Does this PR introduce _any_ user-facing change?
+no
+
+### How was this patch tested?
+
+- vLLM version: 
+- vLLM main: https://github.com/vllm-project/vllm/commit/
+",,
+10841,[CI]Fixed the installation error caused by redundant C++ header files added during the cache building process.,[CI],merged,ci/build,2026-06-23T08:46:00Z,"### What this PR does / why we need it?
+Fixed the installation error caused by redundant C++ header files added during the cache building process.
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10838,fix(kv_pool): free blocks immediately on request finish in layerwise mode,[Misc],closed,"documentation,module:tests,module:core,merge-conflicts",2026-06-23T08:12:55Z,"### What this PR does / why we need it?
+AscendStoreConnector is SupportsHMA, so vLLM invokes request_finished_all_groups (not request_finished). The HMA path missed the layerwise early-return present in request_finished, so a layerwise producer with saved tokens returned `delay_free_blocks=True`. vLLM then deferred the free, but layerwise never records a sending event (only touch_sending_mamba_blocks does), so update_connector_output never freed those blocks -- GPU KV cache usage climbed monotonically to 100%.
+
+Add the same `if self.use_layerwise: return False` guard so blocks are freed immediately on request finish. This is safe because layerwise saves each layer synchronously before the request finishes (save_kv_layer waits on the last layer's save event).
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10835,request_num leaks on user cancellation before generate_stream(),[Misc],open,,2026-06-23T07:55:50Z,"### What this PR does / why we need it?
+In our production scenario, the proxy relies on request_num to enforce rate limiting by capping concurrent requests via MAX_CONCURRENT_REQUESTS. After running for some time, we observed that request_num had grown far beyond the actual number of in-flight requests. Investigation revealed that requests cancelled before entering generate_stream() did not decrement request_num as expected—the counter leaked by one each time. Over time, this accumulated leak caused the proxy to incorrectly reject new requests even when the system was lightly loaded.
+The reason is:
+In Python 3.11+, asyncio.CancelledError inherits from BaseException instead of Exception, meaning it bypasses the existing except Exception handler. When a client disconnects before generate_stream() is registered (i.e., between the request_num += 1 at the top of _handle_completions and the return StreamingResponse(...)), the cancellation propagates uncaught, leaving proxy_state.request_num permanently incremented.
+
+### Does this PR introduce _any_ user-facing change?
+No. This is a bugfix that ensures the internal request counter remains accurate under client disconnection. Behavior is unchanged for Python ≤ 3.10 (where CancelledError was already caught by except Exception and the old code happened to work correctly by accident).
+
+### How was this patch tested?
+Reviewed the control flow manually across all exit paths . Confirmed on Python 3.11+ that asyncio.CancelledError is a subclass of BaseException, not Exception, and verified the fix properly catches it before the generic except Exception clause.
+- vLLM version: 
+- vLLM main: https://github.com/vllm-project/vllm/commit/
+",,
+10832,[EPLB][Doc] Update EPLB document,[EPLB],open,"documentation,module:core,merge-conflicts",2026-06-23T07:50:58Z,"
+### What this PR does / why we need it?
+1. Update the EPLB documentation #10718 
+2. Updating the default values of EPLB parameters
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10825,[BugFix][SpecDecode] Fix low MTP acceptance rate for SFA+DSA_CP (MTP>1),[BugFix],open,,2026-06-23T06:54:17Z,"### What this PR does / why we need it?
+Fixes a degraded multi-token-prediction (MTP) / speculative-decoding acceptance rate on Ascend when num_speculative_tokens > 1 when enable dsa_cp for sfa models.
+
+Root cause: Root cause: In the SFA v1 attention-metadata builder (vllm_ascend/attention/sfa_v1.py), the actual_seq_lengths_query / actual_seq_lengths_key buffers handed to lightning indexer shared the same memory buffer across all draft steps. With MTP > 1, the attention-metadata is overwritten and only the last step is kept, which leads to wrong inputs. Meanwhile, rotary cos/sin were also fetched from an out-dated cache while drafting.
+
+Changes:
+
+- vllm_ascend/attention/sfa_v1.py: pre-allocate per-draft-step buffers spec_actual_seq_lengths_query/key (one tensor per step, sized max_num_reqs * (num_speculative_tokens + 1) + 1) so each step owns independent, with no step overwrites another's metadata. Split the builder into build() (non-draft/verify path), build_for_drafting(draft_step, ...), and a shared _build(..., draft_step) that selects the correct per-step buffer; pass use_cache=False to get_cos_and_sin_mla while drafting so the rotary tables are recomputed for each step.
+- vllm_ascend/spec_decode/llm_base_proposer.py: when a builder exposes build_for_drafting, route each draft step's attention-metadata build through it instead of calling build(0, ...) for every step, so the per-step buffers are actually used and cross-step aliasing is avoided.
+
+Effect: correct per-step attention metadata and rotary embeddings → restored MTP/spec-decode acceptance rate for num_speculative_tokens > 1.
+
+### Does this PR introduce _any_ user-facing change?
+No
+
+### How was this patch tested?
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10817,[BugFix][v0.20.2rc] Avoid streaming partial MiniMax parameter tags,[BugFix],open,module:tests,2026-06-23T03:23:23Z,"## Summary
+- stop MiniMax-M2 streaming tool parser from emitting argument JSON for an incomplete <parameter> value
+- keep early tool-name emission, but stream arguments at completed-parameter granularity to avoid leaking partial </parameter> token pieces
+- add a regression test for the MiniMax-M2.5 write_file case from #10758
+
+## Context
+MiniMax-M2.5 can tokenize </parameter> as separate text pieces such as </, parameter, and >. The v0.20.2rc incremental parser was serializing a still-open parameter value, so clients could reconstruct arguments like a.txt</parameter even though the final parsed tool call was correct.
+
+Current vLLM main moved MiniMax-M2 to the parser engine in vllm#45701, but that rewrite is too broad for v0.20.2rc. This patch backports the narrower behavior needed here: emit argument deltas only after a complete parameter closes.
+
+## Tests
+- PYTHONPATH=/vllm-workspace/vllm:/mnt/share_space/j00513044/src/vllm-ascend pytest -q tests/ut/patch/platform/test_patch_minimax_m2_tool_call_parser.py
+- replayed issue #10758 raw_completion token ids with /models/MiniMax-M2.5-w8a8-QuaRot tokenizer; reconstructed {""path"":""a.txt"",""content"":""123""}
+- ruff check vllm_ascend/patch/platform/patch_minimax_m2_tool_call_parser.py tests/ut/patch/platform/test_patch_minimax_m2_tool_call_parser.py
+- python -m py_compile vllm_ascend/patch/platform/patch_minimax_m2_tool_call_parser.py
+
+- vLLM version: 
+- vLLM main: https://github.com/vllm-project/vllm/commit/
+",,
+10813,[CI]modify euler dependencies which need to install for install vllm-ascend,[CI],merged,ci/build,2026-06-23T02:25:03Z,"### What this PR does / why we need it?
+https://github.com/vllm-project/vllm-ascend/actions/runs/27943551599/job/82857810618. 
+Referring to this error report, the probable cause is incomplete required installation dependencies. The Euler image does not come with `patch` pre-installed, which needs to be added.
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10811,[Doc]:  Update additional_config.md with migrated env vars documentation and kv cache pool doc,[Doc],merged,documentation,2026-06-23T02:16:32Z,"### What this PR does / why we need it?
+ Updates documentation references for the --additional-config migration, avoids prematurely marking environment variables as deprecated, and adds links to related PR/deployment docs.
+
+### Does this PR introduce _any_ user-facing change?
+No code change. Documentation only.
+
+### How was this patch tested?
+documentation-only change.
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10806,[Perf][Worker] Build DSV4 compressor slot mapping on device,[Perf],open,module:ops,2026-06-22T16:50:00Z,"### What this PR does / why we need it?
+
+This refresh limits candidate B to the B2 runtime-only path for removing the DSV4 compressor sync from the model runner hot path.
+
+It keeps the existing DSA/compressor cos/sin contract unchanged and only changes metadata construction:
+
+- unwrap `UniformTypeKVCacheSpecs` in `BlockTable` so compressed KV groups use the real `compress_ratio`;
+- build the original compact compressor `slot_mapping` for single-rank DSV4 directly from device `positions`, `query_start_loc`, and the KV block table with a Triton helper;
+- leave CP/DCP on the original CPU-list path for a narrower validation surface;
+- refresh CPU `optimistic_seq_lens` after deferred async-spec state corrections instead of forcing a compressor-specific GPU-to-CPU seq_lens sync.
+
+No AscendC compressor, scatter/update, or cos/sin selection logic is changed in this PR.
+
+### Does this PR introduce _any_ user-facing change?
+
+No. This is an internal metadata construction change for DSV4 compressed KV slot mapping.
+
+### How was this patch tested?
+
+- `PATH=/tmp/vllm-ascend-lint-venv/bin:$PATH bash format.sh ci`
+- `python -m py_compile vllm_ascend/worker/model_runner_v1.py vllm_ascend/worker/block_table.py vllm_ascend/ops/triton/compressor/slot_mapping.py`
+- Unit tests were intentionally not added or run for this refresh; NPU correctness/performance validation will be done on the remote machine first.
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10803,[Doc] Update summary formatting in context_parallel.md and correct syntax in eplb_swift_balancer.md,[Doc],merged,documentation,2026-06-22T14:24:47Z,"### What this PR does / why we need it?
+Improves documentation wording and removes a trailing comma from the EPLB JSON example.
+
+### Does this PR introduce _any_ user-facing change?
+No. Documentation-only changes.
+
+### How was this patch tested?
+Pass the test CI.
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10798,[Misc]feat: adapt to vLLM main (967c5c3b...fa662b1a),[Misc],open,,2026-06-22T13:12:45Z,"# Cumulative Step Summary
+
+## Step step-1
+
+**vllm-ascend changes: none (no-op)**
+
+### Upstream changes analyzed
+- `vllm/model_executor/models/gemma4_mm.py`: Internal refactor in `Gemma4ProcessingInfo.validate_num_items()` to use `get_served_model_name()`. vllm-ascend has no gemma4 code.
+- `vllm/v1/sample/ops/topk_topp_triton.py`: XPU device branch for block sizes. vllm-ascend replaces `apply_top_k_top_p` with Ascend-specific kernels.
+
+### Adaptation performed
+None required. Both upstream changes are internal implementation details that do not interact with vllm-ascend's Ascend-specific code paths.
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10790,[BugFix][v0.22.1] Handle wrapped reasoning parsers in usage accounting,[BugFix],open,module:tests,2026-06-22T11:35:37Z,"### What this PR does / why we need it?
+
+Backports #10645 to `releases/v0.22.1rc`.
+
+Fixes #10628 on the v0.22.1 release branch by making chat usage accounting unwrap parser-manager reasoning parser objects before calling `count_reasoning_tokens()`. If the resolved parser does not support reasoning-token counting, usage accounting now skips reasoning-token details instead of raising an internal 500.
+
+### Does this PR introduce _any_ user-facing change?
+
+No API or schema change. This fixes an internal 500 for affected DeepSeek-V4 chat completions using tool and reasoning parsers together.
+
+### How was this patch tested?
+
+- `python3 -m pytest -q tests/ut/patch/platform/test_patch_minimax_usage_accounting.py`
+- `ruff check vllm_ascend/patch/platform/patch_chat_usage_accounting.py vllm_ascend/patch/platform/patch_minimax_usage_accounting.py tests/ut/patch/platform/test_patch_minimax_usage_accounting.py vllm_ascend/patch/platform/__init__.py vllm_ascend/patch/__init__.py`
+- `ruff format --check vllm_ascend/patch/platform/patch_chat_usage_accounting.py vllm_ascend/patch/platform/patch_minimax_usage_accounting.py tests/ut/patch/platform/test_patch_minimax_usage_accounting.py vllm_ascend/patch/platform/__init__.py vllm_ascend/patch/__init__.py`
+- `python3 -m py_compile vllm_ascend/patch/platform/patch_chat_usage_accounting.py vllm_ascend/patch/platform/patch_minimax_usage_accounting.py tests/ut/patch/platform/test_patch_minimax_usage_accounting.py vllm_ascend/patch/platform/__init__.py`
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10787,[Feature]refactor(device): centralize Ascend device type logic in _DeviceConfig,[Feature],open,"module:tests,module:ops,module:core,module:quantization,ready,merge-conflicts",2026-06-22T11:18:29Z,"- Move AscendDeviceType, get_ascend_device_type, check_ascend_device_type from vllm_ascend.utils to vllm_ascend.device.device_config
+- Add a singleton DeviceConfig with semantic properties (is_a2, is_a3, is_310p, is_a5, supports_triton, cpu_binding_mode, etc.) replacing scattered get_ascend_device_type() == AscendDeviceType.X checks
+- Initialize device type eagerly in DeviceConfig.__init__ from _build_info
+- Add startup check in NPUWorker that raises if supports_triton but triton-ascend is not installed
+- Replace HAS_TRITON usage in vllm-ascend with DeviceConfig.supports_triton (HAS_TRITON was effectively a 310P proxy in this codebase)
+- Add device_config (lowercase) alias for the DeviceConfig singleton so module-level 'from vllm_ascend.device import device_config' works
+- Update test mocks accordingly
+
+---
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10782,[BugFix] Propagate num_cached_tokens in disaggregated prefill,[BugFix],open,,2026-06-22T09:15:46Z,"  Forward the prefill node's real num_cached_tokens through kv_transfer_params
+  (remote_num_cached_tokens) so the decode node reports correct cached_tokens.
+
+  Companion to vllm-project/vllm#46357.
+
+### What this PR does / why we need it?
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: 
+- vLLM main: https://github.com/vllm-project/vllm/commit/
+",,
+10780,[CI]model-reuse-NEW,[CI],open,"ci/build,module:tests",2026-06-22T09:10:39Z,"### What this PR does / why we need it?
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10775,[BugFix]  isolate KV cache from sleep cleanup with dedicated memory tag for hadamard matrix,[BugFix],open,ready,2026-06-22T07:37:36Z,"### What this PR does / why we need it?
+Use a dedicated memory tag for KV cache used by DSA Hadamard, instead of the shared tag that was previously being cleaned up during sleep(). This ensures the Hadamard tensor is properly tagged and excluded from sleep-mode memory release.
+Fixes #10684
+
+### Does this PR introduce _any_ user-facing change?
+No. 
+
+### How was this patch tested?
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10773,[CI]Adjust the dp_size and tp_size in the decode stage to 4 respectively,[CI],open,module:tests,2026-06-22T07:22:15Z,"### What this PR does / why we need it?
+This PR adjusts the dp_size and tp_size in the decode stage to 4 respectively in the Qwen3-235B-A22B-Mooncake-Layerwise configuration file.
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10770,[CI] update A3 PVC name to gy005-az5-vllm-ascend,[CI],merged,ci/build,2026-06-22T07:03:08Z,"## Summary
+
+Update the PVC name for A3 nodes in the multi-node nightly workflow from `nv-action-vllm-benchmarks-v2` to `gy005-az5-vllm-ascend`.
+
+## Changes
+
+- `.github/workflows/_e2e_nightly_multi_node.yaml`: replace A3 `pvc_name` value
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10767,[CI]fix deepseek long seq nightly,[CI],merged,module:tests,2026-06-22T06:35:37Z,"### What this PR does / why we need it?
+fix deepseek long seq nightly
+
+Increase the concurrency size and reduce the number of output tokens.
+
+### Does this PR introduce _any_ user-facing change?
+No
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10763,[BugFix] Fix MTP DSA graph capture metadata,[BugFix],open,,2026-06-22T05:24:01Z,"## Summary
+
+Fix MTP speculative decoding with DSA compressed attention when FULL decode graph capture is enabled.
+
+## Root cause
+
+When MTP speculative decoding captures FULL decode graphs with DSA compressed attention enabled, the drafter dummy-run path builds an `AscendCommonAttentionMetadata` with `positions` but without `positions_cpu`. The DSA-CP metadata builder later indexes `common_attn_metadata.positions_cpu`, which causes graph capture to fail with `TypeError: 'NoneType' object is not subscriptable`.
+
+After startup succeeds, the first request replays the draft ACL graph and updates graph params through `update_full_graph_params()`. DSA/DSA-CP attention does not register mutable attention graph params, but the common graph-update path still calls `impl_cls.update_graph_params()`. Since `AscendDSACPImpl` inherited no such method, request-time graph replay failed with `AttributeError: type object 'AscendDSACPImpl' has no attribute 'update_graph_params'`.
+
+These paths are only exercised when the speculative drafter is allowed to use graph capture. Deployments that set `""enforce_eager"": true` in `--speculative-config` bypass this path because `AscendSpecDecodeBaseProposer.use_cuda_graph` becomes false.
+
+## Fix
+
+- Reuse the runner's `_dsa_positions_cpu_buf` for compressed-attention graph capture metadata, matching the main runner metadata path. Non-compressed paths keep `positions_cpu=None`.
+- Add a no-op `update_graph_params()` to `DSAAttentionImpl`, matching DSA's lack of registered mutable graph attention params and covering both regular DSA and DSA-CP implementations.
+
+## Validation
+
+- `python -m py_compile vllm_ascend/spec_decode/llm_base_proposer.py vllm_ascend/attention/abstract.py`
+- Reproduced the startup failure with DeepSeek-V4-Flash w8a8 MTP on Ascend using MTP graph capture enabled; after the metadata fix, `Capturing CUDA graphs (decode, FULL)` completed `8/8`, the server logged `Application startup complete`, and `GET /v1/models` returned the served model.
+- Reproduced the request-time failure on `/v1/chat/completions` after startup; after adding the DSA graph-update no-op, two chat completion requests returned `200 OK` while the worker logged `Replaying aclgraph` without `AttributeError` or worker failure.
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10761,Bump actions/checkout from 6 to 7,[Misc],merged,"ci/build,dependencies,github_actions",2026-06-22T05:23:34Z,"Bumps [actions/checkout](https://github.com/actions/checkout) from 6 to 7.
+<details>
+<summary>Release notes</summary>
+<p><em>Sourced from <a href=""https://github.com/actions/checkout/releases"">actions/checkout's releases</a>.</em></p>
+<blockquote>
+<h2>v7.0.0</h2>
+<h2>What's Changed</h2>
+<ul>
+<li>block checking out fork pr for pull_request_target and workflow_run by <a href=""https://github.com/aiqiaoy""><code>@​aiqiaoy</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2454"">actions/checkout#2454</a></li>
+<li>Bump actions/publish-immutable-action from 0.0.3 to 0.0.4 in the minor-actions-dependencies group across 1 directory by <a href=""https://github.com/dependabot""><code>@​dependabot</code></a>[bot] in <a href=""https://redirect.github.com/actions/checkout/pull/2458"">actions/checkout#2458</a></li>
+<li>Bump flatted from 3.3.1 to 3.4.2 by <a href=""https://github.com/dependabot""><code>@​dependabot</code></a>[bot] in <a href=""https://redirect.github.com/actions/checkout/pull/2460"">actions/checkout#2460</a></li>
+<li>Bump js-yaml from 4.1.0 to 4.2.0 by <a href=""https://github.com/dependabot""><code>@​dependabot</code></a>[bot] in <a href=""https://redirect.github.com/actions/checkout/pull/2461"">actions/checkout#2461</a></li>
+<li>Bump <code>@​actions/core</code> and <code>@​actions/tool-cache</code> and Remove uuid by <a href=""https://github.com/dependabot""><code>@​dependabot</code></a>[bot] in <a href=""https://redirect.github.com/actions/checkout/pull/2459"">actions/checkout#2459</a></li>
+<li>upgrade module to esm and update dependencies by <a href=""https://github.com/aiqiaoy""><code>@​aiqiaoy</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2463"">actions/checkout#2463</a></li>
+<li>Bump the minor-npm-dependencies group across 1 directory with 3 updates by <a href=""https://github.com/dependabot""><code>@​dependabot</code></a>[bot] in <a href=""https://redirect.github.com/actions/checkout/pull/2462"">actions/checkout#2462</a></li>
+<li>getting ready for checkout v7 release by <a href=""https://github.com/aiqiaoy""><code>@​aiqiaoy</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2464"">actions/checkout#2464</a></li>
+<li>update error wording by <a href=""https://github.com/aiqiaoy""><code>@​aiqiaoy</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2467"">actions/checkout#2467</a></li>
+</ul>
+<h2>New Contributors</h2>
+<ul>
+<li><a href=""https://github.com/aiqiaoy""><code>@​aiqiaoy</code></a> made their first contribution in <a href=""https://redirect.github.com/actions/checkout/pull/2454"">actions/checkout#2454</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a href=""https://github.com/actions/checkout/compare/v6.0.3...v7.0.0"">https://github.com/actions/checkout/compare/v6.0.3...v7.0.0</a></p>
+<h2>v6.0.3</h2>
+<h2>What's Changed</h2>
+<ul>
+<li>Update changelog by <a href=""https://github.com/ericsciple""><code>@​ericsciple</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2357"">actions/checkout#2357</a></li>
+<li>fix: expand merge commit SHA regex and add SHA-256 test cases by <a href=""https://github.com/yaananth""><code>@​yaananth</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2414"">actions/checkout#2414</a></li>
+<li>Fix checkout init for SHA-256 repositories by <a href=""https://github.com/yaananth""><code>@​yaananth</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2439"">actions/checkout#2439</a></li>
+<li>Update changelog for v6.0.3 by <a href=""https://github.com/yaananth""><code>@​yaananth</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2446"">actions/checkout#2446</a></li>
+</ul>
+<h2>New Contributors</h2>
+<ul>
+<li><a href=""https://github.com/yaananth""><code>@​yaananth</code></a> made their first contribution in <a href=""https://redirect.github.com/actions/checkout/pull/2414"">actions/checkout#2414</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a href=""https://github.com/actions/checkout/compare/v6...v6.0.3"">https://github.com/actions/checkout/compare/v6...v6.0.3</a></p>
+<h2>v6.0.2</h2>
+<h2>What's Changed</h2>
+<ul>
+<li>Add orchestration_id to git user-agent when ACTIONS_ORCHESTRATION_ID is set by <a href=""https://github.com/TingluoHuang""><code>@​TingluoHuang</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2355"">actions/checkout#2355</a></li>
+<li>Fix tag handling: preserve annotations and explicit fetch-tags by <a href=""https://github.com/ericsciple""><code>@​ericsciple</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2356"">actions/checkout#2356</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a href=""https://github.com/actions/checkout/compare/v6.0.1...v6.0.2"">https://github.com/actions/checkout/compare/v6.0.1...v6.0.2</a></p>
+<h2>v6.0.1</h2>
+<h2>What's Changed</h2>
+<ul>
+<li>Update all references from v5 and v4 to v6 by <a href=""https://github.com/ericsciple""><code>@​ericsciple</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2314"">actions/checkout#2314</a></li>
+<li>Add worktree support for persist-credentials includeIf by <a href=""https://github.com/ericsciple""><code>@​ericsciple</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2327"">actions/checkout#2327</a></li>
+<li>Clarify v6 README by <a href=""https://github.com/ericsciple""><code>@​ericsciple</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2328"">actions/checkout#2328</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a href=""https://github.com/actions/checkout/compare/v6...v6.0.1"">https://github.com/actions/checkout/compare/v6...v6.0.1</a></p>
+</blockquote>
+</details>
+<details>
+<summary>Changelog</summary>
+<p><em>Sourced from <a href=""https://github.com/actions/checkout/blob/main/CHANGELOG.md"">actions/checkout's changelog</a>.</em></p>
+<blockquote>
+<h1>Changelog</h1>
+<h2>v7.0.0</h2>
+<ul>
+<li>Block checking out fork PR for pull_request_target and workflow_run by <a href=""https://github.com/aiqiaoy""><code>@​aiqiaoy</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2454"">actions/checkout#2454</a></li>
+<li>Bump actions/publish-immutable-action from 0.0.3 to 0.0.4 in the minor-actions-dependencies group across 1 directory by <a href=""https://github.com/dependabot""><code>@​dependabot</code></a>[bot] in <a href=""https://redirect.github.com/actions/checkout/pull/2458"">actions/checkout#2458</a></li>
+<li>Bump flatted from 3.3.1 to 3.4.2 by <a href=""https://github.com/dependabot""><code>@​dependabot</code></a>[bot] in <a href=""https://redirect.github.com/actions/checkout/pull/2460"">actions/checkout#2460</a></li>
+<li>Bump js-yaml from 4.1.0 to 4.2.0 by <a href=""https://github.com/dependabot""><code>@​dependabot</code></a>[bot] in <a href=""https://redirect.github.com/actions/checkout/pull/2461"">actions/checkout#2461</a></li>
+<li>Bump <code>@​actions/core</code> and <code>@​actions/tool-cache</code> and Remove uuid by <a href=""https://github.com/dependabot""><code>@​dependabot</code></a>[bot] in <a href=""https://redirect.github.com/actions/checkout/pull/2459"">actions/checkout#2459</a></li>
+<li>upgrade module to esm and update dependencies by <a href=""https://github.com/aiqiaoy""><code>@​aiqiaoy</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2463"">actions/checkout#2463</a></li>
+<li>Bump the minor-npm-dependencies group across 1 directory with 3 updates by <a href=""https://github.com/dependabot""><code>@​dependabot</code></a>[bot] in <a href=""https://redirect.github.com/actions/checkout/pull/2462"">actions/checkout#2462</a></li>
+</ul>
+<h2>v6.0.3</h2>
+<ul>
+<li>Fix checkout init for SHA-256 repositories by <a href=""https://github.com/yaananth""><code>@​yaananth</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2439"">actions/checkout#2439</a></li>
+<li>fix: expand merge commit SHA regex and add SHA-256 test cases by <a href=""https://github.com/yaananth""><code>@​yaananth</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2414"">actions/checkout#2414</a></li>
+</ul>
+<h2>v6.0.2</h2>
+<ul>
+<li>Fix tag handling: preserve annotations and explicit fetch-tags by <a href=""https://github.com/ericsciple""><code>@​ericsciple</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2356"">actions/checkout#2356</a></li>
+</ul>
+<h2>v6.0.1</h2>
+<ul>
+<li>Add worktree support for persist-credentials includeIf by <a href=""https://github.com/ericsciple""><code>@​ericsciple</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2327"">actions/checkout#2327</a></li>
+</ul>
+<h2>v6.0.0</h2>
+<ul>
+<li>Persist creds to a separate file by <a href=""https://github.com/ericsciple""><code>@​ericsciple</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2286"">actions/checkout#2286</a></li>
+<li>Update README to include Node.js 24 support details and requirements by <a href=""https://github.com/salmanmkc""><code>@​salmanmkc</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2248"">actions/checkout#2248</a></li>
+</ul>
+<h2>v5.0.1</h2>
+<ul>
+<li>Port v6 cleanup to v5 by <a href=""https://github.com/ericsciple""><code>@​ericsciple</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2301"">actions/checkout#2301</a></li>
+</ul>
+<h2>v5.0.0</h2>
+<ul>
+<li>Update actions checkout to use node 24 by <a href=""https://github.com/salmanmkc""><code>@​salmanmkc</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2226"">actions/checkout#2226</a></li>
+</ul>
+<h2>v4.3.1</h2>
+<ul>
+<li>Port v6 cleanup to v4 by <a href=""https://github.com/ericsciple""><code>@​ericsciple</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2305"">actions/checkout#2305</a></li>
+</ul>
+<h2>v4.3.0</h2>
+<ul>
+<li>docs: update README.md by <a href=""https://github.com/motss""><code>@​motss</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/1971"">actions/checkout#1971</a></li>
+<li>Add internal repos for checking out multiple repositories by <a href=""https://github.com/mouismail""><code>@​mouismail</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/1977"">actions/checkout#1977</a></li>
+<li>Documentation update - add recommended permissions to Readme by <a href=""https://github.com/benwells""><code>@​benwells</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2043"">actions/checkout#2043</a></li>
+<li>Adjust positioning of user email note and permissions heading by <a href=""https://github.com/joshmgross""><code>@​joshmgross</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2044"">actions/checkout#2044</a></li>
+<li>Update README.md by <a href=""https://github.com/nebuk89""><code>@​nebuk89</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2194"">actions/checkout#2194</a></li>
+<li>Update CODEOWNERS for actions by <a href=""https://github.com/TingluoHuang""><code>@​TingluoHuang</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2224"">actions/checkout#2224</a></li>
+<li>Update package dependencies by <a href=""https://github.com/salmanmkc""><code>@​salmanmkc</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/2236"">actions/checkout#2236</a></li>
+</ul>
+<h2>v4.2.2</h2>
+<ul>
+<li><code>url-helper.ts</code> now leverages well-known environment variables by <a href=""https://github.com/jww3""><code>@​jww3</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/1941"">actions/checkout#1941</a></li>
+<li>Expand unit test coverage for <code>isGhes</code> by <a href=""https://github.com/jww3""><code>@​jww3</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/1946"">actions/checkout#1946</a></li>
+</ul>
+<h2>v4.2.1</h2>
+<ul>
+<li>Check out other refs/* by commit if provided, fall back to ref by <a href=""https://github.com/orhantoy""><code>@​orhantoy</code></a> in <a href=""https://redirect.github.com/actions/checkout/pull/1924"">actions/checkout#1924</a></li>
+</ul>
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10755,[Scheduler][Feature] Implement LAPS-Inspired Prefill Scheduling for vllm-ascend,[Scheduler],open,"documentation,module:tests,module:core,merge-conflicts",2026-06-22T03:13:49Z,"### What this PR does / why we need it?
+
+This PR implements **LAPS (Length-Aware Prefill Scheduling)** for the Ascend recompute scheduler in `vllm-ascend`.
+
+Under FCFS prefill scheduling, a long prompt at the head of the waiting queue blocks shorter prompts behind it (head-of-line blocking), inflating the latency of short requests under load. LAPS splits the waiting queue into three length-aware lanes (**immediate**, **short**, and **long**) and schedules short prefills ahead of long ones, while bounding how badly long requests can be starved using a **token-bucket anti-starvation aging** mechanism.
+
+### Does this PR introduce _any_ user-facing change?
+
+Yes, but it is **off by default** and **additive**:
+
+- A new optional `additional_config['laps_config']` block is introduced.
+- When enabled without `recompute_scheduler_enable=true`, or with a non-FCFS policy, LAPS is not activated and a warning is logged.
+
+### How was this patch tested?
+
+- **Unit tests** (`tests/ut/core/test_laps_scheduler.py`, `test_laps_scheduler_mixin.py`, `test_recompute_scheduler_laps.py`, and `test_ascend_config.py`) covering config validation, queue routing, token-bucket aging, and recompute-scheduler integration.
+- **E2E tests** (`tests/e2e/singlecard/test_laps_scheduling.py`) asserting LAPS produces output consistent with the default scheduler on a single card.
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10752,[Doc][Misc] Update benchmarks README and fix MiniMax-M2.5 docker command,[Doc],merged,documentation,2026-06-22T02:58:26Z,"### What this PR does / why we need it?
+
+This PR synchronizes documentation updates from the release/v0.18.0 branch. Specifically, it:
+1. Updates the benchmark results file names in `benchmarks/README.md` to match the Qwen2.5-VL-7B model (`7Bvl` instead of `7B`).
+2. Fixes a syntax issue in the Docker run command for MiniMax-M2.5 by removing an inline comment after a backslash line continuation, which would otherwise break the command execution.
+ps:
+Synchronize the release/v0.18.0 PR:
+https://github.com/vllm-project/vllm-ascend/pull/8626
+ https://github.com/vllm-project/vllm-ascend/pull/8638
+
+### Does this PR introduce _any_ user-facing change?
+
+No, these are documentation-only updates.
+
+### How was this patch tested?
+
+Documentation changes only.
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10749,add mxfp quant for token dispatch to fit low acc communication,[Misc],open,module:ops,2026-06-22T02:30:02Z,"### What this PR does / why we need it?
+1. Added is_mxfp_quant to moe_stage_params
+2. Added logic for mxfp quant during low acc communication throw all2all
+
+### Does this PR introduce _any_ user-facing change?
+1. This change will allow users to use mxfp quant on low acc communication and increase performance on prefill layers
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10745,[Doc][Feature] Add Motor deployment guide,[Doc],open,documentation,2026-06-22T01:40:37Z,"### What this PR does / why we need it?
+
+This PR adds a deployment guide for using MindIE-PyMotor with vLLM-Ascend. MindIE-PyMotor provides one-click deployment for prefill–decode (PD) disaggregation and PD aggregation on Ascend NPUs.
+
+### Does this PR introduce _any_ user-facing change?
+
+No, this is a documentation-only update.
+
+### How was this patch tested?
+
+Documentation-only change, no testing required.
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10743,[wip]Migrate kda to npu refactor,[wip],open,"module:tests,module:ops",2026-06-21T15:23:19Z,"### What this PR does / why we need it?
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10740,[BugFix] Fix logic bug in patch_kv_coordinator to properly support vLLM 0.22.1,[BugFix],merged,ready,2026-06-21T02:05:35Z,"https://github.com/vllm-project/vllm-ascend/pull/10476
+### What this PR does / why we need it?
+
+**What:** This PR fixes a syntax/logic error in `patch_kv_coordinator` where multiple `vllm_version_is` conditions were incorrectly chained or nested. It corrects the version check logic so that `eagle_kwarg` is accurately set based on the vLLM version.
+
+**Why:**
+In the original code, `if vllm_version_is(""0.22.1""):` was placed directly under `if vllm_version_is(""0.21.0""):` without proper control flow (like `elif`), which leads to dead code or unexpected behavior when determining whether to use `use_eagle` or `drop_eagle_block`.
+
+**Corrected Logic Applied:**
+
+```python
+# Eagle needs to match one more block and then pop the last.
+_max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
+# vLLM B renamed the ``use_eagle`` kwarg to ``drop_eagle_block``.
+if vllm_version_is(""0.22.1""):
+    eagle_kwarg = {""use_eagle"": use_eagle}
+else:
+    eagle_kwarg = {""drop_eagle_block"": use_eagle}
+
+```
+
+### Does this PR introduce *any* user-facing change?
+
+No. This is a purely internal bug fix to adapt to different vLLM versions and does not change any public APIs or user-facing behavior.
+
+### How was this patch tested?
+
+* **Unit Tests:** Verified that the integration with vLLM `0.21.0`, `0.22.1`, and newer versions passes the local coordination tests. [CI]
+* **Manual Verification:** Verified that `eagle_kwarg` correctly resolves to `{""use_eagle"": ...}` when mock version is set to `0.22.1`. [CI]
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10737,[BugFix]  isolate KV cache from sleep cleanup with dedicated memory tag for hadamard matrix,[BugFix],open,,2026-06-20T07:53:35Z,"### What this PR does / why we need it?
+Use a dedicated memory tag for KV cache used by DSA Hadamard, instead of the shared tag that was previously being cleaned up during sleep(). This ensures the Hadamard tensor is properly tagged and excluded from sleep-mode memory release.
+
+### Does this PR introduce _any_ user-facing change?
+No. 
+
+### How was this patch tested?
+
+
+- vLLM version: 
+- vLLM main: https://github.com/vllm-project/vllm/commit/
+",,
+10734,[Doc] Translated Doc files 2026-06-19,[Doc],closed,"documentation,merge-conflicts",2026-06-19T05:35:37Z,"## Auto-Translation Summary
+
+Translated **26** file(s):
+
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/community/versioning_policy.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/developer_guide/Design_Documents/context_parallel.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/developer_guide/Design_Documents/cpu_binding.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/developer_guide/Design_Documents/eplb_swift_balancer.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/developer_guide/performance_and_debug/optimization_and_tuning.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/faqs.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/installation.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/tutorials/features/dynamic_chunked_pipeline_parallel.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/tutorials/models/DeepSeek-V3.2.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/tutorials/models/GLM4.x.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/tutorials/models/GLM5.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/configuration/additional_config.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/feature_guide/Ai_QoS_introduction_en.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/feature_guide/batch_invariance.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/feature_guide/cpu_binding.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/feature_guide/epd_disaggregation.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/feature_guide/eplb_swift_balancer.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/feature_guide/graph_mode.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/feature_guide/kv_pool.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/feature_guide/quantization.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/feature_guide/speculative_decoding.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/release_notes.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/support_matrix/supported_models.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/tutorials/models/GLM5.2.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/tutorials/models/Kimi-K2.6.po</code>
+- <code>docs/source/locale/zh_CN/LC_MESSAGES/user_guide/feature_guide/layerwise_kv_pool.po</code>
+
+---
+
+[Workflow run](https://github.com/vllm-project/vllm-ascend/actions/runs/27806872280)
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10732,[Doc]Update Qwen-VL-Dense & Qwen3-Next documentation ,[Doc],open,documentation,2026-06-18T10:46:06Z,"### What this PR does / why we need it?
+Update Qwen-VL-Dense & Qwen3-Next documentation 
+### Does this PR introduce _any_ user-facing change?
+NO
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10729,[Misc] main2main upgrade vllm to 0619,[Misc],open,"ci/build,module:tests,module:ops,module:core,module:quantization,ready,merge-conflicts",2026-06-18T09:42:31Z,"### What this PR does / why we need it?
+This PR adapts vllm-ascend to the latest upstream vLLM changes (commit `560fb8b867aaa444d471b35fd846368ebacf12b9`). The changes are organized by the upstream PRs they correspond to:
+
+#### 1. Dynamic Speculative Decoding Support (#32374)
+
+**Files changed:**
+
+- `vllm_ascend/worker/model_runner_v1.py`
+
+- `vllm_ascend/spec_decode/suffix_proposer.py`
+
+- `vllm_ascend/worker/v2/model_runner.py`
+
+**Changes:**
+
+- Updated `propose()` method signatures for `AscendNgramProposer`, `AscendSuffixDecodingProposer`, `AscendMedusaProposer`, and `AscendExtractHiddenStatesProposer` to accept `num_speculative_tokens` as the first parameter
+
+- Added `import torch` to `suffix_proposer.py` to fix undefined name error
+
+- Used temporary value for `decode_query_len` initialization in v2 model runner
+
+#### 2. Model Runner V2 Migration (#44446)
+
+**Files changed:**
+
+- `vllm_ascend/patch/platform/patch_pp_mtp.py`
+
+**Changes:**
+
+- Added `_patch_default_v2_model_runner_architectures()` to remove `DeepseekV2ForCausalLM` from `DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES`
+
+- This ensures DeepSeek-V2 models use the v1 model runner which has proper PP (pipeline parallel) support for MoE models
+
+#### 3. Streaming Parser Engine (#45915)
+
+**Files changed:**
+
+- `vllm_ascend/patch/platform/patch_glm47_tool_call_parser.py`
+
+- `vllm_ascend/patch/platform/patch_minimax_m2_tool_call_parser.py`
+
+- `tests/ut/patch/platform/test_patch_glm47_tool_call_parser.py`
+
+- `tests/ut/patch/platform/test_patch_minimax_m2_tool_call_parser.py`
+
+**Changes:**
+
+- Wrapped patches with `if False:` since upstream has replaced old regex-based parsers with the new state-machine engine
+
+- Set `_LEGACY_PARSER = False` in tests to skip legacy parser test cases
+
+#### 4. Anthropic System Message Support (#44602, #46025)
+
+**Files changed:**
+
+- `vllm_ascend/patch/platform/patch_anthropic_system_message.py`
+
+- `tests/ut/patch/platform/test_patch_anthropic_system_message.py`
+
+**Changes:**
+
+- Wrapped patches with `if False:` since upstream now natively supports `merge_inline_system` parameter
+
+- Added `_LEGACY_MODE` detection in tests to skip when upstream has the feature
+
+- Updated tests to pass `merge_inline_system=True` parameter
+
+#### 5. Scheduler Throttle Prefills Parameter
+
+**Files changed:**
+
+- `vllm_ascend/patch/platform/patch_balance_schedule.py`
+
+**Changes:**
+
+- Added `throttle_prefills: bool = False` parameter to `schedule()` method
+
+- Forwarded parameter to parent class method
+
+#### 6. Regex Compilation Timeout Fix (#45118)
+
+**Files changed:**
+
+- `tests/e2e/pull_request/one_card/test_guided_decoding.py`
+
+**Changes:**
+
+- Set `VLLM_REGEX_COMPILATION_TIMEOUT_S=30` for `xgrammar` and `outlines` backends
+
+- This handles complex JSON schemas that may exceed the default 5s timeout
+
+#### 7. Test Infrastructure Improvements
+
+**Files changed:**
+
+- `tests/ut/patch/platform/test_patch_minimax_usage_accounting.py`
+
+**Changes:**
+
+- Added missing `eos_token_id`, `bos_token_id`, `pad_token_id` attributes and `decode()` method to `FakeTokenizer` class for compatibility with new state-machine engine
+
+### Does this PR introduce any user-facing change?
+
+**No.**  All changes are internal adaptations to upstream vLLM API changes. Users should not observe any behavioral differences after this update.
+
+**Key points:**
+
+- All patches are backward-compatible with older upstream versions via conditional checks
+
+- DeepSeek-V2 models will continue to work correctly with PP configurations
+
+- No changes to public APIs or configuration options
+
+### Related Upstream PRs
+
+| Upstream PR | Description | Files Affected |
+|---|---|---|
+| #32374 | [V1][Spec Decode] Add Dynamic SD | model_runner_v1.py, suffix_proposer.py, model_runner.py (v2) |
+| #44446 | [Model Runner V2] Migration to support quantized model by default [5/N] | patch_pp_mtp.py |
+| #45915 | [Frontend] Add Streaming Parser Engine and new GLM4.7/GLM5.1/GLM5.2 Parser | patch_glm47_tool_call_parser.py, patch_minimax_m2_tool_call_parser.py |
+| #44602 | fix(anthropic): preserve inline system message position for prefix caching | patch_anthropic_system_message.py |
+| #46025 | fix(anthropic): auto-detect template support for mid-conversation system messages | patch_anthropic_system_message.py |
+| #45118 | [Security] Add timeout guard for regex compilation in structured output | test_guided_decoding.py |
+
+### How was this patch tested?
+https://github.com/vllm-project/vllm-ascend/actions/runs/27892595280/job/82538857415?pr=10729
+https://github.com/vllm-project/vllm-ascend/actions/runs/27896389470/job/82548948104?pr=10729
+https://github.com/vllm-project/vllm-ascend/actions/runs/27899594634/job/82557641743?pr=10729
+https://github.com/vllm-project/vllm-ascend/actions/runs/27903089171/job/82567241257?pr=10729
+https://github.com/vllm-project/vllm-ascend/actions/runs/27928484787/job/82635950403?pr=10729
+https://github.com/vllm-project/vllm-ascend/actions/runs/27935695692/job/82657424062?pr=10729
+https://github.com/vllm-project/vllm-ascend/actions/runs/27935695692/job/82657424065?pr=10729
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10727,[BugFix][Performance] fix performance issue when enable return router experts with async scheduling,[BugFix],merged,ready,2026-06-18T09:37:59Z,"### What this PR does / why we need it?
+This pull request addresses a performance and stability issue related to routed experts when using asynchronous scheduling. By introducing a snapshot mechanism with cloned tensors, the changes ensure that data remains consistent during asynchronous transfers, avoiding race conditions where buffers might be overwritten before the transfer completes. The logic for synchronous scheduling was also optimized to better align with existing bookkeeping flows.
+
+Highlights
+- Async Scheduling Optimization: Refactored the handling of routed experts to support asynchronous scheduling, preventing potential data corruption by cloning tensors before device-to-host transfers.
+- Sync Path Improvements: Moved the routed experts device-to-host transfer logic into the bookkeeping sync phase for -synchronous scheduling, ensuring data is ready before synchronization events.
+- Code Cleanup: Simplified the worker initialization by removing conditional imports for routed experts, ensuring consistent patching.
+
+### Does this PR introduce _any_ user-facing change?
+not involved
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10722,[CI]model reuse,[CI],closed,"ci/build,module:tests",2026-06-18T09:29:22Z,"### What this PR does / why we need it?
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10717,[bugfix][performance] fix performance issue when enable return router experts with async scheduling,[BugFix],closed,,2026-06-18T08:42:49Z,"### What this PR does / why we need it?
+This pull request addresses a performance and stability issue related to routed experts when using asynchronous scheduling. By introducing a snapshot mechanism with cloned tensors, the changes ensure that data remains consistent during asynchronous transfers, avoiding race conditions where buffers might be overwritten before the transfer completes. The logic for synchronous scheduling was also optimized to better align with existing bookkeeping flows.
+
+Highlights
+- Async Scheduling Optimization: Refactored the handling of routed experts to support asynchronous scheduling, preventing potential data corruption by cloning tensors before device-to-host transfers.
+- Sync Path Improvements: Moved the routed experts device-to-host transfer logic into the bookkeeping sync phase for -synchronous scheduling, ensuring data is ready before synchronization events.
+- Code Cleanup: Simplified the worker initialization by removing conditional imports for routed experts, ensuring consistent patching.
+
+### Does this PR introduce _any_ user-facing change?
+not-involved
+### How was this patch tested?
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10713,[CI] run test only if the change is only for test,[CI],closed,ci/build,2026-06-18T08:21:44Z,"### What this PR does / why we need it?
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10712,[BugFix][Worker] Align encoder ACL graph with vLLM main encoder cudagraph API,[BugFix],merged,"module:tests,ready",2026-06-18T08:11:07Z,"### What this PR does / why we need it?
+
+Aligns ViT encoder ACL graph (FIA graph-task) with upstream encoder cudagraph API changes.
+Following #10704 
+Fix #10549 
+
+- **Capture:** `values` / `input_buffers` + `encoder_cudagraph_forward(dict(values))`; always `super().capture(graph_pool=...)`.
+- **Replay:** `prepare_encoder_cudagraph_replay_buffers()` + inline copy to `input_buffers`; FIA metadata from `input_buffers`.
+- **FIA context:** keep `graph.replay()` → `set_encoder_forward_context` → `update_encoder_graph_params()`; CPU metadata fields use `torch.Tensor`.
+- **E2E:** enable `cudagraph_mm_encoder=True`.
+
+```mermaid
+flowchart TB
+  direction TB
+  NV[""Capture path<br/>Before 350d1f0: legacy API<br/>After: main API upstream #42288""]
+  NC2L[""Before: mm_kwargs + buffers""]
+  NC2M[""After: values""]
+  NC3L[""Before: encoder_cudagraph_forward(mm_kwargs, buffers)""]
+  NC3M[""After: encoder_cudagraph_forward(dict(values))""]
+  NC4L[""Before: input_buffer + metadata_buffers""]
+  NC4M[""After: input_buffers""]
+  NC5L[""Before: inspect graph_pool in signature<br/>→ super().capture() or super().capture(graph_pool)""]
+  NC5M[""After: super().capture(graph_pool)""]
+  NR[""Replay buffer copy<br/>Before 350d1f0: manual legacy copy<br/>After: prepare + inline copy""]
+  NR1L[""Before: mm_kwargs → input_buffer<br/>replay_buffers → metadata_buffers""]
+  NR1M[""After: prepare_encoder_cudagraph_replay_buffers()<br/>→ inline copy to input_buffers""]
+  NR2L[""Before: metadata_buffers → CPU tensors""]
+  NR2M[""After: input_buffers → CPU tensors""]
+  NR3[""set_encoder_forward_context(CPU tensors)""]
+  NR4[""graph.replay()""]
+  NR5[""update_encoder_graph_params()""]
+  NV -->|before| NC2L --> NC3L --> NC4L --> NC5L
+  NV -->|after| NC2M --> NC3M --> NC4M --> NC5M
+  NR -->|before| NR1L --> NR2L
+  NR -->|after| NR1M --> NR2M
+  NR2L --> NR4
+  NR2M --> NR4
+  NR4 --> NR3 --> NR5
+```
+
+### Does this PR introduce _any_ user-facing change?
+Yes, but only when `compilation_config.cudagraph_mm_encoder=True`: encoder NPUGraph capture/replay now works on vLLM main. No new CLI flags or public APIs.
+
+### How was this patch tested?
+
+- E2E: `tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py`
+  - `test_qwen3_6_27b_multimodel_fia_eager`
+  - `test_qwen3_6_27b_multimodel_fia_acl_graph` (with `cudagraph_mm_encoder=True`)
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10697,[Feature] Support Step3P7/Step3P5 with Step3P5 MTP on Ascend,[Feature],open,"module:tests,module:ops,module:quantization",2026-06-18T06:17:36Z,"### What this PR does / why we need it?
+
+This PR adds Ascend support for Step3P5 and Step3P7 models with MTP speculative decoding.
+
+With this change, Step3P5 and Step3P7 checkpoints can run on Ascend with `--speculative_config '{""method"": ""mtp"", ""num_speculative_tokens"": 3}'` enabled for Step3p5 MTP, allowing the model to draft multiple tokens and use speculative decoding to improve generation performance.
+
+This is needed to support Step-family MTP checkpoints on Ascend and align Ascend speculative decoding capability with the model architecture used by Step3P5/Step3P7.
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+e2e:
+```
+export HCCL_CONNECT_TIMEOUT=7200
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export PYTORCH_NPU_ALLOC_CONF=""expandable_segments:True""
+export HCCL_OP_EXPANSION_MODE=""AIV""
+export HCCL_BUFFSIZE=512
+export CPU_AFFINITY_CONF=1
+export TASK_QUEUE_ENABLE=0
+export SHM_BARRIER=""true""
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
+LD_PRELOAD=/lib/x86_64-linux-gnu/libjemalloc.so.2
+capture_size=$(echo {1..64} | tr ' ' ',')
+vllm serve path/to/model \
+  --trust-remote-code \
+  --tensor-parallel-size 8 \
+  --pipeline-parallel-size 1 \
+  --port 8000 \
+  --compilation-config ""{\""cudagraph_mode\"": \""FULL_DECODE_ONLY\"", \""cudagraph_capture_sizes\"": [$capture_size]}"" \
+  --reasoning-parser step3p5 \
+  --enable-auto-tool-choice \
+  --tool-call-parser step3p5 \
+  --gpu-memory-utilization 0.96 \
+  --no-enable-prefix-caching \
+  --served-model-name ""step3p7"" \
+  --max-num-seqs 16 \
+  --async-scheduling \
+  --max-num-batched-tokens 65536 \
+  --enable-expert-parallel \
+  --additional-config '{""weight_prefetch_config"":{""enabled"":true}}'  \
+  --speculative_config '{""method"": ""mtp"", ""num_speculative_tokens"": 3}' 
+```
+
+- 精度
+
+```
+evalscope eval \
+ --model step3p7 \
+ --api-url http://0.0.0.0:8000/v1/chat/completions \
+ --generation-config do_sample=true,temperature=1.0,top_p=0.95 \
+ --eval-batch-size 16 \
+ --dataset-args '{""aime25"":{""shuffle"": false}}' \
+ --datasets aime25 \
+ --repeat 16 \
+ --timeout 5400
+```
+
+<img width=""1364"" height=""230"" alt=""image"" src=""https://github.com/user-attachments/assets/0c2469e7-bce1-45eb-bca8-804b2bb60931"" />
+<img width=""2494"" height=""348"" alt=""image"" src=""https://github.com/user-attachments/assets/890dfdad-8d7c-4bb5-93a2-5b88dc1c374d"" />
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10685,[CI] Add E2E weekly multi-node config for MiniMax-PD-in32k-bs4-1,[CI],open,"ci/build,module:tests",2026-06-18T03:34:58Z,"### What this PR does / why we need it?
+
+1、Fixing the problem that historical PR changes are overwritten: Add external DP test orchestration under tests/e2e/nightly/multi_node/external_dp/
+     historical PR: https://github.com/vllm-project/vllm-ascend/pull/9449  
+2、Add E2E weekly multi-node config for MiniMax-PD-in32k-bs4-1
+3、Update the performance baseline in the test cases according to the exported peformance data
+### Does this PR introduce _any_ user-facing change?
+NO
+### How was this patch tested?
+
+by the running the test
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10635,[CI] Fix gh install error,[CI],merged,,2026-06-17T15:28:32Z,"1.Fix gh install error
+2. speed up bot_pr_create
+",,
+10619, [BugFix] align spec_sequence_masks device tensor capacity with CPU,[Misc],merged,"module:ops,ready",2026-06-17T10:01:09Z,"### What this PR does / why we need it?
+Problem: When max_num_seqs > decode_cudagraph_max_bs, spec_sequence_masks device tensor (decode_cudagraph_max_bs sized) is smaller than its CPU
+  counterpart (max(max_num_seqs, decode_cudagraph_max_bs) sized), causing RuntimeError on copy_ in _build_attn_group_metadata.
+
+ Fix: Override self.spec_sequence_masks in AscendGDNAttentionMetadataBuilder with sequence_index_capacity to match spec_sequence_masks_cpu.
+### Does this PR introduce _any_ user-facing change?
+no
+
+### How was this patch tested?
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10605,Minimax m3 dev,[Misc],closed,"module:ops,module:quantization",2026-06-17T08:08:06Z,"### What this PR does / why we need it?
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10588,[Doc][Misc] Improve readability and fix typos in documentation,[Doc],merged,documentation,2026-06-17T02:49:51Z,"### What this PR does / why we need it?
+This PR improves the readability and correctness of the GLM-5/5.1 tutorial documentation by:
+- Correcting the model cache paths for GLM-5 quantized models (from `GLM-5-w4a8` to `GLM5-w4a8` and from `/root/.cache/glm5-w8a8` to `/root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8`) to ensure consistency and accuracy.
+- Adding a brief explanation of *Prefill-Decode Disaggregation* to clarify the separation of prefill and decode stages across different nodes.
+
+### Does this PR introduce _any_ user-facing change?
+No. This is a documentation-only update.
+
+### How was this patch tested?
+
+Documentation changes only.
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10573,[CI] Auto-update estimated test times in test_config.yaml,[CI],merged,,2026-06-16T23:28:53Z,"## Summary
+
+This PR was auto-generated by the **Update estimated test times** [workflow](https://github.com/vllm-project/vllm-ascend/actions/runs/27618625841).
+
+It updates the `estimated_times` values in `.github/workflows/scripts/test_config.yaml` based on actual elapsed times collected from CI workflow runs.
+
+### Methodology
+
+- Each test job uploads its elapsed time as a `timing-data-*` artifact upon completion.
+- The workflow aggregates all collected timing artifacts across jobs.
+- For each test, the **median** elapsed time is computed to reduce outlier impact.
+- A **10% safety buffer** is applied and the result is rounded to the nearest 10 seconds.
+
+### Review Checklist
+
+- [x] Verify that updated `estimated_time` values are within a reasonable range.
+- [x] Confirm no test entries are missing or unexpectedly removed.
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10556,[Feature] [Ascend950] Support Step3p5 Flash,[Feature],open,"module:ops,module:core,module:quantization",2026-06-16T10:20:31Z,"### What this PR does / why we need it?
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10543,[CI] Added the nightly test case DeepSeek-V4-Flash-W8A8-A3 and fixed the failed weekly test case.,[CI],merged,"ci/build,module:tests",2026-06-16T07:48:58Z,"### What this PR does / why we need it?
+
+We run the nightly and weekly test case at a fixed period. Add nightly case: DeepSeek-V4-Flash-W8A8-A3. Fixed the failed weekly test case: Kimi-K2.5.yaml.
+
+### Does this PR introduce _any_ user-facing change?
+
+no
+
+### How was this patch tested?
+
+by running the DeepSeek-V4-Flash-W8A8-A3 test and failed weekly test.
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10542,[bugfix]Fix division by zero risk in unpermute stage of dispatch_ffn_combine operator,[BugFix],open,,2026-06-16T07:48:19Z,"### What this PR does / why we need it?
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10510,[Feature]Support IndexCache top-k index reuse for DeepSeek Sparse MLA's MTP Layer,[Feature],open,module:tests,2026-06-15T12:57:45Z,"
+### What this PR does / why we need it?
+This PR aligns the Ascend backend with the upstream implementation of IndexCache top-k index reuse for DeepSeek Sparse MLA's MTP Layer, inspired by IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse.{GLM5.2}
+vllm PR: https://github.com/vllm-project/vllm/pull/44420/changes
+
+### Does this PR introduce _any_ user-facing change?
+No
+### How was this patch tested?
+vllm serve /home/jjz/mnt/GLM-5.2-0610-Provider
+--host 0.0.0.0
+--port 8077
+--data-parallel-size 1
+--tensor-parallel-size 16
+--enable-expert-parallel
+--seed 1024
+--served-model-name glm-5
+--max-num-seqs 16
+--max-model-len 40960
+--max-num-batched-tokens 4096
+--trust-remote-code
+--gpu-memory-utilization 0.95
+--enable-chunked-prefill
+--enable-prefix-caching
+--additional-config '{""fuse_muls_add"": true, ""multistream_overlap_shared_expert"": true, ""ascend_compilation_config"": {""enable_npugraph_ex"": true}}'
+--compilation-config '{""cudagraph_mode"": ""FULL_DECODE_ONLY""}'
+--speculative-config '{""num_speculative_tokens"": 3, ""method"": ""deepseek_mtp""}'
+
+
+- vLLM version: v0.22.1
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10474,[MISC][ops]Log main,[Misc],closed,"ci/build,module:tests,module:ops,module:core,module:quantization,merge-conflicts",2026-06-15T04:01:53Z,"### What this PR does / why we need it?
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.21.0
+- vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
+",,
+10445,"[CI] Refactor test selection: config-driven routing, partition, estimated_times",[CI],merged,"ci/build,module:tests,ready",2026-06-13T16:25:30Z,"### What this PR does / why we need it?
+- Replace hardcoded UT/E2E routing patterns with config-driven runner_mapping (regex) in test_config.yaml second doc
+- Add partition logic to split test groups across parallel runners by estimated time (greedy algorithm)
+- Add estimated_times section with historical data + 600s defaults
+- Add update_estimated_times.py for periodic timing data collection
+- Add schedule_update_estimated_times.yaml (every 3 days)
+- Add --timing flag to run_selected_tests.sh for recording elapsed
+- Add upload_timing/continue_on_error inputs to _selected_tests.yaml
+- Update coverage.py with estimated_times/runner_mapping/partition validation checks
+- Remove all hardcoded _UT_DIR_PATTERNS/_E2E_DIR_PATTERNS
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+
+- vLLM version: v0.21.0
+- vLLM main: https://github.com/vllm-project/vllm/commit/efc347f1b2e635753ae8a594e9714109c200fcd3
+",,
+10421,[CI] fix sample ut,[CI],closed,module:tests,2026-06-12T11:52:24Z,"### What this PR does / why we need it?
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+- vLLM version: v0.21.0
+- vLLM main: https://github.com/vllm-project/vllm/commit/9090368b650896bf5fc990c921df7eb4c20355a5
+",,
+10380,[BugFix] Fix garbled output for Qwen3.6-27B with dflash/suffix num_speculative_tokens > 7,[BugFix],open,,2026-06-12T02:53:34Z,"Fix garbled output for Qwen3.6-27B with dflash/suffix when num_speculative_tokens > 7
+
+### What this PR does / why we need it?
+
+This PR fixes garbled output for Qwen3.6-27B when using dflash/suffix speculative decoding with num_speculative_tokens > 7. The root cause is that the UB (Unified Buffer) memory allocation in the recurrent gated delta rule tiling logic did not correctly account for cases where the actual speculative token count exceeds certain internal buffer limits (8), leading to memory corruption during attention computation. This fix ensures correct buffer sizing and output correctness for all valid num_speculative_tokens values (1–15).
+
+### Does this PR introduce _any_ user-facing change?
+
+No. This is a bugfix with no API or interface changes. Users can now correctly set num_speculative_tokens to values greater than 7 without encountering garbled output.
+
+### How was this patch tested?
+
+Tested manually on Ascend 910B with Qwen3.6-27B using dflash/suffix speculative decoding:
+
+- Run inference with num_speculative_tokens=8 (previously garbled) → output is now correct.
+- Run inference with num_speculative_tokens=7 (previously working) → output unchanged, no regression.
+
+- vLLM version: v0.21.0
+- vLLM main: https://github.com/vllm-project/vllm/commit/9090368b650896bf5fc990c921df7eb4c20355a5
+",,
+10350,[Feature][DSv4] Support partial compressed prefix cache hits,[Feature],open,,2026-06-11T08:50:55Z,"## What this PR does / why we need it?
+Adds partial compressed prefix-cache hits for DeepSeek V4. When a prompt is
+shorter than one compressed cache block and gets zero full-block hits, the
+first block's prefix boundaries are registered in a private partial table; a
+later request then reuses the longest matching prefix by copying the source KV
+into a private block (in-cache device-to-device copy) before the forward pass.
+Boundary registration is latched once per request to avoid per-decode-step
+re-hashing. Builds on the prefix-cache core block-reuse patch and aligns hits
+to the scheduler block size.
+
+## Does this PR introduce any user-facing change?
+No.
+
+---
+Co-authored with @wangzhao-11a.",,
+10323,[CI][Misc] Read Dockerfile vLLM ref from verified anchor,[CI],open,merge-conflicts,2026-06-11T06:19:33Z,"Fixes #9800.
+
+## What this PR does / why we need it?
+
+Follow-up for the review question about the runtime Dockerfiles.
+
+The listed Dockerfiles duplicated the upstream vLLM release ref as `ARG VLLM_TAG=v0.21.0`:
+
+- `Dockerfile`
+- `Dockerfile.310p`
+- `Dockerfile.310p.openEuler`
+- `Dockerfile.a3`
+- `Dockerfile.a3.openEuler`
+- `Dockerfile.a5`
+- `Dockerfile.a5.openEuler`
+- `Dockerfile.openEuler`
+
+This PR keeps `VLLM_TAG` overridable for manual builds, but defaults it from `.github/vllm-release-tag.commit` when no build arg is provided. The resolved value is validated as a safe git ref string, then fetched with `git fetch --depth 1`, which supports tags, branches, and commit SHAs.
+
+It intentionally does not change CANN base image tags or `MOONCAKE_TAG`; those are separate dependency/version anchors and should not follow the vLLM release-tag file.
+
+## Does this PR introduce _any_ user-facing change?
+
+No. It only changes the default source of the vLLM ref used during Docker image builds.
+
+## How was this patch tested?
+
+- `git diff --check`
+- Shell simulation for default `.github/vllm-release-tag.commit` lookup.
+- Shell simulation for explicit `VLLM_TAG` build-arg override.
+- Real `git fetch --depth 1` validation for a vLLM release tag, branch, and commit SHA.
+
+- vLLM version: v0.21.0
+- vLLM main: https://github.com/vllm-project/vllm/commit/9090368b650896bf5fc990c921df7eb4c20355a5
+",,
+10292,[Feature] add ascendc ops store_kv_block,[Feature],merged,"documentation,module:tests,module:core,ready",2026-06-10T10:33:42Z,"### What this PR does / why we need it?
+add ascendc ops store_kv_block
+Control whether to use the operator by using additional-config '{""enable_sparse_c8"":true,""c8_enable_reshape_optim"":true}'. It is only used on the P node.
+
+### Does this PR introduce _any_ user-facing change?
+By enabling c8_enable_reshape_optim on the P node
+
+### How was this patch tested?
+nightly custom op
+- vLLM version: v0.21.0
+- vLLM main: https://github.com/vllm-project/vllm/commit/9090368b650896bf5fc990c921df7eb4c20355a5
+",,
+10260,[EPLB][Test] Change mooncake port,[EPLB],merged,"module:tests,ready",2026-06-10T02:41:42Z,"### What this PR does / why we need it?
+If mooncake uses port 36000, it is prone to being occupied. Therefore, the port is changed to 30000 to remain consistent with other use cases.
+
+The port occupation issue is tracked by issue #8938 .
+
+### Does this PR introduce _any_ user-facing change?
+
+### How was this patch tested?
+
+
+- vLLM version: v0.21.0
+- vLLM main: https://github.com/vllm-project/vllm/commit/9090368b650896bf5fc990c921df7eb4c20355a5
+",,
