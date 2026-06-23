@@ -849,7 +849,7 @@ vllm serve your_model_path \
     --quantization ascend \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"method": "eagle3", "model":"/mnt/share/weight/Qwen3-235B-A22B-EAGLE3-rotated/", "num_speculative_tokens": 3}' \
+    --speculative-config '{"method": "eagle3", "model":"your_eagle3_model_path", "num_speculative_tokens": 3}' \
     --additional-config '{"enable_cpu_binding":true}'
 ```
 
