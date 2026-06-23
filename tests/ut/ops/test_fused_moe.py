@@ -638,7 +638,7 @@ class TestAscendFusedMoE:
         )
         moe_comm_method = MagicMock()
         moe_comm_method.prepare.return_value = prepare_output
-        moe_comm_method.finalize.side_effect = lambda hidden_states, **_: (hidden_states + 2)
+        moe_comm_method.finalize.side_effect = lambda hidden_states, **_: hidden_states + 2
         before_dispatch_evt = MagicMock()
         before_combine_evt = MagicMock()
         layer.quant_method.apply.return_value = FusedExpertsResult(
@@ -718,7 +718,7 @@ class TestAscendFusedMoE:
             mc2_mask=None,
             padded_hidden_states_shape=None,
         )
-        moe_comm_method.finalize.side_effect = lambda hidden_states, **_: (hidden_states)
+        moe_comm_method.finalize.side_effect = lambda hidden_states, **_: hidden_states
         layer.quant_method.apply.return_value = FusedExpertsResult(
             routed_out=torch.ones(2, 4),
             expert_tokens=torch.tensor([4, 6]),

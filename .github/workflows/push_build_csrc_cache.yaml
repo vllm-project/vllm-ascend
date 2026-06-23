@@ -102,6 +102,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Config mirrors (ubuntu)
         if: matrix.os == 'ubuntu'

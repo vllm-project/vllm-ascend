@@ -155,7 +155,7 @@ checkout_src() {
 
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
         echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
-        git clone --depth 1 "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
+        git clone --depth 1 --recurse-submodules "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
         cd "$WORKSPACE/vllm-ascend"
         PR_REF=$(git ls-remote origin 'refs/pull/*/head' | grep "^${VLLM_ASCEND_REF}" | awk '{print $2}' | head -1)
         if [ -n "$PR_REF" ]; then
@@ -165,6 +165,7 @@ checkout_src() {
             git fetch origin '+refs/pull/*/head:refs/remotes/pull/*' 2>/dev/null || true
             git checkout "$VLLM_ASCEND_REF"
         fi
+        git submodule update --init --recursive
     fi
 }
 

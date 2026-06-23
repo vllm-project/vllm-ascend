@@ -49,11 +49,14 @@ jobs:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: checkout vllm-ascend ${{ inputs.tag }}
         if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/checkout@v7
         with:
+          submodules: recursive
           ref: ${{ inputs.tag }}
 
       - name: Print
@@ -99,11 +102,14 @@ jobs:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: checkout vllm-ascend ${{ inputs.tag }}
         if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/checkout@v7
         with:
+          submodules: recursive
           ref: ${{ inputs.tag }}
 
       - name: Free up disk space
@@ -183,11 +189,14 @@ jobs:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: checkout vllm-ascend ${{ inputs.tag }}
         if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/checkout@v7
         with:
+          submodules: recursive
           ref: ${{ inputs.tag }}
 
       - name: Free up disk space
@@ -261,11 +270,14 @@ jobs:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: checkout vllm-ascend ${{ inputs.tag }}
         if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/checkout@v7
         with:
+          submodules: recursive
           ref: ${{ inputs.tag }}
 
       - name: Free up disk space

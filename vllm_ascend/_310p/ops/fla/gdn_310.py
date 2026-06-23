@@ -25,7 +25,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
+from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_310
 from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
@@ -419,7 +419,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
-                ) = chunk_gated_delta_rule_pytorch(
+                ) = chunk_gated_delta_rule_310(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
