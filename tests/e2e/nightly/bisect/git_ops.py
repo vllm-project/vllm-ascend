@@ -220,6 +220,15 @@ def changed_files(repo: Path, base: str, target: str) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def file_at_commit(repo: Path, commit: str, rel_path: str) -> str | None:
+    """Return the contents of ``rel_path`` at ``commit`` without checking out.
+
+    Uses ``git show <commit>:<path>``; returns None if the file is absent there.
+    """
+    out = _git(repo, "show", f"{commit}:{rel_path}", check=False)
+    return out if out else None
+
+
 def commit_changed_files(repo: Path, commit: str) -> list[str]:
     """Files changed by a single ``commit`` relative to its first parent.
 

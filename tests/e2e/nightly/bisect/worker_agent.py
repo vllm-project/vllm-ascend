@@ -79,12 +79,18 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     rnd = 0
     while True:
         rnd += 1
-        cmd = coord.wait_command(rnd, opt.barrier_timeout_s)
+        cmd = coord.wait_command(rnd, opt.barrier_timeout_s, release_file=opt.release_file)
         if cmd is None:
-            logger.info("[worker] DONE received; exiting after %d rounds", rnd - 1)
+            logger.info("[worker] stop signal received; exiting after %d rounds", rnd - 1)
             return 0
 
         commit = cmd["commit"]
+        # A SKIP command (e.g. vLLM mismatch decided by the leader) is consumed
+        # to keep rounds in lockstep, but the worker neither deploys nor runs.
+        if cmd.get("action") == "SKIP":
+            logger.info("[worker] round %d: SKIP %s (no deploy/run)", rnd, commit[:12])
+            continue
+
         log_path = log_dir / f"round{rnd}_{commit[:12]}.log"
         logger.info("[worker] round %d: deploying %s", rnd, commit[:12])
         try:

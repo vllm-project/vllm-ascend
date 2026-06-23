@@ -202,6 +202,12 @@ class BisectOptions:
     num_nodes: int = 1
     node_index: int = 0
     barrier_timeout_s: float = 3600.0
+    # Optional external "leader finished" sentinel file. When the AOP pipeline's
+    # leader decides NOT to bisect (env/age skip) it never starts the coordinator,
+    # so a worker would otherwise wait out the full barrier timeout. If set, the
+    # worker also exits promptly once this file appears (run.sh touches its
+    # ``done`` file on every leader exit path).
+    release_file: str | None = None
     # Per-trial pytest timeout (seconds).
     trial_timeout_s: float = 5400.0
 
