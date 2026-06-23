@@ -30,6 +30,8 @@ _ORIGINAL_SCHEDULER = Scheduler
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
+    # TODO: Unify this path with AscendConfig once AscendConfig initialization
+    # is moved earlier in the startup flow.
     try:
         from vllm_ascend.ascend_config import get_ascend_config
 
