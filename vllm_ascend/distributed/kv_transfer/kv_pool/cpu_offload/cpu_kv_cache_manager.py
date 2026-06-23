@@ -10,7 +10,6 @@ from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
-from vllm_ascend.utils import vllm_version_is
 
 
 class CPUCacheStats:
@@ -77,8 +76,7 @@ class CPUKVCacheManager:
             max_num_batched_tokens=max_model_len,
             max_model_len=max_model_len,
         )
-        if not vllm_version_is("0.22.1"):
-            manager_kwargs["scheduler_block_size"] = kv_cache_spec.block_size
+        manager_kwargs["scheduler_block_size"] = kv_cache_spec.block_size
         self.single_type_manager = get_manager_for_kv_cache_spec(**manager_kwargs)
         # Record kv block hashes, avoid redundant computation.
         self.req_to_block_hashes: defaultdict[str, list[BlockHash]] = defaultdict(list)
@@ -103,10 +101,7 @@ class CPUKVCacheManager:
             block_hashes = request.block_hashes
             self.req_to_block_hashes[request_id] = block_hashes
         max_cache_hit_length = request.num_tokens - 1
-        if vllm_version_is("0.22.1"):
-            eagle_kwarg = {"use_eagle": self.use_eagle}
-        else:
-            eagle_kwarg = {"drop_eagle_block": self.use_eagle}
+        eagle_kwarg = {"drop_eagle_block": self.use_eagle}
         computed_blocks = self.single_type_manager.find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,

@@ -30,10 +30,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.parser.abstract_parser import DelegatingParser
 
-from vllm_ascend.utils import vllm_version_is
-
-_NO_FORCED_TOOL_CALL = "_vllm_ascend_no_forced_tool_call"
-
 _original_chat_completion_response_model_dump = ChatCompletionResponse.model_dump
 _original_chat_completion_stream_response_model_dump = ChatCompletionStreamResponse.model_dump
 
@@ -87,31 +83,6 @@ def _is_forced_tool_choice(request) -> bool:
     )
 
 
-def _set_no_forced_tool_call(request, value: bool) -> None:
-    tool_choice = getattr(request, "tool_choice", None)
-    if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
-        setattr(tool_choice, _NO_FORCED_TOOL_CALL, value)
-
-
-def _patch_named_tool_choice_bool() -> None:
-    if getattr(ChatCompletionNamedToolChoiceParam, "_vllm_ascend_bool_patched", False):
-        return
-
-    original_bool = getattr(ChatCompletionNamedToolChoiceParam, "__bool__", None)
-
-    def _patched_named_tool_choice_bool(self) -> bool:
-        if getattr(self, _NO_FORCED_TOOL_CALL, False):
-            return False
-        if original_bool is not None:
-            return original_bool(self)
-        return True
-
-    ChatCompletionNamedToolChoiceParam.__bool__ = _patched_named_tool_choice_bool
-    ChatCompletionNamedToolChoiceParam._vllm_ascend_bool_patched = True
-
-
-_patch_named_tool_choice_bool()
-
 _original_delegating_parse_tool_calls = DelegatingParser._parse_tool_calls
 
 
@@ -133,30 +104,3 @@ def _patched_delegating_parse_tool_calls(
 
 
 DelegatingParser._parse_tool_calls = _patched_delegating_parse_tool_calls
-
-if vllm_version_is("0.22.1"):
-    from vllm.entrypoints.openai.engine.serving import OpenAIServing  # type: ignore[import-not-found]
-
-    _original_parse_tool_calls_from_content = OpenAIServing._parse_tool_calls_from_content
-
-    def _patched_parse_tool_calls_from_content(
-        request,
-        tokenizer,
-        enable_auto_tools: bool,
-        tool_parser_cls,
-        content: str | None = None,
-    ):
-        if content is None and _is_forced_tool_choice(request):
-            _set_no_forced_tool_call(request, True)
-            return [], None
-
-        _set_no_forced_tool_call(request, False)
-        return _original_parse_tool_calls_from_content(
-            request=request,
-            tokenizer=tokenizer,
-            enable_auto_tools=enable_auto_tools,
-            tool_parser_cls=tool_parser_cls,
-            content=content,
-        )
-
-    OpenAIServing._parse_tool_calls_from_content = staticmethod(_patched_parse_tool_calls_from_content)
