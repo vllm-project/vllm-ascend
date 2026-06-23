@@ -4,6 +4,7 @@
 import inspect
 import os
 from collections.abc import Iterable
+from math import lcm
 from typing import Any
 
 import vllm.envs as vllm_envs
@@ -422,6 +423,16 @@ def _manager_uses_eagle(coordinator: KVCacheCoordinator, manager: SingleTypeKVCa
 
 
 def _coordinator_alignment_tokens(coordinator: KVCacheCoordinator) -> int:
+    kv_cache_config = getattr(coordinator, "kv_cache_config", None)
+    kv_cache_groups = getattr(kv_cache_config, "kv_cache_groups", None)
+    if kv_cache_groups:
+        block_sizes = [
+            spec.block_size * max(getattr(spec, "compress_ratio", 1) or 1, 1)
+            for group in kv_cache_groups
+            for spec in _unwrap_specs(group.kv_cache_spec)
+        ]
+        if block_sizes:
+            return lcm(*block_sizes)
     return (
         getattr(coordinator, "scheduler_block_size", None)
         or getattr(coordinator, "lcm_block_size", None)
@@ -478,8 +489,8 @@ def _patch_upstream_coordinators() -> None:
                 *args,
                 **kwargs,
             )
-            scheduler_block_size = getattr(self, "block_size", hash_block_size)
-            self.retention_interval = get_prefix_cache_retention_interval(kv_cache_config, scheduler_block_size)
+            alignment_tokens = _coordinator_alignment_tokens(self)
+            self.retention_interval = get_prefix_cache_retention_interval(kv_cache_config, alignment_tokens)
 
         def hybrid_init(
             self: HybridKVCacheCoordinator,
@@ -507,7 +518,8 @@ def _patch_upstream_coordinators() -> None:
                 *args,
                 **kwargs,
             )
-            self.retention_interval = get_prefix_cache_retention_interval(kv_cache_config, self.lcm_block_size)
+            alignment_tokens = _coordinator_alignment_tokens(self)
+            self.retention_interval = get_prefix_cache_retention_interval(kv_cache_config, alignment_tokens)
 
         KVCacheCoordinator.__init__ = init  # type: ignore[method-assign]
         HybridKVCacheCoordinator.__init__ = hybrid_init  # type: ignore[method-assign]
