@@ -40,7 +40,6 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
-    ACL_FORMAT_FRACTAL_NZ,
     enable_sp,
     maybe_trans_nz,
     npu_stream_switch,
@@ -109,18 +108,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
-        # Therefore, we must cast weights to NZ when fusion is enabled.
-        # Once the underlying dispatch_ffn_combine operator is updated to support
-        # ND format (or other formats), remove this specific 'if' check and the forced
-        # npu_format_cast. At that point, the operator should be able to handle weights
-        # in their native format without explicit casting here.
-        if get_ascend_config().enable_fused_mc2:
-            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        else:
-            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
     def apply(
         self,

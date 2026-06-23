@@ -287,8 +287,21 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType.A3}:
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
-        fused_mc2_enable = get_ascend_config().enable_fused_mc2
+        ascend_config = get_ascend_config()
+        fused_mc2_enable = ascend_config.enable_fused_mc2
         dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
+        # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
+        # Therefore, we must cast weights to NZ when fusion is enabled.
+        # Once the dispatch_ffn_combine operator is updated to support
+        # ND format (or other formats), remove this enabling logic and
+        # always allow fused MC2 regardless of weight_nz_mode.
+        fused_mc2_requires_nz = fused_mc2_enable in {1, 2}
+        weight_nz_enabled = ascend_config.weight_nz_mode != 0
+        if fused_mc2_requires_nz and not weight_nz_enabled:
+            logger.info_once(
+                "Skip FUSED_MC2 because weight_nz_mode=0 disables the NZ weights required by fused MC2 ops."
+            )
+            fused_mc2_enable = 0
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if fused_mc2_enable == 1:
