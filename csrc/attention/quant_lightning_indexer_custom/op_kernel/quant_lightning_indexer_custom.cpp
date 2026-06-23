@@ -35,7 +35,7 @@ using namespace optiling::detail;
     } while (0)
 
 template <int DT_Q, int DT_K, int DT_OUT, int PAGE_ATTENTION, int Q_LAYOUT_T, int K_LAYOUT_T>
-__global__ __aicore__ void quant_lightning_indexer(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights,
+__global__ __aicore__ void quant_lightning_indexer_custom(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights,
                                                    __gm__ uint8_t *queryScale, __gm__ uint8_t *keyScale,
                                                    __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengthsK,
                                                    __gm__ uint8_t *blocktable, __gm__ uint8_t *metadata,

@@ -85,7 +85,7 @@ ge::graphStatus QLIInfoParser::CheckRequiredParaExistence() const
 ge::graphStatus QLIInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE("QuantLightningIndexer", "opName got from TilingContext is nullptr");
+        OP_LOGE("QuantLightningIndexerCustom", "opName got from TilingContext is nullptr");
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -849,8 +849,8 @@ static ge::graphStatus TilingPrepareForQuantLightningIndexer(gert::TilingParseCo
     return ge::GRAPH_SUCCESS;
 }
 
-// --------------------------QuantLightningIndexerTiling类成员函数定义-----------------------
-ge::graphStatus QuantLightningIndexerTiling::DoTiling(QLITilingInfo *tilingInfo)
+// --------------------------QuantLightningIndexerCustomTiling类成员函数定义-----------------------
+ge::graphStatus QuantLightningIndexerCustomTiling::DoTiling(QLITilingInfo *tilingInfo)
 {
     // -------------set blockdim-----------------
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(tilingInfo->platformInfo);
@@ -929,19 +929,19 @@ ge::graphStatus QuantLightningIndexerTiling::DoTiling(QLITilingInfo *tilingInfo)
 // --------------------------Tiling函数定义---------------------------
 ge::graphStatus TilingForQuantLightningIndexer(gert::TilingContext *context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("QuantLightningIndexer", "Tiling context is null."),
+    OP_CHECK_IF(context == nullptr, OP_LOGE("QuantLightningIndexerCustom", "Tiling context is null."),
                return ge::GRAPH_FAILED);
     QLITilingInfo QLIInfo;
     QLIInfoParser QLIInfoParser(context);
     if (QLIInfoParser.ParseAndCheck(QLIInfo) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    QuantLightningIndexerTiling QLITiling(context);
+    QuantLightningIndexerCustomTiling QLITiling(context);
     return QLITiling.DoTiling(&QLIInfo);
 }
 
 // --------------------------Tiling及函数TilingPrepare函数注册--------
-IMPL_OP_OPTILING(QuantLightningIndexer)
+IMPL_OP_OPTILING(QuantLightningIndexerCustom)
     .Tiling(TilingForQuantLightningIndexer)
     .TilingParse<QLICompileInfo>(TilingPrepareForQuantLightningIndexer);
 
