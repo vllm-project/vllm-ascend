@@ -182,9 +182,7 @@ jobs:
           source /usr/local/Ascend/nnal/atb/set_env.sh
           arch=$(uname -i)
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${arch}-linux/devlib
-          if [ "${{ matrix.os }}" = "openeuler" ]; then
-            export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${arch}-openEuler-linux
-          fi
+          
           if [ "${{ runner.arch }}" = "X64" ]; then
             export UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL} https://download.pytorch.org/whl/cpu/"
           fi
