@@ -146,8 +146,8 @@ def build_fused_experts_input(
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
     swiglu_limit: float = 0.0,
-    swiglu_alpha: float = 1.702,
-    swiglu_beta: float = 1.0,
+    swiglu_alpha: float = 1.0,
+    swiglu_beta: float = 0.0,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
