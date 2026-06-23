@@ -4208,9 +4208,7 @@ class TestEagleProposerSetInputsFirstPass:
             assert_attr_equal(attrition, expected_cad, out_cad)
 
 
-def _build_split_pcp_input_hybrid_inputs(
-    req_scheduled_tokens: dict[str, int], hidden_size: int
-):
+def _build_split_pcp_input_hybrid_inputs(req_scheduled_tokens: dict[str, int], hidden_size: int):
     """Build input_ids and target_hidden_states where row i is filled with i.
 
     Using the row index as the value makes it easy to assert which original
