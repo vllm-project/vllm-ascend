@@ -1255,9 +1255,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                         if is_hidden_layer(layer):
                             reach_layer_for_shard_weight_series(layer)
                 elif full_gather_o_proj_enabled:
-                    _, o_proj_full_handle = all_gather_async(
-                        self.o_proj_tp_weight, get_tp_group(), output=AscendSFAImpl.o_proj_full_pool
-                    )
+                    pool, o_proj_full_handle = all_gather_async(self.o_proj_tp_weight, get_tp_group())
+                    AscendSFAImpl.o_proj_full_pool = pool
 
                 if kv_cache is not None:
                     assert fused_kv_no_split is not None
