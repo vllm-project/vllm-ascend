@@ -166,29 +166,26 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             global_redundant_expert_num=global_redundant_expert_num,
             num_shared_experts=num_shared_experts,
         )
-        if topk_weights is None or topk_ids is None:
-            topk_weights, topk_ids = select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                top_k=top_k,
-                use_grouped_topk=use_grouped_topk,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
-                num_experts=num_logical_experts,
-                tid2eid=self.tid2eid,
-                input_ids=input_ids,
-            )
-        else:
-            # vLLM PR #41184's RoutedExperts.forward_modular precomputes routing
-            # and passes topk_weights/topk_ids into quant_method.apply. Reuse
-            # those tensors instead of reselecting experts in the unquantized path.
-            topk_weights = topk_weights.to(device=x.device)
-            topk_ids = topk_ids.to(device=x.device)
+        # vLLM PR #41184 may include topk_weights/topk_ids in the
+        # quant_method.apply interface. Ascend keeps routing in its own NPU
+        # path, so these arguments are accepted for compatibility and ignored.
+        del topk_weights, topk_ids
+        topk_weights, topk_ids = select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            top_k=top_k,
+            use_grouped_topk=use_grouped_topk,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            num_experts=num_logical_experts,
+            tid2eid=self.tid2eid,
+            input_ids=input_ids,
+        )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = getattr(layer, "_ascend_routed_experts_capturer", None)
             if capturer is not None:

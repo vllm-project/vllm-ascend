@@ -443,6 +443,8 @@ class TestAscendUnquantizedFusedMoEMethod:
         router_logits = torch.randn(2, 4)
         topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4]], dtype=torch.float32)
         topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
+        ignored_topk_weights = torch.tensor([[0.9, 0.1], [0.8, 0.2]], dtype=torch.float32)
+        ignored_topk_ids = torch.tensor([[3, 2], [2, 3]], dtype=torch.int64)
         moe_comm_method = MagicMock()
         moe_comm_method.fused_experts.return_value = torch.ones_like(hidden_states)
         monkeypatch.setattr(
@@ -466,6 +468,8 @@ class TestAscendUnquantizedFusedMoEMethod:
             activation="gelu",
             pertoken_scale=torch.ones(2),
             mc2_mask=torch.tensor([True, False]),
+            topk_weights=ignored_topk_weights,
+            topk_ids=ignored_topk_ids,
         )
 
         torch.testing.assert_close(result, torch.ones_like(hidden_states))

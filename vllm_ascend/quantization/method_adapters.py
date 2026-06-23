@@ -285,10 +285,10 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor | None = None,
         topk_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # vLLM PR #41184 passes precomputed routing tensors from
-        # RoutedExperts.forward_modular into quant_method.apply. Ascend's
-        # quantized schemes still select experts inside their own apply path, so
-        # the adapter accepts the keywords but does not forward them.
+        # vLLM PR #41184 may pass topk_weights/topk_ids into
+        # quant_method.apply. Ascend's quantized schemes still select experts
+        # inside their own NPU path, so the adapter accepts the keywords for
+        # interface compatibility but does not forward them.
         del topk_weights, topk_ids
         return self.quant_method.apply(
             layer=layer,

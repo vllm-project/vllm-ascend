@@ -192,10 +192,10 @@ class TestAscendFusedMoEMethod(TestBase):
         self.mock_scheme.apply.assert_called_once()
 
     def test_apply_accepts_routing_kwargs_without_forwarding(self):
-        # vLLM PR #41184 passes precomputed topk_weights/topk_ids into
-        # quant_method.apply from RoutedExperts.forward_modular. The adapter
-        # must accept them but not forward them, because Ascend's quantized
-        # schemes still select experts inside their own apply path.
+        # vLLM PR #41184 may pass topk_weights/topk_ids into quant_method.apply.
+        # The adapter accepts them for interface compatibility but does not
+        # forward them, because Ascend's quantized schemes still select experts
+        # inside their own NPU path.
         layer = torch.nn.Module()
         x = torch.randn(8, 64)
         router_logits = torch.randn(8, 64)
