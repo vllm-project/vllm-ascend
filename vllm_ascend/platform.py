@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import math
 import os
-import subprocess
 from importlib import import_module, util
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -73,34 +72,6 @@ else:
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_CAPTURE_SIZES_FOR_950 = 4
-
-
-def _get_npu_smi_field(lines: list[str], key: str) -> str | None:
-    for line in lines:
-        normalized = " ".join(line.split())
-        if normalized.startswith(f"{key} :"):
-            return normalized.split(":", 1)[1].strip()
-    return None
-
-
-def _get_npu_smi_hbm_capacity_mb(device_id: int) -> int | None:
-    try:
-        output = subprocess.check_output(
-            ["npu-smi", "info", "-t", "memory", "-i", str(device_id)],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return None
-
-    value = _get_npu_smi_field(output.splitlines(), "HBM Capacity(MB)")
-    if value is None:
-        return None
-
-    try:
-        return int(value)
-    except ValueError:
-        return None
 
 
 def config_deprecated_logging():
@@ -301,17 +272,11 @@ class NPUPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         """
-        Return total memory of the device in bytes.
+        Get the total memory of the NPU device in bytes.
+        DO NOT IMPLEMENT: Implementing it calls get_device_name() in advance and initializes torch_npu too early.
+        torch_npu allows global initialization only once; duplicate initialization causes errors.
         """
-        hbm_capacity_mb = _get_npu_smi_hbm_capacity_mb(device_id)
-        if hbm_capacity_mb is not None:
-            return hbm_capacity_mb * 1024 * 1024
-
-        device_props = torch.npu.get_device_properties(device_id)
-        total_memory = getattr(device_props, "total_memory", None)
-        if total_memory is not None:
-            return int(total_memory)
-        raise RuntimeError(f"Unable to determine total memory for device {device_id}.")
+        raise NotImplementedError
 
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
