@@ -49,14 +49,25 @@
 #   Remove this patch when upstream vllm relaxes the Literal type to str
 #   or provides an extension point for out-of-tree backends.
 
+from typing import TYPE_CHECKING
+
 from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
 
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLWeightTransferEngine,
 )
-from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
-    NPUIPCWeightTransferEngine,
-)
+
+if TYPE_CHECKING:
+    from vllm.distributed.weight_transfer.base import WeightTransferEngine
+
+
+def _load_npu_ipc_engine() -> "type[WeightTransferEngine]":
+    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+        NPUIPCWeightTransferEngine,
+    )
+
+    return NPUIPCWeightTransferEngine
+
 
 WeightTransferEngineFactory._registry["nccl"] = lambda: HCCLWeightTransferEngine
-WeightTransferEngineFactory._registry["ipc"] = lambda: NPUIPCWeightTransferEngine
+WeightTransferEngineFactory._registry["ipc"] = _load_npu_ipc_engine

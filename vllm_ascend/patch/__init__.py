@@ -410,6 +410,29 @@
 #    Future Plan:
 #       Remove this patch when upstream vLLM relaxes the Literal type to str or
 #       provides an extension point for out-of-tree weight transfer backends.
+#   2. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["ipc"]`
+#    Why:
+#       The "ipc" backend must resolve to NPUIPCWeightTransferEngine on Ascend NPU.
+#       However, this patch runs during global plugin patching - extremely early in
+#       startup, before any weight transfer backend is selected. Importing the IPC
+#       engine eagerly pulls in vllm.distributed.weight_transfer.ipc_engine, which
+#       does `import ray` at module top level. Since ray is an optional dependency,
+#       its absence aborts the whole vllm_ascend plugin load and crashes every
+#       `vllm serve` invocation - even workloads that never use weight transfer.
+#    How：
+#       Register a lazy loader function (instead of an eager import) that imports
+#       and returns NPUIPCWeightTransferEngine only when create_engine() is invoked
+#       for the "ipc" backend. This matches the factory's zero-arg-callable
+#       lazy-loading contract, so the ray-importing module is loaded only when ipc
+#       is actually requested. (HCCL keeps its eager import - it never imports ray.)
+#    Related PR (if no, explain why):
+#       No.  The eager `import ray` lives in upstream vLLM's ipc_engine module; the
+#       lazy loader is a local workaround until upstream defers that import.
+#    Future Plan:
+#       Remove this workaround once upstream vLLM stops importing ray at module top
+#       level in vllm.distributed.weight_transfer.ipc_engine (e.g. defers it into
+#       the code path that actually needs ray), so importing the IPC engine no
+#       longer requires the optional ray dependency.
 #
 # ** 15. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
