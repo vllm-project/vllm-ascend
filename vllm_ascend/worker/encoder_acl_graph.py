@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import torch
@@ -138,15 +139,96 @@ def set_encoder_forward_context(
 
 
 # ---------------------------------------------------------------------------
-# Replay-time FIA task updates
+# Shared FIA actual_seq_lengths helpers (eager / capture / replay)
 # ---------------------------------------------------------------------------
 
 
-def _pad_actual_seq_lengths_for_fia(actual_seq_lengths: list[int], num_tokens: int) -> list[int]:
-    """TND FIA requires ``query.shape[0] == actual_seq_lengths[-1]``."""
-    if not actual_seq_lengths or actual_seq_lengths[-1] != num_tokens:
-        actual_seq_lengths.append(num_tokens)
-    return actual_seq_lengths
+def _align_fia_endpoints_to_num_tokens(endpoints: list[int], num_tokens: int) -> list[int]:
+    """Common post-process for both length formats before FIA ``actual_seq_lengths``.
+
+    CUMULATIVE and PER_SEQUENCE helpers only perform format conversion; this function
+    is the sole place that trims padding, clamps to the token budget, enforces
+    monotonicity, and ensures the terminal endpoint equals ``num_tokens``.
+    """
+    # 1. Trim trailing zeros (prefix-sum budget padding).
+    trimmed = list(endpoints)
+    while trimmed and trimmed[-1] == 0:
+        trimmed.pop()
+    endpoints = trimmed
+
+    # 2. Empty token budget.
+    if num_tokens <= 0:
+        return [0]
+
+    # 3. Filter non-positive, clamp at num_tokens, enforce strict monotonicity.
+    filtered: list[int] = []
+    for end in endpoints:
+        if end <= 0:
+            continue
+        if end > num_tokens:
+            break
+        if not filtered or end > filtered[-1]:
+            filtered.append(end)
+
+    # 4. Ensure terminal endpoint equals num_tokens.
+    if not filtered or filtered[-1] != num_tokens:
+        filtered.append(num_tokens)
+    return filtered
+
+
+def _cumulative_buffer_to_fia_endpoints(buffer: torch.Tensor) -> list[int]:
+    """Convert a cumulative-length buffer to raw FIA endpoint list (format only).
+
+    Input is ``cu_seqlens`` / ``cu_window_seqlens`` style: leading 0 is a format
+    marker, not a sequence boundary. Output may contain trailing padding zeros and
+    need not end at the token budget — callers run ``_align_fia_endpoints_to_num_tokens``.
+    """
+    flat = buffer.detach().cpu().view(-1).tolist()
+    return flat[1:] if flat else flat
+
+
+def _per_sequence_lengths_to_fia_endpoints(buffer: torch.Tensor) -> list[int]:
+    """Convert a per-sequence length buffer to raw cumulative endpoints (format only).
+
+    Zero slots denote unused batch padding and are excluded before cumsum. Output
+    need not end at the token budget — callers run ``_align_fia_endpoints_to_num_tokens``.
+    """
+    valid = buffer.detach().cpu().view(-1)
+    valid = valid[valid != 0]
+    return valid.cumsum(dim=0).to(torch.int64).tolist()
+
+
+class FIALengthFormat(Enum):
+    CUMULATIVE = "cumulative"
+    PER_SEQUENCE = "per_sequence"
+
+
+@dataclass(frozen=True)
+class FIAActualSeqLengthsInput:
+    """Host-side encoder metadata buffer and its layout format for FIA ``actual_seq_lengths``."""
+
+    format: FIALengthFormat
+    buffer: torch.Tensor
+
+
+def build_fia_actual_seq_lengths(
+    *,
+    num_query_tokens: int,
+    length_input: FIAActualSeqLengthsInput,
+) -> tuple[list[int], list[int]]:
+    """Build aligned FIA ``actual_seq_lengths`` for eager, capture, and replay."""
+    if length_input.format is FIALengthFormat.PER_SEQUENCE:
+        actual = _per_sequence_lengths_to_fia_endpoints(length_input.buffer)
+    else:
+        actual = _cumulative_buffer_to_fia_endpoints(length_input.buffer)
+
+    aligned = _align_fia_endpoints_to_num_tokens(actual, num_query_tokens)
+    return aligned, aligned
+
+
+# ---------------------------------------------------------------------------
+# Replay-time FIA task updates
+# ---------------------------------------------------------------------------
 
 
 def _maybe_compute_actual_seq_lengths(
@@ -160,23 +242,36 @@ def _maybe_compute_actual_seq_lengths(
     if uses_seq_len_host:
         if context.sequence_lengths_cpu is None:
             raise RuntimeError("context.sequence_lengths_cpu is None during encoder replay.")
-        actual = context.sequence_lengths_cpu.cumsum(0).to(torch.int64).tolist()
+        length_input = FIAActualSeqLengthsInput(
+            FIALengthFormat.PER_SEQUENCE,
+            buffer=context.sequence_lengths_cpu,
+        )
     elif fullatt_block_indexes is not None:
         if vit_layer_idx in fullatt_block_indexes:
             if context.cu_seqlens_cpu is None:
                 raise RuntimeError("context.cu_seqlens_cpu is None during encoder replay.")
-            actual = context.cu_seqlens_cpu[1:].to(torch.int64).tolist()
+            length_input = FIAActualSeqLengthsInput(
+                FIALengthFormat.CUMULATIVE,
+                buffer=context.cu_seqlens_cpu,
+            )
         else:
             if context.cu_window_seqlens_cpu is None:
                 raise RuntimeError("context.cu_window_seqlens_cpu is None during encoder replay.")
-            actual = context.cu_window_seqlens_cpu[1:].to(torch.int64).tolist()
+            length_input = FIAActualSeqLengthsInput(
+                FIALengthFormat.CUMULATIVE,
+                buffer=context.cu_window_seqlens_cpu,
+            )
     else:
         if context.cu_seqlens_cpu is None:
             raise RuntimeError("context.cu_seqlens_cpu is None during encoder replay.")
-        actual = context.cu_seqlens_cpu[1:].to(torch.int64).tolist()
-
-    aligned = _pad_actual_seq_lengths_for_fia(actual, num_query_tokens)
-    return aligned, aligned
+        length_input = FIAActualSeqLengthsInput(
+            FIALengthFormat.CUMULATIVE,
+            buffer=context.cu_seqlens_cpu,
+        )
+    return build_fia_actual_seq_lengths(
+        num_query_tokens=num_query_tokens,
+        length_input=length_input,
+    )
 
 
 def update_encoder_graph_params(
