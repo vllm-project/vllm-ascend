@@ -14,37 +14,10 @@ from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
-    get_attn_metadata_key,
-    split_optional_workspace_and_layer_name,
-    use_max_workspace_for_fia_graph,
 )
 
 
 class TestAttentionGraphHelpers(TestBase):
-    def test_metadata_key_prefers_existing_layer_name(self):
-        attn_metadata = {
-            "fallback": MagicMock(),
-            "model.layers.1.self_attn": MagicMock(),
-        }
-
-        result = get_attn_metadata_key(attn_metadata, "fallback", "model.layers.1.self_attn")
-
-        self.assertEqual(result, "model.layers.1.self_attn")
-
-    def test_metadata_key_uses_fallback_when_layer_name_missing(self):
-        attn_metadata = {"fallback": MagicMock()}
-
-        result = get_attn_metadata_key(attn_metadata, "fallback", "model.layers.1.self_attn")
-
-        self.assertEqual(result, "fallback")
-
-    def test_split_optional_workspace_and_layer_name(self):
-        workspace = MagicMock()
-
-        result = split_optional_workspace_and_layer_name((workspace, "model.layers.1.self_attn"))
-
-        self.assertEqual(result, (workspace, "model.layers.1.self_attn"))
-
     def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
         graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
         new_workspace = torch.empty(8)
@@ -62,18 +35,6 @@ class TestAttentionGraphHelpers(TestBase):
 
         self.assertEqual(result.numel(), 8)
         self.assertEqual(graph_params.workspaces[1].numel(), 8)
-
-    def test_use_max_workspace_for_fia_graph_checks_text_config_model_type(self):
-        vllm_config = SimpleNamespace(
-            model_config=SimpleNamespace(
-                hf_config=SimpleNamespace(
-                    model_type="gemma4_mm", text_config=SimpleNamespace(model_type="gemma4_text")
-                ),
-                hf_text_config=SimpleNamespace(model_type="gemma4_text"),
-            )
-        )
-
-        self.assertTrue(use_max_workspace_for_fia_graph(vllm_config))
 
 
 class TestAscendAttentionBackend(TestBase):

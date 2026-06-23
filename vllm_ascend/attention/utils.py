@@ -13,63 +13,8 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_de
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 
-def expand_attn_keys_for_graph_params(attn_keys: list[str], graph_param_count: int) -> list[str]:
-    # Graph replay iterates over captured ops, whose count can be larger than
-    # the current metadata key count. Repeat keys to keep the zip loop aligned.
-    if len(attn_keys) == 0:
-        return []
-    return [attn_keys[index % len(attn_keys)] for index in range(graph_param_count)]
-
-
-def get_attn_metadata_key(attn_metadata: dict, fallback_key: str, layer_name: str | None) -> str:
-    # Prefer the layer name recorded during graph capture. The fallback keeps
-    # compatibility with params captured before layer names were appended.
-    if layer_name is not None and layer_name in attn_metadata:
-        return layer_name
-    return fallback_key
-
-
-def split_optional_workspace_and_layer_name(optional_items: tuple) -> tuple[torch.Tensor | None, str | None]:
-    # Graph param tuples are append-only for backward compatibility. Older
-    # entries may contain a workspace only; newer entries may append layer_name.
-    if not optional_items:
-        return None, None
-
-    layer_name = None
-    if isinstance(optional_items[-1], str) or optional_items[-1] is None:
-        layer_name = optional_items[-1]
-        optional_items = optional_items[:-1]
-
-    workspace = optional_items[0] if optional_items else None
-    return workspace, layer_name
-
-
-def use_max_workspace_for_fia_graph(vllm_config: VllmConfig) -> bool:
-    # Gemma4 can mix attention variants with different FIA workspace sizes in
-    # the same graph bucket, so graph capture must cache the largest workspace.
-    # Multimodal configs can expose the text model type from different config
-    # objects depending on the vLLM/HF wrapper in use.
-    model_config = vllm_config.model_config
-    hf_config = getattr(model_config, "hf_config", None)
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    model_types = [
-        getattr(hf_config, "model_type", None),
-        getattr(hf_text_config, "model_type", None),
-    ]
-    text_config = getattr(hf_config, "text_config", None)
-    if text_config is not None:
-        model_types.append(getattr(text_config, "model_type", None))
-    return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
-
-
-def workspace_byte_size(workspace: torch.Tensor | None) -> int:
-    if workspace is None:
-        return 0
-    return workspace.numel() * workspace.element_size()
-
-
 def cache_graph_workspace(
-    graph_params: Any,
+    graph_params,
     num_tokens: int,
     new_workspace: torch.Tensor,
     *,
@@ -80,7 +25,10 @@ def cache_graph_workspace(
     # can require different FIA workspace sizes under the same num_tokens.
     current_workspace = graph_params.workspaces.get(num_tokens)
     if use_max_workspace:
-        if current_workspace is None or workspace_byte_size(new_workspace) > workspace_byte_size(current_workspace):
+        if current_workspace is None or (
+            new_workspace.numel() * new_workspace.element_size()
+            > current_workspace.numel() * current_workspace.element_size()
+        ):
             graph_params.workspaces[num_tokens] = new_workspace
     elif current_workspace is None:
         graph_params.workspaces[num_tokens] = new_workspace

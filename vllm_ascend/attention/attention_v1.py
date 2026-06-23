@@ -51,12 +51,8 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
     enable_cp,
-    expand_attn_keys_for_graph_params,
-    get_attn_metadata_key,
     notify_kv_cache_written,
     split_decodes_and_prefills,
-    split_optional_workspace_and_layer_name,
-    use_max_workspace_for_fia_graph,
     using_paged_attention,
 )
 from vllm_ascend.compilation.acl_graph import (
@@ -400,6 +396,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
+        model_config = self.vllm_config.model_config
+        hf_config = getattr(model_config, "hf_config", None)
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        text_config = getattr(hf_config, "text_config", None)
+        model_types = (
+            getattr(hf_config, "model_type", None),
+            getattr(hf_text_config, "model_type", None),
+            getattr(text_config, "model_type", None),
+        )
+        # Gemma4 can mix attention layer shapes under the same graph bucket, so
+        # its FIA graph replay needs the largest captured workspace.
+        self._use_max_workspace_for_fia_graph = any(
+            model_type in {"gemma4", "gemma4_text"} for model_type in model_types
+        )
         self.sinks = sinks
         self.layerIndex = 0
         self.enable_hamming_sparse = is_enable_hamming_sparse()
@@ -499,21 +509,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_layers = len(attn_keys)
             if num_layers == 0:
                 return
+            captured_attn_params = graph_params.attn_params[num_tokens]
+            handles = graph_params.handles[num_tokens]
+            events = graph_params.events[num_tokens]
+            graph_param_count = len(captured_attn_params)
+            workspace = graph_params.workspaces.get(num_tokens)
             if _EXTRA_CTX.is_draft_model:
-                attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+                attn_keys = attn_keys * (graph_param_count // num_layers)
             else:
                 # One graph size can contain captured FIA ops from all layers.
                 # Repeat attn keys to match the captured op count, then use the
                 # stored layer name in each op param to resolve the exact
                 # metadata entry during replay.
-                attn_keys = expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
+                attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     attn_keys,
-                    graph_params.attn_params[num_tokens],
-                    graph_params.handles[num_tokens],
-                    graph_params.events[num_tokens],
+                    captured_attn_params,
+                    handles,
+                    events,
                 ):
                     (
                         query,
@@ -530,13 +545,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         sinks,
                         attn_output,
                         softmax_lse,
-                        *maybe_workspace_and_layer_name,
+                        layer_name,
                     ) = param
-                    workspace, layer_name = split_optional_workspace_and_layer_name(
-                        tuple(maybe_workspace_and_layer_name)
-                    )
-                    if workspace is None:
-                        workspace = graph_params.workspaces.get(num_tokens)
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -544,7 +554,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                         attn_count = attn_count + 1
                     else:
-                        metadata_key = get_attn_metadata_key(attn_metadata, key, layer_name)
+                        metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
                         seq_lens = attn_metadata[metadata_key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
 
@@ -594,20 +604,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_layers = len(attn_keys)
             if num_layers == 0:
                 return
+            captured_attn_params = graph_params.attn_params[num_tokens]
+            handles = graph_params.handles[num_tokens]
+            events = graph_params.events[num_tokens]
+            graph_param_count = len(captured_attn_params)
+            workspace = graph_params.workspaces.get(num_tokens)
             if _EXTRA_CTX.is_draft_model:
-                attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+                attn_keys = attn_keys * (graph_param_count // num_layers)
             else:
                 # Keep the replay loop length aligned with captured FIA ops;
                 # layer-specific metadata lookup below prevents global/sliding
                 # window layers from accidentally sharing the same metadata.
-                attn_keys = expand_attn_keys_for_graph_params(attn_keys, len(graph_params.attn_params[num_tokens]))
+                attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     attn_keys,
-                    graph_params.attn_params[num_tokens],
-                    graph_params.handles[num_tokens],
-                    graph_params.events[num_tokens],
+                    captured_attn_params,
+                    handles,
+                    events,
                 ):
                     (
                         query,
@@ -630,13 +645,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         c8_k_aq_offset,
                         c8_v_aq_scale,
                         c8_v_aq_offset,
-                        *maybe_workspace_and_layer_name,
+                        layer_name,
                     ) = param
-                    workspace, layer_name = split_optional_workspace_and_layer_name(
-                        tuple(maybe_workspace_and_layer_name)
-                    )
-                    if workspace is None:
-                        workspace = graph_params.workspaces.get(num_tokens)
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -647,7 +657,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         if not attn_metadata[draft_step][key].causal:
                             sparse_mode = 0
                     else:
-                        metadata_key = get_attn_metadata_key(attn_metadata, key, layer_name)
+                        metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
                         seq_lens = attn_metadata[metadata_key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
                         # NOTE:
@@ -758,7 +768,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output = output.unsqueeze(2)
             attn_mask = None
             sparse_mode = 0
-        use_max_workspace = use_max_workspace_for_fia_graph(self.vllm_config)
+        use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = graph_params.workspaces.get(num_tokens)
         if workspace is None or use_max_workspace:
             # Gemma4 mixes attention layer shapes under the same graph size.
@@ -877,7 +887,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
-        use_max_workspace = use_max_workspace_for_fia_graph(self.vllm_config)
+        use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = graph_params.workspaces.get(num_tokens)
         if workspace is None or use_max_workspace:
             # See full_graph_fia: Gemma4 needs the max workspace across layer
