@@ -59,7 +59,7 @@ representative at an online or offline/IRL event.
 
 ## Enforcement
 
-If you experience any abusive, harassing, or otherwise unacceptable behavior, please feel free to report it to us via [Ascend opensource assistant](docs/source/community/images/ascend_assistant.png) or contact@ascend.osinfra.cn.
+If you experience any abusive, harassing, or otherwise unacceptable behavior, please feel free to report it to us via [Ascend opensource assistant](docs/source/community/images/ascend_assistant.png) or <contact@ascend.osinfra.cn>.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the
