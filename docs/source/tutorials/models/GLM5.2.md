@@ -324,7 +324,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --max-num-seqs 16 \
 --data-parallel-size 2 \
 --data-parallel-size-local 1 \
---data-parallel-address $local_ip \
+--data-parallel-address $node0_ip \
 --data-parallel-rpc-port 13389 \
 --tensor-parallel-size 8 \
 --enable-expert-parallel \
