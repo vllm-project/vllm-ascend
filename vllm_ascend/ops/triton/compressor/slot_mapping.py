@@ -28,6 +28,42 @@ def _count_compressed_tokens_kernel(
 
 
 @triton.jit
+def _build_single_req_compressed_slot_mapping_kernel(
+    max_output_tokens,
+    query_start_loc,
+    positions,
+    block_table,
+    block_table_stride,
+    block_size,
+    slot_mapping,
+    COMPRESS_RATIO: tl.constexpr,
+    PAD_ID: tl.constexpr,
+    BLOCK_SIZE_: tl.constexpr,
+):
+    block_pid = tl.program_id(0)
+    offsets = block_pid * BLOCK_SIZE_ + tl.arange(0, BLOCK_SIZE_)
+    output_mask = offsets < max_output_tokens
+
+    start = tl.load(query_start_loc)
+    end = tl.load(query_start_loc + 1)
+    has_tokens = start < end
+    first_pos = tl.load(positions + start, mask=has_tokens, other=0).to(tl.int64)
+    last_pos = tl.load(positions + end - 1, mask=has_tokens, other=0).to(tl.int64)
+    first_window = first_pos // COMPRESS_RATIO
+    compressed_count = (last_pos + 1) // COMPRESS_RATIO - first_window
+    compressed_count = tl.where(has_tokens, compressed_count, 0)
+
+    valid_out = output_mask & (offsets < compressed_count)
+    compressed_cache_pos = first_window + offsets
+    block_idx = compressed_cache_pos // block_size
+    block_offset = compressed_cache_pos - block_idx * block_size
+    block_number = tl.load(block_table + block_idx, mask=valid_out, other=0)
+    slot_id = block_number * block_size + block_offset
+    slot_id = tl.where(valid_out, slot_id, PAD_ID)
+    tl.store(slot_mapping + offsets, slot_id, mask=output_mask)
+
+
+@triton.jit
 def _build_compressed_slot_mapping_kernel(
     max_output_tokens,
     query_start_loc,
@@ -56,18 +92,12 @@ def _build_compressed_slot_mapping_kernel(
     first_pos = tl.load(positions + start, mask=start < end, other=0).to(tl.int64)
     first_window = first_pos // COMPRESS_RATIO
     req_prefix = tl.load(compressed_query_start_loc + req_idx).to(tl.int64)
+    req_end = tl.load(compressed_query_start_loc + req_idx + 1).to(tl.int64)
 
-    for row_start in range(start, end, BLOCK_SIZE_):
+    for row_start in range(req_prefix, req_end, BLOCK_SIZE_):
         offsets = row_start + tl.arange(0, BLOCK_SIZE_)
-        mask = offsets < end
-        pos = tl.load(positions + offsets, mask=mask, other=0).to(tl.int64)
-        pos_plus_one = pos + 1
-        window = pos_plus_one // COMPRESS_RATIO
-        is_boundary = (window * COMPRESS_RATIO == pos_plus_one) & mask
-        out_offsets = req_prefix + window - first_window - 1
-        valid_out = is_boundary & (out_offsets < max_output_tokens)
-
-        compressed_cache_pos = pos // COMPRESS_RATIO
+        valid_out = offsets < req_end
+        compressed_cache_pos = first_window + offsets - req_prefix
         block_idx = compressed_cache_pos // block_size
         block_offset = compressed_cache_pos - block_idx * block_size
         block_number = tl.load(
@@ -76,9 +106,9 @@ def _build_compressed_slot_mapping_kernel(
             other=0,
         )
         tl.store(
-            slot_mapping + out_offsets,
+            slot_mapping + offsets,
             block_number * block_size + block_offset,
-            mask=valid_out,
+            mask=valid_out & (offsets < max_output_tokens),
         )
 
 
@@ -97,6 +127,22 @@ def build_compressed_slot_mapping(
 ) -> None:
     """Build the original compact compressor slot_mapping without host sync."""
     if num_reqs == 0 or positions.shape[0] == 0:
+        return
+
+    if num_reqs == 1:
+        fill_blocks = triton.cdiv(max_output_tokens, BLOCK_SIZE)
+        _build_single_req_compressed_slot_mapping_kernel[(fill_blocks,)](
+            max_output_tokens,
+            query_start_loc,
+            positions,
+            block_table,
+            block_table.stride(0),
+            block_size,
+            slot_mapping,
+            COMPRESS_RATIO=compress_ratio,
+            PAD_ID=PAD_SLOT_ID,
+            BLOCK_SIZE_=BLOCK_SIZE,
+        )
         return
 
     compressed_counts = compressed_counts_buffer[:num_reqs]
