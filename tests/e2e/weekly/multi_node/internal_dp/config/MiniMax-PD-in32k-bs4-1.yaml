@@ -3,13 +3,10 @@ model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
 num_nodes: 3
 npu_per_node: 16
 
-#special_dependencies:
-#  transformers: "5.2.0"
-
 routing:
   type: "disaggregated_prefill"
   groups:
-    prefiller: [0,]
+    prefiller: [0]
     decoder: [1, 2]
 
 config:
@@ -47,17 +44,6 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_USE_MODELSCOPE: "true"
-#  OMP_PROC_BIND: "false"
-#  VLLM_TORCH_PROFILER_WITH_STACK: "0"
-#  ASCEND_AGGREGATE_ENABLE: "1"
-#  ASCEND_TRANSPORT_PRINT: "1"
-#  ACL_OP_INIT_MODE: "1"
-#  ASCEND_A3_ENABLE: "1"
-#  VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
-#  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
-#  HCCL_CONNECT_TIMEOUT: "1200"
-#  HCCL_INTRA_PCIE_ENABLE: "1"
-#  HCCL_INTRA_ROCE_ENABLE: "0"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
 
 
