@@ -4,13 +4,11 @@ from typing import Any
 import torch
 from typing_extensions import override
 from vllm.config import VllmConfig
-from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     GPULoadStoreSpec,
     LoadStoreSpec,
-    OffloadingManager,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -24,8 +22,16 @@ from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandlers
 def _set_cpu_bytes_from_legacy_num_blocks(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
-    alignment: int,
 ) -> None:
+    """Translate the Ascend-only ``num_cpu_blocks`` knob into the upstream
+    ``cpu_bytes_to_use`` knob expected by ``CPUOffloadingSpec``.
+
+    Upstream specs derive the number of offloaded blocks from a byte budget
+    (``cpu_bytes_to_use``). To stay backward compatible with deployments that
+    configure ``num_cpu_blocks`` directly, compute the equivalent byte budget
+    using the exact same per-block sizing the upstream spec uses, so that
+    ``CPUOffloadingSpec`` recovers ``num_blocks == num_cpu_blocks``.
+    """
     extra_config: dict[str, Any] = (
         vllm_config.kv_transfer_config.kv_connector_extra_config  # type: ignore[union-attr]
     )
@@ -65,9 +71,7 @@ def _set_cpu_bytes_from_legacy_num_blocks(
     kv_bytes_per_block = (
         total_gpu_kv_bytes // kv_cache_config.num_blocks
     ) * world_size
-    kv_bytes_per_offloaded_block = round_up(
-        kv_bytes_per_block * block_size_factor, alignment
-    )
+    kv_bytes_per_offloaded_block = kv_bytes_per_block * block_size_factor
     extra_config["cpu_bytes_to_use"] = int(num_cpu_blocks) * kv_bytes_per_offloaded_block
 
 
@@ -93,7 +97,7 @@ class NPUOffloadingSpec(_NPUHandlersMixin, _CPUOffloadingSpec):
     """Ascend NPU implementation of vLLM's CPU KV offloading spec."""
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        _set_cpu_bytes_from_legacy_num_blocks(vllm_config, kv_cache_config, self.BLOCK_SIZE_ALIGNMENT)
+        _set_cpu_bytes_from_legacy_num_blocks(vllm_config, kv_cache_config)
         super().__init__(vllm_config, kv_cache_config)
 
     @override
@@ -109,21 +113,24 @@ class NPUTieringOffloadingSpec(_NPUHandlersMixin, _TieringOffloadingSpec):
     """Ascend NPU implementation of vLLM's multi-tier KV offloading spec."""
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        _set_cpu_bytes_from_legacy_num_blocks(
-            vllm_config,
-            kv_cache_config,
-            SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
-        )
+        _set_cpu_bytes_from_legacy_num_blocks(vllm_config, kv_cache_config)
         super().__init__(vllm_config, kv_cache_config)
 
     @override
     def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuNpuOffloadingHandlers:
+        # Mirror upstream TieringOffloadingSpec.create_handlers, but route the
+        # worker-side transfers through the Ascend handlers and resolve the
+        # worker slot via the NPU device index.
+        world_size = self.vllm_config.parallel_config.world_size
         rank = torch.npu.current_device()
         worker_mmap = SharedOffloadRegion(
             instance_id=self.vllm_config.instance_id,
+            total_size_bytes=self.cpu_page_size_per_worker
+            * world_size
+            * self.num_blocks,
             num_blocks=self.num_blocks,
             rank=rank,
-            kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
+            num_workers=world_size,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         return CpuNpuOffloadingHandlers(
@@ -132,10 +139,6 @@ class NPUTieringOffloadingSpec(_NPUHandlersMixin, _TieringOffloadingSpec):
             num_cpu_blocks=self.num_blocks,
             mmap_region=worker_mmap,
         )
-
-    @override
-    def get_manager(self) -> OffloadingManager:
-        return super().get_manager()
 
 
 # Compatibility aliases for users that set spec_module_path to this module
