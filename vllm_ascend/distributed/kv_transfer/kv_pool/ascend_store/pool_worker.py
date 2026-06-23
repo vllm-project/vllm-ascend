@@ -65,6 +65,21 @@ from vllm_ascend.memcache_comm_fence import (
     reset_attention_compute_start_gate,
 )
 
+# Shared per-layer transfer-finished events. Created by the mooncake
+# PD-disaggregation send thread (when it runs) and consumed by the ascend_store
+# save thread to wait for each layer's PD transfer to finish. When mooncake is
+# not running, these stay None and the save thread skips the PD wait.
+_shared_layer_transfer_events: list[threading.Event] | None = None
+
+
+def get_shared_layer_transfer_events() -> list[threading.Event] | None:
+    return _shared_layer_transfer_events
+
+
+def set_shared_layer_transfer_events(events: list[threading.Event] | None) -> None:
+    global _shared_layer_transfer_events
+    _shared_layer_transfer_events = events
+
 
 class KVPoolWorker:
     # The main class for the cache engine.
@@ -264,6 +279,7 @@ class KVPoolWorker:
         self.layer_save_tasks: list[list[LayerTransferTask]] = [[] for i in range(self.num_layers)]
         self.layer_load_finished_events: list[threading.Event] | None = None
         self.layer_save_finished_events: list[threading.Event] | None = None
+        self.layer_transfer_finished_events: list[threading.Event] | None = None
 
         layerwise_config = get_layerwise_config(
             self.num_layers,
@@ -305,6 +321,7 @@ class KVPoolWorker:
                     self.sync_save_events,
                     self.layerwise_max_transfer_blocks,
                     self.layerwise_max_transfer_bytes,
+                    layer_transfer_finished_events=get_shared_layer_transfer_events(),
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()

@@ -611,7 +611,10 @@ class NPUWorker(WorkerBase):
         # that vLLM's get_kv_cache_configs() naturally calculates more
         # num_blocks.  The actual tensor allocation (in the model runner) will
         # create fewer shared buffers, so total memory usage stays the same.
-        extra_config = self.vllm_config.kv_transfer_config.kv_connector_extra_config
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is None:
+            return available
+        extra_config = kv_transfer_config.kv_connector_extra_config
         total_layers = self.model_config.get_num_layers(self.parallel_config)
         num_tensors = get_layerwise_kv_cache_num_tensors(total_layers, extra_config)
         if num_tensors is not None and num_tensors < total_layers:

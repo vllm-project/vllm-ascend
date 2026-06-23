@@ -3840,7 +3840,10 @@ class NPUModelRunner(GPUModelRunner):
         ``_allocate_kv_cache_tensors`` then allocates one buffer per merged
         entry and maps every layer in ``shared_by`` to it.
         """
-        extra_config = self.vllm_config.kv_transfer_config.kv_connector_extra_config
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is None:
+            return
+        extra_config = kv_transfer_config.kv_connector_extra_config
         total_layers = self.model_config.get_num_layers(self.parallel_config)
         if get_layerwise_kv_cache_reuse_layers(total_layers, extra_config) is None:
             return
@@ -4139,7 +4142,12 @@ class NPUModelRunner(GPUModelRunner):
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
         self.hybrid_with_attn_and_mamba = False
-        extra_config = self.vllm_config.kv_transfer_config.kv_connector_extra_config
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        extra_config = (
+            kv_transfer_config.kv_connector_extra_config
+            if kv_transfer_config is not None
+            else None
+        )
         reuse_layers = get_layerwise_kv_cache_reuse_layers(
             self.model_config.get_num_layers(self.parallel_config),
             extra_config,
