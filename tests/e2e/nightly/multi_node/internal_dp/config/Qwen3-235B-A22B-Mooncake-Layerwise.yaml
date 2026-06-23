@@ -50,8 +50,8 @@ deployment:
                           "tp_size": 8
                   },
                   "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
+                          "dp_size": 4,
+                          "tp_size": 4
                   }
             }
         }'
@@ -86,8 +86,8 @@ deployment:
                           "tp_size": 8
                   },
                   "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
+                          "dp_size": 4,
+                          "tp_size": 4
                   }
             }
         }'
