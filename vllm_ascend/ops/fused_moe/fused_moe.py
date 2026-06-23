@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
@@ -494,6 +495,11 @@ class AscendFusedMoE(FusedMoE):
                 return result
 
             self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+
+        # Register this MoE layer with EPLB for PP compatibility.
+        # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
+        # so only real MoE layers on this rank are registered.
+        VllmEplbAdaptor.register_layer(self)
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated
