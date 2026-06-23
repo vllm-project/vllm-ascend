@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import torch
+from torch.multiprocessing.reductions import reduce_tensor
 
 # Default values for packed tensor configuration.
 # These are imported by HCCLWeightTransferUpdateInfo and trainer_send_weights.
@@ -192,3 +193,127 @@ def packed_broadcast_consumer(
     # Otherwise NPU tensor cleanup at exit may hang.
     for s in streams:
         s.synchronize()
+
+
+# ── NPU IPC packed transfer ────────────────────────────────────────────
+
+
+def packed_npu_ipc_producer(
+    iterator: Iterator[tuple[str, torch.Tensor]],
+    npu_uuid: str,
+    post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
+    buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+) -> Iterator[dict[str, Any]]:
+    """Pack tensors into a reusable NPU IPC buffer and yield chunks.
+
+    Allocates a single NPU buffer of ``buffer_size_bytes`` and registers
+    it for IPC once via ``reduce_tensor``.  Each chunk's packed data is
+    copied into this buffer before yielding, so only one IPC-shared
+    allocation exists for the lifetime of the transfer.
+
+    Args:
+        iterator: Iterator of (name, tensor) pairs.
+        npu_uuid: Physical NPU UUID string for this rank.
+        post_iter_func: Applied to each (name, tensor) before packing.
+        buffer_size_bytes: Exact capacity of the reusable IPC buffer.
+    """
+    ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="npu")
+    _, ipc_args = reduce_tensor(ipc_buffer)
+
+    names: list[str] = []
+    shapes: list[list[int]] = []
+    dtypes: list[torch.dtype] = []
+    tensor_sizes: list[int] = []
+    total_bytes = 0
+
+    for name, orig_tensor in iterator:
+        flat = post_iter_func((name, orig_tensor)).contiguous().view(torch.uint8).view(-1)
+
+        if flat.numel() > buffer_size_bytes:
+            raise ValueError(
+                f"Tensor '{name}' has size {flat.numel()} bytes, "
+                f"which exceeds buffer_size_bytes={buffer_size_bytes}. "
+                f"Increase buffer_size_bytes to at least {flat.numel()}."
+            )
+
+        if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
+            torch.npu.current_stream().synchronize()
+            yield {
+                "names": names,
+                "shapes": shapes,
+                "dtype_names": [str(d).split(".")[-1] for d in dtypes],
+                "tensor_sizes": tensor_sizes,
+                "ipc_handle": {npu_uuid: ipc_args},
+            }
+            names, shapes, dtypes, tensor_sizes = [], [], [], []
+            total_bytes = 0
+
+        ipc_buffer[total_bytes : total_bytes + flat.numel()].copy_(flat)
+        names.append(name)
+        shapes.append(list(orig_tensor.shape))
+        dtypes.append(orig_tensor.dtype)
+        tensor_sizes.append(flat.numel())
+        total_bytes += flat.numel()
+
+    if total_bytes:
+        torch.npu.current_stream().synchronize()
+        yield {
+            "names": names,
+            "shapes": shapes,
+            "dtype_names": [str(d).split(".")[-1] for d in dtypes],
+            "tensor_sizes": tensor_sizes,
+            "ipc_handle": {npu_uuid: ipc_args},
+        }
+
+
+def packed_npu_ipc_consumer(
+    ipc_handle: dict[str, tuple],
+    physical_npu_id: str,
+    names: list[str],
+    shapes: list[list[int]],
+    dtype_names: list[str],
+    tensor_sizes: list[int],
+    device_index: int,
+) -> list[tuple[str, torch.Tensor]]:
+    """Unpack a single packed IPC chunk into named tensors.
+
+    Reconstructs the packed buffer via the IPC handle, unpacks into
+    individual tensors, and clones each into independent storage before
+    returning.  The clone is required because the producer reuses one
+    IPC buffer across chunks.
+
+    Args:
+        ipc_handle: Mapping of NPU UUID to a (func, args) tuple from
+            ``reduce_tensor``.
+        physical_npu_id: Physical NPU UUID string for the current process.
+        names: Parameter names in the packed buffer.
+        shapes: Parameter shapes.
+        dtype_names: Parameter dtype name strings (e.g. "float16").
+        tensor_sizes: Size in bytes of each parameter in the packed buffer.
+        device_index: Local NPU device index.
+    """
+    if physical_npu_id not in ipc_handle:
+        raise ValueError(
+            f"IPC handle not found for NPU UUID {physical_npu_id}. Available UUIDs: {list(ipc_handle.keys())}"
+        )
+
+    func, args = ipc_handle[physical_npu_id]
+    list_args = list(args)
+    # Index 6 of the args from reduce_tensor is the device_index.
+    # Overwrite it with the receiver's device index.
+    list_args[6] = device_index
+    packed = func(*list_args)
+
+    content_size = sum(tensor_sizes)
+    packed = packed[:content_size]
+
+    dtypes = [getattr(torch, dn) for dn in dtype_names]
+    weights: list[tuple[str, torch.Tensor]] = []
+    offset = 0
+    for name, shape, dtype, size in zip(names, shapes, dtypes, tensor_sizes):
+        raw = packed[offset : offset + size]
+        tensor = raw.contiguous().view(dtype).view(*shape).clone()
+        weights.append((name, tensor))
+        offset += size
+
+    return weights
