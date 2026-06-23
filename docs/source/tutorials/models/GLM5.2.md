@@ -377,13 +377,12 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --served-model-name glm-52 \
 --seed 1024 \
 --gpu-memory-utilization 0.95 \
---api-server-count 1 \
 --max-num-seqs 16 \
 --headless \
 --data-parallel-size 2 \
 --data-parallel-size-local 1 \
 --data-parallel-start-rank 1 \
---data-parallel-address $local_ip \
+--data-parallel-address $node0_ip \
 --data-parallel-rpc-port 13389 \
 --tensor-parallel-size 8 \
 --enable-expert-parallel \
