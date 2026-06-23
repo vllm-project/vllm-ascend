@@ -484,6 +484,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # dsa c8
         self.use_sparse_c8_indexer = ascend_config.is_sparse_c8_layer(self.layer_name)
+        self.use_a5_sparse_c8_indexer = self.use_sparse_c8_indexer and (get_ascend_device_type() == AscendDeviceType.A5)
         if self.use_sparse_c8_indexer:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
@@ -961,6 +962,21 @@ class AscendSFAImpl(MLAAttentionImpl):
         cache_mode = "PA"
 
         if self.enable_dsa_cp:
+            if self.use_a5_sparse_c8_indexer:
+                k_pe, k_nope, knope_scale = custom_kv_rmsnorm_rope(
+                    kv_no_split,
+                    self.kv_a_layernorm.weight,  # type: ignore[union-attr]
+                    cos,
+                    sin,
+                    slots.to(torch.int64),
+                    kv_cache[1],
+                    kv_cache[0],
+                    epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+                    cache_mode=cache_mode,
+                    is_output_kv=True,
+                )
+                return k_pe, k_nope, knope_scale
+
             _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
                 kv_no_split,
                 self.kv_a_layernorm.weight,  # type: ignore[union-attr]
@@ -973,7 +989,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 cache_mode=cache_mode,
                 is_output_kv=True,
             )
-            return k_pe, k_nope
+            knope_scale = None
+            return k_pe, k_nope, knope_scale
         else:
             torch_npu.npu_kv_rmsnorm_rope_cache(
                 kv_no_split,
@@ -1283,7 +1300,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             if self.enable_dsa_cp:
                 assert slot_mapping_cp is not None
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata)
+                k_pe, k_nope, knope_scale = self.exec_kv(
+                    kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata
+                )
             else:
                 k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, attn_metadata)
 
@@ -1303,6 +1322,32 @@ class AscendSFAImpl(MLAAttentionImpl):
                             ],
                             dim=1,
                         ),
+                        get_tp_group(),
+                        async_op=async_op,
+                    )
+                elif self.use_a5_sparse_c8_indexer:
+                    # due to different dtypes, we have to split commu pass
+                    assert knope_scale is not None
+                    assert k_li_scale is not None
+                    fused_kv_no_split, _ = all_gather_async(
+                        torch.cat(
+                            [
+                                k_nope.view(-1, k_nope.shape[-1]),
+                                k_pe.view(-1, k_pe.shape[-1]),
+                                knope_scale.view(-1, knope_scale.shape[-1]),
+                            ],
+                            dim=1,
+                        ),
+                        get_tp_group(),
+                        async_op=async_op,
+                    )
+                    k_li, _ = all_gather_async(
+                        k_li,
+                        get_tp_group(),
+                        async_op=async_op,
+                    )
+                    k_li_scale, kv_ag_handle = all_gather_async(
+                        k_li_scale,
                         get_tp_group(),
                         async_op=async_op,
                     )
@@ -1359,17 +1404,26 @@ class AscendSFAImpl(MLAAttentionImpl):
                         k_pe, k_nope, k_li = fused_kv_no_split.split(
                             [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim], dim=-1
                         )
+                    elif self.use_a5_sparse_c8_indexer:
+                        torch_npu.npu_scatter_nd_update_(
+                            kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
+                            slot_mapping[: attn_metadata.num_actual_tokens].view(-1, 1),
+                            fused_kv_no_split[: attn_metadata.num_actual_tokens],
+                        )
+                        k_pe = None
+                        k_nope = None
                     else:
                         k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
-                    k_nope = k_nope.view(k_nope.shape[0], 1, -1)
-                    k_pe = k_pe.view(k_pe.shape[0], 1, -1)
-                    DeviceOperator.reshape_and_cache(
-                        key=k_nope[: attn_metadata.num_actual_tokens],
-                        value=k_pe[: attn_metadata.num_actual_tokens],
-                        key_cache=kv_cache[0],
-                        value_cache=kv_cache[1],
-                        slot_mapping=slot_mapping[: attn_metadata.num_actual_tokens],
-                    )
+                    if not self.use_a5_sparse_c8_indexer:
+                        k_nope = k_nope.view(k_nope.shape[0], 1, -1)
+                        k_pe = k_pe.view(k_pe.shape[0], 1, -1)
+                        DeviceOperator.reshape_and_cache(
+                            key=k_nope[: attn_metadata.num_actual_tokens],
+                            value=k_pe[: attn_metadata.num_actual_tokens],
+                            key_cache=kv_cache[0],
+                            value_cache=kv_cache[1],
+                            slot_mapping=slot_mapping[: attn_metadata.num_actual_tokens],
+                        )
 
             k_li = self._get_full_kv(k_li, attn_metadata)
 
@@ -1480,3 +1534,39 @@ class AscendSFAImpl(MLAAttentionImpl):
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
         return output_padded
+
+
+def custom_kv_rmsnorm_rope(
+    kv,
+    gamma,
+    cos,
+    sin,
+    index,
+    k_cache,
+    ckv_cache,
+    k_rope_scale=None,
+    c_kv_scale=None,
+    k_rope_offset=None,
+    c_kv_offset=None,
+    v=None,
+    epsilon=1e-05,
+    cache_mode="Norm",
+    is_output_kv=False,
+):
+    # Split KV into RMSNorm and RoPE parts for sparse C8 cache preparation.
+    rms_in, rope_in = kv.split([512, 64], dim=-1)
+    k_nope, _ = torch_npu.npu_rms_norm(rms_in, gamma, epsilon=epsilon)
+    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin)
+
+    # Store k_nope with block FP8 scales for the sparse C8 cache layout.
+    k_nope, knope_scale = torch_npu.npu_dynamic_block_quant(
+        k_nope.view(-1, 1, k_nope.shape[-1]),
+        dst_type=torch.float8_e4m3fn,
+        row_block_size=1,
+        col_block_size=128,
+    )
+    return (
+        k_rope.view(torch.float8_e4m3fn),
+        k_nope,
+        knope_scale.view(knope_scale.shape[0], -1).view(torch.float8_e4m3fn),
+    )
