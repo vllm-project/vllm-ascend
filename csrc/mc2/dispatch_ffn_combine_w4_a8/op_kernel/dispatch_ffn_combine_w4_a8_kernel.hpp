@@ -1248,13 +1248,13 @@ private:
 
             // workspaceOffset += params.maxOutputSize * k2 * sizeof(ElementABefore);
             if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
-                // A1Int4 and A2Int4 cannot alias — their lifetimes overlap:
-                // SwiGLU writes A2Int4 in sync blocks while GMM1 still reads A1Int4 for later groups
+                // A1Int4 and A2Int4 alias reuse (same pattern as W8A8 ptrA/ptrPermutedToken):
+                // lifetimes separated by SyncAll barrier after GMM1 loop — GMM1 reads A1Int4 complete
+                // before SwiGLU epilogue writes A2Int4
                 ptrA1Int4 = params.ptrWorkspace + workspaceOffset;
-                workspaceOffset += params.maxOutputSize * params.problemShape.k();
-
                 ptrA2Int4 = params.ptrWorkspace + workspaceOffset;
-                workspaceOffset += params.maxOutputSize * k2;
+
+                workspaceOffset += params.maxOutputSize * (params.problemShape.k() > k2 ? params.problemShape.k() : k2);
 
                 ptrCGMM1 = params.ptrWorkspace + workspaceOffset;
                 ptrCGMM2 = params.ptrWorkspace + workspaceOffset;

@@ -251,13 +251,13 @@ static ge::graphStatus DispatchFFNCombineW4A8TilingFuncImpl(gert::TilingContext 
     uint32_t k2 = info.N / 2;
 
     // ptrC/ptrC2 alias reuse: allocate max(N, n2), not N + n2
-    // A1Int4 and A2Int4 cannot alias — their lifetimes overlap (SwiGLU writes A2Int4 while GMM1 may still read A1Int4)
+    // ptrA1Int4/ptrA2Int4 alias reuse: allocate max(K, k2), not K + k2
+    // (lifetimes separated by SyncAll barrier after GMM1 loop, same pattern as W8A8 ptrA/ptrPermutedToken)
     uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK * sizeof(int32_t) +
                             info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 2 +
                             info.maxOutputSize * sizeof(float) * 2 +
                             info.maxOutputSize * std::max(info.N, n2) * sizeof(int16_t) * 2 +
-                            info.maxOutputSize * info.K +
-                            info.maxOutputSize * k2 +
+                            info.maxOutputSize * std::max(info.K, k2) +
                             info.worldSize * sizeof(int32_t) * 16;
 
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
