@@ -3,7 +3,7 @@
 BEFORE SUBMITTING, PLEASE READ https://docs.vllm.ai/en/latest/contributing/overview.html
 
 -->
-### What this PR does / why we need it?
+### What this PR does / why we need it? (必填)
 <!--
 - Please clarify what changes you are proposing. The purpose of this section is to outline the changes and how this PR fixes the issue.
 If possible, please consider writing useful notes for better and faster reviews in your PR.
@@ -13,13 +13,13 @@ If possible, please consider writing useful notes for better and faster reviews 
 - Fixes #
 -->
 
-### Does this PR introduce _any_ user-facing change?
+### Does this PR introduce _any_ user-facing change? (必填)
 <!--
 Note that it means *any* user-facing change including all aspects such as API, interface or other behavior changes.
 Documentation-only updates are not considered user-facing changes.
 -->
 
-### How was this patch tested?
+### How was this patch tested? (必填)
 <!--
 CI passed with new added/existing test.
 If it was tested in a way different from regular unit tests, please clarify how you tested step by step, ideally copy and paste-able, so that other reviewers can test and check, and descendants can verify in the future.

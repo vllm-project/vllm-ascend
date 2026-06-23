@@ -72,9 +72,6 @@ def validate_result(data: dict) -> dict:
     if not isinstance(suggestions, list):
         suggestions = []
 
-    if not missing_items:
-        ok = True
-
     return {
         "ok": ok,
         "score": max(0, min(100, score)),
