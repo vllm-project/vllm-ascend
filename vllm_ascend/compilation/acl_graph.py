@@ -16,7 +16,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
+from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
@@ -54,16 +54,11 @@ def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
 class ACLGraphEntry:
     batch_descriptor: BatchDescriptor
     aclgraph: torch.npu.NPUGraph | None = None
-    breakable_capture: Any | None = None
     output: Any | None = None
 
     # for aclgraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
-
-    @property
-    def captured(self) -> bool:
-        return self.aclgraph is not None or self.breakable_capture is not None
 
 
 class ACLGraphWrapper:
@@ -107,7 +102,6 @@ class ACLGraphWrapper:
         *,
         use_eagle: bool = False,
         enable_enpu: bool = False,
-        use_breakable_capture: bool = False,
     ):
         self.runnable = runnable
         self.vllm_config = vllm_config
@@ -131,7 +125,6 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
-        self.use_breakable_capture = use_breakable_capture
 
         ACLGraphWrapper._all_instances.add(self)
 
@@ -176,7 +169,7 @@ class ACLGraphWrapper:
 
         entry = self.concrete_aclgraph_entries[batch_descriptor]
 
-        if not entry.captured:
+        if entry.aclgraph is None:
             if self.aclgraph_options.debug_log_enable:
                 # Since we capture aclgraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
@@ -188,7 +181,48 @@ class ACLGraphWrapper:
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
-            output = self._capture_graph(entry, forward_context, args, kwargs)
+            aclgraph = torch.npu.NPUGraph()
+
+            with ExitStack() as stack:
+                if self.aclgraph_options.gc_disable:
+                    # during every model forward for piecewise aclgraph
+                    # mode, we will capture many pieces of aclgraphs
+                    # (roughly one per layer). running gc again and again
+                    # across layers will make the aclgraph capture very slow.
+                    # therefore, we only run gc for the first graph,
+                    # and disable gc for the rest of the graphs.
+                    stack.enter_context(patch("gc.collect", lambda: None))
+                    stack.enter_context(patch("torch.npu.empty_cache", lambda: None))
+
+                # mind-exploding: carefully manage the reference and memory.
+
+                # Sync offloader's copy stream before capture.
+                # Ensure any pre-capture prefetches from offloader are complete.
+                from vllm.model_executor.offloader.base import get_offloader
+
+                get_offloader().sync_prev_onload()
+                forward_context.capturing = True
+                try:
+                    with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                        # `output` is managed by pytorch's aclgraph pool
+                        output = self.runnable(*args, **kwargs)
+                        # Join offloader's copy stream after forward to avoid
+                        # unjoined stream error. The last layer's start_prefetch
+                        # forks copy_stream, but wait_prefetch only happens in
+                        # the next forward pass.
+                        get_offloader().join_after_forward()
+                        if self.aclgraph_options.weak_ref_output:
+                            # by converting it to weak ref,
+                            # the original `output` will immediately be released
+                            # to save memory. It is only safe to do this for
+                            # the last graph in piecewise aclgraph mode, because
+                            # the output of the last graph will not be used by
+                            # any other acl graph.
+                            output = weak_ref_tensors(output)
+                except RuntimeError as exc:
+                    if _is_stream_resource_capture_error(exc):
+                        _raise_stream_resource_capture_error(exc)
+                    raise
 
             # here we always use weak ref for the workspaces
             # to save memory
@@ -202,6 +236,7 @@ class ACLGraphWrapper:
             # here we always use weak ref for the output
             # to save memory
             entry.output = weak_ref_tensors(output)
+            entry.aclgraph = aclgraph
 
             compilation_counter.num_cudagraph_captured += 1
 
@@ -233,64 +268,8 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        if entry.breakable_capture is not None:
-            entry.breakable_capture.replay()
-        else:
-            entry.aclgraph.replay()
+        entry.aclgraph.replay()
         return entry.output
-
-    def _capture_graph(
-        self,
-        entry: ACLGraphEntry,
-        forward_context: ForwardContext,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> Any:
-        from vllm.model_executor.offloader.base import get_offloader
-
-        with ExitStack() as stack:
-            if self.aclgraph_options.gc_disable:
-                stack.enter_context(patch("gc.collect", lambda: None))
-                stack.enter_context(patch("torch.npu.empty_cache", lambda: None))
-
-            get_offloader().sync_prev_onload()
-            forward_context.capturing = True
-            try:
-                if self.use_breakable_capture:
-                    from vllm_ascend.compilation.breakable_acl_graph import (
-                        BreakableACLGraphCapture,
-                    )
-
-                    capture = BreakableACLGraphCapture(pool=self.graph_pool)
-                    with capture:
-                        output = self.runnable(*args, **kwargs)
-                        get_offloader().join_after_forward()
-                        if self.aclgraph_options.weak_ref_output:
-                            output = weak_ref_tensors(output)
-                    entry.breakable_capture = capture
-                    logger.info(
-                        "Captured breakable ACL graph for %s: graphs=%d "
-                        "eager_breaks=%d total_segments=%d",
-                        entry.batch_descriptor,
-                        capture.num_graphs,
-                        capture.num_eager_breaks,
-                        len(capture.segments),
-                    )
-                else:
-                    aclgraph = torch.npu.NPUGraph()
-                    with torch.npu.graph(aclgraph, pool=self.graph_pool):
-                        output = self.runnable(*args, **kwargs)
-                        get_offloader().join_after_forward()
-                        if self.aclgraph_options.weak_ref_output:
-                            output = weak_ref_tensors(output)
-                    entry.aclgraph = aclgraph
-            except RuntimeError as exc:
-                if _is_stream_resource_capture_error(exc):
-                    _raise_stream_resource_capture_error(exc)
-                raise
-            finally:
-                forward_context.capturing = False
-        return output
 
 
 def weak_ref_workspaces(params):
@@ -335,6 +314,7 @@ def update_full_graph_params(
         _EXTRA_CTX.is_draft_model,
         draft_attn_metadatas,
     )
+
 
 @dataclass
 class GraphParams:
