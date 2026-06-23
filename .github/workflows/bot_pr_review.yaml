@@ -37,8 +37,8 @@ jobs:
         run: python .github/workflows/scripts/robot/prepare_template.py --input pr_info.json --output template.txt
 
       # Step 3: Prepare description system prompt → desc_system_prompt.txt
-      - name: Prepare desc system prompt
-        id: sysprompt_desc
+      - name: Prepare system prompt
+        id: sysprompt
         if: success()
         run: python .github/workflows/scripts/robot/prepare_system_prompt.py --variant pr --output desc_system_prompt.txt
 
@@ -76,40 +76,7 @@ jobs:
         run: |
           echo '{"ok": true, "score": 100, "executed": false}' > description_result.json
 
-      # Step 5: Prepare commit system prompt → commit_system_prompt.txt
-      - name: Prepare commit system prompt
-        id: sysprompt_commit
-        if: success()
-        run: python .github/workflows/scripts/robot/prepare_system_prompt.py --variant commit --output commit_system_prompt.txt
-
-      # Step 6: Check commit messages → commit_results.json
-      - name: Check commits
-        id: commit_check
-        if: |
-          success() &&
-          github.event.action != 'edited'
-        env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
-          LLM_MODEL: ${{ secrets.LLM_MODEL }}
-          VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
-          VLLM_BASE_URL: ${{ secrets.VLLM_BASE_URL }}
-          VALID_TYPES: ${{ vars.PR_COMMIT_CHECK_VALID_TYPES || 'feat,fix,perf,refactor,test,docs,chore' }}
-          REQUIRE_SIGNOFF: ${{ vars.PR_COMMIT_CHECK_REQUIRE_SIGNOFF || 'true' }}
-        run: |
-          python .github/workflows/scripts/robot/commit_check.py \
-            --pr-info pr_info.json \
-            --system-prompt commit_system_prompt.txt \
-            --output commit_results.json
-
-      # If commit check was skipped, create a placeholder
-      - name: Skip commit check
-        id: skip_commit
-        if: success() && steps.commit_check.outcome == 'skipped'
-        run: |
-          echo '{"executed": false, "total_commits": 0, "overall_ok": true, "failed_commits": []}' > commit_results.json
-
-      # Step 7: Post combined comment + write label actions → label_actions.json
+      # Step 5: Post comment + write label actions → label_actions.json
       - name: Post handler
         id: post
         if: success()
@@ -118,24 +85,12 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           NEED_DETAIL_LABEL: ${{ vars.PR_DESC_CHECK_NEED_DETAIL_LABEL || 'need-detail-desc' }}
-          NEED_COMMIT_FIX_LABEL: ${{ vars.PR_COMMIT_CHECK_NEED_FIX_LABEL || 'need-commit-fix' }}
         run: |
-          if [ -f description_result.json ]; then
-            DESC_ARG="--input description_result.json"
-          else
-            DESC_ARG=""
-          fi
-          if [ -f commit_results.json ]; then
-            COMMIT_ARG="--commit-result commit_results.json"
-          else
-            COMMIT_ARG=""
-          fi
           python .github/workflows/scripts/robot/handle_review.py \
-            $DESC_ARG \
-            $COMMIT_ARG \
+            --input description_result.json \
             --label-output label_actions.json
 
-      # Step 8: Manage labels (add/remove need-detail-desc, need-commit-fix)
+      # Step 6: Manage labels (add/remove need-detail-desc)
       - name: Manage labels
         id: label
         if: success()

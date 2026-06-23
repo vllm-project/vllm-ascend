@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Load a system prompt text file for the given variant and write it to a file.
 
-Supported variants: ``issue``, ``pr``, ``commit``.
+Supported variants: ``issue``, ``pr``.
 
-Used as step 3 of both the Issue Review and PR Review Bot workflows.
+Used in both the Issue Review and PR Review Bot workflows.
 """
 
 import argparse
@@ -14,8 +14,8 @@ from lib.prompts import load_system_prompt
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare system prompt")
-    parser.add_argument("--variant", default="issue", choices=["issue", "pr", "commit"],
-                        help="Prompt variant: issue, pr, or commit")
+    parser.add_argument("--variant", default="issue", choices=["issue", "pr"],
+                        help="Prompt variant: issue or pr")
     parser.add_argument("--output", default="system_prompt.txt", help="File to write the system prompt to")
     args = parser.parse_args()
 
