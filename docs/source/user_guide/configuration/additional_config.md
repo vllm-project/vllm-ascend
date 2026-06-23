@@ -4,7 +4,7 @@ Additional configuration is a mechanism provided by vLLM to allow plugins to con
 
 ## Migration Guide
 
-Starting from PR #9064, vLLM Ascend is migrating **10 environment variables** to `--additional-config`.
+Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064), vLLM Ascend is migrating **10 environment variables** to `--additional-config`.
 
 ### Important Notice
 
@@ -90,16 +90,16 @@ The following table lists additional configuration options available in vLLM Asc
 | `c8_enable_reshape_optim`           | bool | `False` | Whether to enable StoreKVBlock operator achieves acceleration under the C8 feature (this means that enable_sparse_c8 needs to be enabled). In the PD separation scenario, only the P node is enabled. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
 | `profiling_chunk_config`            | dict | `{}`    | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
-| `enable_balance_scheduling`         | bool | `False` | Whether to enable balance scheduling. Can also be configured via `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable (deprecated). |
-| `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable (deprecated). |
-| `enable_matmul_allreduce`           | bool | `False` | Whether to enable matmul allreduce optimization. Can also be configured via `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` environment variable (deprecated). |
-| `flashcomm2_parallel_size`          | int  | `0`     | FlashComm2 parallel size. Can also be configured via `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` environment variable (deprecated). |
-| `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via `MSMONITOR_USE_DAEMON` environment variable (deprecated). |
-| `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via `VLLM_ASCEND_ENABLE_MLAPO` environment variable (deprecated). |
-| `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. Can also be configured via `VLLM_ASCEND_ENABLE_NZ` environment variable (deprecated). |
-| `enable_context_parallel`           | bool | `False` | Whether to enable context parallelism. Can also be configured via `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable (deprecated). |
-| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable (deprecated). |
-| `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable (deprecated). |
+| `enable_balance_scheduling`         | bool | `False` | Whether to enable balance scheduling. Can also be configured via the `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable during the migration period. |
+| `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable during the migration period. |
+| `enable_matmul_allreduce`           | bool | `False` | Whether to enable matmul allreduce optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE` environment variable during the migration period. |
+| `flashcomm2_parallel_size`          | int  | `0`     | FlashComm2 parallel size. Can also be configured via the `VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE` environment variable during the migration period. |
+| `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via the `MSMONITOR_USE_DAEMON` environment variable during the migration period. |
+| `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via the `VLLM_ASCEND_ENABLE_MLAPO` environment variable during the migration period. |
+| `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. Can also be configured via the `VLLM_ASCEND_ENABLE_NZ` environment variable during the migration period. |
+| `enable_context_parallel`           | bool | `False` | Whether to enable context parallelism. Can also be configured via the `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` environment variable during the migration period. |
+| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via the `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration period. |
+| `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature depends on FLASHCOMM1. Please ensure that FLASHCOMM1 is enabled before enabling this feature.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
