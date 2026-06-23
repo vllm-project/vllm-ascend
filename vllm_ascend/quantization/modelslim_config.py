@@ -278,7 +278,7 @@ QUANT_MODEL_PREFIX_MAPPINGS = {
 
 QUANT_MODEL_SUBSTR_MAPPINGS = {
     "deepseek_v4": {
-        ".attn.": ".self_attn.",
+        ".attn.": ".sefl_attn.",
         ".w1.": ".gate_proj.",
         ".w2.": ".down_proj.",
         ".w3.": ".up_proj.",
@@ -579,10 +579,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
-            if (
-                self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping)
-                or f"{prefix}.weight" not in self.quant_description
-            ):
+            if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
                 return UnquantizedEmbeddingMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
