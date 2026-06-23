@@ -3,38 +3,25 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
  */
-
-/*!
- * \file fused_gdn_gating.h
- * \brief AscendC kernel for fused GDN gating.
- *
- * Per-row math:
- *   g = -exp(A_log) * softplus(cast(a,fp32) + dt_bias, beta, threshold)
- *   beta_output = sigmoid(cast(b, fp32)) -> cast back to InDtype
- */
-
-#ifndef FUSED_GDN_GATING_KERNEL_H
-#define FUSED_GDN_GATING_KERNEL_H
+ 
+#ifndef FUSED_GDN_GATING_910_H
+#define FUSED_GDN_GATING_910_H
 
 #include <type_traits>
 
 #include "kernel_operator.h"
-#include "fused_gdn_gating_tiling_data.h"
+#include "../fused_gdn_gating_tiling_data.h"
 
 namespace FusedGdnGating {
 
 using namespace AscendC;
 
-// 32-byte alignment requirement for DataCopy on NPU.
 constexpr uint32_t BYTES_PER_BLOCK = 32;
-constexpr uint32_t BF16_PER_BLOCK  = BYTES_PER_BLOCK / sizeof(int16_t);  // 16
-constexpr uint32_t FP32_PER_BLOCK  = BYTES_PER_BLOCK / sizeof(float);    // 8
+constexpr uint32_t BF16_PER_BLOCK  = BYTES_PER_BLOCK / sizeof(int16_t);
+constexpr uint32_t FP32_PER_BLOCK  = BYTES_PER_BLOCK / sizeof(float);
 constexpr uint32_t MASK_ALIGN_ELEMS = 64;
 
-// DMA-friendly alignment: 16 elements = 32 bytes = 1 DMA block.
-// Vector ops use count=numHeads_ with partial-iteration masking,
-// so there is no minimum-count constraint.
-constexpr uint32_t DMA_ALIGN_ELEMS = BYTES_PER_BLOCK / sizeof(int16_t);  // 16
+constexpr uint32_t DMA_ALIGN_ELEMS = BYTES_PER_BLOCK / sizeof(int16_t);
 
 template <typename T>
 __aicore__ inline T CeilDiv(T a, T b) { return (a + b - 1) / b; }
@@ -47,11 +34,6 @@ class KernelFusedGdnGating {
 public:
     __aicore__ inline KernelFusedGdnGating() {}
 
-    /*!
-     * \brief Init kernel with GM addresses and tiling data.
-     *
-     * Argument order matches OpDef: aLogGm, aGm, bGm, dtBiasGm, gGm, betaOutputGm.
-     */
     __aicore__ inline void Init(GM_ADDR aLogGm, GM_ADDR aGm, GM_ADDR bGm, GM_ADDR dtBiasGm,
                                 GM_ADDR gGm, GM_ADDR betaOutputGm,
                                 const FusedGdnGatingTilingData *tiling, TPipe *pipe)
@@ -64,7 +46,6 @@ public:
         beta_ = tiling->beta;
         threshold_ = tiling->threshold;
 
-        // Aligned dimensions for UB tensors.
         alignedHeadsHalf_  = AlignUp<uint32_t>(numHeads_, MASK_ALIGN_ELEMS);
         alignedHeadsFloat_ = AlignUp<uint32_t>(numHeads_, MASK_ALIGN_ELEMS);
         alignedHeadsMask_ = alignedHeadsFloat_;
@@ -82,26 +63,21 @@ public:
         betaGm_.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(betaOutputGm),
                                 static_cast<uint64_t>(numBatches_) * numHeads_);
 
-        // I/O queues (depth=1).
         pipe_->InitBuffer(aInQue_, 1, rowsPerIter_ * alignedHeadsHalf_ * sizeof(InDtype));
         pipe_->InitBuffer(bInQue_, 1, rowsPerIter_ * alignedHeadsHalf_ * sizeof(InDtype));
         pipe_->InitBuffer(gOutQue_, 1, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
         pipe_->InitBuffer(betaOutQue_, 1, rowsPerIter_ * alignedHeadsHalf_ * sizeof(InDtype));
 
-        // Constant queues (single-row).
         pipe_->InitBuffer(aLogInQue_, 1, 1 * alignedHeadsParam_ * sizeof(ParamDtype));
         pipe_->InitBuffer(dtBiasInQue_, 1, 1 * alignedHeadsParam_ * sizeof(ParamDtype));
         pipe_->InitBuffer(negExpInQue_, 1, 1 * alignedHeadsFloat_ * sizeof(float));
         pipe_->InitBuffer(dtBiasPreloadQue_, 1, 1 * alignedHeadsFloat_ * sizeof(float));
 
-        // Multi-row constants: dt_bias and neg_exp(A_log) replicated R times.
-        // Only allocated for R > 1; single-row kernels use per-row fallback.
         if (rowsPerIter_ > 1) {
             pipe_->InitBuffer(dtBiasMultiBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
             pipe_->InitBuffer(negExpMultiBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
         }
 
-        // Scratch buffers (V-only access).
         pipe_->InitBuffer(xBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
         pipe_->InitBuffer(betaXBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
         pipe_->InitBuffer(softplusTmpBuf_, rowsPerIter_ * alignedHeadsFloat_ * sizeof(float));
@@ -117,7 +93,6 @@ public:
         uint32_t blockNum = GetBlockNum();
         if (blockNum == 0) { blockNum = 1; }
 
-        // Chunk-based task distribution.
         uint32_t totalChunks = CeilDiv<uint32_t>(numBatches_, rowsPerIter_);
         uint32_t chunksPerBlock = CeilDiv<uint32_t>(totalChunks, blockNum);
         uint32_t chunkStart = blockIdx * chunksPerBlock;
@@ -130,9 +105,6 @@ public:
     }
 
 private:
-    /*!
-     * \brief Preload A_log, neg_exp(A_log), dt_bias, and multi-row replicas.
-     */
     __aicore__ inline void PreloadConstants()
     {
         LocalTensor<ParamDtype> tmpALog = aLogInQue_.template AllocTensor<ParamDtype>();
@@ -142,7 +114,6 @@ private:
                                          0, 0, 0};
         DataCopyPadExtParams<ParamDtype> paramPadParams{false, 0, 0, static_cast<ParamDtype>(0)};
 
-        // Load A_log.
         DataCopyPad(tmpALog, aLogGm_, paramCopyParams, paramPadParams);
         aLogInQue_.template EnQue<ParamDtype>(tmpALog);
         tmpALog = aLogInQue_.template DeQue<ParamDtype>();
@@ -154,7 +125,6 @@ private:
         }
         PipeBarrier<PIPE_V>();
 
-        // neg_exp(A_log).
         Exp(dtBiasTensor_, dtBiasTensor_, numHeads_);
         PipeBarrier<PIPE_V>();
         Muls(dtBiasTensor_, dtBiasTensor_, -1.0f, numHeads_);
@@ -165,7 +135,6 @@ private:
         negExpInQue_.template EnQue<float>(dtBiasTensor_);
         dtBiasTensor_ = negExpInQue_.template DeQue<float>();
 
-        // Load dt_bias.
         LocalTensor<ParamDtype> tmpDtBias = dtBiasInQue_.template AllocTensor<ParamDtype>();
         dtBiasPreloaded_ = dtBiasPreloadQue_.template AllocTensor<float>();
         DataCopyPad(tmpDtBias, dtBiasGm_, paramCopyParams, paramPadParams);
@@ -181,7 +150,6 @@ private:
         dtBiasPreloadQue_.template EnQue<float>(dtBiasPreloaded_);
         dtBiasPreloaded_ = dtBiasPreloadQue_.template DeQue<float>();
 
-        // Replicate to multi-row buffers (skip for single-row kernels).
         if (rowsPerIter_ > 1) {
             LocalTensor<float> dtBiasMulti = dtBiasMultiBuf_.Get<float>();
             LocalTensor<float> negExpMulti = negExpMultiBuf_.Get<float>();
@@ -209,7 +177,6 @@ private:
         LocalTensor<float>   gLocal = gOutQue_.template AllocTensor<float>();
         LocalTensor<InDtype> betaLocal = betaOutQue_.template AllocTensor<InDtype>();
 
-        // MTE2: Load input.
         if (useBulkDma_ && isFullChunk) {
             const uint64_t rowOffset = static_cast<uint64_t>(baseRow) * numHeads_;
             const uint32_t rowBytesHalf = numHeads_ * static_cast<uint32_t>(sizeof(InDtype));
@@ -244,13 +211,11 @@ private:
         const uint32_t multiCount = validRows * alignedHeadsFloat_;
         const uint32_t maskCount = validRows * alignedHeadsMask_;
 
-        // Batch Cast a→fp32, b→fp32.
         Cast(x,        aLocal, RoundMode::CAST_NONE, multiCount);
         Cast(betaFp32, bLocal, RoundMode::CAST_NONE, multiCount);
         PipeBarrier<PIPE_V>();
 
         if (rowsPerIter_ > 1) {
-            // Multi-row path: dt_bias and neg_exp from precomputed buffers.
             LocalTensor<float> dtBiasMulti = dtBiasMultiBuf_.Get<float>();
             LocalTensor<float> negExpMulti = negExpMultiBuf_.Get<float>();
             Add(x, x, dtBiasMulti, multiCount);
@@ -274,7 +239,6 @@ private:
             Mul(gLocal, gLocal, negExpMulti, multiCount);
             PipeBarrier<PIPE_V>();
         } else {
-            // Single-row fallback.
             Add(x, x, dtBiasPreloaded_, numHeads_);
             PipeBarrier<PIPE_V>();
             Muls(betaX, x, beta_, multiCount);
@@ -297,7 +261,6 @@ private:
             PipeBarrier<PIPE_V>();
         }
 
-        // Numerically stable sigmoid: 1 / (1 + exp(-b)).
         Muls(betaFp32, betaFp32, -1.0f, multiCount);
         PipeBarrier<PIPE_V>();
         Exp(betaFp32, betaFp32, multiCount);
@@ -317,7 +280,6 @@ private:
         gOutQue_.template EnQue<float>(gLocal);
         betaOutQue_.template EnQue<InDtype>(betaLocal);
 
-        // MTE3: Write output.
         gLocal    = gOutQue_.template DeQue<float>();
         betaLocal = betaOutQue_.template DeQue<InDtype>();
 
@@ -393,4 +355,4 @@ private:
 
 } // namespace FusedGdnGating
 
-#endif // FUSED_GDN_GATING_KERNEL_H
+#endif // FUSED_GDN_GATING_910_H

@@ -17,14 +17,31 @@
 namespace FusedGdnGating {
 
 #pragma pack(push, 8)
+
 struct alignas(8) FusedGdnGatingTilingData {
+
     uint32_t numHeads;
+    float beta;
+
+    // --------------------------------------------------------
+    // 2. 910/910B 架构专用参数
+    // --------------------------------------------------------
     uint32_t numBatches;
     uint32_t rowsPerIter;
     uint32_t useBulkDma;
-    float    beta;
-    float    threshold;
+
+    // --------------------------------------------------------
+    // 3. 310P 架构专用参数
+    // --------------------------------------------------------
+    uint32_t usedCoreNum;
+    uint32_t alignedLength;
+    uint32_t tailLength;
+    uint32_t tileRows;
+    float inv_beta;
+
+    float threshold;
 };
+
 #pragma pack(pop)
 
 } // namespace FusedGdnGating

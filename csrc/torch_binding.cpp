@@ -2152,6 +2152,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                   Tensor? num_accepted_tokens, "
         "                                   float scale_value=1.0) -> (Tensor output)");
     ops.impl("npu_recurrent_gated_delta_rule_310", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule_310);
+
+    ops.def(
+        "npu_fused_gdn_gating(Tensor A_log, "
+        "                     Tensor a, "
+        "                     Tensor b, "
+        "                     Tensor dt_bias, "
+        "                     float beta=1.0, "
+        "                     float threshold=20.0) -> (Tensor g, Tensor beta_output)");
+    ops.impl("npu_fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::npu_fused_gdn_gating);
 }
 #else
 // Pybind on other platform
