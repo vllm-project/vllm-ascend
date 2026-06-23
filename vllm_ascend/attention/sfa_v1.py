@@ -1325,7 +1325,16 @@ class AscendSFAImpl(MLAAttentionImpl):
                         )
             notify_kv_cache_written(self.layer_name or "")
 
-        topk_num_tokens = num_input_tokens or hidden_states.shape[0]
+        # IndexCache + SFA tiling fix: use per-rank q_pe length, not the global
+        # padded-to-tp num_input_tokens. SFA's aclnnSparseFlashAttention tiling
+        # expects sparse_indices shape [tokens_per_rank, 1, topk]; on PD分离 +
+        # TP>1 num_input_tokens is the prefill batch token count pre-shard
+        # while q_pe is already per-rank, so feeding the global number causes
+        # "sparse_indices shape [N*tp, 1, 2048] expected [N, 1, 2048]" tiling
+        # errors (e.g. TP=8 → exact 8x ratio). PD混步 happens to be safe
+        # because q_pe.shape[0] == num_input_tokens there, so this is a no-op
+        # for it.
+        topk_num_tokens = q_pe.shape[0]
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
         else:
