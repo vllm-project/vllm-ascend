@@ -5296,7 +5296,7 @@ class NPUModelRunner(GPUModelRunner):
         if self._is_all_reqs_chunked_prefill():
             return True
         if self.is_kv_producer:
-            return False
+            return True
         return self._all_sampled_reqs_reached_max_tokens(
             include_current_sample
         )
