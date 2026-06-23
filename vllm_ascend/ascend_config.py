@@ -635,6 +635,7 @@ class ProfilingChunkConfig:
         # the start to skip online calibration entirely and rely solely on
         # the startup profiling model (avoids per-step sync overhead).
         self.need_timing: bool = config.get("need_timing", self.enabled)
+        self.max_fit_chunk: int = int(config.get("max_fit_chunk", 30))
         self._validate()
 
     def _validate(self):
@@ -642,6 +643,8 @@ class ProfilingChunkConfig:
             raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
         if self.min_chunk <= 0:
             raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
+        if self.max_fit_chunk <= 5:
+            raise ValueError(f"Recommend to use at least 30 data points for fitting, got {self.max_fit_chunk}")
 
 
 class RejectionSamplerConfig:

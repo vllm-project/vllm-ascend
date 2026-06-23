@@ -18,8 +18,14 @@
 name: E2E-upstream
 
 on:
-  schedule:
-    - cron: '0 8 * * 0' # every Sunday at 8:00
+  # Dropped vLLM v0.22.1 (release-tag) compatibility from main. This workflow
+  # runs vllm-ascend main against the v0.22.1 release tag and would now fail, so
+  # the weekly schedule is disabled (left manually runnable via workflow_dispatch).
+  # Re-enable the cron below and update .github/vllm-release-tag.commit when
+  # maintaining a new release tag.
+  workflow_dispatch:
+  # schedule:
+  #   - cron: '0 8 * * 0' # every Sunday at 8:00
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -48,7 +54,7 @@ jobs:
         outputs:
             release_tag: ${{ steps.vllm.outputs.release_tag }}
         steps:
-          - uses: actions/checkout@v6
+          - uses: actions/checkout@v7
           - name: Read vLLM release tag
             id: vllm
             uses: ./.github/actions/read-vllm-release-tag
@@ -69,7 +75,7 @@ jobs:
             HF_HUB_OFFLINE: 1
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
-            uses: actions/checkout@v6
+            uses: actions/checkout@v7
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -93,7 +99,7 @@ jobs:
               pip install uv
 
           - name: Checkout vllm-project/vllm repo
-            uses: actions/checkout@v6
+            uses: actions/checkout@v7
             with:
               repository: vllm-project/vllm
               ref: ${{ needs.resolve-tag.outputs.release_tag }}
@@ -189,7 +195,7 @@ jobs:
             HF_HUB_OFFLINE: 1
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
-            uses: actions/checkout@v6
+            uses: actions/checkout@v7
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -213,7 +219,7 @@ jobs:
               pip install uv
 
           - name: Checkout vllm-project/vllm repo
-            uses: actions/checkout@v6
+            uses: actions/checkout@v7
             with:
               repository: vllm-project/vllm
               ref: ${{ needs.resolve-tag.outputs.release_tag }}
@@ -300,7 +306,7 @@ jobs:
             HF_HUB_OFFLINE: 0
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
-            uses: actions/checkout@v6
+            uses: actions/checkout@v7
           - name: Check npu and CANN info
             run: |
               npu-smi info
@@ -324,7 +330,7 @@ jobs:
               pip install uv
 
           - name: Checkout vllm-project/vllm repo
-            uses: actions/checkout@v6
+            uses: actions/checkout@v7
             with:
               repository: vllm-project/vllm
               ref: ${{ needs.resolve-tag.outputs.release_tag }}

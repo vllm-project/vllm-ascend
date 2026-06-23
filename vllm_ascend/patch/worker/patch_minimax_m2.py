@@ -25,6 +25,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.model_executor.layers.minimax_rms_norm import (  # type: ignore[import-not-found]
+    MiniMaxText01RMSNormTP,
+)
 from vllm.model_executor.models.minimax_m2 import (
     MiniMaxM2Attention,
     MiniMaxM2ForCausalLM,
@@ -35,16 +38,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.22.1"):
-    from vllm.model_executor.layers.mamba.linear_attn import (  # type: ignore[import-not-found]
-        MiniMaxText01RMSNormTP,
-    )
-else:
-    from vllm.model_executor.layers.minimax_rms_norm import (  # type: ignore[import-not-found]
-        MiniMaxText01RMSNormTP,
-    )
 
 FP8_DTYPES = tuple(
     getattr(torch, dtype_name)
