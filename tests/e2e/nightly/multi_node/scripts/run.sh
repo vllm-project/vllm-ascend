@@ -215,11 +215,11 @@ run_tests_with_log() {
         echo "====> TEST MODE: forced failure ===="
         mkdir -p "${LOG_PREFIX}"
         local log_file="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-?}_pytest.log"
-        python -c "
-import sys
-print('AssertionError: test failed - forced for AOP testing')
-sys.exit(1)
-" 2>&1 | tee "$log_file"
+        if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
+            python -c "import sys; print('RuntimeError: Timeout waiting for engine core processes to start'); sys.exit(1)" 2>&1 | tee "$log_file"
+        else
+            python -c "import sys; print('AssertionError: worker failure'); sys.exit(1)" 2>&1 | tee "$log_file"
+        fi
         ret=$?
         echo "pytest exit code: ret=${ret}"
         if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
