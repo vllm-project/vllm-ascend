@@ -216,7 +216,7 @@ run_tests_with_log() {
         mkdir -p "${LOG_PREFIX}"
         local log_file="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-?}_pytest.log"
         if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
-            python -c "import sys; print('RuntimeError: Timeout waiting for engine core processes to start'); sys.exit(1)" 2>&1 | tee "$log_file"
+            python -c "import sys; print('AssertionError: Timeout waiting for engine core processes to start'); sys.exit(1)" 2>&1 | tee "$log_file"
         else
             python -c "import sys; print('AssertionError: worker failure'); sys.exit(1)" 2>&1 | tee "$log_file"
         fi
@@ -416,16 +416,16 @@ aop_pipeline() {
     echo "  Name        : ${case_name}"
     echo "  Coord dir   : ${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
     cd "$WORKSPACE/vllm-ascend"
-    # TODO: enable bisect after classify+age verification
-    # python -m tests.e2e.nightly.bisect.auto_bisect \
-    #     --scene multi_node \
-    #     --config-yaml "${CONFIG_YAML_PATH}" \
-    #     --bad-commit HEAD \
-    #     --good-table "${table}" \
-    #     --name "${case_name}" \
-    #     --coord-dir "${COORD_DIR:-/root/.cache/nightly_bisect/coord}" || true
-    echo "  bisect skipped (commented out for classify+age verification)"
-    echo "=== AOP Pipeline (Pod) - END ==="
+    cd "$WORKSPACE/vllm-ascend"
+    python -m tests.e2e.nightly.bisect.auto_bisect \
+        --scene multi_node \
+        --config-yaml "${CONFIG_YAML_PATH}" \
+        --bad-commit HEAD \
+        --good-table "${table}" \
+        --name "${case_name}" \
+        --coord-dir "${COORD_DIR:-/root/.cache/nightly_bisect/coord}" || true
+    echo "  bisect completed (exit code: ${PIPESTATUS[0]:-$?})"
+    echo "=== AOP Pipeline (Pod) - END (bisect done) ==="
     return 1
 }
 
