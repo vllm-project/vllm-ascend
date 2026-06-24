@@ -13,7 +13,7 @@ from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -450,7 +450,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         kv_c_normed, k_pe = prefill_k_c_normed, prefill_k_pe
         prefill_k_c_normed = prefill_k_c_normed.squeeze(1)
         slot_mapping = attn_metadata.slot_mapping[self.pcp_size * num_decode_tokens :]
-        DeviceOperator.reshape_and_cache(
+        DeviceConfig.device_operator.reshape_and_cache(
             key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_mapping=slot_mapping
         )
         notify_kv_cache_written(self.layer_name or "")

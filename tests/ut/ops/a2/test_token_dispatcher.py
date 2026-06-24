@@ -22,6 +22,7 @@ import pytest
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend.device.device_config import AscendDeviceType, DeviceConfig
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
@@ -32,7 +33,6 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
 )
 
 from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
-    AscendDeviceType,
     EXPERT_TOKEN_NUMS_TYPE_COUNT,
     EXPERT_TOKEN_NUMS_TYPE_CUMSUM,
     TokenDispatcherWithAll2AllV,
@@ -120,9 +120,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.forward_context_patch.start()
 
         # Mock get_ascend_device_type()
-        self.ascend_soc_version_patch = patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_device_type", return_value=AscendDeviceType.A3
-        )
+        self.ascend_soc_version_patch = patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
         self.ascend_soc_version_patch.start()
 
         # Mock get_ascend_config() and is_hierarchical_communication_enabled()

@@ -2,14 +2,14 @@ import torch
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
-from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
+from vllm_ascend.utils import global_stream, npu_stream_switch
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
@@ -50,7 +50,7 @@ class AscendSampler(Sampler):
         output_token_ids: list[list[int]],
     ) -> torch.Tensor:
         """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
-        if not HAS_TRITON:
+        if not DeviceConfig.supports_triton:
             logger.warning_once(
                 "[sample/sampler] Triton not available, falling back to vLLM default "
                 "penalty implementation. Penalty performance may be degraded on NPU. "
@@ -77,7 +77,7 @@ class AscendSampler(Sampler):
         logger.debug(
             "[sample/sampler] AscendSampler initialized. logprobs_mode=%s, triton_available=%s",
             logprobs_mode,
-            HAS_TRITON,
+            DeviceConfig.supports_triton,
         )
 
     def set_q_event(self, q, event):
@@ -295,8 +295,4 @@ def _apply_top_k_top_p_ascendc(
     return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, k=k, p=p)
 
 
-apply_top_k_top_p = (
-    _apply_top_k_top_p_ascendc
-    if get_ascend_device_type() in [AscendDeviceType.A2, AscendDeviceType.A3]
-    else _apply_top_k_top_p_pytorch
-)
+apply_top_k_top_p = _apply_top_k_top_p_ascendc if DeviceConfig.use_ascendc_sampler else _apply_top_k_top_p_pytorch

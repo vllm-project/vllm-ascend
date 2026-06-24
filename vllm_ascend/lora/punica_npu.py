@@ -5,8 +5,8 @@ from collections.abc import Callable
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.lora.utils import refresh_all_lora_classes
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -22,7 +22,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
-        if get_ascend_device_type() == AscendDeviceType._310P or (
+        if not DeviceConfig.use_ascend_lora_ops or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
             from vllm.lora.ops.torch_ops import (

@@ -58,16 +58,17 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
+from vllm_ascend.device.device_config import (
+    DeviceConfig,
+    check_ascend_device_type,
+)
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
-    AscendDeviceType,
-    check_ascend_device_type,
     enable_sp,
-    get_ascend_device_type,
     register_ascend_customop,
     setup_ascend_local_comm_res,
 )
@@ -97,30 +98,48 @@ class NPUWorker(WorkerBase):
         **kwargs,
     ):
         """Initialize the worker for Ascend."""
-        if not envs_ascend.COMPILE_CUSTOM_KERNELS:
-            logger.warning(
-                "COMPILE_CUSTOM_KERNELS is set to False. "
-                "In most scenarios, without custom kernels, vllm-ascend will not function correctly."
-            )
+        # Check if the device type is supported.
+        check_ascend_device_type()
 
-        # register patch for vllm
+        # Check if triton is installed on this device.
+        if DeviceConfig.supports_triton:
+            try:
+                import triton.language.extra.cann  # type: ignore  # noqa: F401
+            except ImportError:
+                raise ImportError("Triton-Ascend is required on this device but not installed. ")
+        else:
+            try:
+                import triton  # noqa: F401
+            except ImportError:
+                pass
+            else:
+                raise ImportError(
+                    "Triton should not be installed on this device. "
+                    "Please uninstall triton to avoid conflicts with the native Ascend driver."
+                )
+
+        # register patch for vllm, lazy import to avoid circular import.
         from vllm_ascend.utils import adapt_patch
 
         adapt_patch()
 
-        # Register ops when worker init.
-        from vllm_ascend import ops
+        # Register ops when worker init. Lazy import to avoid circular import.
+        from vllm_ascend import ops  # noqa
 
-        ops.register_dummy_fusion_op()
-        if get_ascend_device_type() != AscendDeviceType.A5:
+        # Register ATB ops if enabled.
+        if DeviceConfig.enable_atb:
             _register_atb_extensions()
+
+        # replace Ascend custom ops implementation
         register_ascend_customop(vllm_config)
+
         # init ascend config and soc version
         init_ascend_config(vllm_config)
+
+        # Configure logging for Ascend.
         from vllm_ascend.logger import configure_ascend_file_logging
 
         configure_ascend_file_logging()
-        check_ascend_device_type()
 
         super().__init__(
             vllm_config=vllm_config,
@@ -170,7 +189,7 @@ class NPUWorker(WorkerBase):
                 nonlocal shutdown_request
                 if not shutdown_request:
                     shutdown_request = True
-                    self.uninstall_static_kernel()
+                    self._uninstall_static_kernel()
                     raise SystemExit()
 
             # Either SIGTERM or SIGINT will terminate the worker
@@ -179,7 +198,7 @@ class NPUWorker(WorkerBase):
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
-    def uninstall_static_kernel(self):
+    def _uninstall_static_kernel(self):
         import fcntl
         import os
         import subprocess
@@ -290,14 +309,6 @@ class NPUWorker(WorkerBase):
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
-    def _check_nz_disabled(self) -> None:
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
-            raise ValueError(
-                "FRACTAL_NZ mode is enabled. This may cause model parameter "
-                "precision issues in the RL scenarios. Please set "
-                "VLLM_ASCEND_ENABLE_NZ=0."
-            )
-
     def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """Begin a new weight update; prepares the model for layerwise reload."""
         self._check_weight_transfer_engine()
@@ -307,7 +318,12 @@ class NPUWorker(WorkerBase):
                 "start_weight_update called while a weight update is already active. Call finish_weight_update first."
             )
 
-        self._check_nz_disabled()
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+            raise ValueError(
+                "FRACTAL_NZ mode is enabled. This may cause model parameter "
+                "precision issues in the RL scenarios. Please set "
+                "VLLM_ASCEND_ENABLE_NZ=0."
+            )
 
         if is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
@@ -398,15 +414,17 @@ class NPUWorker(WorkerBase):
         # This lazy import avoids torch_npu re-initialization in patch
         # Note that this should be imported after torch.npu.set_device
         # to avoid repeated set_device in extra processes
-        from vllm.triton_utils import HAS_TRITON
+        from vllm_ascend.device.device_config import (
+            DeviceConfig,
+        )
 
-        if HAS_TRITON:
+        if DeviceConfig.supports_triton:
             import torch_npu._inductor  # noqa: F401
 
         gc.collect()
         torch.npu.empty_cache()
 
-        if get_ascend_device_type() == AscendDeviceType.A5:
+        if DeviceConfig.enable_local_comm_res:
             setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
@@ -787,7 +805,7 @@ class NPUWorker(WorkerBase):
 
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        if get_ascend_device_type() != AscendDeviceType.A5:
+        if DeviceConfig.enable_atb:
             self._warm_up_atb()
         # Bind after warmup so hot allocations are already materialized on the
         # worker process before migratepages/taskset run.
@@ -1034,7 +1052,11 @@ class NPUWorker(WorkerBase):
             )
 
             if result.returncode == 0:
-                parse_text_output(result.stdout)
+                lines = result.stdout.strip().split("\n")
+                for i, line in enumerate(lines):
+                    line = line.strip()
+                    if "Health" in line and line.split(":")[-1].strip() != "OK":
+                        raise RuntimeError("NPU card health status is not OK")
                 logger.debug("check_health success for rank %s.", self.local_rank)
             else:
                 logger.warning("query NPU card %s fail: %s", self.local_rank, result.stderr)
@@ -1044,14 +1066,3 @@ class NPUWorker(WorkerBase):
             logger.warning("npu-smi tool not found.")
         except Exception as e:
             logger.error("query NPU card %s fail: %s", self.local_rank, e)
-        return
-
-
-def parse_text_output(output) -> None:
-    lines = output.strip().split("\n")
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if "Health" in line:
-            if line.split(":")[-1].strip() != "OK":
-                raise RuntimeError("NPU card health status is not OK")
-    return

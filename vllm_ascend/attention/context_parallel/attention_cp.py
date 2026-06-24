@@ -55,7 +55,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -784,7 +784,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         key = torch.empty(total_toks, num_heads, head_size, dtype=query.dtype, device=query.device)
         value = torch.empty(total_toks, num_heads, head_size, dtype=query.dtype, device=query.device)
         if total_toks > 0:
-            DeviceOperator.kv_cache_load(
+            DeviceConfig.device_operator.kv_cache_load(
                 cache_key,
                 cache_value,
                 attn_metadata.prefill.block_tables,
@@ -816,7 +816,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             if has_decode:
                 slot_mapping = attn_metadata.slot_mapping[: num_decode_tokens * self.pcp_size : self.pcp_size]
-                DeviceOperator.reshape_and_cache(
+                DeviceConfig.device_operator.reshape_and_cache(
                     key=key[:num_decode_tokens],
                     value=value[:num_decode_tokens],
                     key_cache=self.key_cache,
@@ -849,7 +849,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 slot_mapping = attn_metadata.slot_mapping[
                     self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded
                 ]
-                DeviceOperator.reshape_and_cache(
+                DeviceConfig.device_operator.reshape_and_cache(
                     key=prefill_key,
                     value=prefill_value,
                     key_cache=self.key_cache,

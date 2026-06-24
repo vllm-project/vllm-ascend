@@ -24,7 +24,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.utils import get_rope_dim
 
 
@@ -83,7 +83,7 @@ class QKNormRopeFusionPattern(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            results = DeviceOperator.split_qkv_rmsnorm_rope(
+            results = DeviceConfig.device_operator.split_qkv_rmsnorm_rope(
                 input=qkv,
                 q_weight=q_weight,
                 k_weight=k_weight,
@@ -166,7 +166,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            results = DeviceOperator.split_qkv_rmsnorm_rope(
+            results = DeviceConfig.device_operator.split_qkv_rmsnorm_rope(
                 input=qkv,
                 q_weight=q_weight,
                 k_weight=k_weight,

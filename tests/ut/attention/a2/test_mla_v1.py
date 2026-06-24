@@ -1,5 +1,5 @@
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
@@ -21,6 +21,7 @@ from vllm_ascend.attention.mla_v1 import (
     PrefillMLAPreprocessResult,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.device.device_config import DeviceConfig as _DevConfigSingleton
 
 
 class TestAscendMLABackend(TestBase):
@@ -1540,11 +1541,13 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(hasattr(self.impl, "weight_dq_scale"))
         self.assertTrue(hasattr(self.impl, "weight_dkv_kr_scale"))
 
-    @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
+    @patch.object(type(_DevConfigSingleton), "device_operator", new_callable=PropertyMock)
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch("torch_npu.npu_attention_update")
-    def test__forward_prefill(self, mock_npu_attention_update, mock_fia, mock_device_operator):
+    def test__forward_prefill(self, mock_npu_attention_update, mock_fia, mock_device_operator_prop):
         batch_size = 2
+        mock_adaptor = MagicMock()
+        mock_device_operator_prop.return_value = mock_adaptor
 
         # create input tensors
         q_nope = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_nope_head_dim)
@@ -1567,7 +1570,7 @@ class TestAscendMLAImpl(TestBase):
         prefill_metadata.block_table = torch.randint(0, 100, (2, 4))
         attn_metadata.prefill = prefill_metadata
 
-        mock_device_operator.kv_cache_load = MagicMock()
+        mock_adaptor.kv_cache_load = MagicMock()
 
         mock_fia.return_value = (
             torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim),
@@ -1593,11 +1596,14 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[1], self.impl.num_heads * self.impl.v_head_dim)
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
+    @patch.object(type(_DevConfigSingleton), "device_operator", new_callable=PropertyMock)
     @patch("torch_npu.npu_fused_infer_attention_score")
-    def test_forward_prefill_non_power_of_two_heads(self, mock_fia, mock_device_operator, mock_get_current_vllm_config):
+    def test_forward_prefill_non_power_of_two_heads(
+        self, mock_fia, mock_device_operator_prop, mock_get_current_vllm_config
+    ):
         """Test prefill with non-power-of-2 heads uses concat instead of query_rope/key_rope kwargs."""
-        mock_get_current_vllm_config.return_value = MagicMock()
+        mock_adaptor = MagicMock()
+        mock_device_operator_prop.return_value = mock_adaptor
         num_heads = 20
         kwargs = {
             "kv_lora_rank": 32,
@@ -1644,7 +1650,7 @@ class TestAscendMLAImpl(TestBase):
         prefill_metadata.chunked_context = None
         attn_metadata.prefill = prefill_metadata
 
-        mock_device_operator.kv_cache_load = MagicMock()
+        mock_adaptor.kv_cache_load = MagicMock()
         mock_fia.return_value = (
             torch.randn(batch_size, num_heads, impl.v_head_dim),
             torch.randn(num_heads, batch_size),
@@ -1706,9 +1712,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
 
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_mlapo_a5(self, mock_format_cast, mock_get_ascend_device_type):
+    def test_process_weights_after_loading_with_mlapo_a5(self, mock_format_cast):
         # test with enable_mlapo=True and device_type=A5
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
@@ -1730,9 +1735,9 @@ class TestAscendMLAImpl(TestBase):
         self.impl.fused_qkv_a_proj = mock_fused_qkv_a_proj
 
         # set device_type=A5
-        from vllm_ascend.attention.mla_v1 import AscendDeviceType
+        from vllm_ascend.device.device_config import AscendDeviceType, DeviceConfig
 
-        mock_get_ascend_device_type.return_value = AscendDeviceType.A5
+        DeviceConfig._device_type = AscendDeviceType.A5
 
         self.impl._process_weights_for_fused_mlapo_a5 = MagicMock()
 
@@ -1748,9 +1753,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
 
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_mlapo_non_a5(self, mock_format_cast, mock_get_ascend_device_type):
+    def test_process_weights_after_loading_with_mlapo_non_a5(self, mock_format_cast):
         # test with enable_mlapo=True and device_type!=A5
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
@@ -1772,9 +1776,9 @@ class TestAscendMLAImpl(TestBase):
         mock_fused_qkv_a_proj.quant_method = mock_quant_method
         self.impl.fused_qkv_a_proj = mock_fused_qkv_a_proj
 
-        from vllm_ascend.attention.mla_v1 import AscendDeviceType
+        from vllm_ascend.device.device_config import AscendDeviceType, DeviceConfig
 
-        mock_get_ascend_device_type.return_value = AscendDeviceType.A2
+        DeviceConfig._device_type = AscendDeviceType.A2
 
         self.impl._process_weights_for_fused_mlapo = MagicMock()
 

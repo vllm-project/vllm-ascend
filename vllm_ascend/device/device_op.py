@@ -20,8 +20,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     QUANT_DTYPES,
@@ -31,9 +31,8 @@ from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-if HAS_TRITON:
+if DeviceConfig.supports_triton:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
     triton_q_rms = None  # type: ignore
@@ -1672,13 +1671,3 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             positions=positions,
         )
         return results
-
-
-def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
-    ascend_device_type = get_ascend_device_type()
-    if ascend_device_type == AscendDeviceType.A5:
-        return A5DeviceAdaptor
-    return BaseDeviceAdaptor
-
-
-DeviceOperator: type["BaseDeviceAdaptor"] = get_device_adaptor()

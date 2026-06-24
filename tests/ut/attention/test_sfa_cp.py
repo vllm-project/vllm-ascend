@@ -29,6 +29,7 @@ if "torch_npu._inductor" not in sys.modules:
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl, AscendSFACPMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata
+from vllm_ascend.device.device_config import _DeviceConfig
 
 
 def _make_indexer_mock():
@@ -1136,7 +1137,7 @@ class TestAscendSFACPImpl(TestBase):
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 3)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True)
+    @patch.object(_DeviceConfig, "supports_triton", True)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
     def test_indexer_select_post_process_decode_only_simple(self, mock_rope):
@@ -1187,7 +1188,7 @@ class TestAscendSFACPImpl(TestBase):
             )
         self.assertIsNotNone(result)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", False)
+    @patch.object(_DeviceConfig, "supports_triton", False)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
     def test_indexer_select_post_process_decode_only_no_triton(self, mock_torch_npu):
@@ -1239,7 +1240,7 @@ class TestAscendSFACPImpl(TestBase):
             )
         self.assertIsNotNone(result)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True)
+    @patch.object(_DeviceConfig, "supports_triton", True)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
     def test_indexer_select_post_process_prefill_only_no_pcp(self, mock_rope):
@@ -1293,7 +1294,7 @@ class TestAscendSFACPImpl(TestBase):
             )
         self.assertIsNotNone(result)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True)
+    @patch.object(_DeviceConfig, "supports_triton", True)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso")
     @patch_distributed_groups(dcp_size=1, pcp_size=1, needs_mocks=False)
     def test_indexer_select_post_process_decode_and_prefill_no_pcp(self, mock_rope):
@@ -1354,7 +1355,7 @@ class TestAscendSFACPImpl(TestBase):
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 3)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True)
+    @patch.object(_DeviceConfig, "supports_triton", True)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_indexer_select_post_process_prefill_with_pcp(self, mock_rope):
@@ -1418,7 +1419,7 @@ class TestAscendSFACPImpl(TestBase):
         self.assertIsNotNone(result)
         self.assertEqual(result.shape[0], 4)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.HAS_TRITON", True)
+    @patch.object(_DeviceConfig, "supports_triton", True)
     @patch("vllm_ascend.attention.context_parallel.sfa_cp.rope_forward_triton_siso")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_indexer_select_post_process_decode_and_prefill_with_pcp(self, mock_rope):

@@ -1,13 +1,15 @@
 from typing import Any
 
 import torch
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.triton_utils import tl, triton
+
+from vllm_ascend.device.device_config import DeviceConfig
 
 _NUM_AICORE = -1
 _NUM_VECTORCORE = -1
 _extension_module = None
 
-if HAS_TRITON:
+if DeviceConfig.supports_triton:
     try:
         import triton.language.extra.cann.extension as _extension_module  # type: ignore
     except ImportError:
@@ -15,8 +17,8 @@ if HAS_TRITON:
 
 
 def _resolve_triton_ascend_op(op_name: str):
-    if not HAS_TRITON:
-        raise RuntimeError(f"Triton op '{op_name}' cannot be resolved because HAS_TRITON is False")
+    if not DeviceConfig.supports_triton:
+        raise RuntimeError(f"Triton op '{op_name}' cannot be resolved because supports_triton is False")
 
     if _extension_module is not None:
         extension_op = getattr(_extension_module, op_name, None)
@@ -33,7 +35,7 @@ def _resolve_triton_ascend_op(op_name: str):
     )
 
 
-if HAS_TRITON:
+if DeviceConfig.supports_triton:
     insert_slice = _resolve_triton_ascend_op("insert_slice")
     extract_slice = _resolve_triton_ascend_op("extract_slice")
     get_element = _resolve_triton_ascend_op("get_element")
@@ -45,7 +47,7 @@ else:
 
 def init_device_properties_triton():
     global _NUM_AICORE, _NUM_VECTORCORE
-    if _NUM_AICORE == -1 and HAS_TRITON:
+    if _NUM_AICORE == -1 and DeviceConfig.supports_triton:
         device_properties: dict[str, Any] = triton.runtime.driver.active.utils.get_device_properties(
             torch.npu.current_device()
         )

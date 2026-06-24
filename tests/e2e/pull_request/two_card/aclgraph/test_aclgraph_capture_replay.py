@@ -26,7 +26,7 @@ import torch
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import wait_until_npu_memory_free
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.device.device_config import AscendDeviceType, DeviceConfig
 
 MODELS = [
     # Offline data parallel mode will be not supported/useful for dense models
@@ -211,7 +211,7 @@ def test_models_aclgraph_capture_replay_metrics_dp2(
 
     # Part A: Warmup runs (Profile run + 2 runs per captured graph)
     warmup_runs = 1 + (2 * max_batch_sizes)
-    soc_version = get_ascend_device_type()
+    soc_version = DeviceConfig._device_type
     if soc_version in {AscendDeviceType.A3} and "DeepSeek" in model:
         # An extra warmup run is needed for MC2 warmup here
         warmup_runs += 1

@@ -27,7 +27,7 @@ from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.triton_utils import triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -49,6 +49,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
@@ -1871,7 +1872,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         used as padding and filtered out later by `token_indices_to_sample`.
         No blocking CPU operations should be introduced in this function.
         """
-        if HAS_TRITON:
+        if DeviceConfig.supports_triton:
             num_reqs = common_attn_metadata.num_reqs
             device = valid_sampled_tokens_count.device
 

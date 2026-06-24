@@ -5,8 +5,8 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.utils import enable_custom_op
-from vllm_ascend.utils import is_310p as is_310p_hw
 
 enable_custom_op()
 
@@ -64,7 +64,7 @@ def test_RMSNorm_forward(
         assert torch.allclose(out_x, expected_out_x)
 
 
-@pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
+@pytest.mark.skipif(not DeviceConfig.use_310p_op_implementations, reason="310P device unittest case.")
 @pytest.mark.parametrize("residual", [None, torch.randn(4, 8, dtype=torch.float16)])
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
 @patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)

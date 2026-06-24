@@ -18,10 +18,9 @@
 import torch
 import torch_npu
 from torch.nn.functional import pad
-from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
@@ -31,11 +30,8 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
-    get_ascend_device_type,
     get_weight_prefetch_method,
 )
-
-ASCEND_DEVICE_TYPE = get_ascend_device_type()
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
@@ -125,7 +121,7 @@ def quant_apply_mlp(
         quantized_hidden_states = None
     elif dynamic_scale is None:
         unquantized_hidden_states = hidden_states
-        hidden_states, pertoken_scale = DeviceOperator.npu_dynamic_quant(
+        hidden_states, pertoken_scale = DeviceConfig.device_operator.npu_dynamic_quant(
             hidden_states=hidden_states,
             dynamic_scale=None,
             act_quant_type=act_quant_type,
@@ -136,7 +132,9 @@ def quant_apply_mlp(
     else:
         unquantized_hidden_states = None
         pertoken_scale = (
-            DeviceOperator.maybe_normalize_mxfp_scale_layout(dynamic_scale) if use_mxfp_quant else dynamic_scale
+            DeviceConfig.device_operator.maybe_normalize_mxfp_scale_layout(dynamic_scale)
+            if use_mxfp_quant
+            else dynamic_scale
         )
         quantized_hidden_states = hidden_states
 
@@ -160,7 +158,7 @@ def quant_apply_mlp(
             )
         elif use_gmm_swiglu_quant_fusion:
             # gmm1: gate_up_proj & act_fn: swiglu
-            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
+            hidden_states, swiglu_out_scale, _ = DeviceConfig.device_operator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
@@ -204,7 +202,7 @@ def quant_apply_mlp(
             )
         before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
-        hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
+        hidden_states = DeviceConfig.device_operator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
             weight=w2,
             weight_scale=w2_scale,
@@ -285,7 +283,7 @@ def quant_apply_mlp(
                 swiglu_limit=swiglu_limit,
             )
         elif use_gmm_swiglu_quant_fusion:
-            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
+            hidden_states, swiglu_out_scale, _ = DeviceConfig.device_operator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
@@ -318,7 +316,7 @@ def quant_apply_mlp(
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
-            if HAS_TRITON:
+            if DeviceConfig.supports_triton:
                 from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
 
                 hidden_states, swiglu_out_scale = swiglu_quant(
@@ -329,7 +327,7 @@ def quant_apply_mlp(
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
         before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
-        hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
+        hidden_states = DeviceConfig.device_operator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
             weight=w2,
             weight_scale=w2_scale,
@@ -406,7 +404,7 @@ def unquant_apply_mlp(
 def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     """
     Unified MoE MLP entry.
-    Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
+    Quant path is dispatched by DeviceConfig.device_operator with explicit typed kernel flags.
     """
     hidden_states = mlp_compute_input.hidden_states
     group_list = mlp_compute_input.group_list

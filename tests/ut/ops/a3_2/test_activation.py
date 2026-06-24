@@ -20,13 +20,13 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
 
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.ops.activation import (
     AscendQuickGELU,
     AscendSiluAndMul,
     AscendSwigluOAIAndMul,
     swiglustep_and_mul,
 )
-from vllm_ascend.utils import is_310p as is_310p_hw
 
 
 @pytest.fixture
@@ -111,7 +111,7 @@ def test_AscendSiluAndMul_forward_oot_prefetch(
     assert torch.allclose(out, dummy_tensor + 1)
 
 
-@pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
+@pytest.mark.skipif(not DeviceConfig.use_310p_op_implementations, reason="310P device unittest case.")
 @patch("torch.nn.functional.silu", side_effect=lambda x: x + 1)
 def test_SiluAndMul_forward_310p(
     mock_silu,

@@ -19,6 +19,7 @@ import torch
 
 from vllm_ascend import utils
 from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
+from vllm_ascend.device.device_config import _DeviceConfig
 
 
 def test_register_customop_overrides_mm_encoder_attention_for_310p():
@@ -27,7 +28,12 @@ def test_register_customop_overrides_mm_encoder_attention_for_310p():
         utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
         with (
             mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot"),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+            mock.patch.object(
+                _DeviceConfig,
+                "use_310p_op_implementations",
+                new_callable=mock.PropertyMock,
+                return_value=True,
+            ),
         ):
             utils.register_ascend_customop()
 

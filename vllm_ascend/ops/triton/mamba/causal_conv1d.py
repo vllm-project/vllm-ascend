@@ -13,12 +13,13 @@ import torch
 import torch.nn.functional as F
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
-if not HAS_TRITON:
+if not DeviceConfig.supports_triton:
     from vllm_ascend._310p.ops.causal_conv1d import (
         causal_conv1d_update as _pytorch_update,
     )
@@ -588,7 +589,7 @@ def causal_conv1d_update_npu(
             indices 0 and 3
     out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
     """
-    if not HAS_TRITON:
+    if not DeviceConfig.supports_triton:
         return _pytorch_update(
             x,
             conv_state,

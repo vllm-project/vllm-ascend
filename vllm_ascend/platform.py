@@ -36,20 +36,19 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm_ascend.ascend_config import init_ascend_config
 
 # isort: off
+from vllm_ascend.device.device_config import DeviceConfig
+
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
-    AscendDeviceType,
     bootstrap_custom_op_env,
     check_kv_extra_config,
     flashcomm2_enable,
-    get_ascend_device_type,
     is_moe_model,
     refresh_block_size,
     update_cudagraph_capture_sizes,
-    is_310p,
     enable_sp,
 )
 
@@ -194,7 +193,7 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
-        if not is_310p():
+        if DeviceConfig.supports_advanced_quantization:
             from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendFp8Config, AscendModelSlimConfig  # noqa: F401
         else:
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
@@ -615,7 +614,7 @@ class NPUPlatform(Platform):
                 ]
             )
             # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if not DeviceConfig.enable_npu_graph_ex:
                 prune_capture_sizes_for_950(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -648,7 +647,7 @@ class NPUPlatform(Platform):
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             if not vllm_config.compilation_config.pass_config.enable_sp:
                 parallel_config.all2all_backend = "flashinfer_all2allv"
-            if is_310p():
+            if DeviceConfig.use_310p_worker:
                 parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
             elif ascend_config.xlite_graph_config.enabled:
                 logger.info("openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite")
@@ -659,7 +658,7 @@ class NPUPlatform(Platform):
         refresh_block_size(vllm_config)
 
         # Activate custom ops for v1, except on 310P
-        if get_ascend_device_type() != AscendDeviceType._310P:
+        if DeviceConfig.supports_compilation_custom_ops:
             compilation_config.custom_ops = ["all"]
 
         if ascend_config.enable_balance_scheduling:
@@ -804,7 +803,7 @@ class NPUPlatform(Platform):
             # (True, True):  "...AscendSFABackend310",
         }
 
-        if is_310p():
+        if not DeviceConfig.supports_advanced_attention_backends:
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
         return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]

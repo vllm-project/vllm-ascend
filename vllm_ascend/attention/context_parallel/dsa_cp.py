@@ -14,13 +14,11 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
     olora_tp_enable,
 )
 
@@ -207,10 +205,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
-        else:
+        if DeviceConfig.slot_mapping_2d:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
+        else:
+            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.spec_slot_mapping = [
@@ -309,7 +307,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens_cpu = self.common_ratio_to_sas_metadata["seq_lens_cpu"]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
+        self.slot_mapping[:num_input_tokens] = DeviceConfig.device_operator.format_dsa_slot_mapping(
+            slot_mapping, self.block_size
+        )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
 
@@ -364,8 +364,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
 
         assert self.spec_slot_mapping is not None
-        self.spec_slot_mapping[draft_step - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
-            slot_mapping, self.block_size
+        self.spec_slot_mapping[draft_step - 1][:num_input_tokens] = (
+            DeviceConfig.device_operator.format_dsa_slot_mapping(slot_mapping, self.block_size)
         )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
@@ -449,13 +449,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = self.spec_slot_mapping[draft_step - 1][: self.num_actual_tokens]
 
         num_heads = self.model_config.hf_config.num_attention_heads
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceConfig.device_operator.get_dsa_sparse_attn_metadata_op()
+        metadata_kwargs = DeviceConfig.device_operator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         metadata_kwargs.setdefault("device", str(self.seqused_q.device))
         cu_seqlens_ori_kv = (
             local_query_start_loc
             if has_prefill
-            else DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+            else DeviceConfig.device_operator.get_dsa_decode_cu_seqlens_ori_kv(
                 None,
                 "draft_cu_seqlens_ori_kv",
                 local_seq_lens,
@@ -465,7 +465,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
         )
         cu_seqlens_cmp_kv = (
-            None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
+            None
+            if has_prefill
+            else DeviceConfig.device_operator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
         sas_metadata = metadata_op(
             **metadata_kwargs,
@@ -758,7 +760,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             return None
         if has_prefill:
             return None
-        return DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
+        return DeviceConfig.device_operator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
 
     def _get_slot_mapping_size(self, input_positions, compress_ratio, num_reqs, num_input_tokens):
         if compress_ratio <= 1:
@@ -787,7 +789,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cu_seqlens_ori_kv = (
                 query_start_loc
                 if has_prefill
-                else DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+                else DeviceConfig.device_operator.get_dsa_decode_cu_seqlens_ori_kv(
                     self.common_ratio_to_sas_metadata,
                     f"{cache_key}_cu_seqlens_ori_kv",
                     seq_lens,
@@ -797,10 +799,12 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
             )
             cu_seqlens_cmp_kv = (
-                None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
+                None
+                if has_prefill
+                else DeviceConfig.device_operator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
             )
-            metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-            metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+            metadata_op = DeviceConfig.device_operator.get_dsa_sparse_attn_metadata_op()
+            metadata_kwargs = DeviceConfig.device_operator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
             metadata_kwargs.setdefault("device", str(self.seqused_q.device))
             kw = dict(
                 **metadata_kwargs,
@@ -1015,7 +1019,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         num_tokens = o_proj_input.shape[0]
 
         # o
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if DeviceConfig.supports_mxfp:
             o = o_proj_input.view(num_tokens, self.n_local_groups, -1)
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(
@@ -1063,8 +1067,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
         need_gather_q_kv: bool = False,
     ):
         """Run full-sequence KV cache updates and local-token attention."""
-        (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = DeviceOperator.unpack_dsa_forward_kv_cache(
-            kv_cache, self.compress_ratio
+        (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = (
+            DeviceConfig.device_operator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)
         )
         if self.compress_ratio == 4:
             (compressor_attn_metadata, compressor_kv_state_metadata, _, _, swa_metadata) = attn_metadata
@@ -1139,7 +1143,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         q = q.unflatten(-1, (self.num_heads, self.head_dim))
 
-        q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
+        q = DeviceConfig.device_operator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
             local_cos,
@@ -1159,7 +1163,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
+        DeviceConfig.device_operator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
 
         compress_topk_idxs = None
         if self.compress_ratio > 1:
@@ -1212,14 +1216,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
             if compressed_kv.numel() == 0:
                 compressed_kv = None
-            DeviceOperator.dsa_kv_compress_scatter(
+            DeviceConfig.device_operator.dsa_kv_compress_scatter(
                 compress_kv_cache, compressed_kv, compressor_attn_metadata.req_metadata.slot_mapping
             )
 
-        attn_op = DeviceOperator.get_dsa_sparse_attn_op()
-        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
+        attn_op = DeviceConfig.device_operator.get_dsa_sparse_attn_op()
+        extra_attn_kwargs: dict = DeviceConfig.device_operator.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            DeviceConfig.device_operator.add_dsa_sparse_attn_extra_kwargs(
                 extra_attn_kwargs, cu_seqlens_ori_kv=local_seq_lengths_query
             )
 
@@ -1247,7 +1251,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             )[0]
         elif self.compress_ratio == 4:
             assert compressor_attn_metadata.req_metadata is not None
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            DeviceConfig.device_operator.add_dsa_sparse_attn_extra_kwargs(
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
             attn_output = attn_op(
@@ -1263,7 +1267,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             )[0]
         else:
             assert compressor_attn_metadata.req_metadata is not None
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            DeviceConfig.device_operator.add_dsa_sparse_attn_extra_kwargs(
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
             attn_output = attn_op(
@@ -1319,7 +1323,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
     ) -> None:
         (indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
-            DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
+            DeviceConfig.device_operator.unpack_dsa_indexer_kv_cache(kv_cache)
         )
         (_, _, indexer_kv_state_metadata, indexer_kv_scale_metadata, _) = attn_metadata
         coff = 2 if self.compressor_overlap else 1
@@ -1354,14 +1358,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
         if self.indexer.compressor.rotate:
             kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
 
-        _, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
+        _, kv_scale = DeviceConfig.device_operator.indexer_quant_scatter_part1(
             kv,
             indexer_k_cache,
             indexer_full_cache,
             indexer_kv_scale_metadata.req_metadata.slot_mapping,
         )
         if kv_scale is not None:
-            DeviceOperator.dsa_indexer_scatter_scale_part3(
+            DeviceConfig.device_operator.dsa_indexer_scatter_scale_part3(
                 kv_scale,
                 indexer_scale_cache,
                 indexer_kv_scale_metadata.req_metadata.slot_mapping,
@@ -1379,7 +1383,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
         actual_seq_lengths_key: torch.Tensor,
         qr_pertoken_scale: torch.Tensor = None,
     ):
-        (_, indexer_k_cache, indexer_scale_cache, _) = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
+        (_, indexer_k_cache, indexer_scale_cache, _) = DeviceConfig.device_operator.unpack_dsa_indexer_kv_cache(
+            kv_cache
+        )
         (_, _, _, indexer_kv_scale_metadata, _) = attn_metadata
         assert indexer_kv_scale_metadata is not None
 
@@ -1387,7 +1393,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod))
             and isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
             and qr_pertoken_scale is not None
-            and get_ascend_device_type() not in {AscendDeviceType.A5}
+            and DeviceConfig.indexer_uses_quant_matmul
         ):
             q = torch_npu.npu_quant_matmul(
                 qr,
@@ -1410,7 +1416,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
         weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
 
-        q, q_scale = DeviceOperator.indexer_quantize_query(q)
+        q, q_scale = DeviceConfig.device_operator.indexer_quantize_query(q)
 
         assert indexer_kv_scale_metadata.req_metadata is not None
         qli_metadata = indexer_kv_scale_metadata.req_metadata.qli_metadata
@@ -1418,9 +1424,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
         topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
             query=q,
             key=indexer_k_cache,
-            weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
-            query_dequant_scale=DeviceOperator.prepare_dsa_indexer_query_scale(q_scale),
-            key_dequant_scale=DeviceOperator.prepare_dsa_indexer_key_scale(indexer_scale_cache),
+            weights=DeviceConfig.device_operator.prepare_dsa_indexer_weights(weights),
+            query_dequant_scale=DeviceConfig.device_operator.prepare_dsa_indexer_query_scale(q_scale),
+            key_dequant_scale=DeviceConfig.device_operator.prepare_dsa_indexer_key_scale(indexer_scale_cache),
             actual_seq_lengths_query=actual_seq_lengths_query[1:],
             actual_seq_lengths_key=actual_seq_lengths_key,
             block_table=block_table,

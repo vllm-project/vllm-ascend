@@ -37,6 +37,14 @@ def _ensure_global_patch():
     _GLOBAL_PATCH_APPLIED = True
 
 
+# Apply the global patch at module import time, before any general-plugin
+# entry point (register_model, register_connector, ...) is invoked.
+# vLLM's DEFAULT_PLUGINS_GROUP load order between entry points is not
+# guaranteed, so relying on each individual function to call
+# _ensure_global_patch() is not sufficient.
+_ensure_global_patch()
+
+
 def register():
     """Register the NPU platform."""
 
@@ -72,6 +80,8 @@ def register_service_profiling():
 
 
 def register_model():
+    _ensure_global_patch()
+
     from .models import register_model
 
     register_model()

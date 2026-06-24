@@ -9,7 +9,8 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
+from vllm_ascend.device.device_config import DeviceConfig
+from vllm_ascend.utils import get_ascend_config
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 
@@ -44,7 +45,7 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
 def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
     if vllm_config.speculative_config is not None:
         return False
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if not DeviceConfig.use_paged_attention:
         return False
     from vllm.config.compilation import CUDAGraphMode
 
@@ -400,7 +401,7 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
     config_val = get_ascend_config().enable_mlapo
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if not DeviceConfig.mlapo_decode_only:
         return bool(config_val)
 
     is_decode_instance = (

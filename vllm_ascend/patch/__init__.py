@@ -491,7 +491,7 @@
 #       The Triton version bundled with torch_npu on Ascend NPU
 #       does not include `next_power_of_2`, which is called by
 #       upstream vLLM and vLLM-Ascend code in 94+ places.
-#       Additionally, when Triton is not available (HAS_TRITON=False),
+#       Additionally, when Triton is not available (i.e. on 310P),
 #       vLLM uses TritonPlaceholder which also lacks this function.
 #    How：
 #       Import `triton` from vllm.triton_utils (which handles both

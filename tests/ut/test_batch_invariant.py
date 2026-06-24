@@ -22,6 +22,7 @@ import torch
 
 # Now import the module under test
 import vllm_ascend.batch_invariant as batch_invariant
+from vllm_ascend.device.device_config import _DeviceConfig
 
 
 class TestBatchInvariant:
@@ -38,7 +39,7 @@ class TestBatchInvariant:
         assert os.environ["HCCL_DETERMINISTIC"] == "strict"
         assert os.environ["LCCL_DETERMINISTIC"] == "1"
 
-    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch.object(_DeviceConfig, "supports_triton", False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     def test_enable_batch_invariant_mode_ascendc_path(self):
         """Test enable_batch_invariant_mode with AscendC ops available"""
@@ -71,7 +72,7 @@ class TestBatchInvariant:
             == batch_invariant.torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
 
-    @patch("vllm_ascend.batch_invariant.HAS_TRITON", True)
+    @patch.object(_DeviceConfig, "supports_triton", True)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", False)
     def test_enable_batch_invariant_mode_triton_path(self):
         """Test enable_batch_invariant_mode with only Triton available"""
@@ -100,7 +101,7 @@ class TestBatchInvariant:
         mock_library.impl.assert_any_call("aten::softmax", batch_invariant.softmax_batch_invariant, "NPU")
         mock_library.impl.assert_any_call("aten::_softmax", batch_invariant.softmax_batch_invariant, "NPU")
 
-    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch.object(_DeviceConfig, "supports_triton", False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", False)
     def test_enable_batch_invariant_mode_no_backend(self):
         """Test enable_batch_invariant_mode with no backends available"""
@@ -124,13 +125,13 @@ class TestBatchInvariant:
         import vllm.envs as envs
 
         envs.VLLM_BATCH_INVARIANT = batch_invariant_enabled
-        batch_invariant.HAS_TRITON = has_backend
         batch_invariant.HAS_ASCENDC_BATCH_INVARIANT = has_backend
         batch_invariant.override_envs_for_invariance = MagicMock()
         batch_invariant.enable_batch_invariant_mode = MagicMock()
 
         # Call function
-        batch_invariant.init_batch_invariance()
+        with patch.object(_DeviceConfig, "supports_triton", has_backend):
+            batch_invariant.init_batch_invariance()
 
         # Verify function calls based on conditions
         if batch_invariant_enabled and has_backend:

@@ -28,13 +28,13 @@ from vllm.model_executor.layers.rotary_embedding import (
     YaRNScalingRotaryEmbedding,
 )
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
-from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import has_rope, is_vl_model
 
-if HAS_TRITON:
+if DeviceConfig.supports_triton:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
     from vllm_ascend.ops.triton.rope import rope_forward_triton
@@ -163,7 +163,7 @@ def rope_forward_oot(
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
-    if HAS_TRITON:
+    if DeviceConfig.supports_triton:
         num_tokens = query.shape[0]
         query, key = rope_forward_triton(
             query.view(num_tokens, -1, head_size),
@@ -520,7 +520,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
+        if DeviceConfig.supports_triton and positions.ndim == 2 and self.mrope_interleaved:
             # todo: need cann update in 8.5.0
             return self.forward_triton(positions, query, key)
 

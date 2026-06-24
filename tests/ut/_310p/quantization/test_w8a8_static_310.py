@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.quantization.methods.w8a8_static import AscendW8A8LinearMethod310
+from vllm_ascend.device.device_config import _DeviceConfig
 
 
 class TestAscendW8A8LinearMethod310(TestBase):
@@ -122,9 +123,14 @@ class TestAscendW8A8LinearMethod310(TestBase):
 
         self.assertTrue(torch.equal(output, expected_y_output))
 
-    @patch("vllm_ascend.utils.is_310p", return_value=True)
+    @patch.object(
+        _DeviceConfig,
+        "force_nz_weight_format",
+        new_callable=PropertyMock,
+        return_value=True,
+    )
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_calls_nz_format_cast_310p(self, mock_npu_format_cast, _mock_is_310p):
+    def test_process_weights_after_loading_calls_nz_format_cast_310p(self, mock_npu_format_cast, _mock_force_nz):
         mock_npu_format_cast.side_effect = lambda x, fmt: x
 
         layer = MagicMock()

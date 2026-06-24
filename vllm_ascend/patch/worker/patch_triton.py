@@ -1,9 +1,10 @@
 import vllm.model_executor.layers.fla.ops
 import vllm.model_executor.layers.mamba.ops.causal_conv1d
 import vllm.v1.worker.gpu.sample.gumbel
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.triton_utils import triton
 from vllm.utils.math_utils import next_power_of_2
 
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_recurrent_gated_delta_rule_fwd_kernel
@@ -23,7 +24,7 @@ vllm.model_executor.layers.fla.ops.chunk_gated_delta_rule = chunk_gated_delta_ru
 # Triton-based fused_post_conv_prep with a pure-PyTorch fallback so that
 # qwen_gdn_linear_attn's from-import picks up the replacement before model
 # load.
-if not HAS_TRITON:
+if not DeviceConfig.supports_triton:
     import torch
     import torch.nn.functional as _F
 

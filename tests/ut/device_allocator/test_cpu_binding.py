@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, call, mock_open, patch
 
 import vllm_ascend.cpu_binding as cpu_binding_module
 from vllm_ascend.cpu_binding import CpuAlloc, DeviceInfo, bind_cpus, is_arm_cpu
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.device.device_config import AscendDeviceType, DeviceConfig
 
 
 def make_cpu_alloc(rank_id=0):
@@ -292,7 +292,7 @@ class TestCpuAlloc(unittest.TestCase):
         visible_devices_patcher.start()
         self.addCleanup(visible_devices_patcher.stop)
 
-        device_type_patcher = patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+        device_type_patcher = patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
         device_type_patcher.start()
         self.addCleanup(device_type_patcher.stop)
 
@@ -325,18 +325,16 @@ class TestCpuAlloc(unittest.TestCase):
             },
         )
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type")
-    def test_binding_mode_table(self, mock_get_device_type):
-        mock_get_device_type.return_value = AscendDeviceType.A2
-        self.assertEqual(self.cpu_alloc._binding_mode(), "topo_affinity")
-        mock_get_device_type.return_value = AscendDeviceType.A3
-        self.assertEqual(self.cpu_alloc._binding_mode(), "global_slice")
-        mock_get_device_type.return_value = AscendDeviceType.A5
-        self.assertEqual(self.cpu_alloc._binding_mode(), "global_slice")
+    def test_binding_mode_table(self):
+        with patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2):
+            self.assertEqual(self.cpu_alloc._binding_mode(), "topo_affinity")
+        with patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3):
+            self.assertEqual(self.cpu_alloc._binding_mode(), "global_slice")
+        with patch.object(DeviceConfig, "_device_type", AscendDeviceType.A5):
+            self.assertEqual(self.cpu_alloc._binding_mode(), "global_slice")
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type")
-    def test_build_cpu_pools_fallback_to_global_slice(self, mock_get_device_type):
-        mock_get_device_type.return_value = AscendDeviceType.A2
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
+    def test_build_cpu_pools_fallback_to_global_slice(self):
         self.cpu_alloc.device_info.npu_affinity = {}
         with (
             patch.object(self.cpu_alloc, "build_cpu_node_map") as mock_build_cpu_node_map,
@@ -346,9 +344,8 @@ class TestCpuAlloc(unittest.TestCase):
         mock_build_cpu_node_map.assert_called_once()
         mock_build_global_slice_cpu_pool.assert_called_once()
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type")
-    def test_build_cpu_pools_global_slice_mode(self, mock_get_device_type):
-        mock_get_device_type.return_value = AscendDeviceType.A3
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
+    def test_build_cpu_pools_global_slice_mode(self):
         with (
             patch.object(self.cpu_alloc, "build_cpu_node_map") as mock_build_cpu_node_map,
             patch.object(self.cpu_alloc, "build_global_slice_cpu_pool") as mock_build_global_slice_cpu_pool,
@@ -442,8 +439,8 @@ class TestCpuAlloc(unittest.TestCase):
         self.assertEqual(self.cpu_alloc.npu_cpu_pool[0], [0, 1, 2, 3, 4, 5])
         self.assertEqual(self.cpu_alloc.npu_cpu_pool[1], [6, 7, 8, 9, 10, 11])
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
-    def test_build_global_slice_cpu_pool_raises_when_cpu_insufficient(self, _mock_get_device_type):
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
+    def test_build_global_slice_cpu_pool_raises_when_cpu_insufficient(self):
         self.cpu_alloc.device_info.running_npu_list = [0, 1]
         self.cpu_alloc.device_info.allowed_cpus = list(range(8))
         self.cpu_alloc.device_info.total_logic_npus = 2
@@ -451,8 +448,8 @@ class TestCpuAlloc(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.cpu_alloc.build_global_slice_cpu_pool()
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A5)
-    def test_build_global_slice_cpu_pool_allows_ascend_950_without_irq_reservation(self, _mock_get_device_type):
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A5)
+    def test_build_global_slice_cpu_pool_allows_ascend_950_without_irq_reservation(self):
         self.cpu_alloc.device_info.running_npu_list = [0, 1]
         self.cpu_alloc.device_info.allowed_cpus = list(range(6))
         self.cpu_alloc.device_info.total_logic_npus = 2
@@ -481,9 +478,9 @@ class TestCpuAlloc(unittest.TestCase):
         self.cpu_alloc.build_global_slice_cpu_pool()
         self.assertEqual(self.cpu_alloc.npu_cpu_pool, {})
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("vllm_ascend.cpu_binding.execute_command")
-    def test_allocate(self, _mock_execute_command, _mock_get_device_type):
+    def test_allocate(self, _mock_execute_command):
         self.cpu_alloc.device_info.running_npu_list = [0]
         self.cpu_alloc.npu_cpu_pool = {0: [0, 1, 2, 3, 4]}
         self.cpu_alloc.allocate()
@@ -494,8 +491,8 @@ class TestCpuAlloc(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.cpu_alloc.allocate()
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A5)
-    def test_allocate_ascend_950_uses_unreserved_cpus_for_main(self, _mock_get_device_type):
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A5)
+    def test_allocate_ascend_950_uses_unreserved_cpus_for_main(self):
         self.cpu_alloc.device_info.running_npu_list = [0]
         self.cpu_alloc.npu_cpu_pool = {0: [0, 1, 2, 3, 4]}
 
@@ -529,19 +526,18 @@ class TestCpuAlloc(unittest.TestCase):
         self.cpu_alloc.bind_threads()
         mock_execute_command.assert_called()
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type")
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.cpu_binding.os.listdir")
     @patch("builtins.open", new_callable=mock_open, read_data="123: 0 0 0 0 sq_send_trigger_irq\n")
     @patch("vllm_ascend.cpu_binding.shutil.which")
     @patch("vllm_ascend.cpu_binding.os.access")
     @patch("vllm_ascend.cpu_binding.execute_command")
     def test_bind_npu_irq_a3_uses_card_chip_mapping(
-        self, mock_execute_command, mock_access, mock_which, _mock_open, mock_listdir, mock_get_device_type
+        self, mock_execute_command, mock_access, mock_which, _mock_open, mock_listdir
     ):
         mock_access.return_value = True
         mock_which.return_value = None
         mock_listdir.side_effect = FileNotFoundError
-        mock_get_device_type.return_value = AscendDeviceType.A3
         mock_execute_command.return_value = ("PCIe Bus Info 0000:03:00.0", 0)
         self.cpu_alloc.rank_id = 0
         self.cpu_alloc.device_info.running_npu_list = [3]
@@ -558,7 +554,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         visible_devices_patcher.start()
         self.addCleanup(visible_devices_patcher.stop)
 
-        device_type_patcher = patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+        device_type_patcher = patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
         device_type_patcher.start()
         self.addCleanup(device_type_patcher.stop)
 
@@ -618,12 +614,12 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         self.assertEqual(cpu_alloc.cpu_node, {0: 0, 1: 1})
         self.assertEqual(cpu_alloc.numa_to_cpu_map, {0: [0], 1: [1]})
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value="unknown")
-    def test_binding_mode_defaults_to_topo_affinity_for_unknown_device(self, _mock_get_device_type):
+    @patch.object(DeviceConfig, "_device_type", new="unknown")
+    def test_binding_mode_defaults_to_topo_affinity_for_unknown_device(self):
         self.assertEqual(CpuAlloc._binding_mode(), "topo_affinity")
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
-    def test_build_cpu_pools_raises_on_affinity_conflict(self, _mock_get_device_type):
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
+    def test_build_cpu_pools_raises_on_affinity_conflict(self):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [0]
         cpu_alloc.device_info.allowed_cpus = [8, 9]
@@ -632,8 +628,8 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         with patch.object(cpu_alloc, "build_cpu_node_map"), self.assertRaises(RuntimeError):
             cpu_alloc.build_cpu_pools()
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
-    def test_build_cpu_pools_topo_mode_builds_and_splits_duplicate_groups(self, _mock_get_device_type):
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
+    def test_build_cpu_pools_topo_mode_builds_and_splits_duplicate_groups(self):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.all_logic_npus = [0, 1, 2]
         cpu_alloc.device_info.running_npu_list = [0, 1, 2]
@@ -648,8 +644,8 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         self.assertEqual(cpu_alloc.npu_cpu_pool, {0: [0, 1], 1: [2], 2: [3]})
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
-    def test_build_cpu_pools_topo_mode_skips_non_running_npu_without_cpuset_overlap(self, _mock_get_device_type):
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
+    def test_build_cpu_pools_topo_mode_skips_non_running_npu_without_cpuset_overlap(self):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.all_logic_npus = [0, 1]
         cpu_alloc.device_info.running_npu_list = [0]
@@ -664,8 +660,8 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         self.assertEqual(cpu_alloc.npu_cpu_pool, {0: [192, 193]})
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
-    def test_build_cpu_pools_topo_mode_excludes_non_running_npu_from_final_pool(self, _mock_get_device_type):
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
+    def test_build_cpu_pools_topo_mode_excludes_non_running_npu_from_final_pool(self):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.all_logic_npus = [0, 1]
         cpu_alloc.device_info.running_npu_list = [0]
@@ -685,8 +681,8 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         self.assertEqual(cpu_alloc.npu_cpu_pool, {0: [192, 193, 194, 195, 196]})
         self.assertEqual(cpu_alloc.assign_main, {0: [194]})
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
-    def test_build_cpu_pools_topo_mode_splits_hidden_same_affinity_npus_across_processes(self, _mock_get_device_type):
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
+    def test_build_cpu_pools_topo_mode_splits_hidden_same_affinity_npus_across_processes(self):
         def build_single_card_process(visible_npu):
             cpu_alloc = make_cpu_alloc()
             cpu_alloc.device_info.all_logic_npus = list(range(8))
@@ -810,21 +806,19 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         )
         mock_bind_memory.assert_called_once_with("1000", 0)
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("vllm_ascend.cpu_binding.os.access", return_value=False)
     @patch("vllm_ascend.cpu_binding.execute_command")
-    def test_bind_npu_irq_returns_when_irq_path_not_writable(
-        self, mock_execute_command, _mock_access, _mock_get_device_type
-    ):
+    def test_bind_npu_irq_returns_when_irq_path_not_writable(self, mock_execute_command, _mock_access):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.bind_npu_irq()
 
         mock_execute_command.assert_not_called()
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A5)
     @patch("vllm_ascend.cpu_binding.os.access")
     @patch("vllm_ascend.cpu_binding.execute_command")
-    def test_bind_npu_irq_skips_on_ascend_950(self, mock_execute_command, mock_access, _mock_get_device_type):
+    def test_bind_npu_irq_skips_on_ascend_950(self, mock_execute_command, mock_access):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [0]
         cpu_alloc.npu_cpu_pool = {0: [8, 9, 10]}
@@ -834,12 +828,10 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         mock_access.assert_not_called()
         mock_execute_command.assert_not_called()
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("vllm_ascend.cpu_binding.os.access", return_value=True)
     @patch("vllm_ascend.cpu_binding.execute_command")
-    def test_bind_npu_irq_returns_when_current_npu_has_no_cpu_pool(
-        self, mock_execute_command, _mock_access, _mock_get_device_type
-    ):
+    def test_bind_npu_irq_returns_when_current_npu_has_no_cpu_pool(self, mock_execute_command, _mock_access):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [0]
         cpu_alloc.npu_cpu_pool = {}
@@ -848,13 +840,13 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         mock_execute_command.assert_not_called()
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("builtins.open", new_callable=mock_open, read_data="123: 0 0 0 sq_send_trigger_irq\n")
     @patch("vllm_ascend.cpu_binding.shutil.which", return_value=None)
     @patch("vllm_ascend.cpu_binding.os.access", return_value=True)
     @patch("vllm_ascend.cpu_binding.execute_command")
     def test_bind_npu_irq_skips_when_cpu_pool_too_small(
-        self, mock_execute_command, _mock_access, _mock_which, _mock_open, _mock_get_device_type
+        self, mock_execute_command, _mock_access, _mock_which, _mock_open
     ):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [0]
@@ -864,13 +856,13 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         mock_execute_command.assert_not_called()
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("builtins.open", new_callable=mock_open, read_data="123: 0 0 0 sq_send_trigger_irq\n")
     @patch("vllm_ascend.cpu_binding.shutil.which", return_value=None)
     @patch("vllm_ascend.cpu_binding.os.access", return_value=True)
     @patch("vllm_ascend.cpu_binding.execute_command", return_value=("board info without pci", 0))
     def test_bind_npu_irq_skips_when_pci_address_missing(
-        self, mock_execute_command, _mock_access, _mock_which, _mock_open, _mock_get_device_type
+        self, mock_execute_command, _mock_access, _mock_which, _mock_open
     ):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [0]
@@ -880,14 +872,14 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         mock_execute_command.assert_called_once_with(["npu-smi", "info", "-t", "board", "-i", "0"])
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("vllm_ascend.cpu_binding.os.listdir", return_value=["456", "457"])
     @patch("builtins.open", new_callable=mock_open, read_data="123: 0 0 0 sq_send_trigger_irq\n")
     @patch("vllm_ascend.cpu_binding.shutil.which", return_value=None)
     @patch("vllm_ascend.cpu_binding.os.access", return_value=True)
     @patch("vllm_ascend.cpu_binding.execute_command", return_value=("prefix\nPCIe Bus Info 0000:03:00.0", 0))
     def test_bind_npu_irq_skips_when_sq_irq_not_found(
-        self, _mock_execute_command, _mock_access, _mock_which, _mock_open, _mock_listdir, _mock_get_device_type
+        self, _mock_execute_command, _mock_access, _mock_which, _mock_open, _mock_listdir
     ):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [0]
@@ -895,14 +887,14 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         cpu_alloc.bind_npu_irq()
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("vllm_ascend.cpu_binding.os.listdir", return_value=["123", "124"])
     @patch("builtins.open", new_callable=mock_open, read_data="123: 0 0 0 sq_send_trigger_irq\n")
     @patch("vllm_ascend.cpu_binding.shutil.which", return_value="/bin/systemctl")
     @patch("vllm_ascend.cpu_binding.os.access", return_value=True)
     @patch("vllm_ascend.cpu_binding.execute_command")
     def test_bind_npu_irq_stops_irqbalance_and_writes_affinity_masks(
-        self, mock_execute_command, _mock_access, _mock_which, mock_file, _mock_listdir, _mock_get_device_type
+        self, mock_execute_command, _mock_access, _mock_which, mock_file, _mock_listdir
     ):
         mock_execute_command.side_effect = [
             ("irqbalance.service enabled\n", 0),
@@ -921,14 +913,14 @@ class TestCpuBindingSupplemental(unittest.TestCase):
         handle = mock_file()
         self.assertEqual(handle.write.call_args_list, [call("00000100"), call("00000200")])
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("vllm_ascend.cpu_binding.os.listdir", return_value=["123", "124"])
     @patch("builtins.open", new_callable=mock_open, read_data="123: 0 0 0 sq_send_trigger_irq\n")
     @patch("vllm_ascend.cpu_binding.shutil.which", return_value="/bin/systemctl")
     @patch("vllm_ascend.cpu_binding.os.access", return_value=True)
     @patch("vllm_ascend.cpu_binding.execute_command")
     def test_bind_npu_irq_keeps_irqbalance_when_inactive(
-        self, mock_execute_command, _mock_access, _mock_which, _mock_open, _mock_listdir, _mock_get_device_type
+        self, mock_execute_command, _mock_access, _mock_which, _mock_open, _mock_listdir
     ):
         mock_execute_command.side_effect = [
             ("irqbalance.service enabled\n", 0),
@@ -943,14 +935,14 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         self.assertNotIn(call(["systemctl", "stop", "irqbalance"]), mock_execute_command.call_args_list)
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("vllm_ascend.cpu_binding.os.listdir", return_value=["123", "124"])
     @patch("builtins.open", new_callable=mock_open, read_data="123: 0 0 0 sq_send_trigger_irq\n")
     @patch("vllm_ascend.cpu_binding.shutil.which", return_value="/bin/systemctl")
     @patch("vllm_ascend.cpu_binding.os.access", return_value=True)
     @patch("vllm_ascend.cpu_binding.execute_command")
     def test_bind_npu_irq_skips_irqbalance_handling_when_service_absent(
-        self, mock_execute_command, _mock_access, _mock_which, _mock_open, _mock_listdir, _mock_get_device_type
+        self, mock_execute_command, _mock_access, _mock_which, _mock_open, _mock_listdir
     ):
         mock_execute_command.side_effect = [
             ("another.service enabled\n", 0),
@@ -964,7 +956,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         self.assertNotIn(call(["systemctl", "is-active", "--quiet", "irqbalance"]), mock_execute_command.call_args_list)
 
-    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("vllm_ascend.cpu_binding.os.listdir", return_value=["123", "124"])
     @patch(
         "builtins.open",
@@ -975,7 +967,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     @patch("vllm_ascend.cpu_binding.os.access", return_value=True)
     @patch("vllm_ascend.cpu_binding.execute_command", return_value=("prefix\nPCIe Bus Info 0000:03:00.0", 0))
     def test_bind_npu_irq_scans_multiple_interrupt_lines(
-        self, _mock_execute_command, _mock_access, _mock_which, mock_file, _mock_listdir, _mock_get_device_type
+        self, _mock_execute_command, _mock_access, _mock_which, mock_file, _mock_listdir
     ):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [0]

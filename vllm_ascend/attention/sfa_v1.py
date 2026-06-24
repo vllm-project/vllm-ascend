@@ -11,7 +11,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -35,7 +34,7 @@ from vllm_ascend.attention.utils import (
     transdata,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.memcache_comm_fence import (
@@ -52,14 +51,12 @@ from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
-    AscendDeviceType,
     _round_up,
     dispose_layer,
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,
     enable_sp,
-    get_ascend_device_type,
     get_weight_prefetch_method,
     maybe_trans_nz,
 )
@@ -518,14 +515,10 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # dsa c8
         self.use_sparse_c8_indexer = ascend_config.is_sparse_c8_layer(self.layer_name)
-        self.use_a5_sparse_c8_indexer = self.use_sparse_c8_indexer and (get_ascend_device_type() == AscendDeviceType.A5)
+        self.use_a5_sparse_c8_indexer = self.use_sparse_c8_indexer and DeviceConfig.indexer_has_full_cache
         if self.use_sparse_c8_indexer:
-            if get_ascend_device_type() == AscendDeviceType.A5:
-                self.c8_k_cache_dtype = torch.float8_e4m3fn
-                self.c8_k_scale_cache_dtype = torch.float32
-            else:
-                self.c8_k_cache_dtype = torch.int8
-                self.c8_k_scale_cache_dtype = torch.float16
+            self.c8_k_cache_dtype = DeviceConfig.c8_k_cache_dtype
+            self.c8_k_scale_cache_dtype = DeviceConfig.c8_k_scale_cache_dtype
 
         # Effective in SFA when FlashComm is enabled.
         self.enable_dsa_cp = enable_dsa_cp()
@@ -624,7 +617,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             is_quantized = isinstance(quant_method, (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod))
             if self.fused_qkv_a_proj is None:
                 reasons.append("fused_qkv_a_proj is None, mlapo is disabled.")
-            if not is_quantized and get_ascend_device_type() != AscendDeviceType.A5:
+            if not is_quantized and DeviceConfig.mlapo_requires_quantization:
                 reasons.append(
                     "Currently mlapo only supports W8A8 quantization in SFA scenario on non-A5 devices."
                     "Some layers in your model are not quantized with W8A8,"
@@ -638,7 +631,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     logger.warning_once(msg)
             else:
                 self.mlapo_is_quantized = is_quantized
-                if get_ascend_device_type() == AscendDeviceType.A5:
+                if DeviceConfig.mlapo_uses_a5_weight_processing:
                     if is_quantized:
                         self._process_weights_for_fused_mlapo_a5(act_dtype)
                     else:
@@ -646,7 +639,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 else:
                     self._process_weights_for_fused_mlapo(act_dtype)
 
-        if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
+        if self.use_sparse_c8_indexer and DeviceConfig.sparse_c8_supports_unquantized_mlapo:
             if hasattr(self, "mlapo_is_quantized") and not self.mlapo_is_quantized:
                 self.c8_k_cache_dtype = act_dtype
                 self.c8_k_scale_cache_dtype = act_dtype
@@ -1090,7 +1083,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         slot_mapping: torch.Tensor,
         num_input_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return DeviceOperator.sfa_preprocess_with_mlapo(
+        return DeviceConfig.device_operator.sfa_preprocess_with_mlapo(
             self,
             hidden_states,
             kv_cache,
@@ -1111,7 +1104,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
-        if HAS_TRITON:
+        if DeviceConfig.supports_triton:
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
             k_li = rope_forward_triton_siso(
@@ -1176,7 +1169,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
-        if HAS_TRITON:
+        if DeviceConfig.supports_triton:
             q_li = rope_forward_triton_siso(
                 q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
             )
@@ -1199,7 +1192,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
         record_attention_compute_start()
-        return DeviceOperator.indexer_select_post_process(
+        return DeviceConfig.device_operator.indexer_select_post_process(
             self,
             q_li,
             q_li_scale,
@@ -1236,7 +1229,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _execute_sparse_flash_attention_process(
         self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
     ):
-        return DeviceOperator.execute_sparse_flash_attention_process(
+        return DeviceConfig.device_operator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
             q_pe,
@@ -1293,9 +1286,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         }
 
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
-        if self.enable_mlapo and (
-            get_ascend_device_type() == AscendDeviceType.A5 or num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
-        ):
+        if self.enable_mlapo and (not DeviceConfig.mlapo_decode_only or num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS):
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
             )
@@ -1451,7 +1442,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     if not self.use_a5_sparse_c8_indexer:
                         k_nope = k_nope.view(k_nope.shape[0], 1, -1)
                         k_pe = k_pe.view(k_pe.shape[0], 1, -1)
-                        DeviceOperator.reshape_and_cache(
+                        DeviceConfig.device_operator.reshape_and_cache(
                             key=k_nope[: attn_metadata.num_actual_tokens],
                             value=k_pe[: attn_metadata.num_actual_tokens],
                             key_cache=kv_cache[0],
@@ -1462,7 +1453,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             k_li = self._get_full_kv(k_li, attn_metadata)
 
         if kv_cache is not None:
-            if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
+            if self.use_sparse_c8_indexer and not DeviceConfig.kv_cache_has_v_tensor:
                 dsa_k_cache_idx = 1
                 dsa_k_scale_cache_idx = 2
             else:
@@ -1485,10 +1476,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     k_li.view(-1, k_li.shape[-1]),
                 )  # b, s, n, d
             if self.use_sparse_c8_indexer:
-                if get_ascend_device_type() == AscendDeviceType.A5:
-                    assert len(kv_cache) == 3
-                else:
-                    assert len(kv_cache) == 4
+                assert len(kv_cache) == DeviceConfig.sparse_c8_cache_tuple_len
                 if k_li_scale is not None:
                     if self.is_kv_producer and get_ascend_config().c8_enable_reshape_optim:
                         torch.ops._C_ascend.store_kv_block(

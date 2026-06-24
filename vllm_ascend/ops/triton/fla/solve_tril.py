@@ -12,6 +12,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
 
 from .utils import prepare_chunk_indices
@@ -363,9 +364,7 @@ def solve_tril(
     chunk_indices = chunk_indices_large_block
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, LARGE_BLOCK_T)
 
-    from vllm_ascend.device.device_op import DeviceOperator
-
-    DeviceOperator.solve_tril_16x16(
+    DeviceConfig.device_operator.solve_tril_16x16(
         A=A,
         Ad=Ad,
         cu_seqlens=cu_seqlens,

@@ -22,31 +22,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-)
-
-
-def get_dsv4_block_sizes():
-    # cache_config.block_size: [mla, swa, c4 state, c128 state], [page_size_padded_t1, page_size_padded_t2]
-    _DSV4_BLOCK_SIZES = {
-        128: [[128, 128, 8, 32], [16640, 131072]],
-        64: [[64, 64, 4, 16], [8320, 65536]],
-        32: [[32, 32, 2, 8], [4160, 32768]],
-    }
-    _DSV4_BLOCK_SIZES_A5 = {
-        128: [[128, 128, 8, 16], [16896, 81920]],
-        64: [[64, 64, 4, 8], [8448, 40960]],
-        32: [[32, 32, 2, 4], [4224, 20480]],
-    }
-    if get_ascend_device_type() in {AscendDeviceType.A5}:
-        return _DSV4_BLOCK_SIZES_A5
-    else:
-        return _DSV4_BLOCK_SIZES
-
-
-DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
+from vllm_ascend.device.device_config import DeviceConfig
 
 
 class DSAAttention(nn.Module, AttentionLayerBase):
@@ -175,15 +151,13 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if DeviceConfig.kv_cache_dtype == torch.float8_e4m3fn:
             kv_cache_dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
-        cached_head_size = (
-            (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
-        )
+        cached_head_size = DeviceConfig.pd_cache_head_size(self.head_size)
         return MLAAttentionSpec(
-            block_size=DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0],
+            block_size=DeviceConfig.dsv4_block_sizes[vllm_config.cache_config.block_size][0][0],
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=kv_cache_dtype,

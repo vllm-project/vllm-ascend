@@ -1,5 +1,5 @@
 from functools import partial
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import numpy as np
 import pytest
@@ -519,10 +519,7 @@ def run_cp_attention(
 
         mock_layer = MockAttentionLayer(device)
 
-        import vllm_ascend.device.device_op as device_op_module
-
-        original_reshape_and_cache = device_op_module.DeviceOperator.reshape_and_cache
-        original_kv_cache_load = device_op_module.DeviceOperator.kv_cache_load
+        from vllm_ascend.device.device_config import DeviceConfig as _DevConfig
 
         def _mock_reshape_and_cache(key, value, key_cache, value_cache, slot_mapping):
             return
@@ -530,14 +527,12 @@ def run_cp_attention(
         def _mock_kv_cache_load(key_cache, value_cache, block_tables, seq_lens_kv, starts, key, value):
             return
 
-        device_op_module.DeviceOperator.reshape_and_cache = staticmethod(_mock_reshape_and_cache)
-        device_op_module.DeviceOperator.kv_cache_load = staticmethod(_mock_kv_cache_load)
-
-        try:
+        with patch.object(type(_DevConfig), "device_operator", new_callable=PropertyMock) as mock_prop:
+            mock_adaptor = MagicMock()
+            mock_adaptor.reshape_and_cache = _mock_reshape_and_cache
+            mock_adaptor.kv_cache_load = _mock_kv_cache_load
+            mock_prop.return_value = mock_adaptor
             output = impl.forward(mock_layer, query, key, value, kv_cache, attn_metadata, output=output)
-        finally:
-            device_op_module.DeviceOperator.reshape_and_cache = original_reshape_and_cache
-            device_op_module.DeviceOperator.kv_cache_load = original_kv_cache_load
 
     return output
 

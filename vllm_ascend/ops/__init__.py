@@ -15,40 +15,78 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import torch
-from vllm.triton_utils import HAS_TRITON
-
+import vllm_ascend.ops.activation  # noqa
+import vllm_ascend.ops.bailing_moe_linear_attn  # noqa
+import vllm_ascend.ops.conv  # noqa
+import vllm_ascend.ops.cv_linear  # noqa
+import vllm_ascend.ops.dsa  # noqa
+import vllm_ascend.ops.flashcomm2_oshard_manager  # noqa
+import vllm_ascend.ops.fused_moe.comm_utils  # noqa
+import vllm_ascend.ops.fused_moe.experts_selector  # noqa
 import vllm_ascend.ops.fused_moe.fused_moe  # noqa
+import vllm_ascend.ops.fused_moe.gate_linear  # noqa
+import vllm_ascend.ops.fused_moe.moe_comm_method  # noqa
+import vllm_ascend.ops.fused_moe.moe_mlp  # noqa
+import vllm_ascend.ops.fused_moe.moe_runtime_args  # noqa
+import vllm_ascend.ops.fused_moe.moe_stage_contracts  # noqa
+import vllm_ascend.ops.fused_moe.moe_stage_params  # noqa
+import vllm_ascend.ops.fused_moe.prepare_finalize  # noqa
+import vllm_ascend.ops.fused_moe.token_dispatcher  # noqa
+import vllm_ascend.ops.gdn  # noqa
+import vllm_ascend.ops.gdn_attn_builder  # noqa
+import vllm_ascend.ops.layer_shard_linear  # noqa
 import vllm_ascend.ops.layernorm  # noqa
+import vllm_ascend.ops.linear  # noqa
+import vllm_ascend.ops.linear_op  # noqa
+import vllm_ascend.ops.mhc  # noqa
+import vllm_ascend.ops.mla  # noqa
+import vllm_ascend.ops.mm_encoder_attention  # noqa
+import vllm_ascend.ops.qwen2_decoder  # noqa
 import vllm_ascend.ops.register_custom_ops  # noqa
-
-if HAS_TRITON:
-    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa
-    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope
-    import vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope
-    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope_simt
-
+import vllm_ascend.ops.rel_pos_attention  # noqa
+import vllm_ascend.ops.rope_dsv4  # noqa
+import vllm_ascend.ops.rotary_embedding  # noqa
 import vllm_ascend.ops.vocab_parallel_embedding  # noqa
-from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-from vllm_ascend.ops.rotary_embedding import AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding
+import vllm_ascend.ops.weight_prefetch  # noqa
 
+from vllm_ascend.device.device_config import DeviceConfig
 
-class dummyFusionOp:
-    default = None
-
-    def __init__(self, name=""):
-        self.name = name
-
-
-def register_dummy_fusion_op() -> None:
-    torch.ops._C_ascend.rms_norm = dummyFusionOp(name="rms_norm")
-    torch.ops._C_ascend.fused_add_rms_norm = dummyFusionOp(name="fused_add_rms_norm")
-    torch.ops._C_ascend.static_scaled_fp8_quant = dummyFusionOp(name="static_scaled_fp8_quant")
-    torch.ops._C_ascend.dynamic_scaled_fp8_quant = dummyFusionOp(name="dynamic_scaled_fp8_quant")
-    torch.ops._C_ascend.dynamic_per_token_scaled_fp8_quant = dummyFusionOp(name="dynamic_per_token_scaled_fp8_quant")
-    torch.ops._C_ascend.rms_norm_static_fp8_quant = dummyFusionOp(name="rms_norm_static_fp8_quant")
-    torch.ops._C_ascend.fused_add_rms_norm_static_fp8_quant = dummyFusionOp(name="fused_add_rms_norm_static_fp8_quant")
-    torch.ops._C_ascend.rms_norm_dynamic_per_token_quant = dummyFusionOp(name="rms_norm_dynamic_per_token_quant")
-
-
-__all__ = ["AscendQuickGELU", "AscendSiluAndMul", "AscendRotaryEmbedding", "AscendDeepseekScalingRotaryEmbedding"]
+if DeviceConfig.supports_triton:
+    import vllm_ascend.ops.triton.batch_invariant.matmul  # noqa
+    import vllm_ascend.ops.triton.batch_invariant.mean  # noqa
+    import vllm_ascend.ops.triton.batch_invariant.rmsnorm  # noqa
+    import vllm_ascend.ops.triton.batch_invariant.softmax  # noqa
+    import vllm_ascend.ops.triton.batch_memcpy  # noqa
+    import vllm_ascend.ops.triton.bincount  # noqa
+    import vllm_ascend.ops.triton.fla.chunk  # noqa
+    import vllm_ascend.ops.triton.fla.chunk_delta_h  # noqa
+    import vllm_ascend.ops.triton.fla.chunk_delta_hupdate  # noqa
+    import vllm_ascend.ops.triton.fla.chunk_o  # noqa
+    import vllm_ascend.ops.triton.fla.chunk_o_update  # noqa
+    import vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt  # noqa
+    import vllm_ascend.ops.triton.fla.cumsum  # noqa
+    import vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape  # noqa
+    import vllm_ascend.ops.triton.fla.l2norm  # noqa
+    import vllm_ascend.ops.triton.fla.layernorm_guard  # noqa
+    import vllm_ascend.ops.triton.fla.sigmoid_gating  # noqa
+    import vllm_ascend.ops.triton.fla.solve_tril  # noqa
+    import vllm_ascend.ops.triton.fla.utils  # noqa
+    import vllm_ascend.ops.triton.fla.wy_fast  # noqa
+    import vllm_ascend.ops.triton.fused_gdn_gating  # noqa
+    import vllm_ascend.ops.triton.gdn_chunk_meta  # noqa
+    import vllm_ascend.ops.triton.layernorm_gated  # noqa
+    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope  # noqa
+    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa
+    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope_simt  # noqa
+    import vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope  # noqa
+    import vllm_ascend.ops.triton.mamba.causal_conv1d  # noqa
+    import vllm_ascend.ops.triton.mamba.lightning_attn  # noqa
+    import vllm_ascend.ops.triton.mul_add  # noqa
+    import vllm_ascend.ops.triton.muls_add  # noqa
+    import vllm_ascend.ops.triton.penalty  # noqa
+    import vllm_ascend.ops.triton.reject_sample  # noqa
+    import vllm_ascend.ops.triton.rms_norm  # noqa
+    import vllm_ascend.ops.triton.rope  # noqa
+    import vllm_ascend.ops.triton.spec_decode.utils  # noqa
+    import vllm_ascend.ops.triton.activation.swiglu_quant  # noqa
+    import vllm_ascend.ops.triton.triton_utils  # noqa

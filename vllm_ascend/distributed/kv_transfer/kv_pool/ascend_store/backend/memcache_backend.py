@@ -9,8 +9,8 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
 
@@ -32,7 +32,7 @@ class MemcacheBackend(Backend):
     ):
         self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
         self._init_bm = init_bm
-        self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
+        self._is_a2 = not DeviceConfig.memcache_lazy_init
         self._lazy_init = lazy_init and not self._is_a2
 
         self.store: Any | None = None

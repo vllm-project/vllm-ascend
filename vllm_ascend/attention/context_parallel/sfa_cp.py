@@ -6,11 +6,11 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -418,7 +418,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         weights = kw[:, self.head_dim :]
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
-        if HAS_TRITON:
+        if DeviceConfig.supports_triton:
             q_li = rope_forward_triton_siso(
                 q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
             )

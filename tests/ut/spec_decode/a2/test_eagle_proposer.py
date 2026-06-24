@@ -19,6 +19,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.device.device_config import _DeviceConfig
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import enable_custom_op
@@ -171,7 +172,7 @@ def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
     spec_decode_metadata.cu_num_draft_tokens = torch.tensor([2, 3], dtype=torch.int32)
     valid_sampled_tokens_count = torch.tensor([3, 1], dtype=torch.int32)
 
-    with patch.object(llm_base_proposer, "HAS_TRITON", False):
+    with patch.object(_DeviceConfig, "supports_triton", False):
         spec_common_attn_metadata, *_ = proposer.prepare_inputs_padded(
             common_attn_metadata,
             spec_decode_metadata,
@@ -3392,8 +3393,9 @@ class TestEagleProposerPrepareInputsPadded:
         valid_sampled_tokens_count = torch.tensor([2, 3, 4], dtype=torch.int32, device=self.device)
 
         with (
-            patch(
-                "vllm_ascend.spec_decode.llm_base_proposer.HAS_TRITON",
+            patch.object(
+                _DeviceConfig,
+                "supports_triton",
                 has_triton,
             ),
             patch.multiple(
@@ -3518,8 +3520,9 @@ class TestEagleProposerPrepareInputsPadded:
         valid_sampled_tokens_count = torch.tensor([1, 1, 1], dtype=torch.int32, device=self.device)
 
         with (
-            patch(
-                "vllm_ascend.spec_decode.llm_base_proposer.HAS_TRITON",
+            patch.object(
+                _DeviceConfig,
+                "supports_triton",
                 has_triton,
             ),
             patch.multiple(

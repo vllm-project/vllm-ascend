@@ -43,7 +43,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
@@ -57,8 +57,6 @@ from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
-    AscendDeviceType,
-    get_ascend_device_type,
     get_weight_prefetch_method,
     maybe_trans_nz,
     weak_ref_tensors,
@@ -756,7 +754,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         if self.fa_quant_layer:
-            self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+            self.dtype = DeviceConfig.fa_quant_act_dtype
         else:
             self.dtype = self.vllm_config.model_config.dtype
         self.layer_sharding_kwargs = []
@@ -971,7 +969,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     "Some layers not W8A8 quantized, mlapo disabled for these layers."
                 )
         if self.enable_mlapo:
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if DeviceConfig.mlapo_uses_a5_weight_processing:
                 self._process_weights_for_fused_mlapo_a5(act_dtype)
             else:
                 self._process_weights_for_fused_mlapo(act_dtype)
@@ -986,7 +984,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 post_process_after_loading_for_shard_weight_series(layer)
 
     def _process_weights_for_fused_fa_quant(self):
-        if get_ascend_device_type() == AscendDeviceType.A5:
+        if DeviceConfig.fa_quant_uses_fak_descale:
             layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
             self.fak_descale_float = layer.fak_descale_float
             self.quant_kscale = layer.quant_kscale
@@ -1186,7 +1184,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device)
             k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
 
-            DeviceOperator.kv_cache_load(
+            DeviceConfig.device_operator.kv_cache_load(
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
@@ -1203,7 +1201,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 toks=toks,
             )
             kv_c_normed = kv_c_normed.squeeze()
-            if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
+            if self.fa_quant_layer and DeviceConfig.fa_quant_uses_fak_descale:
                 kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
                     torch.bfloat16
                 )
@@ -1320,7 +1318,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
         c_kv_scale = None
-        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
+        if DeviceConfig.fa_quant_uses_c_kv_scale and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
         k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
@@ -1352,7 +1350,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA"
         c_kv_scale = None
-        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
+        if DeviceConfig.fa_quant_uses_c_kv_scale and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
         _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
@@ -1400,7 +1398,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
+        if self.fa_quant_layer and DeviceConfig.fa_quant_uses_nz_format:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
@@ -1453,7 +1451,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_mask = None
             sparse_mode = 0
             actual_seq_lengths = None
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if DeviceConfig.fa_quant_layout == "BNSD":
                 input_layout = "BNSD"
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
@@ -1620,7 +1618,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_ql_nope, decode_q_pe = self._q_proj_and_k_up_proj(decode_q_c)
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         dequant_scale_q_nope = None
-        if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
+        if self.fa_quant_layer and DeviceConfig.fa_quant_dynamic_quant_decode:
             decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
                 decode_ql_nope, dst_type=torch.float8_e4m3fn
             )
@@ -1748,7 +1746,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
             )
-            decode_preprocess_res, prefill_preprocess_res = DeviceOperator.mla_preprocess_only_decode(
+            decode_preprocess_res, prefill_preprocess_res = DeviceConfig.device_operator.mla_preprocess_only_decode(
                 self, hidden_states, kv_cache, attn_metadata
             )
         else:

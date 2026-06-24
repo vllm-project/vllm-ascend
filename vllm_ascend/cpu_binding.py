@@ -10,7 +10,7 @@ import psutil
 import regex as re
 from vllm.logger import logger
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.device.device_config import DeviceConfig
 
 MASK_BIT = 32  # Number of bits in a CPU affinity mask group
 MIN_CPUS_PER_NPU = 5  # 2(IRQ) + 1(main, at least 1 CPU) + 1(acl) + 1(release) = 5 CPUs per NPU
@@ -20,14 +20,6 @@ ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 
 TOPO_AFFINITY_MODE = "topo_affinity"
 GLOBAL_SLICE_MODE = "global_slice"
-
-DEVICE_BINDING_MODE: dict["AscendDeviceType", str] = {
-    AscendDeviceType.A2: TOPO_AFFINITY_MODE,
-    AscendDeviceType.A3: GLOBAL_SLICE_MODE,
-    AscendDeviceType._310P: TOPO_AFFINITY_MODE,
-    AscendDeviceType.A5: GLOBAL_SLICE_MODE,
-}
-NO_IRQ_BINDING_DEVICE_TYPES = {AscendDeviceType.A5}
 
 
 def is_arm_cpu() -> bool:
@@ -369,12 +361,11 @@ class CpuAlloc:
 
     @staticmethod
     def _binding_mode() -> str:
-        device_type = get_ascend_device_type()
-        return DEVICE_BINDING_MODE.get(device_type, TOPO_AFFINITY_MODE)
+        return DeviceConfig.cpu_binding_mode
 
     @staticmethod
     def _reserve_irq_cpus() -> bool:
-        return get_ascend_device_type() not in NO_IRQ_BINDING_DEVICE_TYPES
+        return DeviceConfig.enable_irq_binding
 
     @staticmethod
     def _min_cpus_per_npu() -> int:
@@ -546,8 +537,7 @@ class CpuAlloc:
         sq_cpu, cq_cpu = cpus[0], cpus[1]  # Reserved for IRQ binding
         pci_addr = ""
 
-        device_type = get_ascend_device_type()
-        if device_type == AscendDeviceType.A3:
+        if DeviceConfig.npu_smi_uses_logical_id:
             # A3: logical npu_id = card_id*2 + chip_id
             card_id = npu // 2
             chip_id = npu % 2

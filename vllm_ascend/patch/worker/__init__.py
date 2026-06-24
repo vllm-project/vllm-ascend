@@ -14,12 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from vllm_ascend.device.device_config import DeviceConfig
 
-from vllm.triton_utils import HAS_TRITON
-
-from vllm_ascend.utils import is_310p
-
-if HAS_TRITON:
+if DeviceConfig.supports_triton:
     import vllm_ascend.patch.worker.patch_triton
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
@@ -31,7 +28,7 @@ import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 
-if not is_310p():
+if DeviceConfig.supports_advanced_model_patches:
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa

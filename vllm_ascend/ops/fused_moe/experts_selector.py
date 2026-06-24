@@ -22,7 +22,7 @@ from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
 from vllm_ascend.utils import get_weight_prefetch_method
 
@@ -293,7 +293,7 @@ def _select_experts_with_fusion_ops(
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
-    topk_weights, topk_ids, _ = DeviceOperator.moe_gating_top_k(
+    topk_weights, topk_ids, _ = DeviceConfig.device_operator.moe_gating_top_k(
         router_logits,
         k=top_k,
         k_group=topk_group,

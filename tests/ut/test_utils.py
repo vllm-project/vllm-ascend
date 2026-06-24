@@ -22,6 +22,7 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
+from vllm_ascend.device.device_config import _DeviceConfig
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
@@ -338,7 +339,12 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 0
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch.object(
+                _DeviceConfig,
+                "force_nz_weight_format",
+                new_callable=mock.PropertyMock,
+                return_value=False,
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -350,7 +356,12 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 0
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+            mock.patch.object(
+                _DeviceConfig,
+                "force_nz_weight_format",
+                new_callable=mock.PropertyMock,
+                return_value=True,
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -362,7 +373,12 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+            mock.patch.object(
+                _DeviceConfig,
+                "force_nz_weight_format",
+                new_callable=mock.PropertyMock,
+                return_value=True,
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float32)
             result = utils.maybe_trans_nz(weight)
@@ -374,7 +390,12 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch.object(
+                _DeviceConfig,
+                "force_nz_weight_format",
+                new_callable=mock.PropertyMock,
+                return_value=False,
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -386,7 +407,12 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch.object(
+                _DeviceConfig,
+                "force_nz_weight_format",
+                new_callable=mock.PropertyMock,
+                return_value=False,
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -398,7 +424,12 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch.object(
+                _DeviceConfig,
+                "force_nz_weight_format",
+                new_callable=mock.PropertyMock,
+                return_value=False,
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.bfloat16)
             result = utils.maybe_trans_nz(weight)
@@ -410,7 +441,12 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch.object(
+                _DeviceConfig,
+                "force_nz_weight_format",
+                new_callable=mock.PropertyMock,
+                return_value=False,
+            ),
         ):
             weight = torch.zeros(32, 64, dtype=torch.int8)
             result = utils.maybe_trans_nz(weight)

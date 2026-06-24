@@ -26,6 +26,7 @@ import torch.nn.functional as F
 from pytest_mock import MockerFixture
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.device.device_config import AscendDeviceType, DeviceConfig
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe.fused_moe import (
     AscendFusedMoE,
@@ -40,7 +41,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEWeights,
 )
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, adapt_patch
+from vllm_ascend.utils import adapt_patch
 
 adapt_patch(True)
 
@@ -185,7 +186,7 @@ def mock_dist_env(mocker: MockerFixture):
         ),
         patch("vllm_ascend.ops.fused_moe.fused_moe.get_forward_context", return_value=mock_forward_context_obj),
         patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=mock_forward_context_obj),
-        patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3),
+        patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher", return_value=None),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.AlltoAllCommImpl._get_token_dispatcher", return_value=None),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.AllGatherCommImpl._get_token_dispatcher", return_value=None),

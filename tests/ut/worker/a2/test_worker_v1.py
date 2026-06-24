@@ -5,6 +5,7 @@ import torch
 from vllm.config import CacheConfig, CUDAGraphMode, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
 
 from tests.ut.base import TestBase
+from vllm_ascend.device.device_config import AscendDeviceType, DeviceConfig
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 
@@ -76,7 +77,6 @@ class TestNPUWorker(TestBase):
     ):
         """Test NPUWorker normal initialization"""
         # Setup mock behavior
-        mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_cpu_binding = True
         mock_get_ascend_config.return_value = mock_ascend_config
@@ -94,7 +94,6 @@ class TestNPUWorker(TestBase):
 
         # Verify initialization call order
         mock_adapt_patch.assert_called_once()
-        mock_ops.register_dummy_fusion_op.assert_called_once()
         mock_register_atb_extensions.assert_called_once()
         mock_register_ascend_customop.assert_called_once()
         mock_init_ascend_config.assert_called_once_with(self.vllm_config_mock)
@@ -132,7 +131,6 @@ class TestNPUWorker(TestBase):
         """Test NPUWorker initialization with trust_remote_code=True"""
         # Set trust_remote_code=True
         self.model_config_mock.trust_remote_code = True
-        mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_cpu_binding = True
         mock_get_ascend_config.return_value = mock_ascend_config
@@ -175,7 +173,6 @@ class TestNPUWorker(TestBase):
         """Test NPUWorker initialization with custom cache_dtype"""
         # Set custom cache_dtype
         self.cache_config_mock.cache_dtype = "float32"
-        mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_cpu_binding = True
         mock_get_ascend_config.return_value = mock_ascend_config
@@ -252,7 +249,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
-    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A2)
     @patch("torch.npu.set_device")
     @patch("torch.npu.empty_cache")
     @patch("torch.npu.mem_get_info")
@@ -261,17 +258,15 @@ class TestNPUWorker(TestBase):
         mock_mem_get_info,
         mock_empty_cache,
         mock_set_device,
-        mock_get_device_type,
         mock_init_triton,
         mock_init_dist_env,
         mock_snapshot_cls,
     ):
         """Test _init_device method"""
-        from vllm_ascend.worker.worker import AscendDeviceType, NPUWorker
+        from vllm_ascend.worker.worker import NPUWorker
 
         # Setup mock
         mock_mem_get_info.return_value = (1000, 2000)
-        mock_get_device_type.return_value = AscendDeviceType.A2
 
         # Mock MemorySnapshot
         mock_snapshot = MagicMock()
@@ -1040,8 +1035,7 @@ class TestNPUWorker(TestBase):
             self.assertIn("Sleep mode can only be", str(cm.exception))
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
-    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
-    @patch("vllm_ascend.worker.worker.AscendDeviceType")
+    @patch.object(DeviceConfig, "_device_type", new=object())
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
     @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
@@ -1050,8 +1044,6 @@ class TestNPUWorker(TestBase):
         mock_warm_up_atb,
         mock_logger,
         mock_get_ascend_config,
-        mock_ascend_device_type,
-        mock_get_ascend_device_type,
         mock_set_random_seed,
     ):
         """Test compile_or_warm_up_model method - eager mode"""
@@ -1060,7 +1052,6 @@ class TestNPUWorker(TestBase):
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         mock_ascend_config.enable_cpu_binding = False
         mock_get_ascend_config.return_value = mock_ascend_config
-        mock_get_ascend_device_type.return_value = mock_ascend_device_type.A9B
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
@@ -1101,8 +1092,7 @@ class TestNPUWorker(TestBase):
             mock_warm_up_atb.assert_called_once()
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
-    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
-    @patch("vllm_ascend.worker.worker.AscendDeviceType")
+    @patch.object(DeviceConfig, "_device_type", new=object())
     @patch("vllm_ascend.worker.worker.CUDAGraphMode")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
@@ -1113,8 +1103,6 @@ class TestNPUWorker(TestBase):
         mock_logger,
         mock_get_ascend_config,
         mock_cudagraph_mode,
-        mock_ascend_device_type,
-        mock_get_ascend_device_type,
         mock_set_random_seed,
     ):
         """Test compile_or_warm_up_model method - with graph capture enabled"""
@@ -1123,8 +1111,6 @@ class TestNPUWorker(TestBase):
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         mock_ascend_config.enable_cpu_binding = False
         mock_get_ascend_config.return_value = mock_ascend_config
-        mock_get_ascend_device_type.return_value = mock_ascend_device_type.A9B
-        mock_cudagraph_mode.NONE = mock_cudagraph_mode.NONE
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock

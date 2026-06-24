@@ -12,11 +12,13 @@ from vllm.forward_context import BatchDescriptor, get_forward_context, set_forwa
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import (
+from vllm_ascend.device.device_config import (
     AscendDeviceType,
+    DeviceConfig,
+)
+from vllm_ascend.utils import (
     enable_sp,
     flashcomm2_enable,
-    get_ascend_device_type,
     has_layer_idx,
     is_drafter_moe_model,
     is_moe_model,
@@ -264,7 +266,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     if not is_moe_model(vllm_config):
         return None
     mc2_tokens_capacity = get_mc2_tokens_capacity()
-    soc_version = get_ascend_device_type()
+    soc_version = DeviceConfig._device_type
     quant_type = getattr(
         vllm_config.model_config.hf_text_config,
         "moe_quantize",

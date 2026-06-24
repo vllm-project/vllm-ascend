@@ -29,7 +29,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -42,8 +42,6 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
 )
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
     is_hierarchical_communication_enabled,
     should_skip_allreduce_across_dp_group,
 )
@@ -109,8 +107,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
-        self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
-        self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
+        self.need_extra_args = DeviceConfig.moe_dispatch_requires_extra_args
+        self.a5_need_extra_args = DeviceConfig.moe_dispatch_uses_a5_specific
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
@@ -399,16 +397,18 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
-        sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
-            hidden_states,
-            topk_ids,
-            scale=dynamic_scale,
-            active_num=num_tokens * self.top_k,
-            expert_num=global_num_experts,
-            expert_tokens_num_type=1,
-            expert_tokens_num_flag=True,
-            active_expert_range=[first_expert_idx, last_expert_idx],
-            quant_mode=quant_mode,
+        sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = (
+            DeviceConfig.device_operator.npu_moe_init_routing(
+                hidden_states,
+                topk_ids,
+                scale=dynamic_scale,
+                active_num=num_tokens * self.top_k,
+                expert_num=global_num_experts,
+                expert_tokens_num_type=1,
+                expert_tokens_num_flag=True,
+                active_expert_range=[first_expert_idx, last_expert_idx],
+                quant_mode=quant_mode,
+            )
         )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode

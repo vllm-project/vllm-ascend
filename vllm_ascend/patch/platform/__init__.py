@@ -22,9 +22,9 @@ import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
-from vllm_ascend.utils import is_310p
+from vllm_ascend.device.device_config import DeviceConfig
 
-if not is_310p():
+if not DeviceConfig.use_310p_mamba_config:
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa

@@ -226,11 +226,10 @@ _backend_pkg.backend_map = {  # type: ignore[attr-defined]
     "yuanrong": {"name": "YuanrongBackend", "path": _backend_module_paths["yuanrong"]},
 }
 
-if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascend.utils"], "AscendDeviceType"):
+if "vllm_ascend.device" not in sys.modules or not hasattr(sys.modules["vllm_ascend.device"], "AscendDeviceType"):
     _ascend_utils = MagicMock()
     _ascend_utils.AscendDeviceType = MagicMock()
-    _ascend_utils.get_ascend_device_type = MagicMock()
-    sys.modules["vllm_ascend.utils"] = _ascend_utils
+    sys.modules["vllm_ascend.device"] = _ascend_utils
 
 # NOTE: vllm_ascend.{ascend_config, memcache_comm_fence} and their helpers
 # (get_ascend_config, AttentionComputeStartGate, ...) are intentionally NOT

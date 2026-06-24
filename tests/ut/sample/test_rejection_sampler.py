@@ -3,6 +3,7 @@ from unittest.mock import patch
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend.device.device_config import _DeviceConfig
 from vllm_ascend.sample.rejection_sampler import (
     expand_batch_to_tokens,
     expand_pytorch,
@@ -241,7 +242,7 @@ class TestAscendRejectionSampler(TestBase):
         num_tokens = 7
         # Test PyTorch path
         with (
-            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
+            patch.object(_DeviceConfig, "supports_triton", False),
             patch("vllm_ascend.sample.rejection_sampler.expand_pytorch") as mock_pytorch,
         ):
             expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
@@ -252,7 +253,7 @@ class TestAscendRejectionSampler(TestBase):
 
         # Test Triton kernel path
         with (
-            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True),
+            patch.object(_DeviceConfig, "supports_triton", True),
             patch("vllm_ascend.sample.rejection_sampler.expand_triton") as mock_triton,
         ):
             expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
@@ -262,7 +263,7 @@ class TestAscendRejectionSampler(TestBase):
             assert (call_args[3] == cu_num_tokens).all()
 
         # Run actual function
-        with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):
+        with patch.object(_DeviceConfig, "supports_triton", False):
             result = expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
             expected = torch.tensor([10, 10, 20, 20, 20, 30, 30])
             assert torch.equal(result, expected)

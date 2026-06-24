@@ -19,7 +19,7 @@
 
 import torch
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.device.device_config import DeviceConfig
 
 
 class NullHandle:
@@ -85,5 +85,5 @@ def communication_adaptation_310p():
     )
 
 
-if get_ascend_device_type() == AscendDeviceType._310P:
+if DeviceConfig.use_310p_comm_adaptation:
     communication_adaptation_310p()

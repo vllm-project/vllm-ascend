@@ -22,9 +22,10 @@ from pytest_mock import MockerFixture
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.device.device_config import AscendDeviceType, DeviceConfig
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
-from vllm_ascend.utils import AscendDeviceType, adapt_patch, enable_custom_op
+from vllm_ascend.utils import adapt_patch, enable_custom_op
 
 adapt_patch(True)
 
@@ -139,7 +140,7 @@ def mock_dist_env(mocker: MockerFixture):
         ),
         patch("vllm_ascend.ops.fused_moe.fused_moe.get_forward_context", return_value=mock_forward_context_obj),
         patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=mock_forward_context_obj),
-        patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3),
+        patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher", return_value=None),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.AlltoAllCommImpl._get_token_dispatcher", return_value=None),
         patch("vllm_ascend.ops.fused_moe.moe_comm_method.AllGatherCommImpl._get_token_dispatcher", return_value=None),

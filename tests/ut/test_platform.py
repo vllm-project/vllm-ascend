@@ -9,11 +9,11 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
+from vllm_ascend.device.device_config import AscendDeviceType, DeviceConfig
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
-    AscendDeviceType,
 )
 
 
@@ -181,7 +181,7 @@ class TestNPUPlatform(TestBase):
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
 
     @patch("vllm_ascend.platform.refresh_block_size")
-    @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
@@ -190,7 +190,6 @@ class TestNPUPlatform(TestBase):
         mock_auto_detect,
         mock_init_ascend,
         _mock_enable_sp,
-        _mock_device_type,
         _mock_refresh_block_size,
     ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
@@ -300,12 +299,10 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("os.environ", {})
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_basic_config_update(
-        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
-    ):
+    def test_check_and_update_config_basic_config_update(self, mock_init_recompute, mock_init_ascend, mock_auto_detect):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.enable_expert_parallel = False
@@ -329,11 +326,11 @@ class TestNPUPlatform(TestBase):
         mock_init_ascend.assert_called_once_with(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_no_model_config_warning(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+        self, mock_init_recompute, mock_init_ascend, mock_auto_detect
     ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -358,12 +355,10 @@ class TestNPUPlatform(TestBase):
         self.assertTrue("Model config is missing" in cm.output[0])
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_enforce_eager_mode(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
-    ):
+    def test_check_and_update_config_enforce_eager_mode(self, mock_init_recompute, mock_init_ascend, mock_auto_detect):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = True
@@ -400,11 +395,11 @@ class TestNPUPlatform(TestBase):
         )
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_unsupported_compilation_level(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+        self, mock_init_recompute, mock_init_ascend, mock_auto_detect
     ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -441,11 +436,9 @@ class TestNPUPlatform(TestBase):
 
     @pytest.mark.skip("Revert me when vllm support setting cudagraph_mode on oot platform")
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    def test_check_and_update_config_unsupported_cudagraph_mode(
-        self, mock_init_ascend, mock_soc_version, mock_auto_detect
-    ):
+    def test_check_and_update_config_unsupported_cudagraph_mode(self, mock_init_ascend, mock_auto_detect):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = False
@@ -468,11 +461,11 @@ class TestNPUPlatform(TestBase):
             )
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_cache_config_block_size(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+        self, mock_init_recompute, mock_init_ascend, mock_auto_detect
     ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -493,11 +486,11 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(vllm_config.cache_config.block_size, 128)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_recompute_scheduler_rejects_pd_mixed_no_kv_transfer(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+        self, mock_init_recompute, mock_init_ascend, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.recompute_scheduler_enable = True
@@ -523,11 +516,11 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_recompute_scheduler_rejects_pd_mixed_kv_both(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+        self, mock_init_recompute, mock_init_ascend, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.recompute_scheduler_enable = True
@@ -562,11 +555,11 @@ class TestNPUPlatform(TestBase):
             self.platform._validate_kv_load_failure_policy(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_balance_scheduler_rejects_pd_disaggregated_kv_producer(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+        self, mock_init_recompute, mock_init_ascend, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.recompute_scheduler_enable = False
@@ -594,11 +587,11 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_balance_scheduler_rejects_pd_disaggregated_kv_consumer(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+        self, mock_init_recompute, mock_init_ascend, mock_auto_detect
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.recompute_scheduler_enable = False
@@ -748,11 +741,11 @@ class TestNPUPlatform(TestBase):
         self.platform._validate_pd_pp_mtp_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_v1_worker_class_selection(
-        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+        self, mock_init_recompute, mock_init_ascend, mock_auto_detect
     ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -785,11 +778,9 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P)
+    @patch.object(DeviceConfig, "_device_type", AscendDeviceType._310P)
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_310p_no_custom_ops(
-        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
-    ):
+    def test_check_and_update_config_310p_no_custom_ops(self, mock_init_recompute, mock_init_ascend, mock_auto_detect):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.compilation_config.custom_ops = []

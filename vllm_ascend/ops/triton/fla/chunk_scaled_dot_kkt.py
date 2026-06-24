@@ -12,6 +12,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.ops.triton.triton_utils import get_aicore_num
 
 from .utils import prepare_chunk_indices, safe_exp
@@ -132,9 +133,7 @@ def chunk_scaled_dot_kkt_fwd(
     bh_step = B * H
     task_num = NT * bh_step
 
-    from vllm_ascend.device.device_op import DeviceOperator
-
-    A = DeviceOperator.chunk_scaled_dot_kkt_fwd(
+    A = DeviceConfig.device_operator.chunk_scaled_dot_kkt_fwd(
         num_core=num_core,
         bh_step=bh_step,
         task_num=task_num,

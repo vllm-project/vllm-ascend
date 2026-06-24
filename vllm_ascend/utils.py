@@ -24,7 +24,6 @@ import json
 import math
 import os
 from contextlib import nullcontext
-from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -119,14 +118,6 @@ def clear_enable_sp():
     _libc_getenv.cache_clear()
 
 
-def is_310p():
-    return get_ascend_device_type() == AscendDeviceType._310P
-
-
-def is_950():
-    return get_ascend_device_type() == AscendDeviceType.A5
-
-
 def _mark_op_side_effectful(op: Any) -> None:
     torch.fx.node.has_side_effect(op)
     default_overload = getattr(op, "default", None)
@@ -216,7 +207,9 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
         return False
 
     # 310P always converts to NZ.
-    if is_310p():
+    from vllm_ascend.device.device_config import DeviceConfig
+
+    if DeviceConfig.force_nz_weight_format:
         return True
 
     # Get config value instead of env
@@ -371,7 +364,11 @@ def enable_custom_op():
     # FIXME(linfeng): Currently custom op compilation and execution are partially available
     # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
     # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
-    if envs.VLLM_BATCH_INVARIANT or get_ascend_device_type() == AscendDeviceType.A5:
+    from vllm_ascend.device.device_config import (
+        DeviceConfig,
+    )
+
+    if envs.VLLM_BATCH_INVARIANT or not DeviceConfig.enable_custom_ops:
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
@@ -724,7 +721,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
-    if is_310p():
+    from vllm_ascend.device.device_config import DeviceConfig
+
+    if DeviceConfig.use_310p_op_implementations:
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
@@ -763,57 +762,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
-
-
-class AscendDeviceType(Enum):
-    A2 = 0
-    A3 = 1
-    _310P = 2
-    A5 = 3
-
-
-_ascend_device_type = None
-
-
-def _init_ascend_device_type():
-    global _ascend_device_type
-    from vllm_ascend import _build_info  # type: ignore
-
-    device_type = getattr(_build_info, "__device_type__", None)
-    if device_type is None:
-        soc_version = getattr(_build_info, "__soc_version__", "ASCEND910B1").upper()
-        device_type = "_310P" if "310P" in soc_version else "A2"
-    _ascend_device_type = AscendDeviceType[device_type]
-
-
-def check_ascend_device_type():
-    global _ascend_device_type
-    if _ascend_device_type is None:
-        _init_ascend_device_type()
-
-    soc_version = torch_npu.npu.get_soc_version()
-    if 220 <= soc_version <= 225:
-        cur_device_type = AscendDeviceType.A2
-    elif 250 <= soc_version <= 255:
-        cur_device_type = AscendDeviceType.A3
-    elif 200 <= soc_version <= 205:
-        cur_device_type = AscendDeviceType._310P
-    elif soc_version == 260:
-        cur_device_type = AscendDeviceType.A5
-    else:
-        raise RuntimeError(f"Can not support soc_version: {soc_version}.")
-
-    assert _ascend_device_type == cur_device_type, (
-        f"Current device type: {cur_device_type} does not match the installed version's device type: "
-        f"{_ascend_device_type}, please check your installation package."
-    )
-
-
-def get_ascend_device_type():
-    global _ascend_device_type
-    if _ascend_device_type is None:
-        _init_ascend_device_type()
-    return _ascend_device_type
 
 
 def lmhead_tp_enable() -> bool:

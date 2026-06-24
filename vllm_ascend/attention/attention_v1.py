@@ -61,7 +61,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
@@ -1220,7 +1220,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.key_cache is None:
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
-        DeviceOperator.reshape_and_cache(
+        DeviceConfig.device_operator.reshape_and_cache(
             key=key,
             value=value,
             key_cache=self.key_cache,
@@ -1242,7 +1242,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
-            DeviceOperator.reshape_and_cache(
+            DeviceConfig.device_operator.reshape_and_cache(
                 key=key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key,
                 value=value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value,
                 key_cache=self.key_cache,

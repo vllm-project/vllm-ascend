@@ -15,15 +15,15 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
 )
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.device.device_config import DeviceConfig
 
 
 def _get_c8_k_cache_dtype() -> torch.dtype:
-    return torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+    return DeviceConfig.c8_k_cache_dtype
 
 
 def _get_c8_k_scale_cache_dtype() -> torch.dtype:
-    return torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else torch.float16
+    return DeviceConfig.c8_k_scale_cache_dtype
 
 
 @dataclass(frozen=True)

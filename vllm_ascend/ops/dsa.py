@@ -30,11 +30,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 
+from vllm_ascend.device.device_config import DeviceConfig
 from vllm_ascend.models.layer.attention.layer import DSAAttention
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-)
 
 
 @dataclass
@@ -241,7 +238,7 @@ def _build_kv_cache(self, forward_context):
             compress_kv_cache = compress_kv_cache[virtual_engine]
     if self.compress_ratio == 4:
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if DeviceConfig.indexer_has_full_cache:
             indexer_k_cache, indexer_scale_cache, indexer_full_cache = (
                 self.indexer.k_cache.kv_cache[0][0],
                 self.indexer.k_cache.kv_cache[0][1],
@@ -253,7 +250,7 @@ def _build_kv_cache(self, forward_context):
                 self.indexer.k_cache.kv_cache[0][1],
             )
 
-    if get_ascend_device_type() in {AscendDeviceType.A5}:
+    if DeviceConfig.indexer_has_full_cache:
         kv_cache = tuple(
             [
                 unfold_kvcache(cache)
