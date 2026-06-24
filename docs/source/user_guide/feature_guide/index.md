@@ -12,7 +12,7 @@ quantization
 sleep_mode
 structured_output
 lora
-eplb_swift_balancer
+expert_parallelism_load_balancer
 netloader
 rfork
 dynamic_batch
