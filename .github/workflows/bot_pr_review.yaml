@@ -1,7 +1,7 @@
 name: "PR Review Bot"
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, reopened, edited]
 
 concurrency:
   group: pr-review-${{ github.event.pull_request.number }}
@@ -50,8 +50,7 @@ jobs:
           (
             github.event.action == 'opened' ||
             github.event.action == 'reopened' ||
-            (github.event.action == 'edited' && (github.event.changes.title || github.event.changes.body)) ||
-            (github.event.action == 'synchronize' && github.event.changes.body)
+            (github.event.action == 'edited' && (github.event.changes.title || github.event.changes.body))
           )
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
