@@ -1950,7 +1950,7 @@ class NPUModelRunner(GPUModelRunner):
         # next step unpacks the previous-step draft tensor with the right stride
         # (mirrors vLLM's GPUModelRunner.prev_num_spec_tokens bookkeeping).
         if torch.is_tensor(self._draft_token_ids):  # type: ignore[has-type]
-            self.prev_num_spec_tokens = self._draft_token_ids.shape[1]  # type: ignore[has-type]
+            self.prev_num_spec_tokens : int = self._draft_token_ids.shape[1]  # type: ignore[has-type]
         if self.use_async_scheduling and not (
             scheduler_output.has_structured_output_requests
             or self.input_batch.sampling_metadata.output_token_ids
