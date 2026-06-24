@@ -105,9 +105,9 @@ def get_bot_comments(api_base: str, number: int) -> list[dict]:
     return [c for c in comments if c.get("user", {}).get("login", "").endswith("[bot]")]
 
 
-def _poll_bot(api_base: str, number: int, max_wait: int = MAX_WAIT,
-              expect_new_comment: bool = True,
-              prev_comment_count: int = 0) -> tuple[list[str], list[dict], int]:
+def _poll_bot(
+    api_base: str, number: int, max_wait: int = MAX_WAIT, expect_new_comment: bool = True, prev_comment_count: int = 0
+) -> tuple[list[str], list[dict], int]:
     start = time.time()
     while time.time() - start < max_wait:
         labels = get_labels(api_base, number)
@@ -217,13 +217,13 @@ ISSUE_GOOD_ALT = {
 }
 
 
-def verify_issue_state(api_base: str, number: int, prev_comment_count: int,
-                       expect_label: bool, expect_new_comment: bool,
-                       step_name: str) -> tuple[Result, int]:
+def verify_issue_state(
+    api_base: str, number: int, prev_comment_count: int, expect_label: bool, expect_new_comment: bool, step_name: str
+) -> tuple[Result, int]:
     r = Result(step_name)
-    labels, comments, elapsed = _poll_bot(api_base, number,
-                                          expect_new_comment=expect_new_comment,
-                                          prev_comment_count=prev_comment_count)
+    labels, comments, elapsed = _poll_bot(
+        api_base, number, expect_new_comment=expect_new_comment, prev_comment_count=prev_comment_count
+    )
     has_label = LABEL_NAME in labels
     new_comment_count = len(comments)
     got_new_comment = new_comment_count > prev_comment_count
@@ -232,8 +232,10 @@ def verify_issue_state(api_base: str, number: int, prev_comment_count: int,
     if has_label != expect_label:
         checks.append(f"label: expected={expect_label} got={has_label} (labels={labels})")
     if got_new_comment != expect_new_comment:
-        checks.append(f"comment: expected_new={expect_new_comment} got_new={got_new_comment} "
-                      f"(prev={prev_comment_count} cur={new_comment_count})")
+        checks.append(
+            f"comment: expected_new={expect_new_comment} got_new={got_new_comment} "
+            f"(prev={prev_comment_count} cur={new_comment_count})"
+        )
 
     if checks:
         r.fail("; ".join(checks))
@@ -255,9 +257,14 @@ def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
         n = create_issue(api_base, ISSUE_BAD["title"], ISSUE_BAD["body"])
         print(f"  Created issue #{n}")
 
-        r, comment_count = verify_issue_state(api_base, n, comment_count,
-                                              expect_label=True, expect_new_comment=True,
-                                              step_name="I2: opened (bad) -> Flagged")
+        r, comment_count = verify_issue_state(
+            api_base,
+            n,
+            comment_count,
+            expect_label=True,
+            expect_new_comment=True,
+            step_name="I2: opened (bad) -> Flagged",
+        )
         results.append(r)
         print(f"  [I2] {'PASS' if r.passed else 'FAIL: ' + r.error}")
 
@@ -265,9 +272,14 @@ def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
 
         edit_issue(api_base, n, ISSUE_BAD_ALT["title"], ISSUE_BAD_ALT["body"])
         print(f"  Edited issue #{n} (still bad)")
-        r, comment_count = verify_issue_state(api_base, n, comment_count,
-                                              expect_label=True, expect_new_comment=True,
-                                              step_name="I6: Flagged + edit FAIL -> Flagged")
+        r, comment_count = verify_issue_state(
+            api_base,
+            n,
+            comment_count,
+            expect_label=True,
+            expect_new_comment=True,
+            step_name="I6: Flagged + edit FAIL -> Flagged",
+        )
         results.append(r)
         print(f"  [I6] {'PASS' if r.passed else 'FAIL: ' + r.error}")
 
@@ -275,9 +287,14 @@ def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
 
         edit_issue(api_base, n, ISSUE_GOOD["title"], ISSUE_GOOD["body"])
         print(f"  Edited issue #{n} (now good)")
-        r, comment_count = verify_issue_state(api_base, n, comment_count,
-                                              expect_label=False, expect_new_comment=True,
-                                              step_name="I5: Flagged + edit PASS -> Clean")
+        r, comment_count = verify_issue_state(
+            api_base,
+            n,
+            comment_count,
+            expect_label=False,
+            expect_new_comment=True,
+            step_name="I5: Flagged + edit PASS -> Clean",
+        )
         results.append(r)
         print(f"  [I5] {'PASS' if r.passed else 'FAIL: ' + r.error}")
 
@@ -285,9 +302,14 @@ def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
 
         edit_issue(api_base, n, ISSUE_BAD_ALT["title"], ISSUE_BAD_ALT["body"])
         print(f"  Edited issue #{n} (bad again)")
-        r, comment_count = verify_issue_state(api_base, n, comment_count,
-                                              expect_label=True, expect_new_comment=True,
-                                              step_name="I4: Clean + edit FAIL -> Flagged")
+        r, comment_count = verify_issue_state(
+            api_base,
+            n,
+            comment_count,
+            expect_label=True,
+            expect_new_comment=True,
+            step_name="I4: Clean + edit FAIL -> Flagged",
+        )
         results.append(r)
         print(f"  [I4] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
@@ -309,9 +331,14 @@ def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
         n2 = create_issue(api_base, ISSUE_GOOD["title"], ISSUE_GOOD["body"])
         print(f"  Created issue #{n2}")
 
-        r, comment_count = verify_issue_state(api_base, n2, comment_count,
-                                              expect_label=False, expect_new_comment=False,
-                                              step_name="I1: opened (good) -> Clean")
+        r, comment_count = verify_issue_state(
+            api_base,
+            n2,
+            comment_count,
+            expect_label=False,
+            expect_new_comment=False,
+            step_name="I1: opened (good) -> Clean",
+        )
         results.append(r)
         print(f"  [I1] {'PASS' if r.passed else 'FAIL: ' + r.error}")
 
@@ -319,9 +346,14 @@ def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
 
         edit_issue(api_base, n2, ISSUE_GOOD_ALT["title"], ISSUE_GOOD_ALT["body"])
         print(f"  Edited issue #{n2} (still good)")
-        r, comment_count = verify_issue_state(api_base, n2, comment_count,
-                                              expect_label=False, expect_new_comment=False,
-                                              step_name="I3: Clean + edit PASS -> Clean")
+        r, comment_count = verify_issue_state(
+            api_base,
+            n2,
+            comment_count,
+            expect_label=False,
+            expect_new_comment=False,
+            step_name="I3: Clean + edit PASS -> Clean",
+        )
         results.append(r)
         print(f"  [I3] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
@@ -397,39 +429,38 @@ class PRLifecycle:
         run_cmd(["git", "worktree", "add", str(self.worktree_path), self._tmp_branch])
         print(f"  Worktree: {self.worktree_path}")
 
-        run_cmd(["git", "commit", "--allow-empty", "-m", DUMMY_COMMIT[0]],
-                cwd=str(self.worktree_path))
+        run_cmd(["git", "commit", "--allow-empty", "-m", DUMMY_COMMIT[0]], cwd=str(self.worktree_path))
         print(f"    Commit: {DUMMY_COMMIT[0]}")
 
     def _push(self):
-        run_cmd(["git", "push", "origin", f"HEAD:{self.branch_name}", "--force"],
-                cwd=str(self.worktree_path))
+        run_cmd(["git", "push", "origin", f"HEAD:{self.branch_name}", "--force"], cwd=str(self.worktree_path))
         print(f"  Pushed to {self.branch_name}")
 
     def create_pr(self, title: str, body: str):
         self._make_worktree()
         self._push()
 
-        pr_data = api_post(f"{self.api_base}/pulls", {
-            "title": title,
-            "body": body,
-            "head": self.branch_name,
-            "base": "main",
-        })
+        pr_data = api_post(
+            f"{self.api_base}/pulls",
+            {
+                "title": title,
+                "body": body,
+                "head": self.branch_name,
+                "base": "main",
+            },
+        )
         self.pr_number = pr_data["number"]
         print(f"  PR created: #{self.pr_number}")
 
     def edit_pr(self, title: str, body: str):
-        api_patch(f"{self.api_base}/pulls/{self.pr_number}",
-                  {"title": title, "body": body})
+        api_patch(f"{self.api_base}/pulls/{self.pr_number}", {"title": title, "body": body})
         print(f"  Edited PR #{self.pr_number}")
 
-    def verify(self, expect_desc_label: bool, expect_new_comment: bool,
-               step_name: str) -> Result:
+    def verify(self, expect_desc_label: bool, expect_new_comment: bool, step_name: str) -> Result:
         r = Result(step_name)
-        labels, comments, elapsed = _poll_bot(self.api_base, self.pr_number,
-                                              expect_new_comment=expect_new_comment,
-                                              prev_comment_count=self.comment_count)
+        labels, comments, elapsed = _poll_bot(
+            self.api_base, self.pr_number, expect_new_comment=expect_new_comment, prev_comment_count=self.comment_count
+        )
         has_desc = LABEL_NAME in labels
         new_count = len(comments)
         got_new = new_count > self.comment_count
@@ -463,29 +494,29 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
     lc = PRLifecycle(api_base, repo, "chain-a")
     try:
         lc.create_pr(PR_GOOD_DESC["title"], PR_GOOD_DESC["body"])
-        r = lc.verify(expect_desc_label=False, expect_new_comment=False,
-                      step_name="P1: opened (good) -> Clean")
+        r = lc.verify(expect_desc_label=False, expect_new_comment=False, step_name="P1: opened (good) -> Clean")
         results.append(r)
         print(f"  [P1] {'PASS' if r.passed else 'FAIL: ' + r.error}")
         time.sleep(5)
 
         lc.edit_pr(PR_GOOD_DESC_ALT["title"], PR_GOOD_DESC_ALT["body"])
-        r = lc.verify(expect_desc_label=False, expect_new_comment=False,
-                      step_name="P3: Clean + edit PASS -> Clean")
+        r = lc.verify(expect_desc_label=False, expect_new_comment=False, step_name="P3: Clean + edit PASS -> Clean")
         results.append(r)
         print(f"  [P3] {'PASS' if r.passed else 'FAIL: ' + r.error}")
         time.sleep(5)
 
         lc.edit_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
-        r = lc.verify(expect_desc_label=True, expect_new_comment=True,
-                      step_name="P4: Clean + edit FAIL -> Desc-flagged")
+        r = lc.verify(
+            expect_desc_label=True, expect_new_comment=True, step_name="P4: Clean + edit FAIL -> Desc-flagged"
+        )
         results.append(r)
         print(f"  [P4] {'PASS' if r.passed else 'FAIL: ' + r.error}")
         time.sleep(5)
 
         lc.edit_pr(PR_GOOD_DESC["title"], PR_GOOD_DESC["body"])
-        r = lc.verify(expect_desc_label=False, expect_new_comment=True,
-                      step_name="P5: Desc-flagged + edit PASS -> Clean")
+        r = lc.verify(
+            expect_desc_label=False, expect_new_comment=True, step_name="P5: Desc-flagged + edit PASS -> Clean"
+        )
         results.append(r)
         print(f"  [P5] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
@@ -503,15 +534,15 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
     lc = PRLifecycle(api_base, repo, "chain-b")
     try:
         lc.create_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
-        r = lc.verify(expect_desc_label=True, expect_new_comment=True,
-                      step_name="P2: opened (bad) -> Desc-flagged")
+        r = lc.verify(expect_desc_label=True, expect_new_comment=True, step_name="P2: opened (bad) -> Desc-flagged")
         results.append(r)
         print(f"  [P2] {'PASS' if r.passed else 'FAIL: ' + r.error}")
         time.sleep(5)
 
         lc.edit_pr(PR_BAD_DESC_ALT["title"], PR_BAD_DESC_ALT["body"])
-        r = lc.verify(expect_desc_label=True, expect_new_comment=True,
-                      step_name="P6: Desc-flagged + edit FAIL -> unchanged")
+        r = lc.verify(
+            expect_desc_label=True, expect_new_comment=True, step_name="P6: Desc-flagged + edit FAIL -> unchanged"
+        )
         results.append(r)
         print(f"  [P6] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
@@ -535,29 +566,31 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
         time.sleep(5)
 
         lc.edit_pr(PR_GOOD_DESC_ALT["title"], PR_GOOD_DESC_ALT["body"])
-        r = lc.verify(expect_desc_label=False, expect_new_comment=False,
-                      step_name="P7: Clean + sync PASS -> Clean")
+        r = lc.verify(expect_desc_label=False, expect_new_comment=False, step_name="P7: Clean + sync PASS -> Clean")
         results.append(r)
         print(f"  [P7] {'PASS' if r.passed else 'FAIL: ' + r.error}")
         time.sleep(5)
 
         lc.edit_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
-        r = lc.verify(expect_desc_label=True, expect_new_comment=True,
-                      step_name="P8: Clean + sync FAIL -> Desc-flagged")
+        r = lc.verify(
+            expect_desc_label=True, expect_new_comment=True, step_name="P8: Clean + sync FAIL -> Desc-flagged"
+        )
         results.append(r)
         print(f"  [P8] {'PASS' if r.passed else 'FAIL: ' + r.error}")
         time.sleep(5)
 
         lc.edit_pr(PR_GOOD_DESC["title"], PR_GOOD_DESC["body"])
-        r = lc.verify(expect_desc_label=False, expect_new_comment=True,
-                      step_name="P9: Desc-flagged + sync PASS -> Clean")
+        r = lc.verify(
+            expect_desc_label=False, expect_new_comment=True, step_name="P9: Desc-flagged + sync PASS -> Clean"
+        )
         results.append(r)
         print(f"  [P9] {'PASS' if r.passed else 'FAIL: ' + r.error}")
         time.sleep(5)
 
         lc.edit_pr(PR_BAD_DESC_ALT["title"], PR_BAD_DESC_ALT["body"])
-        r = lc.verify(expect_desc_label=True, expect_new_comment=True,
-                      step_name="P10: Clean + sync FAIL -> Desc-flagged")
+        r = lc.verify(
+            expect_desc_label=True, expect_new_comment=True, step_name="P10: Clean + sync FAIL -> Desc-flagged"
+        )
         results.append(r)
         print(f"  [P10] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
@@ -575,8 +608,9 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
     lc = PRLifecycle(api_base, repo, "chain-d")
     try:
         lc.create_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
-        r = lc.verify(expect_desc_label=True, expect_new_comment=True,
-                      step_name="P2 baseline: opened (bad) -> Desc-flagged")
+        r = lc.verify(
+            expect_desc_label=True, expect_new_comment=True, step_name="P2 baseline: opened (bad) -> Desc-flagged"
+        )
         results.append(r)
         print(f"  [P2] {'PASS' if r.passed else 'FAIL: ' + r.error}")
         time.sleep(5)
@@ -584,8 +618,7 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
         # Force a sync by editing with same content (title unchanged triggers synchronize without desc run)
         lc.edit_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
         # Wait long enough for bot not to run desc check
-        labels, comments, _ = _poll_bot(lc.api_base, lc.pr_number, expect_new_comment=False,
-                                         max_wait=120)
+        labels, comments, _ = _poll_bot(lc.api_base, lc.pr_number, expect_new_comment=False, max_wait=120)
         has_label = LABEL_NAME in labels
         if has_label:
             r = Result("P12: Desc-flagged + skip -> unchanged")
@@ -626,14 +659,9 @@ def print_summary(results: list[Result]):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="E2E scenario test for Issue and PR review bots"
-    )
-    parser.add_argument("--repo", default="ai-infra-develop/vllm-ascend",
-                        help="GitHub repo (owner/name)")
-    parser.add_argument("--mode", default="all",
-                        choices=["issue", "pr", "all"],
-                        help="Test mode")
+    parser = argparse.ArgumentParser(description="E2E scenario test for Issue and PR review bots")
+    parser.add_argument("--repo", default="ai-infra-develop/vllm-ascend", help="GitHub repo (owner/name)")
+    parser.add_argument("--mode", default="all", choices=["issue", "pr", "all"], help="Test mode")
     args = parser.parse_args()
 
     if not GITHUB_TOKEN:

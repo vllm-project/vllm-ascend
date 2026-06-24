@@ -27,10 +27,11 @@ environment variables (same as production).
 import argparse
 import csv
 import json
-import regex as re
 import sys
 import time
 from pathlib import Path
+
+import regex as re
 
 # Add parent to path so we can import the step modules
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -191,8 +192,7 @@ def validate_result(data: dict) -> dict:
     }
 
 
-def build_user_prompt(title: str, body: str, template_text: str,
-                      type_key: str, kind: str = "issue") -> str:
+def build_user_prompt(title: str, body: str, template_text: str, type_key: str, kind: str = "issue") -> str:
     template_label = "PR 模板" if kind == "pr" else "Issue 模板"
     return f"""### 任务背景
 目标类型：{kind}
@@ -239,20 +239,26 @@ def process_row(row: dict, kind: str, system_prompt: str) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Test issues/PRs CSV with LLM (same pipeline as GitHub Actions)"
+    parser = argparse.ArgumentParser(description="Test issues/PRs CSV with LLM (same pipeline as GitHub Actions)")
+    parser.add_argument(
+        "--mode",
+        default="issue",
+        choices=["issue", "pr", "issue_judge", "pr_judge"],
+        help="Test mode: issue, pr, issue_judge, pr_judge",
     )
-    parser.add_argument("--mode", default="issue",
-                        choices=["issue", "pr", "issue_judge", "pr_judge"],
-                        help="Test mode: issue, pr, issue_judge, pr_judge")
     parser.add_argument("--input", default=None, help="Input CSV file")
     parser.add_argument("--output", default=None, help="Output CSV file (defaults to same as input)")
     parser.add_argument("--start", type=int, default=0, help="Start index (0-based)")
     parser.add_argument("--limit", type=int, default=0, help="Max rows to process (0 = all)")
-    parser.add_argument("--skip-existing", action="store_true", default=True,
-                        help="Skip rows that already have results")
-    parser.add_argument("--retry-errors", action="store_true", default=False,
-                        help="Re-evaluate/judge rows with malformed or error outputs")
+    parser.add_argument(
+        "--skip-existing", action="store_true", default=True, help="Skip rows that already have results"
+    )
+    parser.add_argument(
+        "--retry-errors",
+        action="store_true",
+        default=False,
+        help="Re-evaluate/judge rows with malformed or error outputs",
+    )
     args = parser.parse_args()
 
     is_judge = args.mode in ("issue_judge", "pr_judge")
@@ -283,8 +289,7 @@ def main() -> None:
             idx = fieldnames.index("expected_ok_dsv4")
             fieldnames.insert(idx, "deepseek_v4_flash_output")
     else:
-        for col in ["judge_raw_output", "ok_reasonable", "reasoning_valid",
-                     "suggestions_valid", "judge_reasoning"]:
+        for col in ["judge_raw_output", "ok_reasonable", "reasoning_valid", "suggestions_valid", "judge_reasoning"]:
             if col not in fieldnames:
                 fieldnames.append(col)
 
@@ -343,9 +348,11 @@ def main() -> None:
                 row["suggestions_valid"] = result["suggestions_valid"]
                 row["judge_reasoning"] = result["judge_reasoning"]
                 success += 1
-                print(f"  JUDGED: ok_reasonable={result['ok_reasonable']} "
-                      f"reasoning_valid={result['reasoning_valid']} "
-                      f"suggestions_valid={result['suggestions_valid']}")
+                print(
+                    f"  JUDGED: ok_reasonable={result['ok_reasonable']} "
+                    f"reasoning_valid={result['reasoning_valid']} "
+                    f"suggestions_valid={result['suggestions_valid']}"
+                )
             except Exception as e:
                 row["judge_reasoning"] = f"ERROR: {e}"
                 failed += 1

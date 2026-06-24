@@ -12,9 +12,9 @@ Usage:
 import argparse
 import csv
 import os
-import regex as re
 import time
 
+import regex as re
 import requests
 
 REPO = "vllm-project/vllm-ascend"
@@ -27,8 +27,7 @@ STATE_TARGETS = {"open": 35, "solved": 35, "closed": 30}
 
 def fetch_issues(page: int) -> list[dict]:
     url = f"https://api.github.com/repos/{REPO}/issues"
-    params = {"state": "all", "per_page": PER_PAGE, "page": page,
-              "sort": "created", "direction": "desc"}
+    params = {"state": "all", "per_page": PER_PAGE, "page": page, "sort": "created", "direction": "desc"}
     headers = {"Accept": "application/vnd.github+json"}
     token = os.environ.get("GITHUB_TOKEN", "")
     if token:
@@ -43,14 +42,29 @@ def fetch_issues(page: int) -> list[dict]:
 
 def extract_prefix(title: str) -> str:
     """Extract the issue type prefix like [Bug], [Doc], etc."""
-    known = ["[Bug]", "[Installation]", "[Usage]", "[Doc]", "[Misc]",
-             "[Feature]", "[RFC]", "[CI]", "[Performance]", "[BugFix]",
-             "[Test]", "[Ops]", "[RoPE]", "[Ascend950]", "[WIP]",
-             "[Community]", "[0.21.0]"]
+    known = [
+        "[Bug]",
+        "[Installation]",
+        "[Usage]",
+        "[Doc]",
+        "[Misc]",
+        "[Feature]",
+        "[RFC]",
+        "[CI]",
+        "[Performance]",
+        "[BugFix]",
+        "[Test]",
+        "[Ops]",
+        "[RoPE]",
+        "[Ascend950]",
+        "[WIP]",
+        "[Community]",
+        "[0.21.0]",
+    ]
     for prefix in known:
         if title.startswith(prefix):
             return prefix
-    m = re.match(r'^\[([^\]]+)\]', title)
+    m = re.match(r"^\[([^\]]+)\]", title)
     if m:
         return f"[{m.group(1)}]"
     return "[Misc]"
@@ -92,8 +106,10 @@ def main() -> None:
         for iss in issues:
             by_state[issue_state(iss)].append(iss)
         counts = {s: len(by_state[s]) for s in by_state}
-        print(f"  page {page}: {len(issues)} issues, "
-              f"open={counts['open']} solved={counts['solved']} closed={counts['closed']}")
+        print(
+            f"  page {page}: {len(issues)} issues, "
+            f"open={counts['open']} solved={counts['solved']} closed={counts['closed']}"
+        )
         # Stop if we have at least the target for each state
         if all(counts[s] >= STATE_TARGETS[s] for s in STATE_TARGETS):
             break
@@ -102,8 +118,10 @@ def main() -> None:
             break
         time.sleep(0.5)
 
-    print(f"Fetched {len(all_issues)} issues total "
-          f"(open={len(by_state['open'])} solved={len(by_state['solved'])} closed={len(by_state['closed'])})")
+    print(
+        f"Fetched {len(all_issues)} issues total "
+        f"(open={len(by_state['open'])} solved={len(by_state['solved'])} closed={len(by_state['closed'])})"
+    )
 
     # State-based stratified sampling
     selected: list[dict] = []
@@ -132,9 +150,17 @@ def main() -> None:
         print(f"  {state}: {n}")
 
     # Write CSV
-    fieldnames = ["issue_number", "title", "prefix", "state", "labels",
-                  "created_at", "body", "deepseek_v4_flash_output",
-                  "expected_ok_dsv4"]
+    fieldnames = [
+        "issue_number",
+        "title",
+        "prefix",
+        "state",
+        "labels",
+        "created_at",
+        "body",
+        "deepseek_v4_flash_output",
+        "expected_ok_dsv4",
+    ]
 
     with open(args.output, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -143,17 +169,19 @@ def main() -> None:
         for issue in selected:
             body = (issue.get("body") or "").replace("\r\n", "\n")
             labels = ",".join(label["name"] for label in issue.get("labels", []))
-            writer.writerow({
-                "issue_number": issue["number"],
-                "title": issue["title"],
-                "prefix": extract_prefix(issue["title"]),
-                "state": issue_state(issue),
-                "labels": labels,
-                "created_at": issue["created_at"],
-                "body": body,
-                "deepseek_v4_flash_output": "",
-                "expected_ok_dsv4": "",
-            })
+            writer.writerow(
+                {
+                    "issue_number": issue["number"],
+                    "title": issue["title"],
+                    "prefix": extract_prefix(issue["title"]),
+                    "state": issue_state(issue),
+                    "labels": labels,
+                    "created_at": issue["created_at"],
+                    "body": body,
+                    "deepseek_v4_flash_output": "",
+                    "expected_ok_dsv4": "",
+                }
+            )
 
     print(f"Written to {args.output}")
 

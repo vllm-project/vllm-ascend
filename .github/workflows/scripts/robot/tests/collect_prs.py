@@ -18,9 +18,9 @@ Usage:
 import argparse
 import csv
 import os
-import regex as re
 import time
 
+import regex as re
 import requests
 
 REPO = "vllm-project/vllm-ascend"
@@ -28,15 +28,28 @@ PER_PAGE = 100
 
 # Sampling config: (start_index, end_index, count_to_pick)
 STRATA = [
-    (0,   100, 40),
+    (0, 100, 40),
     (100, 200, 10),
     (200, 400, 10),
 ]
 
 KNOWN_PREFIXES = [
-    "[Feat]", "[BugFix]", "[Bug]", "[Doc]", "[CI]", "[Refactor]",
-    "[Perf]", "[Test]", "[Chore]", "[Platform]", "[Misc]",
-    "[Installation]", "[Usage]", "[Feature]", "[RFC]", "[Community]",
+    "[Feat]",
+    "[BugFix]",
+    "[Bug]",
+    "[Doc]",
+    "[CI]",
+    "[Refactor]",
+    "[Perf]",
+    "[Test]",
+    "[Chore]",
+    "[Platform]",
+    "[Misc]",
+    "[Installation]",
+    "[Usage]",
+    "[Feature]",
+    "[RFC]",
+    "[Community]",
 ]
 
 
@@ -45,7 +58,7 @@ def extract_prefix(title: str) -> str:
     for prefix in KNOWN_PREFIXES:
         if title_lower.startswith(prefix.lower()):
             return prefix
-    m = re.match(r'^\[([^\]]+)\]', title)
+    m = re.match(r"^\[([^\]]+)\]", title)
     if m:
         # Try to match known prefix case-insensitively
         inner = m.group(1)
@@ -59,8 +72,7 @@ def extract_prefix(title: str) -> str:
 
 def fetch_prs(page: int) -> list[dict]:
     url = f"https://api.github.com/repos/{REPO}/pulls"
-    params = {"state": "all", "per_page": PER_PAGE, "page": page,
-              "sort": "created", "direction": "desc"}
+    params = {"state": "all", "per_page": PER_PAGE, "page": page, "sort": "created", "direction": "desc"}
     headers = {"Accept": "application/vnd.github+json"}
     token = os.environ.get("GITHUB_TOKEN", "")
     if token:
@@ -105,8 +117,10 @@ def main() -> None:
         n_open = sum(1 for p in raw if p.get("state") == "open")
         n_merged = sum(1 for p in raw if p.get("merged_at") is not None)
         n_closed = sum(1 for p in raw if p.get("state") == "closed" and p.get("merged_at") is None)
-        print(f"  page {page}: {len(raw)} total (open={n_open} merged={n_merged} closed={n_closed}),"
-              f" accumulated {len(all_prs)}/{total_needed}")
+        print(
+            f"  page {page}: {len(raw)} total (open={n_open} merged={n_merged} closed={n_closed}),"
+            f" accumulated {len(all_prs)}/{total_needed}"
+        )
         page += 1
         if len(raw) < PER_PAGE:
             break
@@ -117,7 +131,7 @@ def main() -> None:
     # Stratified average sampling
     selected: list[dict] = []
     for start, end, count in STRATA:
-        pool = all_prs[start:min(end, len(all_prs))]
+        pool = all_prs[start : min(end, len(all_prs))]
         picked = average_sample(pool, count)
         selected.extend(picked)
         print(f"  Stratum [{start}:{end}]: pool={len(pool)}, picked={len(picked)}")
@@ -139,9 +153,17 @@ def main() -> None:
         print(f"  {state}: {n}")
 
     # Write CSV
-    fieldnames = ["pr_number", "title", "prefix", "state", "labels",
-                  "created_at", "body", "deepseek_v4_flash_output",
-                  "expected_ok_dsv4"]
+    fieldnames = [
+        "pr_number",
+        "title",
+        "prefix",
+        "state",
+        "labels",
+        "created_at",
+        "body",
+        "deepseek_v4_flash_output",
+        "expected_ok_dsv4",
+    ]
 
     with open(args.output, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -150,17 +172,19 @@ def main() -> None:
         for pr in selected:
             body = (pr.get("body") or "").replace("\r\n", "\n")
             labels = ",".join(label["name"] for label in pr.get("labels", []))
-            writer.writerow({
-                "pr_number": pr["number"],
-                "title": pr["title"],
-                "prefix": extract_prefix(pr["title"]),
-                "state": pr_state(pr),
-                "labels": labels,
-                "created_at": pr["created_at"],
-                "body": body,
-                "deepseek_v4_flash_output": "",
-                "expected_ok_dsv4": "",
-            })
+            writer.writerow(
+                {
+                    "pr_number": pr["number"],
+                    "title": pr["title"],
+                    "prefix": extract_prefix(pr["title"]),
+                    "state": pr_state(pr),
+                    "labels": labels,
+                    "created_at": pr["created_at"],
+                    "body": body,
+                    "deepseek_v4_flash_output": "",
+                    "expected_ok_dsv4": "",
+                }
+            )
 
     print(f"Written to {args.output}")
 

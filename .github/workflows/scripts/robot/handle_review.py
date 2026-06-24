@@ -41,10 +41,12 @@ def build_issue_comment(desc_result: dict) -> str:
         for item in suggestions:
             lines.append(f"- {item}")
         lines.append("")
-    lines.extend([
-        "_内容由 AI 生成，请仔细甄别。_",
-        f"_AI 综合评分：{desc_result.get('score', '-')}/100_",
-    ])
+    lines.extend(
+        [
+            "_内容由 AI 生成，请仔细甄别。_",
+            f"_AI 综合评分：{desc_result.get('score', '-')}/100_",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -114,8 +116,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Handle review result and post comment")
     parser.add_argument("--input", default="review_result.json", help="Description result JSON")
     parser.add_argument("--label-output", default="label_actions.json", help="File to write label actions JSON to")
-    parser.add_argument("--kind", default="issue", choices=["issue", "pr"],
-                        help="Target kind: issue or pr")
+    parser.add_argument("--kind", default="issue", choices=["issue", "pr"], help="Target kind: issue or pr")
     args = parser.parse_args()
 
     input_path = Path(args.input)

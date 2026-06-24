@@ -5,7 +5,7 @@ Tests for the Issue/PR review bot pipeline (`.github/workflows/scripts/robot/`).
 ## Files
 
 | File | Purpose |
-|------|---------|
+| ------ | --------- |
 | `test_scenarios.py` | E2E lifecycle tests — creates real issues/PRs, polls bot, verifies state transitions |
 | `test_csv.py` | Batch LLM evaluation & judge — calls the LLM with production prompts on CSV datasets, supports evaluate and judge modes |
 | `collect_issues.py` | Data collection — fetches issues from GitHub, stratified by state (open/solved/closed) |
@@ -35,11 +35,13 @@ python collect_prs.py --output prs.csv
 ```
 
 State mapping for issues:
+
 - `open` — issue is open
 - `solved` — closed with `state_reason: completed`
 - `closed` — closed with `state_reason: not_planned` or null (older issues)
 
 State mapping for PRs:
+
 - `open` — PR is open
 - `merged` — PR was merged
 - `closed` — PR was closed without merging

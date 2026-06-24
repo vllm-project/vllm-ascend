@@ -24,7 +24,7 @@ Extract type → Load template → Load prompt → LLM check → Post comment �
 ### Scenarios
 
 | # | From | Trigger | Desc result | Comment | Label |
-|---|------|---------|:--:|---------|-------|
+| --- | ------ | --------- | :--: | --------- | ------- |
 | I1 | (new) | `opened` | PASS | — | — |
 | I2 | (new) | `opened` | FAIL | Post | +need-detail-desc |
 | I3 | Clean | `edited` | PASS | — | — |
@@ -71,7 +71,7 @@ state == open (all PRs, no title prefix filter)
 ### Trigger execution
 
 | Trigger | Desc runs |
-|---------|:--:|
+| --------- | :--: |
 | `opened` | Yes |
 | `reopened` | Yes |
 | `edited` + title/body changed | Yes |
@@ -103,14 +103,14 @@ Desc skipped          → (don't touch need-detail-desc)
 ### Scenarios — opened / reopened
 
 | # | From | Desc | Comment | Labels |
-|---|------|:--:|---------|--------|
+| --- | ------ | :--: | --------- | -------- |
 | P1 | (new) | PASS | — | — |
 | P2 | (new) | FAIL | Post | +need-detail-desc |
 
 ### Scenarios — edited (desc runs)
 
 | # | From | Desc | Comment | Labels |
-|---|------|:--:|---------|--------|
+| --- | ------ | :--: | --------- | -------- |
 | P3 | Clean | PASS | — | — |
 | P4 | Clean | FAIL | Post | +need-detail-desc |
 | P5 | Desc-flagged | PASS | new post pass | −need-detail-desc |
@@ -119,7 +119,7 @@ Desc skipped          → (don't touch need-detail-desc)
 ### Scenarios — synchronize (body changed, desc runs)
 
 | # | From | Desc | Comment | Labels |
-|---|------|:--:|---------|--------|
+| --- | ------ | :--: | --------- | -------- |
 | P7 | Clean | PASS | — | — |
 | P8 | Clean | FAIL | Post | +need-detail-desc |
 | P9 | Desc-flagged | PASS | new post pass | −need-detail-desc |
@@ -128,7 +128,7 @@ Desc skipped          → (don't touch need-detail-desc)
 ### Scenarios — synchronize (body unchanged, desc skipped)
 
 | # | From | Desc | Comment | Labels |
-|---|------|:--:|---------|--------|
+| --- | ------ | :--: | --------- | -------- |
 | P11 | Clean | skip | — | — |
 | P12 | Desc-flagged | skip | — | (unchanged) |
 
@@ -145,7 +145,7 @@ concurrency:
 Force-push fires both `edited` + `synchronize`. Each does different work:
 
 | Run | Desc |
-|-----|:--:|
+| ----- | :--: |
 | `edited` | Runs (if body changed) |
 | `synchronize` | Runs (if body changed) |
 

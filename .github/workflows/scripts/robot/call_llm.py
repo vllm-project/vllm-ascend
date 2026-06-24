@@ -10,9 +10,9 @@ Used as step 4 of both the Issue Review and PR Review Bot workflows.
 import argparse
 import json
 import os
-import regex as re
 from pathlib import Path
 
+import regex as re
 from lib.llm import call_llm
 from lib.prefix_map import PREFIX_TO_TYPE_KEY
 
@@ -88,8 +88,7 @@ def main() -> None:
     parser.add_argument("--template", default="template.txt", help="File containing the issue/PR template")
     parser.add_argument("--type-key", default="issue_type.txt", help="File containing the issue type prefix")
     parser.add_argument("--output", default="review_result.json", help="File to write the review result JSON to")
-    parser.add_argument("--kind", default="issue", choices=["issue", "pr"],
-                        help="Target kind: issue or pr")
+    parser.add_argument("--kind", default="issue", choices=["issue", "pr"], help="Target kind: issue or pr")
     args = parser.parse_args()
 
     system_prompt_path = Path(args.system_prompt)
