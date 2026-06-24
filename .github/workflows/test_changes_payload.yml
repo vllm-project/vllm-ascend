@@ -1,0 +1,31 @@
+name: Test Changes Payload
+
+on:
+  pull_request_target:
+    types: [edited]
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump changes payload
+        run: |
+          echo "=== action: ${{ github.event.action }} ==="
+          echo "=== PR title: ${{ github.event.pull_request.title }} ==="
+          echo ""
+          echo "=== changes (whole object) ==="
+          echo '${{ toJson(github.event.changes) }}'
+          echo ""
+          echo "=== changes.title ==="
+          echo '${{ toJson(github.event.changes.title) }}'
+          echo "  from: ${{ github.event.changes.title.from }}"
+          echo ""
+          echo "=== changes.body ==="
+          echo '${{ toJson(github.event.changes.body) }}'
+          echo "  from: ${{ github.event.changes.body.from }}"
+          echo ""
+          echo "=== Truthy checks ==="
+          TITLE_CHANGED="${{ github.event.changes.title != '' }}"
+          BODY_CHANGED="${{ github.event.changes.body != '' }}"
+          echo "changes.title truthy: $TITLE_CHANGED"
+          echo "changes.body truthy: $BODY_CHANGED"
