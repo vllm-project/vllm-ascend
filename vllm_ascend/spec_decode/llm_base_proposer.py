@@ -60,9 +60,8 @@ from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enab
 def patch_tensor_parallel_group(tp_group):
     """Temporarily swap the global TP group for draft-model spec decode.
 
-    Backports vllm 0.21's ``patch_tensor_parallel_group`` which was removed
-    on vLLM main. Used so the draft model can run with a TP degree that
-    differs from the target model.
+    vllm-ascend local implementation for swapping the global TP group so the
+    draft model can run with a TP degree that differs from the target model.
     """
     old_tp_group = _ps.get_tp_group()
     _ps._TP_STATE_PATCHED = True
@@ -554,6 +553,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 positions=self.runner.positions,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
+                is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                 max_seq_len=0,
             )
             if self.pcp_size * self.dcp_size > 1:
@@ -1846,6 +1846,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else None,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
+            is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
         )
         return spec_common_attn_metadata, token_indices
@@ -1938,6 +1939,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens,
+            is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
         )
 
@@ -1962,6 +1964,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 torch.zeros([0]),
                 torch.tensor([0], dtype=torch.int32),
             )
+
+        if self.runner.pcp_manager.pcp_use_hybrid_attn:
+            return self._split_pcp_input_hybrid(req_scheduled_tokens, input_ids, target_hidden_states)
 
         def _pcp_pad_and_split(num_tokens):
             num_pcp_padded_scheduled_tokens = cdiv(num_tokens, 2 * self.pcp_size) * 2 * self.pcp_size
@@ -1997,6 +2002,47 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             pcp_split_input_ids_list.append(pcp_split_input_ids)
             pcp_split_hidden_states_list.append(pcp_split_hidden_states)
             pad_start_index += num_pcp_padded_scheduled_tokens
+        num_tokens = sum(num_pcp_scheduled_tokens)
+        input_ids = torch.cat(pcp_split_input_ids_list)
+        target_hidden_states = torch.cat(pcp_split_hidden_states_list, dim=0)
+        max_query_len = max(num_pcp_scheduled_tokens)
+        seq_lens = torch.tensor(num_pcp_scheduled_tokens, dtype=torch.int32)
+        cu_num_tokens = torch.tensor(np.insert(np.cumsum(np.array(num_pcp_scheduled_tokens)), 0, 0))
+        return num_tokens, input_ids, target_hidden_states, max_query_len, seq_lens, cu_num_tokens
+
+    def _split_pcp_input_hybrid(self, req_scheduled_tokens, input_ids, target_hidden_states):
+        """
+        Linear-split prefill input_ids and target_hidden_states for hybrid attn PCP.
+
+        Uses the same alignment as DualChunkSwap (pad to 2*pcp_size multiple)
+        so each rank gets an equal number of tokens, but splits linearly
+        (contiguous slices) instead of interleaved head/tail chunks.
+
+        Example: ori_num_tokens=7, pcp_size=2 → padded=8, pcp_tokens=4
+          rank 0: [0,1,2,3]  (4 valid)
+          rank 1: [4,5,6,7]  (3 valid + 1 pad at position 7)
+        """
+        num_pcp_scheduled_tokens = []
+        global_offset = 0
+        pcp_split_input_ids_list = []
+        pcp_split_hidden_states_list = []
+        for ori_num_tokens in req_scheduled_tokens.values():
+            padded_tokens = cdiv(ori_num_tokens, 2 * self.pcp_size) * 2 * self.pcp_size
+            pcp_tokens = padded_tokens // self.pcp_size
+            num_pads = padded_tokens - ori_num_tokens
+            rank_start = self.pcp_rank * pcp_tokens
+            num_pcp_scheduled_tokens.append(pcp_tokens)
+            # Pad and slice input_ids
+            req_input_ids = input_ids[global_offset : global_offset + ori_num_tokens]
+            if num_pads > 0:
+                req_input_ids = F.pad(req_input_ids, (0, num_pads))
+            pcp_split_input_ids_list.append(req_input_ids[rank_start : rank_start + pcp_tokens])
+            # Pad and slice target_hidden_states
+            req_hidden = target_hidden_states[global_offset : global_offset + ori_num_tokens]
+            if num_pads > 0:
+                req_hidden = F.pad(req_hidden, (0, 0, 0, num_pads))
+            pcp_split_hidden_states_list.append(req_hidden[rank_start : rank_start + pcp_tokens])
+            global_offset += ori_num_tokens
         num_tokens = sum(num_pcp_scheduled_tokens)
         input_ids = torch.cat(pcp_split_input_ids_list)
         target_hidden_states = torch.cat(pcp_split_hidden_states_list, dim=0)
