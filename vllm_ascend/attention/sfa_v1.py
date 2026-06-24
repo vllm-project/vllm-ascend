@@ -435,7 +435,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     """
 
     # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
-    o_proj_full_pool: torch.Tensor | None = None
+    o_proj_full_pools: dict[tuple[str, int | None, torch.dtype, int, tuple[int, ...]], torch.Tensor] = {}
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
@@ -822,14 +822,41 @@ class AscendSFAImpl(MLAAttentionImpl):
         - Use original TP o_proj weight for decode phase
         - Need full-gather o_proj weight from all TP ranks for prefill phase
         """
-        if AscendSFAImpl.o_proj_full_pool is None:
-            sample = self.o_proj.weight
-            AscendSFAImpl.o_proj_full_pool = torch.empty(
-                (sample.shape[0] * self.tp_size, sample.shape[1]), dtype=sample.dtype, device=sample.device
+        sample = self.o_proj.weight
+        self.o_proj_full_weight_gather_dim = 1 if self._is_o_proj_unquantized() else 0
+        if self.o_proj_full_weight_gather_dim == 0:
+            full_shape = (sample.shape[0] * self.tp_size, sample.shape[1])
+            gather_shape = full_shape
+        else:
+            full_shape = (sample.shape[0], sample.shape[1] * self.tp_size)
+            gather_shape = (sample.shape[1] * self.tp_size, sample.shape[0])
+        # Main and MTP layers can use different quantized o_proj weight layouts,
+        # so key the shared full-gather pool by gather dimension, dtype, and shape.
+        pool_key = (
+            sample.device.type,
+            sample.device.index,
+            sample.dtype,
+            self.o_proj_full_weight_gather_dim,
+            full_shape,
+        )
+        if pool_key not in AscendSFAImpl.o_proj_full_pools:
+            AscendSFAImpl.o_proj_full_pools[pool_key] = torch.empty(
+                gather_shape, dtype=sample.dtype, device=sample.device
             )
+        self.o_proj_full_gather_pool = AscendSFAImpl.o_proj_full_pools[pool_key]
+        if self.o_proj_full_weight_gather_dim == 0:
+            self.o_proj_full_pool = self.o_proj_full_gather_pool
+        else:
+            self.o_proj_full_pool = self.o_proj_full_gather_pool.transpose(0, 1)
 
         # Save TP-mode parameters (original sharded weights)
         self.o_proj_tp_weight = self.o_proj.weight.clone().detach()
+        if self.o_proj_full_weight_gather_dim == 0:
+            self.o_proj_tp_weight_gather_input = self.o_proj_tp_weight
+        else:
+            self.o_proj_tp_weight_gather_input = (
+                self.o_proj_tp_weight.transpose(0, 1).contiguous()
+            )
         self.o_proj_tp_aclnn_input_params = {}
         self.o_proj_full_aclnn_input_params = {}
         for param_name in O_PROJ_ACLNN_INPUT_PARAMS:
@@ -859,10 +886,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         for param_name, param in params.items():
             getattr(self.o_proj, param_name).set_(param)
 
-    def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
+    def _get_o_proj_linear_method(self):
         quant_method = self.o_proj.quant_method
-        linear_method = getattr(quant_method, "quant_method", quant_method)
-        return linear_method.apply(self.o_proj, attn_output)
+        return getattr(quant_method, "quant_method", quant_method)
+
+    def _is_o_proj_unquantized(self) -> bool:
+        return isinstance(self._get_o_proj_linear_method(), UnquantizedLinearMethod)
+
+    def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
+        return self._get_o_proj_linear_method().apply(self.o_proj, attn_output)
 
     def _handle_o_proj_weight_switch_and_forward(
         self,
@@ -885,7 +917,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     handle.wait()
 
             # Switch o_proj to Full-mode (gathered weight from all TP ranks)
-            self.o_proj.weight.set_(AscendSFAImpl.o_proj_full_pool)
+            self.o_proj.weight.set_(self.o_proj_full_pool)
             self._switch_o_proj_params(self.o_proj_full_aclnn_input_params)
             self._switch_o_proj_params(self.o_proj_full_input_sharded_quant_params)
 
@@ -1314,7 +1346,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                             reach_layer_for_shard_weight_series(layer)
                 elif full_gather_o_proj_enabled:
                     _, o_proj_full_handle = all_gather_async(
-                        self.o_proj_tp_weight, get_tp_group(), output=AscendSFAImpl.o_proj_full_pool
+                        self.o_proj_tp_weight_gather_input,
+                        get_tp_group(),
+                        output=self.o_proj_full_gather_pool,
                     )
                     o_proj_full_param_handles = []
                     for param_name, param in self.o_proj_tp_input_sharded_quant_params.items():
