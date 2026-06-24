@@ -240,7 +240,7 @@ benchmarks:
     max_out_len: 3000
     batch_size: 128
     request_rate: 11.2
-    baseline: 1343 
+    baseline: 1441.4691 
     threshold: 0.97
 
   perf_long:
@@ -252,7 +252,7 @@ benchmarks:
     max_out_len: 3000
     batch_size: 32
     request_rate: 11.2
-    baseline: 173.1 # https://github.com/vllm-project/vllm-ascend/actions/runs/24222505363/job/70716884885?pr=7119
+    baseline: 702.6262 # https://github.com/vllm-project/vllm-ascend/actions/runs/24222505363/job/70716884885?pr=7119
     threshold: 0.97
 
   acc:
