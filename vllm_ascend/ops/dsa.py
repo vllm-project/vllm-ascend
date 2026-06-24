@@ -29,7 +29,6 @@ from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 from vllm_ascend.utils import (
@@ -44,6 +43,7 @@ class DSAModules:
 
     wq_a: torch.nn.Module
     q_norm: torch.nn.Module
+    q_norm_without_weight: torch.nn.Module
     wq_b: torch.nn.Module
     wkv: torch.nn.Module
     kv_norm: torch.nn.Module
@@ -52,6 +52,7 @@ class DSAModules:
     attn_sink: torch.nn.Module
     indexer: torch.nn.Module | None
     compressor: torch.nn.Module | None
+    swa_cache_layer: torch.nn.Module
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
     skip_topk: bool = False
@@ -97,6 +98,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
 
         self.wq_a = dsa_modules.wq_a
         self.q_norm = dsa_modules.q_norm
+        self.q_norm_without_weight = dsa_modules.q_norm_without_weight
         self.wq_b = dsa_modules.wq_b
         self.wkv = dsa_modules.wkv
         self.kv_norm = dsa_modules.kv_norm
@@ -110,15 +112,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.skip_topk = dsa_modules.skip_topk
         self.prefix = prefix
 
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.fp8 if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
-        self.swa_cache_layer = DeepseekV4SWACache(
-            head_dim=self.head_dim,
-            window_size=self.window_size,
-            dtype=k_dtype,
-            prefix=f"{prefix}.swa_cache",
-            cache_config=cache_config,
-        )
+        self.swa_cache_layer = dsa_modules.swa_cache_layer
 
         self.dsa_attn = DSAAttention(
             dim=self.dim,
@@ -142,6 +136,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             wq_b=self.wq_b,
             wkv=self.wkv,
             q_norm=self.q_norm,
+            q_norm_without_weight=self.q_norm_without_weight,
             kv_norm=self.kv_norm,
             indexer=self.indexer,
             compressor=self.compressor,
@@ -194,7 +189,6 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata
 
     if attn_metadata is None:
-        self.dsa_attn.impl.dsa_warmup_with_multistream(hidden_states)
         output.fill_(0)
         return
 
@@ -237,6 +231,7 @@ def _build_kv_cache(self, forward_context):
     indexer_state_cache = None
     indexer_k_cache = None
     indexer_scale_cache = None
+    indexer_full_cache = None
 
     if self.compress_ratio > 1:
         state_cache = self.compressor.state_cache.kv_cache
@@ -246,24 +241,48 @@ def _build_kv_cache(self, forward_context):
             compress_kv_cache = compress_kv_cache[virtual_engine]
     if self.compress_ratio == 4:
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
-        indexer_k_cache, indexer_scale_cache = (
-            self.indexer.k_cache.kv_cache[0][0],
-            self.indexer.k_cache.kv_cache[0][1],
-        )
-
-    return tuple(
-        [
-            unfold_kvcache(cache)
-            for cache in (
-                compress_kv_cache,
-                swa_kv_cache,
-                state_cache,
-                indexer_state_cache,
-                indexer_k_cache,
-                indexer_scale_cache,
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            indexer_k_cache, indexer_scale_cache, indexer_full_cache = (
+                self.indexer.k_cache.kv_cache[0][0],
+                self.indexer.k_cache.kv_cache[0][1],
+                self.indexer.k_cache.kv_cache[0][2],
             )
-        ]
-    )
+        else:
+            indexer_k_cache, indexer_scale_cache = (
+                self.indexer.k_cache.kv_cache[0][0],
+                self.indexer.k_cache.kv_cache[0][1],
+            )
+
+    if get_ascend_device_type() in {AscendDeviceType.A5}:
+        kv_cache = tuple(
+            [
+                unfold_kvcache(cache)
+                for cache in (
+                    compress_kv_cache,
+                    swa_kv_cache,
+                    state_cache,
+                    indexer_state_cache,
+                    indexer_k_cache,
+                    indexer_scale_cache,
+                    indexer_full_cache,
+                )
+            ]
+        )
+    else:
+        kv_cache = tuple(
+            [
+                unfold_kvcache(cache)
+                for cache in (
+                    compress_kv_cache,
+                    swa_kv_cache,
+                    state_cache,
+                    indexer_state_cache,
+                    indexer_k_cache,
+                    indexer_scale_cache,
+                )
+            ]
+        )
+    return kv_cache
 
 
 def unfold_kvcache(kvcache):

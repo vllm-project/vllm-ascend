@@ -40,6 +40,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
         mock_profiler.stop.assert_called_once()
 
     @patch("vllm_ascend.profiler.torch_npu_profiler.envs_ascend")
+    @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
     @patch("torch_npu.profiler._ExperimentalConfig")
     @patch("torch_npu.profiler.profile")
     @patch("torch_npu.profiler.tensorboard_trace_handler")
@@ -56,11 +57,13 @@ class TestTorchNPUProfilerWrapper(TestBase):
         mock_trace_handler,
         mock_profile,
         mock_experimental_config,
+        mock_get_ascend_config,
         mock_envs_ascend,
     ):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 
         mock_envs_ascend.MSMONITOR_USE_DAEMON = 0
+        mock_get_ascend_config.side_effect = RuntimeError("Ascend config is not initialized")
 
         profiler_config = ProfilerConfig(
             profiler="torch",
@@ -71,7 +74,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
 
         mock_export_type.Text = "Text"
         mock_profiler_level.Level1 = "Level1"
-        mock_aic_metrics.AiCoreNone = "AiCoreNone"
+        mock_aic_metrics.PipeUtilization = "PipeUtilization"
         mock_profiler_activity.CPU = "CPU"
         mock_profiler_activity.NPU = "NPU"
 
@@ -91,7 +94,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
             "export_type": "Text",
             "profiler_level": "Level1",
             "msprof_tx": False,
-            "aic_metrics": "AiCoreNone",
+            "aic_metrics": "PipeUtilization",
             "l2_cache": False,
             "op_attr": False,
             "data_simplification": True,
@@ -190,7 +193,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
         )
         mock_export_type.Text = "Text"
         mock_profiler_level.Level1 = "Level1"
-        mock_aic_metrics.AiCoreNone = "AiCoreNone"
+        mock_aic_metrics.PipeUtilization = "PipeUtilization"
         mock_profiler_activity.CPU = "CPU"
         mock_profiler_activity.NPU = "NPU"
         mock_profile.return_value = MagicMock()

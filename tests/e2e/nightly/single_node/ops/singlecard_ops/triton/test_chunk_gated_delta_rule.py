@@ -8,7 +8,7 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 
 
 class TestChunkGatedDeltaRule(PytestBase):
-    def test_triton_fusion_ops(self, mock_moe_env):
+    def test_triton_fusion_ops(self):
         mock_attn_metadata = MagicMock()
         mock_attn_metadata.num_decodes = 1
         mock_forward_context = MagicMock()

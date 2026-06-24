@@ -37,7 +37,7 @@ copyright = "2025, vllm-ascend team"
 author = "the vllm-ascend team"
 
 # The full version, including alpha/beta/rc tags
-release = ""
+release = "0.21.0rc1"
 
 # -- General configuration ---------------------------------------------------
 
@@ -64,27 +64,33 @@ extensions = [
 myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
 # Change this when cut down release
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_VLLM_MAIN_VERIFIED_COMMIT_PATH = _REPO_ROOT / ".github" / "vllm-main-verified.commit"
+_VLLM_RELEASE_TAG_PATH = _REPO_ROOT / ".github" / "vllm-release-tag.commit"
+_VLLM_MAIN_VERIFIED_COMMIT = _VLLM_MAIN_VERIFIED_COMMIT_PATH.read_text(encoding="utf-8").strip()
+_VLLM_RELEASE_TAG = _VLLM_RELEASE_TAG_PATH.read_text(encoding="utf-8").strip()
+
 myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.19.1",
+    "vllm_version": "v0.21.0",
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    "vllm_ascend_version": "v0.19.1rc1",
+    "vllm_ascend_version": "v0.21.0rc1",
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    "pip_vllm_ascend_version": "0.19.1rc1",
-    "pip_vllm_version": "0.19.1",
-    # CANN image tag
-    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.11",
+    "pip_vllm_ascend_version": "0.21.0rc1",
+    "pip_vllm_version": "0.21.0",
+    # CANN image tag paired with the vllm_ascend_version above
+    "cann_image_tag": "9.0.0-910b-ubuntu22.04-py3.12",
     # vLLM commit hash for main branch
-    "main_vllm_commit": "39910f2b25aacc09f5e7f166cdf0030b19f8b9e8",
+    "main_vllm_commit": _VLLM_MAIN_VERIFIED_COMMIT,
     # vLLM tag for main branch
-    "main_vllm_tag": "v0.20.2",
+    "main_vllm_tag": _VLLM_RELEASE_TAG,
     # Python version for main branch
-    "main_python_version": ">= 3.10, < 3.12",
+    "main_python_version": ">= 3.10, < 3.13",
     # CANN version for main branch
     "main_cann_version": "9.0.0",
     # PyTorch/torch_npu version for main branch

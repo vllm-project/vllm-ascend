@@ -141,6 +141,7 @@ class AscendPrefillContextParallelMetadata:
     # chunked prefill calculation. Therefore, this value needs to be passed to the backend.
     # TODO:To be refactored.
     attn_chunk_seqlens: torch.Tensor = None
+    dcp_mtp_attn_mask: torch.Tensor = None
 
 
 @dataclass
@@ -172,6 +173,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([0, 1, 2, ...]) indicating token positions in sequence.
     positions: torch.Tensor = None
     positions_cpu: torch.Tensor = None
+
+    # CPU tensor of slot mapping for host-side operations.
+    slot_mapping_cpu: torch.Tensor = None
 
     # Current attention state (e.g., ChunkedPrefill, DecodeOnly).
     attn_state: Any = None
@@ -208,6 +212,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             # This is really strange since vLLM slices them as well
             block_table_tensor=self.block_table_tensor,
             slot_mapping=self.slot_mapping,
+            slot_mapping_cpu=self.slot_mapping_cpu,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions,
@@ -339,6 +344,26 @@ def maybe_save_kv_layer_to_connector(
         return
     # TODO: assert ascendMetadata
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
+
+
+def notify_kv_cache_written(layer_name: str = ""):
+    """Notify the connector that the paged KV cache for ``layer_name`` has been
+    written for the current step.
+
+    The attention layer calls this unconditionally; each connector decides whether
+    it needs to record a synchronization primitive (e.g. a compute-stream event
+    later waited on by the resharding stream to overlap the outgoing KV copy).
+    Connectors that don't need it -- such as the AscendStore pool connector, which
+    records its own sync event at save time -- simply do not implement
+    ``on_kv_cache_written`` and this becomes a no-op.
+    """
+    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+        return
+
+    connector = get_kv_transfer_group()
+    on_kv_cache_written = getattr(connector, "on_kv_cache_written", None)
+    if on_kv_cache_written is not None:
+        on_kv_cache_written(layer_name)
 
 
 def round_up(val: int, align: int) -> int:

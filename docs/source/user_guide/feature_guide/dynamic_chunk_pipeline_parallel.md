@@ -52,6 +52,7 @@ llm = LLM(
 | `smooth_factor` | float | 1.0 | Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more |
 | `min_chunk` | int | 4096 | Minimum chunk size for dynamic calculation |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
+| `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
 
 ### Parameter Tuning
 
@@ -65,8 +66,7 @@ llm = LLM(
 
 ### max-num-batched-tokens
 
-**Notably, the TTFT of CPP is very sensitive to `max-num-batched-tokens` (considered the initial chunksize for dynamic solving).** Because if it is too large, it will introduce si
-gnificant computational voids, and if it is too small, it will lead to a decrease in operator efficiency. To leave enough room for dynamic adjustments, we recommend that the longer the sequence being processed, the larger the `max-num-batched-tokens` should be set. Recommended values:
+**Notably, the TTFT of CPP is very sensitive to `max-num-batched-tokens` (considered the initial chunksize for dynamic solving).** Because if it is too large, it will introduce significant computational voids, and if it is too small, it will lead to a decrease in operator efficiency. To leave enough room for dynamic adjustments, we recommend that the longer the sequence being processed, the larger the `max-num-batched-tokens` should be set. Recommended values:
 
 | Sequence Length | `max-num-batched-tokens` |
 |-----------------|--------------------------|
@@ -81,29 +81,29 @@ You can use aisbench to generate fixed-length random datasets. Refer to [Using A
 
 1. Modify `<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`:
 
-```python
-synthetic_config = {
-    "Type": "string",
-    "RequestCount": 5,
-    "TrustRemoteCode": False,
-    "StringConfig": {
-        "Input": {
-            "Method": "uniform",
-            "Params": {"MinValue": 131072, "MaxValue": 131072}  # Your max sequence length, max-model-len
+    ```python
+    synthetic_config = {
+        "Type": "string",
+        "RequestCount": 5,
+        "TrustRemoteCode": False,
+        "StringConfig": {
+            "Input": {
+                "Method": "uniform",
+                "Params": {"MinValue": 131072, "MaxValue": 131072}  # Your max sequence length, max-model-len
+            },
+            "Output": {
+                "Method": "uniform",
+                "Params": {"MinValue": 1, "MaxValue": 1}
+            }
         },
-        "Output": {
-            "Method": "uniform",
-            "Params": {"MinValue": 1, "MaxValue": 1}
-        }
-    },
-}
-```
+    }
+    ```
 
 2. Run for online calibration:
 
-```bash
-ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf --debug
-```
+    ```bash
+    ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf --debug
+    ```
 
 Configure online calibration data length to match your `max-model-len`. Use `batch_size=1` and ensure data differs to avoid cache hits if prefix caching is enabled.
 

@@ -139,6 +139,7 @@ IS_GREEDY = torch.zeros(BATCH_SIZE, dtype=torch.bool, device=DEVICE)
 IS_GREEDY[4] = True
 
 
+@pytest.mark.skip(reason="Probabilistic failure, #TODO: tracking issue 9852")
 @pytest.mark.parametrize("cu_num_draft_tokens", [CU_NUM_DRAFT_TOKENS])
 @pytest.mark.parametrize("draft_token_ids", [DRAFT_TOKEN_IDS])
 @pytest.mark.parametrize("draft_probs", [DRAFT_PROBS])

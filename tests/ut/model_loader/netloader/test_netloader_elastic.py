@@ -18,12 +18,13 @@ import io
 import json
 import logging
 import socket
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import vllm.logger
 
+from vllm_ascend.model_loader.netloader.interaction import elastic
 from vllm_ascend.model_loader.netloader.interaction.elastic import ElasticClient, ElasticServer
 
 
@@ -40,6 +41,22 @@ def mock_server_error_response(data):
 # Simulated server's abnormal response
 def mock_server_exception_response(data):
     raise Exception("Mocked server exception")
+
+
+@contextmanager
+def capture_elastic_logs(level=logging.DEBUG):
+    log_capture_string = io.StringIO()
+    handler = logging.StreamHandler(log_capture_string)
+    handler.setLevel(level)
+    original_level = elastic.logger.level
+    elastic.logger.setLevel(level)
+    elastic.logger.addHandler(handler)
+    try:
+        yield log_capture_string
+    finally:
+        elastic.logger.removeHandler(handler)
+        elastic.logger.setLevel(original_level)
+        log_capture_string.close()
 
 
 # Test the initialization of ElasticClient
@@ -180,12 +197,7 @@ def server_config():
 # Test server initialization
 def test_server_initialization(server_config, mock_model):
     server_config["model"] = mock_model
-    with patch("socket.socket") as mock_socket:
-        log_capture_string = io.StringIO()
-        ch = logging.StreamHandler(log_capture_string)
-        ch.setLevel(logging.DEBUG)
-        vllm.logger.logger.addHandler(ch)
-
+    with patch("socket.socket") as mock_socket, capture_elastic_logs() as log_capture_string:
         server = ElasticServer(**server_config)
 
         # Check the socket configuration
@@ -207,8 +219,6 @@ def test_server_initialization(server_config, mock_model):
 
         # Get captured logs
         log_output = log_capture_string.getvalue()
-        vllm.logger.logger.removeHandler(ch)
-        log_capture_string.close()
 
         # Check output
         assert "Server 127.0.0.1:8080 starts" in log_output
@@ -216,21 +226,14 @@ def test_server_initialization(server_config, mock_model):
 
 # Test the int8 cache option
 @pytest.mark.parametrize("cache_option,expected_device", [("dram", "cpu"), ("no", None), ("invalid", None)])
-def test_int8_cache_handling(server_config, mock_model, cache_option, expected_device, caplog):
+def test_int8_cache_handling(server_config, mock_model, cache_option, expected_device):
     server_config["int8_cache"] = cache_option
     server_config["model"] = mock_model
 
-    with patch("socket.socket"):
-        log_capture_string = io.StringIO()
-        ch = logging.StreamHandler(log_capture_string)
-        ch.setLevel(logging.DEBUG)
-        vllm.logger.logger.addHandler(ch)
-
+    with patch("socket.socket"), capture_elastic_logs() as log_capture_string:
         server = ElasticServer(**server_config)
 
         log_output = log_capture_string.getvalue()
-        vllm.logger.logger.removeHandler(ch)
-        log_capture_string.close()
 
         if cache_option == "invalid":
             assert "int8_cache should be selected in [HBM, DRAM]" in log_output
@@ -263,7 +266,7 @@ def test_client_handler_valid_join(server_config, mock_model):
         # Verify response
         expected_ack = {"label": "JOIN_ACK", "content": {"name": "192.168.1.1:12345"}}
         mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
-        mock_p2p_send.assert_called_once_with("127.0.0.1", 9090, "192.168.1.1:12345")
+        mock_p2p_send.assert_called_once_with("127.0.0.1", 9090, "192.168.1.1:12345", "netloader")
         mock_conn.close.assert_called_once()
 
 
@@ -328,40 +331,32 @@ def test_client_handler_mismatch(server_config):
     ],
 )
 def test_client_handler_invalid_requests(server_config, invalid_data, should_send):
-    with patch("socket.socket"):
-        log_capture_string = io.StringIO()
-        ch = logging.StreamHandler(log_capture_string)
-        ch.setLevel(logging.DEBUG)
-        vllm.logger.logger.addHandler(ch)
+    with patch("socket.socket"), capture_elastic_logs() as log_capture_string:
+        server = ElasticServer(**server_config)
+        mock_conn = MagicMock()
+        mock_addr = ("192.168.1.1", 12345)
 
-        with patch("socket.socket"):
-            server = ElasticServer(**server_config)
-            mock_conn = MagicMock()
-            mock_addr = ("192.168.1.1", 12345)
+        if isinstance(invalid_data, (str, bytes)):
+            mock_conn.recv.return_value = invalid_data if isinstance(invalid_data, bytes) else invalid_data.encode()
+        else:
+            mock_conn.recv.return_value = json.dumps(invalid_data).encode("utf-8")
 
-            if isinstance(invalid_data, (str, bytes)):
-                mock_conn.recv.return_value = invalid_data if isinstance(invalid_data, bytes) else invalid_data.encode()
-            else:
-                mock_conn.recv.return_value = json.dumps(invalid_data).encode("utf-8")
+        server.register_handler(mock_conn, mock_addr)
 
-            server.register_handler(mock_conn, mock_addr)
+        if should_send:
+            expected_ack = {
+                "label": "JOIN_NACK",
+                "content": f"Received data does not contain required fields: {invalid_data}",
+            }
+            mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
+        else:
+            mock_conn.send.assert_not_called()
 
-            if should_send:
-                expected_ack = {
-                    "label": "JOIN_NACK",
-                    "content": f"Received data does not contain required fields: {invalid_data}",
-                }
-                mock_conn.send.assert_called_once_with(json.dumps(expected_ack).encode("utf-8"))
-            else:
-                mock_conn.send.assert_not_called()
+        log_output = log_capture_string.getvalue()
 
-            log_output = log_capture_string.getvalue()
-            vllm.logger.logger.removeHandler(ch)
-            log_capture_string.close()
-
-            # Any warning in the log is acceptable
-            assert "Failed to load" in log_output or "does not contain" in log_output
-            mock_conn.close.assert_called_once()
+        # Any warning in the log is acceptable
+        assert "Failed to load" in log_output or "does not contain" in log_output
+        mock_conn.close.assert_called_once()
 
 
 # Test the thread startup.
@@ -390,6 +385,52 @@ def test_server_cleanup(server_config):
         server = ElasticServer(**server_config)
         del server
         mock_socket.return_value.close.assert_called_once()
+
+
+def test_draft_group_name_in_client_register():
+    sent_payloads = []
+
+    with (
+        patch("socket.socket") as mock_socket,
+        patch("vllm_ascend.model_loader.netloader.interaction.elastic.find_free_port", return_value=12346),
+    ):
+        mock_socket_instance = MagicMock()
+        mock_socket.return_value = mock_socket_instance
+        mock_socket_instance.recv.return_value = mock_server_response(None)
+        mock_socket_instance.send.side_effect = lambda data: sent_payloads.append(json.loads(data.decode()))
+
+        client = ElasticClient(["127.0.0.1:12345"], 0, "draft-model", 1, 1, "netloader_draft")
+        client.s = mock_socket_instance
+        client.register(0, "draft-model", 1, 1)
+
+    assert client.group_name == "netloader_draft"
+    assert sent_payloads[0]["content"]["group_name"] == "netloader_draft"
+
+
+def test_draft_group_name_in_server_p2p_send(server_config, mock_model):
+    server_config["model"] = mock_model
+    join_data = {
+        "label": "JOIN",
+        "content": {
+            "device_id": 0,
+            "model_path": "/test/model",
+            "tp": 1,
+            "pp": 1,
+            "port": 9090,
+            "group_name": "netloader_draft",
+        },
+    }
+
+    with (
+        patch("socket.socket"),
+        patch("vllm_ascend.model_loader.netloader.interaction.elastic.P2PSend") as mock_p2p_send,
+    ):
+        mock_conn = MagicMock()
+        mock_conn.recv.return_value = json.dumps(join_data).encode("utf-8")
+
+        ElasticServer(**server_config, group_name="netloader_draft").register_handler(mock_conn, ("192.168.1.1", 12345))
+
+        mock_p2p_send.assert_called_once_with("127.0.0.1", 9090, "192.168.1.1:12345", "netloader_draft")
 
 
 if __name__ == "__main__":

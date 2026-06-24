@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import (
     get_pcp_group,
@@ -16,13 +17,13 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
     init_model_parallel_group,
-    patch_tensor_parallel_group,
 )
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
@@ -31,6 +32,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -47,9 +49,30 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
+from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
+from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+
+
+@contextmanager
+def patch_tensor_parallel_group(tp_group):
+    """Temporarily swap the global TP group for draft-model spec decode.
+
+    Backports vllm 0.21's ``patch_tensor_parallel_group`` which was removed
+    on vLLM main. Used so the draft model can run with a TP degree that
+    differs from the target model.
+    """
+    old_tp_group = _ps.get_tp_group()
+    _ps._TP_STATE_PATCHED = True
+    _ps._TP = tp_group
+    try:
+        yield
+    finally:
+        _ps._TP_STATE_PATCHED = False
+        _ps._TP = old_tp_group
+
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -88,6 +111,23 @@ def split_inputs_tp_to_sp(hidden_states, out):
     return out[:padded_num_tokens_per_rank]
 
 
+def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
+    tp_group = get_tp_group()
+    B, V_local = logits.shape
+    rank = tp_group.rank_in_group
+
+    local_max_logits, local_max_indices = logits.max(dim=-1)
+
+    local_global_idx = local_max_indices + rank * V_local  # [B]
+
+    # [B, world_size]
+    gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
+    gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
+    global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
+    target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
+    return target_argmax
+
+
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
@@ -96,6 +136,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Assign runner before it's used in the methods below
         self.runner = runner
+
+        logger.debug(
+            "[spec_decode/base] Initializing spec decode proposer: method=%s,"
+            " num_speculative_tokens=%s, hidden_size=%s, pass_hidden_states=%s,"
+            " parallel_drafting=%s, use_cuda_graph=%s, device=%s",
+            self.method,
+            self.num_speculative_tokens,
+            self.hidden_size,
+            pass_hidden_states_to_model,
+            self.speculative_config.parallel_drafting if self.speculative_config else False,
+            runner._use_aclgraph() if runner else False,
+            device,
+        )
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
@@ -135,7 +188,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 use_message_queue_broadcaster=True,
                 group_name="tp",
             )
-            self.tp_group_context = patch_tensor_parallel_group(tp_group)
+            self.tp_group_context: AbstractContextManager[Any] = patch_tensor_parallel_group(tp_group)
         else:
             self.tp_group_context = nullcontext()
 
@@ -194,14 +247,25 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         """
         from vllm.compilation.backends import set_model_tag
 
+        draft_vllm_config = self._create_draft_vllm_config()
+        draft_load_config = self.speculative_config.draft_load_config
+        logger.info(
+            "[spec_decode/base] Loading draft model: method=%s, load_format=%s, model=%s",
+            self.method,
+            getattr(draft_load_config, "load_format", None),
+            getattr(self.speculative_config.draft_model_config, "model", None),
+        )
         with set_model_tag("eagle_head"):
             model = get_model(
-                vllm_config=self.vllm_config,
-                model_config=self.vllm_config.speculative_config.draft_model_config,
+                vllm_config=draft_vllm_config,
+                model_config=self.speculative_config.draft_model_config,
+                load_config=self.speculative_config.draft_load_config,
             )
         return model
 
     def load_model(self, model: nn.Module) -> None:
+        assert get_pp_group().is_last_rank, f"{self.method} drafter must be loaded on the last pipeline stage."
+
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
 
         with self.maybe_eager_context:
@@ -266,6 +330,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else self.model.mask_hidden.view(self.hidden_size)
             )
 
+        logger.info(
+            "[spec_decode/base] Draft model loaded successfully: method=%s, num_draft_attn_layers=%d, block_size=%d",
+            self.method,
+            len(self._draft_attn_layer_names),
+            self.kernel_block_size,
+        )
+
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
         Some draft models may not have their own embedding layers, and some may
@@ -288,9 +359,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if not self.model.has_own_embed_tokens:
                     share_embeddings = True
                     logger.info(
-                        "Detected EAGLE model without its own embed_tokens in the"
-                        " checkpoint. Sharing target model embedding weights with the"
-                        " draft model."
+                        "[spec_decode/base] Detected EAGLE model without its own"
+                        " embed_tokens in the checkpoint. Sharing target model"
+                        " embedding weights with the draft model."
                     )
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
@@ -304,20 +375,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 ):
                     share_embeddings = True
                     logger.info(
-                        "Detected EAGLE model with embed_tokens identical to the target"
-                        " model. Sharing target model embedding weights with the draft"
-                        " model."
+                        "[spec_decode/base] Detected EAGLE model with embed_tokens"
+                        " identical to the target model. Sharing target model embedding"
+                        " weights with the draft model."
                     )
                 else:
                     logger.info(
-                        "Detected EAGLE model with distinct embed_tokens weights. "
-                        "Keeping separate embedding weights from the target model."
+                        "[spec_decode/base] Detected EAGLE model with distinct"
+                        " embed_tokens weights. Keeping separate embedding weights"
+                        " from the target model."
                     )
             else:
                 # MTP model
                 share_embeddings = not self.use_compress
                 if share_embeddings:
-                    logger.info("Detected MTP model. Sharing target model embedding weights with the draft model.")
+                    logger.info(
+                        "[spec_decode/base] Detected MTP model. Sharing target model"
+                        " embedding weights with the draft model."
+                    )
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
@@ -325,7 +400,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
-                "Since PP > 1 or other reasons the model head loaded its own vocab embedding"
+                "[spec_decode/base] PP>1: draft model loaded its own vocab embedding"
                 " weights instead of sharing them with the target model."
             )
 
@@ -334,13 +409,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
         if self.method in ("eagle", "dflash"):
-            logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
-            if hasattr(model, "lm_head"):
-                self.model.lm_head = model.lm_head
-            elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
-                self.model.lm_head = model.get_language_model().lm_head
+            # For DFlash drafters trained with a reduced draft vocabulary, the
+            # draft model ships its own lm_head of shape [draft_vocab_size,
+            # hidden] whose rows map to a trained subset of the target vocab via
+            # the draft_id_to_target_id (d2t) buffer. Overwriting it with the
+            # target lm_head ([target_vocab_size, hidden]) makes the draft emit
+            # logits over the wrong vocabulary, so the verifier rejects almost
+            # every speculative token. Keep the draft's own lm_head in that case.
+            draft_has_own_lm_head = (
+                self.method == "dflash" and getattr(self.model, "draft_id_to_target_id", None) is not None
+            )
+            if draft_has_own_lm_head:
+                logger.info(
+                    "[spec_decode/base] DFlash draft uses d2t vocab remapping;"
+                    " keeping the draft's own lm_head instead of sharing the target"
+                    " lm_head."
+                )
             else:
-                logger.warning("Target model has no accessible lm_head for sharing.")
+                logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
+                if hasattr(model, "lm_head"):
+                    self.model.lm_head = model.lm_head
+                elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
+                    self.model.lm_head = model.get_language_model().lm_head
+                else:
+                    logger.warning(
+                        "[spec_decode/base] Target model has no accessible lm_head"
+                        " for sharing. Draft model will use its own lm_head."
+                        " This may cause incorrect logits if the draft lm_head"
+                        " is not trained."
+                    )
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
@@ -348,6 +445,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     layer_module.shared_head.head = model.lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
+            logger.info(
+                "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
+                " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
+                self.use_eagle,
+                self.enable_enpu,
+            )
             self.update_stream = torch.npu.Stream()
             self._runnable = ACLGraphWrapper(
                 self._run_merged_draft,
@@ -363,8 +466,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 del self.model.model.topk_indices_buffer
             self.model.model.topk_indices_buffer = target_language_model.model.topk_indices_buffer
             logger.info(
-                "Detecting MTP model with topk_indices_buffer."
-                "Sharing target model topk_indices_buffer with the draft model."
+                "[spec_decode/base] Detected MTP model with topk_indices_buffer."
+                " Sharing target model topk_indices_buffer with the draft model."
             )
 
     def get_model(self) -> nn.Module:
@@ -447,6 +550,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
+                slot_mapping_cpu=self.runner.input_batch.block_table[0].slot_mapping.cpu,
                 positions=self.runner.positions,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
@@ -455,9 +559,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.pcp_size * self.dcp_size > 1:
                 # update long_seq related params and flatten block_table
                 common_attn_metadata.prefill_context_parallel_metadata = self.runner.pcp_manager.long_seq_metadata
-                common_attn_metadata.block_table_tensor = self.runner.input_batch.block_table[0].get_device_tensor()[
-                    : num_reqs * self.decode_threshold
-                ]
 
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
@@ -470,8 +571,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
                 if self.pcp_size * self.dcp_size > 1 and draft_step > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-                    slicing_length = num_reqs * self.decode_threshold
-                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:slicing_length]
+                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
                     AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
@@ -497,6 +597,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             inputs_embeds = self.inputs_embeds[:num_tokens]
         else:
             inputs_embeds = None
+
+        self.token_indices_to_sample.fill_(0)
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -567,7 +669,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method in ("eagle3", "dflash"):
-            assert isinstance(self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM))
+            assert isinstance(
+                self.get_model(),
+                (
+                    Eagle3LlamaForCausalLM,
+                    DFlashQwen3ForCausalLM,
+                    Eagle3VwnLlamaForCausalLM,
+                    Eagle3DeepseekV2ForCausalLM,
+                ),
+            )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
@@ -672,7 +782,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs_padded = common_attn_metadata.num_reqs
             # In the below scenario, padding has been applied by _pad_query_start_loc_for_fia in the model runner.
             # We need to unpad here for eager mode to maintain compatibility.
-            if (enable_sp() and not self.vllm_config.model_config.use_mla) and self.pcp_size * self.dcp_size == 1:
+            if not self.vllm_config.model_config.use_mla and self.pcp_size * self.dcp_size == 1:
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
@@ -786,13 +896,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                 slot_indices = torch.cat(slot_indices_list, dim=0)
 
-                # fold block_table (restore it to original size before flattened)
-                block_indices = torch.cat(
-                    [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d, dim=0)[:-1]]
-                )
-                common_attn_metadata.block_table_tensor[:batch_size] = common_attn_metadata.block_table_tensor[
-                    block_indices
-                ]
                 common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor[:batch_size]
 
                 # Copy the old attn_metadata and update
@@ -838,6 +941,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
+        self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
@@ -874,6 +978,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         return draft_token_ids
+
+    def compute_draft_token_ids(self, hidden_states: torch.Tensor):
+        logits = self.model.logits_processor(self.model.lm_head, hidden_states)
+        if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
+            return greedy_sample(logits)
+        logits = logits.contiguous()
+        next_token = greedy_sample(logits)
+        bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
+            next_token.shape
+        )
+        return next_token + bias
 
     def _run_merged_draft(
         self,
@@ -952,17 +1067,34 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        if get_ascend_config().enable_reduce_sample:
-            draft_token_ids = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
+        if get_ascend_config().enable_reduce_sample and self.method in ("eagle3", "dflash"):
+            draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
             if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                 draft_token_ids = draft_token_ids[:num_indices]
                 token_indices_to_sample = token_indices_to_sample[:num_indices]
         else:
-            logits = self.model.compute_logits(sample_hidden_states)
-            if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                logits = logits[:num_indices]
-                token_indices_to_sample = token_indices_to_sample[:num_indices]
-            draft_token_ids = logits.argmax(dim=-1)
+            if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
+                if not hasattr(self.model.model, "compute_logits"):
+                    draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+                    if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
+                        draft_token_ids = draft_token_ids[:num_indices]
+                        token_indices_to_sample = token_indices_to_sample[:num_indices]
+                else:
+                    logits = self.model.compute_logits(sample_hidden_states)
+                    if lmhead_tp_enable():
+                        logits = get_lmhead_tp_group().all_to_all(logits)
+                    else:
+                        logits = self.model.model.logits_processor._gather_logits(logits)
+                    if lmhead_tp_enable() and num_indices < logits.shape[0]:
+                        logits = logits[:num_indices]
+                        token_indices_to_sample = token_indices_to_sample[:num_indices]
+                    draft_token_ids = logits.argmax(dim=-1)
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
+                if lmhead_tp_enable() and num_indices < logits.shape[0]:
+                    logits = logits[:num_indices]
+                    token_indices_to_sample = token_indices_to_sample[:num_indices]
+                draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1088,19 +1220,34 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
-            if get_ascend_config().enable_reduce_sample:
-                draft_token_ids = self.model.compute_logits(
-                    sample_hidden_states, get_ascend_config().enable_reduce_sample
-                )
+            if get_ascend_config().enable_reduce_sample and self.method in ("eagle3", "dflash"):
+                draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                 if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                     draft_token_ids = draft_token_ids[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
             else:
-                logits = self.model.compute_logits(sample_hidden_states)
-                if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                    logits = logits[:num_indices]
-                    token_indices_to_sample = token_indices_to_sample[:num_indices]
-                draft_token_ids = logits.argmax(dim=-1)
+                if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
+                    if not hasattr(self.model.model, "compute_logits"):
+                        draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+                        if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
+                            draft_token_ids = draft_token_ids[:num_indices]
+                            token_indices_to_sample = token_indices_to_sample[:num_indices]
+                    else:
+                        logits = self.model.compute_logits(sample_hidden_states)
+                        if lmhead_tp_enable():
+                            logits = get_lmhead_tp_group().all_to_all(logits)
+                        else:
+                            logits = self.model.model.logits_processor._gather_logits(logits)
+                        if lmhead_tp_enable() and num_indices < logits.shape[0]:
+                            logits = logits[:num_indices]
+                            token_indices_to_sample = token_indices_to_sample[:num_indices]
+                        draft_token_ids = logits.argmax(dim=-1)
+                else:
+                    logits = self.model.compute_logits(sample_hidden_states)
+                    if lmhead_tp_enable() and num_indices < logits.shape[0]:
+                        logits = logits[:num_indices]
+                        token_indices_to_sample = token_indices_to_sample[:num_indices]
+                    draft_token_ids = logits.argmax(dim=-1)
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
@@ -1185,7 +1332,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self._split_pcp_input(req_scheduled_tokens_p, input_ids_p, target_hidden_states_p)
                 )
                 num_tokens = num_tokens_d + num_tokens_p
-                target_positions = target_positions[:num_tokens]
+                if self.uses_mrope:
+                    target_positions = target_positions[:, :num_tokens]
+                else:
+                    target_positions = target_positions[:num_tokens]
                 self.input_ids[:num_tokens].copy_(torch.cat([input_ids_d, input_ids_p], dim=0))
                 target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
                 # 2. update sample_indices according to main model
@@ -1417,15 +1567,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata.seq_lens[:batch_size] += 1
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
-        common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_max_model_len, 1)
+        exceeds_mask = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
+        common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_mask, 1)
         if common_attn_metadata.seq_lens_cpu is not None:
             common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
-            exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
-            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
+            exceeds_mask_cpu = common_attn_metadata.seq_lens_cpu[:batch_size] > self.max_model_len
+            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_cpu, 1)
         if common_attn_metadata._seq_lens_cpu is not None:
             common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
-            exceeds_mask_internal = common_attn_metadata._seq_lens_cpu[:batch_size] >= self.max_model_len
-            common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal, 1)
+            exceeds_mask_internal_cpu = common_attn_metadata._seq_lens_cpu[:batch_size] > self.max_model_len
+            common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal_cpu, 1)
         if common_attn_metadata.num_computed_tokens_cpu is not None:
             common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
@@ -1509,11 +1660,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         if self.pcp_size * self.dcp_size > 1:
-            if self.vllm_config.model_config.use_mla:
-                if getattr(attn_metadata, "decode", None):
-                    attn_metadata.decode.cp_seq_len = cp_seq_len
+            kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
+            if isinstance(kv_cache_spec, MLAAttentionSpec):
+                attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
+                attn_metadata.decode_meta.dcp_mtp_attn_mask = None
 
         return common_attn_metadata, attn_metadata
 
@@ -1686,6 +1838,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             max_query_len=new_query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
+            slot_mapping_cpu=common_attn_metadata.slot_mapping_cpu,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             positions=common_attn_metadata.positions[token_indices],
             positions_cpu=common_attn_metadata.positions_cpu[token_indices]
@@ -1777,6 +1930,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
+            slot_mapping_cpu=common_attn_metadata.slot_mapping_cpu,
             positions=common_attn_metadata.positions,
             positions_cpu=common_attn_metadata.positions_cpu,
             attn_state=self.runner.attn_state,
@@ -1808,6 +1962,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 torch.zeros([0]),
                 torch.tensor([0], dtype=torch.int32),
             )
+
+        if self.runner.pcp_manager.pcp_use_hybrid_attn:
+            return self._split_pcp_input_hybrid(req_scheduled_tokens, input_ids, target_hidden_states)
 
         def _pcp_pad_and_split(num_tokens):
             num_pcp_padded_scheduled_tokens = cdiv(num_tokens, 2 * self.pcp_size) * 2 * self.pcp_size
@@ -1843,6 +2000,47 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             pcp_split_input_ids_list.append(pcp_split_input_ids)
             pcp_split_hidden_states_list.append(pcp_split_hidden_states)
             pad_start_index += num_pcp_padded_scheduled_tokens
+        num_tokens = sum(num_pcp_scheduled_tokens)
+        input_ids = torch.cat(pcp_split_input_ids_list)
+        target_hidden_states = torch.cat(pcp_split_hidden_states_list, dim=0)
+        max_query_len = max(num_pcp_scheduled_tokens)
+        seq_lens = torch.tensor(num_pcp_scheduled_tokens, dtype=torch.int32)
+        cu_num_tokens = torch.tensor(np.insert(np.cumsum(np.array(num_pcp_scheduled_tokens)), 0, 0))
+        return num_tokens, input_ids, target_hidden_states, max_query_len, seq_lens, cu_num_tokens
+
+    def _split_pcp_input_hybrid(self, req_scheduled_tokens, input_ids, target_hidden_states):
+        """
+        Linear-split prefill input_ids and target_hidden_states for hybrid attn PCP.
+
+        Uses the same alignment as DualChunkSwap (pad to 2*pcp_size multiple)
+        so each rank gets an equal number of tokens, but splits linearly
+        (contiguous slices) instead of interleaved head/tail chunks.
+
+        Example: ori_num_tokens=7, pcp_size=2 → padded=8, pcp_tokens=4
+          rank 0: [0,1,2,3]  (4 valid)
+          rank 1: [4,5,6,7]  (3 valid + 1 pad at position 7)
+        """
+        num_pcp_scheduled_tokens = []
+        global_offset = 0
+        pcp_split_input_ids_list = []
+        pcp_split_hidden_states_list = []
+        for ori_num_tokens in req_scheduled_tokens.values():
+            padded_tokens = cdiv(ori_num_tokens, 2 * self.pcp_size) * 2 * self.pcp_size
+            pcp_tokens = padded_tokens // self.pcp_size
+            num_pads = padded_tokens - ori_num_tokens
+            rank_start = self.pcp_rank * pcp_tokens
+            num_pcp_scheduled_tokens.append(pcp_tokens)
+            # Pad and slice input_ids
+            req_input_ids = input_ids[global_offset : global_offset + ori_num_tokens]
+            if num_pads > 0:
+                req_input_ids = F.pad(req_input_ids, (0, num_pads))
+            pcp_split_input_ids_list.append(req_input_ids[rank_start : rank_start + pcp_tokens])
+            # Pad and slice target_hidden_states
+            req_hidden = target_hidden_states[global_offset : global_offset + ori_num_tokens]
+            if num_pads > 0:
+                req_hidden = F.pad(req_hidden, (0, 0, 0, num_pads))
+            pcp_split_hidden_states_list.append(req_hidden[rank_start : rank_start + pcp_tokens])
+            global_offset += ori_num_tokens
         num_tokens = sum(num_pcp_scheduled_tokens)
         input_ids = torch.cat(pcp_split_input_ids_list)
         target_hidden_states = torch.cat(pcp_split_hidden_states_list, dim=0)

@@ -13,6 +13,7 @@ _envs: &envs
   VLLM_ASCEND_ENABLE_MLAPO: "1"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ASCEND_ENABLE_NZ: "1"
+  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
 
 _server_cmd: &server_cmd
   - "--enable-expert-parallel"
@@ -48,18 +49,17 @@ _benchmark_acc: &_benchmark_acc
     threshold: 5
 
 _benchmark_TPOT50_3_5k_1_5k: &_benchmark_TPOT50_3_5k_1_5k
-  perf:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 392
-    max_out_len: 1500
-    batch_size: 98
-    trust_remote_code: true
-    request_rate: 0
-    baseline: 1
-    threshold: 0.97
+  case_type: performance
+  dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+  request_conf: vllm_api_stream_chat
+  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+  num_prompts: 392
+  max_out_len: 1500
+  batch_size: 98
+  trust_remote_code: true
+  request_rate: 0
+  baseline: 1
+  threshold: 0.97
 
 _benchmark_TPOT50_16K_1K: &_benchmark_TPOT50_16K_1K
   case_type: performance
@@ -248,6 +248,8 @@ test_cases:
       HCCL_BUFFSIZE: "400"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
     server_cmd:
+      - "--port"
+      - "$SERVER_PORT"
       - "--tool-call-parser"
       - "kimi_k2"
       - "--reasoning-parser"
