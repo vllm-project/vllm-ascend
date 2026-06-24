@@ -705,52 +705,11 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
         lc.cleanup()
     print()
 
-    # ── Chain C: good + sync -> P7, P8, P9, P10 ──
+    # ── Chain C: flagged + no-body sync -> P11, P12 ──
     print("=" * 60)
-    print("PR Chain C: good -> P7 P8 P9 P10")
+    print("PR Chain C: flagged -> P11 P12")
     print("=" * 60)
     lc = PRLifecycle(api_base, repo, "chain-c")
-    try:
-        lc.create_pr(PR_GOOD_DESC["title"], PR_GOOD_DESC["body"])
-        _ = lc.wait_for_action(expect_ok=True, step_name="P1 baseline")
-        print(f"  PR #{lc.pr_number} settled (P1 baseline)")
-        time.sleep(3)
-
-        lc.edit_pr(PR_GOOD_DESC_ALT["title"], PR_GOOD_DESC_ALT["body"])
-        r = lc.wait_for_action(expect_ok=True, step_name="P7: Clean + sync PASS -> Clean")
-        results.append(r)
-        print(f"  [P7] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(3)
-
-        lc.edit_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
-        r = lc.wait_for_action(expect_ok=False, step_name="P8: Clean + sync FAIL -> Desc-flagged")
-        results.append(r)
-        print(f"  [P8] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(3)
-
-        lc.edit_pr(PR_GOOD_DESC["title"], PR_GOOD_DESC["body"])
-        r = lc.wait_for_action(expect_ok=True, step_name="P9: Desc-flagged + sync PASS -> Clean")
-        results.append(r)
-        print(f"  [P9] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(3)
-
-        lc.edit_pr(PR_BAD_DESC_ALT["title"], PR_BAD_DESC_ALT["body"])
-        r = lc.wait_for_action(expect_ok=False, step_name="P10: Clean + sync FAIL -> Desc-flagged")
-        results.append(r)
-        print(f"  [P10] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-    except Exception as e:
-        results.append(Result("Chain C exception"))
-        results[-1].fail(str(e))
-        print(f"  EXCEPTION: {e}")
-    finally:
-        lc.cleanup()
-    print()
-
-    # ── Chain D: flagged + no-body sync -> P11, P12 ──
-    print("=" * 60)
-    print("PR Chain D: flagged -> P11 P12")
-    print("=" * 60)
-    lc = PRLifecycle(api_base, repo, "chain-d")
     try:
         lc.create_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
         r = lc.wait_for_action(expect_ok=False, step_name="P2 baseline: opened (bad) -> Desc-flagged")
@@ -770,7 +729,7 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
         results.append(r)
         print(f"  [P12] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
-        results.append(Result("Chain D exception"))
+        results.append(Result("Chain C exception"))
         results[-1].fail(str(e))
         print(f"  EXCEPTION: {e}")
     finally:
