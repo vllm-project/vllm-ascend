@@ -16,6 +16,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
+    get_quant_type_for_layer,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
 
@@ -35,7 +36,7 @@ class TestAscendModelSlimConfig(TestBase):
             "shard2.weight": "FLOAT",
         }
         self.ascend_config = AscendModelSlimConfig(self.sample_config)
-        self.ascend_config.packed_modules_mapping = None
+        self.ascend_config.packed_modules_mapping = {}
 
     def test_init(self):
         self.assertEqual(self.ascend_config.quant_description, self.sample_config)
@@ -86,10 +87,10 @@ class TestAscendModelSlimConfig(TestBase):
         mock_config = MagicMock()
         mock_config.model_config.hf_config.model_type = None
         linear_layer = MagicMock(spec=LinearBase)
-        # Test skipped layer
+        # Test skipped layer (quant_type is None)
         with (
             patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
+            patch("vllm_ascend.quantization.modelslim_config.get_quant_type_for_layer", return_value=None),
         ):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIsInstance(method, AscendUnquantizedLinearMethod)
@@ -97,8 +98,8 @@ class TestAscendModelSlimConfig(TestBase):
         # Test quantized layer
         mock_scheme = MagicMock()
         with (
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
             patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend.quantization.modelslim_config.get_quant_type_for_layer", return_value="INT8"),
             patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()
@@ -168,10 +169,10 @@ class TestAscendModelSlimConfig(TestBase):
         mock_config = MagicMock()
         mock_config.model_config.hf_config.model_type = None
 
-        # Test skipped layer
+        # Test skipped layer (quant_type is None)
         with (
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
             patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend.quantization.modelslim_config.get_quant_type_for_layer", return_value=None),
             patch(
                 "vllm_ascend.ops.fused_moe.fused_moe.AscendUnquantizedFusedMoEMethod", return_value=MagicMock()
             ) as mock_ascend_moe,
@@ -182,8 +183,8 @@ class TestAscendModelSlimConfig(TestBase):
         # Test quantized layer
         mock_scheme = MagicMock()
         with (
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
             patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend.quantization.modelslim_config.get_quant_type_for_layer", return_value="W8A8_DYNAMIC"),
             patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod", return_value=MagicMock()
@@ -191,23 +192,6 @@ class TestAscendModelSlimConfig(TestBase):
         ):
             method = self.ascend_config.get_quant_method(fused_moe_layer, "moe_layer")
             self.assertIs(method, mock_ascend_moe.return_value)
-
-    def test_is_layer_skipped_ascend(self):
-        # Test non-fused layer that should be quantized
-        self.assertFalse(self.ascend_config.is_layer_skipped_ascend("layer1"))
-
-        # Test non-fused layer that should be skipped
-        self.assertTrue(self.ascend_config.is_layer_skipped_ascend("layer2"))
-
-        # Test fused layer
-        fused_mapping = {"fused_layer": ["shard1", "shard2"]}
-        self.assertTrue(self.ascend_config.is_layer_skipped_ascend("fused_layer", fused_mapping))
-
-        # Test inconsistent fused layer shards
-        bad_config = {"shard1.weight": "FLOAT", "shard2.weight": "INT8"}
-        config = AscendModelSlimConfig(bad_config)
-        with self.assertRaises(ValueError):
-            config.is_layer_skipped_ascend("fused_layer", fused_mapping)
 
     def test_init_with_default_config(self):
         config = AscendModelSlimConfig()
@@ -469,3 +453,126 @@ class TestAddKvcacheQuantMetadata(TestBase):
         self.assertEqual(config.kvcache_quant_layers, [])
         self.assertFalse(config.enable_indexer_quant)
         self.assertEqual(config.indexer_quant_layers, [])
+
+
+class TestGetQuantTypeForLayer(TestBase):
+    """Tests for the get_quant_type_for_layer function."""
+
+    def test_non_fused_quantized(self):
+        """Non-fused module with quantized weight returns the quant type."""
+        quant_desc = {
+            "model.layers.0.mlp.gate_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.mlp.gate_proj.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.mlp.gate_proj.weight_offset": "W8A8_DYNAMIC",
+        }
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.mlp.gate_proj")
+        self.assertEqual(result, "W8A8_DYNAMIC")
+
+    def test_non_fused_float_returns_none(self):
+        """Non-fused module with FLOAT weight returns None (skipped)."""
+        quant_desc = {
+            "model.layers.0.mlp.down_proj.weight": "FLOAT",
+            "model.layers.0.mlp.down_proj.weight_scale": "FLOAT",
+            "model.layers.0.mlp.down_proj.weight_offset": "FLOAT",
+        }
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.mlp.down_proj")
+        self.assertIsNone(result)
+
+    def test_non_fused_missing_key_returns_none(self):
+        """Non-fused module with no matching weight key returns None."""
+        quant_desc = {
+            "model.layers.0.mlp.gate_proj.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.mlp.gate_proj.weight_offset": "W8A8_DYNAMIC",
+        }
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.mlp.gate_proj")
+        self.assertIsNone(result)
+
+    def test_fused_module_all_shards_same(self):
+        """Fused module with all shards having same quant type returns it."""
+        quant_desc = {
+            "model.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.q_proj.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.q_proj.weight_offset": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.k_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.k_proj.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.k_proj.weight_offset": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.v_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.v_proj.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.v_proj.weight_offset": "W8A8_DYNAMIC",
+        }
+        mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.self_attn.qkv_proj", mapping)
+        self.assertEqual(result, "W8A8_DYNAMIC")
+
+    def test_fused_module_shard_is_float_returns_none(self):
+        """Fused module with a FLOAT shard returns None via final conversion."""
+        quant_desc = {
+            "model.layers.0.self_attn.q_proj.weight": "FLOAT",
+            "model.layers.0.self_attn.k_proj.weight": "FLOAT",
+            "model.layers.0.self_attn.v_proj.weight": "FLOAT",
+        }
+        mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.self_attn.qkv_proj", mapping)
+        self.assertIsNone(result)
+
+    def test_fused_module_inconsistent_shards_raises(self):
+        """Fused module with inconsistent shard quant types raises ValueError."""
+        quant_desc = {
+            "model.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.k_proj.weight": "W4A8_DYNAMIC",
+            "model.layers.0.self_attn.v_proj.weight": "W8A8_DYNAMIC",
+        }
+        mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+        with self.assertRaises(ValueError):
+            get_quant_type_for_layer(quant_desc, "model.layers.0.self_attn.qkv_proj", mapping)
+
+    def test_experts_dynamic_lookup_quantized(self):
+        """Experts layer uses dynamic lookup when not in packed_modules_mapping."""
+        quant_desc = {
+            "model.layers.3.mlp.experts.0.gate_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.3.mlp.experts.0.gate_proj.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.3.mlp.experts.0.gate_proj.weight_offset": "W8A8_DYNAMIC",
+            "model.layers.3.mlp.experts.0.up_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.3.mlp.experts.0.up_proj.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.3.mlp.experts.0.up_proj.weight_offset": "W8A8_DYNAMIC",
+            "model.layers.3.mlp.experts.0.down_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.3.mlp.experts.0.down_proj.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.3.mlp.experts.0.down_proj.weight_offset": "W8A8_DYNAMIC",
+        }
+        result = get_quant_type_for_layer(quant_desc, "model.layers.3.mlp.experts", {})
+        self.assertEqual(result, "W8A8_DYNAMIC")
+
+    def test_experts_dynamic_lookup_w1_w2_w3(self):
+        """Experts layer dynamic lookup works with Minimax-style w1/w2/w3 naming."""
+        quant_desc = {
+            "model.layers.0.block_sparse_moe.experts.0.w1.weight": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w1.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w1.weight_offset": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w2.weight": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w2.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w2.weight_offset": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w3.weight": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w3.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w3.weight_offset": "W8A8_DYNAMIC",
+        }
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.block_sparse_moe.experts", {})
+        self.assertEqual(result, "W8A8_DYNAMIC")
+
+    def test_experts_dynamic_lookup_float_returns_none(self):
+        """Experts layer with FLOAT weights returns None via dynamic lookup."""
+        quant_desc = {
+            "model.layers.3.mlp.experts.0.gate_proj.weight": "FLOAT",
+            "model.layers.3.mlp.experts.0.gate_proj.weight_scale": "FLOAT",
+            "model.layers.3.mlp.experts.0.up_proj.weight": "FLOAT",
+            "model.layers.3.mlp.experts.0.up_proj.weight_scale": "FLOAT",
+            "model.layers.3.mlp.experts.0.down_proj.weight": "FLOAT",
+            "model.layers.3.mlp.experts.0.down_proj.weight_scale": "FLOAT",
+        }
+        result = get_quant_type_for_layer(quant_desc, "model.layers.3.mlp.experts", {})
+        self.assertIsNone(result)
+
+    def test_packed_modules_mapping_none_defaults_to_empty(self):
+        """None packed_modules_mapping is treated as empty dict."""
+        quant_desc = {"model.layers.0.mlp.gate_proj.weight": "W8A8_DYNAMIC"}
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.mlp.gate_proj", None)
+        self.assertEqual(result, "W8A8_DYNAMIC")

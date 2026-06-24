@@ -183,7 +183,7 @@ def get_quant_type_for_layer(
                 logger.error(err_msg)
                 raise ValueError(err_msg)
     else:
-        quant_type = quant_description.get(prefix + ".weight", None)
+        quant_type = quant_description.get(prefix + ".weight")
     return quant_type if quant_type != "FLOAT" else None
 
 
