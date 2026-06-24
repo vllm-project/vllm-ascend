@@ -40,6 +40,23 @@ def register_connector():
                 class_name,
             )
 
+    # Override the upstream filesystem secondary tier ("fs_python"). The
+    # upstream tier opens block files with O_DIRECT, whose alignment
+    # requirements the mmap-backed primary tier buffer does not generally
+    # satisfy (notably on 3FS/FUSE, surfacing as EINVAL). The Ascend tier
+    # reuses the upstream flow with buffered I/O by default.
+    try:
+        from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+    except ImportError:
+        pass
+    else:
+        SecondaryTierFactory._registry.pop("fs_python", None)
+        SecondaryTierFactory.register_tier(
+            "fs_python",
+            "vllm_ascend.kv_offload.fs_tier",
+            "AscendFileSystemTierManager",
+        )
+
     # override multi_connector as ascend_multi_connector
     if "MultiConnector" in KVConnectorFactory._registry:
         KVConnectorFactory._registry.pop("MultiConnector")

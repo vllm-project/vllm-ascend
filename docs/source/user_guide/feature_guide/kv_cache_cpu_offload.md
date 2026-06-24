@@ -92,7 +92,21 @@ kv_transfer_config = KVTransferConfig(
 - `block_size`: The CPU-side block size. Should be a multiple of the NPU-side block size. Typical value: `128`.
 - `spec_name`: Use `"NPUOffloadingSpec"` for CPU-only offload or `"NPUTieringOffloadingSpec"` for multi-tier offload. When the Ascend connector registry is initialized, upstream names `"CPUOffloadingSpec"` and `"TieringOffloadingSpec"` are also mapped to the NPU implementations.
 - `spec_module_path`: Must be `"vllm_ascend.kv_offload.npu"`.
-- `secondary_tiers`: Optional list of vLLM tiering backends used by `NPUTieringOffloadingSpec`.
+- `secondary_tiers`: Optional list of vLLM tiering backends used by `NPUTieringOffloadingSpec`. Each entry is a dict; common keys:
+  - `type`: Backend type. `"fs_python"` (the Ascend filesystem tier) is the default for disk-backed tiers (SSD/NFS/3FS).
+  - `root_dir`: Directory the tier writes block files into.
+  - `n_read_threads` / `n_write_threads`: Thread-pool sizes for the tier's I/O. For high-bandwidth backends (e.g. 3FS over RDMA) increasing these helps saturate parallel bandwidth.
+  - `use_direct_io` (default `false`): Re-enable `O_DIRECT`. Only for local filesystems/SSDs that support it with aligned buffers; leave `false` on 3FS/FUSE (where it raises `EINVAL`).
+  - `use_usrbio` (default `false`): On a 3FS mount with the `hf3fs` USRBIO binding installed, transfer KV blocks over **RDMA** via 3FS USRBIO, bypassing the FUSE/page-cache path for much higher throughput. If USRBIO is unavailable (binding missing, `root_dir` not on a 3FS mount, or init failure) the tier automatically falls back to buffered I/O, so enabling it never breaks a deployment. Mutually exclusive in effect with `use_direct_io` (USRBIO manages its own data path). This path must be validated on a real 3FS + RDMA node.
+
+### Tuning the filesystem (SSD / 3FS) secondary tier
+
+The `fs_python` tier writes one file per KV block. On FUSE-backed filesystems such as 3FS, per-block metadata operations (directory creation, `stat`, rename) dominate the cost, so the Ascend tier caches created directories to avoid re-issuing `makedirs` per block. To get the best disk/3FS offload throughput:
+
+- Increase `block_size` (e.g. `256`/`512`, must remain a multiple of the NPU block size) to write larger files, reducing the number of files and metadata operations.
+- Raise `n_read_threads` / `n_write_threads` to match the backend's parallelism (3FS over RDMA benefits from higher concurrency than local SSD).
+- Keep the CPU primary tier (`cpu_bytes_to_use`) large enough that the slower disk tier is only reached for genuinely cold data — a secondary tier only improves performance when the working set exceeds CPU capacity.
+- On 3FS with RDMA, set `"use_usrbio": true` for the native zero-copy RDMA path.
 
 ## How It Works
 
