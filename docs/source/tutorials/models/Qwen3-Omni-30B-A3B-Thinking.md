@@ -235,6 +235,36 @@ curl http://localhost:8000/v1/chat/completions \
     ]
 }'
 ```
+```
+{
+  "id": "chatcmpl-8f3a1c2e4b5d4f7a9c0e1d2b3a4f5e6d",
+  "object": "chat.completion",
+  "created": 1782714240,
+  "model": "Qwen/Qwen3-Omni-30B-A3B-Thinking",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "reasoning_content": "Let me examine each modality. The image shows several cars parked in a row — looks like a street or lot, daytime. The audio is short and sharp, sounds like a human cough (a single dry cough). The video appears to show someone drawing/sketching on paper, a hand moving a pen. Now I need to connect them: there isn't a single obvious narrative linking cars + cough + drawing, so I should describe each and then note any plausible shared context (e.g., a person sketching cars while having a cold). I'll keep the synthesis honest rather than forcing a connection.",
+        "content": "Here's an analysis of the three inputs together:\n\n**Image** — A row of parked cars photographed outdoors in daylight, likely on a street or in a parking area. The vehicles are of varying colors and models, shot at a slight angle so several are visible in perspective.\n\n**Audio** — A brief, dry human cough: a single forceful exhalation lasting under a second, with no speech or background music. It sounds like an isolated cough rather than a sustained coughing fit.\n\n**Video** — A close-up of a hand drawing/sketching with a pen on paper, the strokes building up a simple illustration over a few seconds.\n\n**Combined interpretation** — The three clips don't share an explicit storyline; they're distinct samples of vision, sound, and motion. If a connecting context is assumed, one plausible scene is a person sketching cars (the drawing in the video, the cars in the image) while momentarily coughing (the audio) — e.g., an artist working outdoors who has a cold. But strictly, each input stands on its own: a static photo of cars, a one-off cough sound, and a short hand-drawing clip.",
+        "tool_calls": []
+      },
+      "logprobs": null,
+      "finish_reason": "stop",
+      "stop_reason": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 8423,
+    "total_tokens": 8712,
+    "completion_tokens": 289,
+    "prompt_tokens_details": null
+  },
+  "prompt_logprobs": null
+}
+
+```
 
 ## Accuracy Evaluation
 
