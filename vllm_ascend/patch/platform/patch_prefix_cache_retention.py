@@ -85,6 +85,29 @@ def get_prefix_cache_retention_interval(
     return retention_interval
 
 
+def _patch_compress_manager_factory() -> None:
+    import vllm.v1.core.kv_cache_coordinator as coordinator_mod
+    import vllm.v1.core.single_type_kv_cache_manager as manager_mod
+
+    orig_get_manager = coordinator_mod.get_manager_for_kv_cache_spec
+    if getattr(orig_get_manager, "_ascend_compress_patched", False):
+        return
+
+    def get_manager_for_kv_cache_spec(
+        kv_cache_spec: KVCacheSpec,
+        **kwargs: Any,
+    ) -> SingleTypeKVCacheManager:
+        if (getattr(kv_cache_spec, "compress_ratio", 1) or 1) > 1:
+            from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
+
+            return CompressAttentionManager(kv_cache_spec, **kwargs)
+        return orig_get_manager(kv_cache_spec, **kwargs)
+
+    get_manager_for_kv_cache_spec._ascend_compress_patched = True  # type: ignore[attr-defined]
+    coordinator_mod.get_manager_for_kv_cache_spec = get_manager_for_kv_cache_spec
+    manager_mod.get_manager_for_kv_cache_spec = get_manager_for_kv_cache_spec
+
+
 def _add_prepend_n_to_free_queue() -> None:
     if hasattr(FreeKVCacheBlockQueue, "prepend_n"):
         return
@@ -531,6 +554,7 @@ def _patch_upstream_coordinators() -> None:
 _add_prepend_n_to_free_queue()
 _patch_block_pool_free_blocks()
 _patch_block_pool_cache_full_blocks()
+_patch_compress_manager_factory()
 _patch_single_type_cache_blocks()
 _patch_sliding_window_free()
 _patch_upstream_coordinators()

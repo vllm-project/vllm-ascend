@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+import vllm.v1.core.kv_cache_coordinator as kv_cache_coordinator
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
@@ -135,6 +136,19 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
     )[0]
 
     assert hit_blocks == manager.req_to_blocks[request.request_id]
+
+
+def test_upstream_coordinator_factory_uses_compress_manager() -> None:
+    spec, block_pool, _ = _make_compress_manager()
+
+    manager = kv_cache_coordinator.get_manager_for_kv_cache_spec(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+    )
+
+    assert isinstance(manager, CompressAttentionManager)
 
 
 def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
