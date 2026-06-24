@@ -18,7 +18,6 @@
 #
 
 import copy
-import math
 from collections.abc import Callable
 from itertools import accumulate
 from typing import TYPE_CHECKING, Any
