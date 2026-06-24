@@ -2531,19 +2531,66 @@ class MooncakeConnectorWorker:
 
         return list(rank_group_pulls), dict(rank_group_pulls)
 
-    def _get_attention_group_num_need_pulls(self, group_spec: dict[str, Any], prefill_tp_size: int) -> int:
-        num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
-        num_d_block_heads = max(1, num_key_value_heads // self.tp_size)
-        num_p_block_heads = max(1, num_key_value_heads // prefill_tp_size)
+    def _get_attention_group_num_need_pulls(
+        self,
+        group_spec: dict[str, Any],
+        prefill_tp_size: int,
+    ) -> int:
+        # Sparse C8 / DSA cache is selected and transferred as one logical
+        # KV-head group. _get_remote_ranks_for_req() also selects one remote
+        # rank for each local TP rank, so num_group_pulls must remain 1.
+        if self.use_sparse:
+            return 1
+
+        num_key_value_heads = (self._get_attention_group_num_key_value_heads(group_spec))
+        num_d_block_heads = max(
+            1,
+            num_key_value_heads // self.tp_size,
+        )
+        num_p_block_heads = max(
+            1,
+            num_key_value_heads // prefill_tp_size,
+        )
         return num_d_block_heads // num_p_block_heads
 
-    def _get_attention_group_num_key_value_heads(self, group_spec: dict[str, Any]) -> int:
+    def _get_attention_group_num_key_value_heads(
+        self,
+        group_spec: dict[str, Any],
+    ) -> int:
+        def find_num_kv_heads(value: Any) -> int | None:
+            if isinstance(value, dict):
+                for key in (
+                    "num_kv_heads",
+                    "num_key_value_heads",
+                ):
+                    num_heads = value.get(key)
+                    if (isinstance(num_heads, int) and not isinstance(num_heads, bool) and num_heads > 0):
+                        return num_heads
+
+                for nested_value in value.values():
+                    num_heads = find_num_kv_heads(nested_value)
+                    if num_heads is not None:
+                        return num_heads
+
+            elif isinstance(value, (list, tuple)):
+                for nested_value in value:
+                    num_heads = find_num_kv_heads(nested_value)
+                    if num_heads is not None:
+                        return num_heads
+
+            return None
+
         kv_cache_spec = group_spec.get("kv_cache_spec", {})
-        if isinstance(kv_cache_spec, dict):
-            for key in ("num_kv_heads", "num_key_value_heads"):
-                num_key_value_heads = kv_cache_spec.get(key)
-                if isinstance(num_key_value_heads, int):
-                    return num_key_value_heads
+        num_key_value_heads = find_num_kv_heads(kv_cache_spec)
+
+        if num_key_value_heads is not None:
+            return num_key_value_heads
+
+        # MLA and sparse attention are transferred as one logical KV-head
+        # group even when the model config exposes a larger global head count.
+        if self.use_mla or self.use_sparse:
+            return 1
+
         return self.num_key_value_heads
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
