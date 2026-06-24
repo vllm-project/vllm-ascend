@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
 import json
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from vllm.parser.parser_manager import ParserManager
