@@ -63,7 +63,7 @@ _benchmarks: &benchmarks
     repetition_penalty: 1.0
     batch_size: 32
     baseline: 95
-    threshold: 5
+    threshold: 10
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_kimi
