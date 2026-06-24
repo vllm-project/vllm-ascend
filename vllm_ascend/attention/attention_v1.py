@@ -70,6 +70,7 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+_ATTN_KEYS_BUFFER = None
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -396,7 +397,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
-        model_config = self.vllm_config.model_config
+        # Gemma4 can mix attention layer shapes under the same graph bucket, so
+        # its FIA graph replay needs Gemma4-specific metadata/workspace handling.
+        self._use_gemma4_fia_graph_replay = self._is_gemma4_model(self.vllm_config)
+        self._use_max_workspace_for_fia_graph = self._use_gemma4_fia_graph_replay
+        self.sinks = sinks
+        self.layerIndex = 0
+        self.enable_hamming_sparse = is_enable_hamming_sparse()
+        # Gemma4 graph replay cannot always rely on the iteration order of
+        # attn_metadata. Record the captured layer name only for that path.
+        self._layer_name: str | None = None
+
+    @staticmethod
+    def _is_gemma4_model(vllm_config: VllmConfig) -> bool:
+        model_config = vllm_config.model_config
         hf_config = getattr(model_config, "hf_config", None)
         hf_text_config = getattr(model_config, "hf_text_config", None)
         text_config = getattr(hf_config, "text_config", None)
@@ -405,18 +419,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             getattr(hf_text_config, "model_type", None),
             getattr(text_config, "model_type", None),
         )
-        # Gemma4 can mix attention layer shapes under the same graph bucket, so
-        # its FIA graph replay needs the largest captured workspace.
-        self._use_max_workspace_for_fia_graph = any(
-            model_type in {"gemma4", "gemma4_text"} for model_type in model_types
-        )
-        self.sinks = sinks
-        self.layerIndex = 0
-        self.enable_hamming_sparse = is_enable_hamming_sparse()
-        # Graph replay cannot always rely on the iteration order of
-        # attn_metadata. Record the captured layer name so update_graph_params
-        # can fetch the metadata that belongs to the same attention layer.
-        self._layer_name: str | None = None
+        return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -434,6 +437,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
+        use_gemma4_graph_replay = AscendAttentionBackendImpl._is_gemma4_model(vllm_config)
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:
@@ -516,7 +520,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             workspace = graph_params.workspaces.get(num_tokens)
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (graph_param_count // num_layers)
-            else:
+            elif use_gemma4_graph_replay:
                 # One graph size can contain captured FIA ops from all layers.
                 # Repeat attn keys to match the captured op count, then use the
                 # stored layer name in each op param to resolve the exact
@@ -530,23 +534,42 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     handles,
                     events,
                 ):
-                    (
-                        query,
-                        key_cache,
-                        value,
-                        block_tables,
-                        attn_mask,
-                        block_size,
-                        seq_lens,
-                        num_kv_heads,
-                        num_heads,
-                        scale,
-                        sliding_window,
-                        sinks,
-                        attn_output,
-                        softmax_lse,
-                        layer_name,
-                    ) = param
+                    if use_gemma4_graph_replay and len(param) == 15:
+                        (
+                            query,
+                            key_cache,
+                            value,
+                            block_tables,
+                            attn_mask,
+                            block_size,
+                            seq_lens,
+                            num_kv_heads,
+                            num_heads,
+                            scale,
+                            sliding_window,
+                            sinks,
+                            attn_output,
+                            softmax_lse,
+                            layer_name,
+                        ) = param
+                    else:
+                        (
+                            query,
+                            key_cache,
+                            value,
+                            block_tables,
+                            attn_mask,
+                            block_size,
+                            seq_lens,
+                            num_kv_heads,
+                            num_heads,
+                            scale,
+                            sliding_window,
+                            sinks,
+                            attn_output,
+                            softmax_lse,
+                        ) = param
+                        layer_name = None
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -594,6 +617,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
+                if not use_gemma4_graph_replay:
+                    # Keep the original speculative-decoding ordering for
+                    # non-Gemma4 models so this PR does not change EAGLE/DFlash
+                    # graph replay behavior.
+                    attn_keys_length = len(graph_params.attn_params[num_tokens])
+                    global _ATTN_KEYS_BUFFER
+                    if _ATTN_KEYS_BUFFER is None:
+                        import regex as re
+
+                        def extract_layer_index(key: str) -> int:
+                            match = re.search(r"(\d+)", key)
+                            return int(match.group(1)) if match else 0
+
+                        attn_keys_tmp = attn_keys[:attn_keys_length]
+                        attn_keys_tmp.sort(key=extract_layer_index)
+                        _ATTN_KEYS_BUFFER = attn_keys_tmp
+                    attn_keys[:attn_keys_length] = _ATTN_KEYS_BUFFER
             # For Qwen3-next, since the kv_cache_config has already categorized
             # linear_attn and self_attn, the attn_metadata is first arranged with
             # self_attn followed by linear_attn. Therefore, using zip directly
@@ -611,7 +651,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             workspace = graph_params.workspaces.get(num_tokens)
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (graph_param_count // num_layers)
-            else:
+            elif use_gemma4_graph_replay:
                 # Keep the replay loop length aligned with captured FIA ops;
                 # layer-specific metadata lookup below prevents global/sliding
                 # window layers from accidentally sharing the same metadata.
@@ -624,29 +664,54 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     handles,
                     events,
                 ):
-                    (
-                        query,
-                        key_cache,
-                        value,
-                        block_tables,
-                        attn_mask,
-                        block_size,
-                        seq_lens,
-                        query_start_loc,
-                        num_kv_heads,
-                        num_heads,
-                        scale,
-                        attn_output,
-                        softmax_lse,
-                        sparse_mode,
-                        pre_tokens,
-                        next_tokens,
-                        c8_k_aq_scale,
-                        c8_k_aq_offset,
-                        c8_v_aq_scale,
-                        c8_v_aq_offset,
-                        layer_name,
-                    ) = param
+                    if use_gemma4_graph_replay and len(param) == 21:
+                        (
+                            query,
+                            key_cache,
+                            value,
+                            block_tables,
+                            attn_mask,
+                            block_size,
+                            seq_lens,
+                            query_start_loc,
+                            num_kv_heads,
+                            num_heads,
+                            scale,
+                            attn_output,
+                            softmax_lse,
+                            sparse_mode,
+                            pre_tokens,
+                            next_tokens,
+                            c8_k_aq_scale,
+                            c8_k_aq_offset,
+                            c8_v_aq_scale,
+                            c8_v_aq_offset,
+                            layer_name,
+                        ) = param
+                    else:
+                        (
+                            query,
+                            key_cache,
+                            value,
+                            block_tables,
+                            attn_mask,
+                            block_size,
+                            seq_lens,
+                            query_start_loc,
+                            num_kv_heads,
+                            num_heads,
+                            scale,
+                            attn_output,
+                            softmax_lse,
+                            sparse_mode,
+                            pre_tokens,
+                            next_tokens,
+                            c8_k_aq_scale,
+                            c8_k_aq_offset,
+                            c8_v_aq_scale,
+                            c8_v_aq_offset,
+                        ) = param
+                        layer_name = None
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -838,7 +903,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )  # type: ignore
         else:
             attn_params = attn_params + (None, None, None, None)  # type: ignore
-        attn_params = attn_params + (self._graph_metadata_layer_name(layer),)  # type: ignore
+        if self._use_gemma4_fia_graph_replay:
+            attn_params = attn_params + (self._graph_metadata_layer_name(layer),)  # type: ignore
         graph_params.attn_params[num_tokens].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
@@ -945,7 +1011,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sinks,
                 weak_ref_tensors(output),
                 weak_ref_tensors(softmax_lse),
-                self._graph_metadata_layer_name(),
             )
         )
         torch.npu.graph_task_group_begin(stream)
@@ -1354,7 +1419,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if self.enable_hamming_sparse:
             self.layerIndex = int(layer.layer_name.split(".")[2])
-        self._layer_name = layer.layer_name
+        if self._use_gemma4_fia_graph_replay:
+            self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")
@@ -1418,7 +1484,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
-        self._layer_name = layer.layer_name
+        if self._use_gemma4_fia_graph_replay:
+            self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendC8AttentionBackendImpl")
