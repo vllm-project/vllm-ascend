@@ -234,15 +234,18 @@ run_tests_with_log() {
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
             exit 1
         elif [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
+            local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
             local release="${LOG_PREFIX}/../done"
+            mkdir -p "$coord"
+            touch "${coord}/worker_ready_${LWS_WORKER_INDEX}"
+            echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
             echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
             cd "$WORKSPACE/vllm-ascend"
-            #TODO: enable worker bisect after classify+age verification
             python -m tests.e2e.nightly.bisect.auto_bisect \
                 --scene multi_node \
                 --config-yaml "${CONFIG_YAML_PATH}" \
                 --bad-commit HEAD \
-                --coord-dir "${COORD_DIR:-/root/.cache/nightly_bisect/coord}" \
+                --coord-dir "${coord}" \
                 --release-file "${release}" || true
             while [ ! -f "$release" ]; do sleep 5; done
             echo "Worker: release signal received, exiting"
@@ -272,15 +275,18 @@ run_tests_with_log() {
             exit 1
         fi
     elif [ $ret -ne 0 ] && [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
+        local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
         local release="${LOG_PREFIX}/../done"
+        mkdir -p "$coord"
+        touch "${coord}/worker_ready_${LWS_WORKER_INDEX}"
+        echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
         echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
         cd "$WORKSPACE/vllm-ascend"
-        # TODO: enable worker bisect after classify+age verification
         python -m tests.e2e.nightly.bisect.auto_bisect \
             --scene multi_node \
             --config-yaml "${CONFIG_YAML_PATH}" \
             --bad-commit HEAD \
-            --coord-dir "${COORD_DIR:-/root/.cache/nightly_bisect/coord}" \
+            --coord-dir "${coord}" \
             --release-file "${release}" || true
         while [ ! -f "$release" ]; do sleep 5; done
         echo "Worker: release signal received, exiting"
@@ -414,8 +420,19 @@ aop_pipeline() {
     echo "  Config      : ${CONFIG_YAML_PATH}"
     echo "  Bad commit  : HEAD"
     echo "  Name        : ${case_name}"
-    echo "  Coord dir   : ${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
-    cd "$WORKSPACE/vllm-ascend"
+    local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
+    echo "  Coord dir   : ${coord}"
+
+    # Wait for all workers to signal ready
+    echo "  Waiting for workers..."
+    for i in $(seq 1 30); do
+        local ready_count
+        ready_count=$(ls "${coord}"/worker_ready_* 2>/dev/null | wc -l || echo 0)
+        echo "    [${i}/30] ready workers: ${ready_count}"
+        if [ "$ready_count" -ge 1 ]; then break; fi
+        sleep 2
+    done
+
     cd "$WORKSPACE/vllm-ascend"
     python -m tests.e2e.nightly.bisect.auto_bisect \
         --scene multi_node \
@@ -423,7 +440,7 @@ aop_pipeline() {
         --bad-commit HEAD \
         --good-table "${table}" \
         --name "${case_name}" \
-        --coord-dir "${COORD_DIR:-/root/.cache/nightly_bisect/coord}" || true
+        --coord-dir "${coord}" || true
     echo "  bisect completed (exit code: ${PIPESTATUS[0]:-$?})"
     echo "=== AOP Pipeline (Pod) - END (bisect done) ==="
     return 1
