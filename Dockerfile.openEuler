@@ -28,7 +28,7 @@ ARG MOONCAKE_TAG=0.3.11.post1
 RUN yum update -y && \
     yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel jemalloc hiredis-devel clang patch && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url https://mirrors.aliyun.com/pypi/web/simple && \
+    python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url https://mirrors.aliyun.com/pypi/web/simple && \
     rm -rf /var/cache/yum/*
 
 # Install modelscope (for fast download) and ray (for multinode)

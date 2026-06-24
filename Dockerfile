@@ -28,7 +28,7 @@ RUN apt-get update -y && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url https://mirrors.aliyun.com/pypi/web/simple && \
+    python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url https://mirrors.aliyun.com/pypi/web/simple && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
