@@ -73,9 +73,9 @@ state == open (all PRs, no title prefix filter)
 | --------- | :--: |
 | `opened` | Yes |
 | `reopened` | Yes |
-| `edited` + title/body changed | Yes |
-| `synchronize` + body changed | Yes |
-| `synchronize` + body unchanged | — |
+| `edited` + title/body changed | Yes (P3-P6) |
+| `synchronize` + body changed | Yes (P3-P6) |
+| `synchronize` + body unchanged | Skip (P11-P12) |
 
 When desc is skipped, a placeholder JSON with `"executed": false` is written.
 
@@ -106,7 +106,10 @@ Desc skipped          → (don't touch need-detail-desc)
 | P1 | (new) | PASS | — | — |
 | P2 | (new) | FAIL | Post | +need-detail-desc |
 
-### Scenarios — edited (desc runs)
+### Scenarios — edited / synchronize (body changed)
+
+P3-P6 cover both `edited` and `synchronize` with body changes — the state
+transitions are identical regardless of trigger type.
 
 | # | From | Desc | Comment | Labels |
 | --- | ------ | :--: | --------- | -------- |
@@ -114,15 +117,6 @@ Desc skipped          → (don't touch need-detail-desc)
 | P4 | Clean | FAIL | Post | +need-detail-desc |
 | P5 | Desc-flagged | PASS | new post pass | −need-detail-desc |
 | P6 | Desc-flagged | FAIL | new posted | (unchanged) |
-
-### Scenarios — synchronize (body changed, desc runs)
-
-| # | From | Desc | Comment | Labels |
-| --- | ------ | :--: | --------- | -------- |
-| P7 | Clean | PASS | — | — |
-| P8 | Clean | FAIL | Post | +need-detail-desc |
-| P9 | Desc-flagged | PASS | new post pass | −need-detail-desc |
-| P10 | Desc-flagged | FAIL | new posted | (unchanged) |
 
 ### Scenarios — synchronize (body unchanged, desc skipped)
 
