@@ -174,6 +174,7 @@ class KVTransferThread(threading.Thread):
         block_ids: list[int],
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
+        block_id: int | None = None,
     ):
         try:
             return self.token_database.prepare_value(
@@ -182,6 +183,7 @@ class KVTransferThread(threading.Thread):
                 block_ids,
                 kv_cache_group_id=kv_cache_group_id,
                 cache_role=cache_role,
+                block_id=block_id,
             )
         except TypeError:
             return self.token_database.prepare_value(start, end, block_ids)
@@ -290,6 +292,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ends = []
             keys = []
             block_hashes = []
+            key_block_ids = []
             block_ids = req_meta.block_ids_by_group[group_id]
             group_block_size = self._get_block_size(group_id)
             group_block_hashes = get_block_hashes(
@@ -298,7 +301,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 getattr(self.token_database, "hash_block_size", group_block_size),
             )
 
-            for start, end, key, _ in self._process_tokens_with_block_ids(
+            for start, end, key, block_id in self._process_tokens_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
                 block_ids,
@@ -311,12 +314,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 ends.append(end)
                 keys.append(key.to_string())
                 block_hashes.append(group_block_hashes[start // group_block_size])
+                key_block_ids.append(block_id)
 
             if not self.dcp_size > 1 and not req_meta.disable_tp_key_sharding:
                 starts = starts[self.tp_rank % self.put_step :: self.put_step]
                 ends = ends[self.tp_rank % self.put_step :: self.put_step]
                 keys = keys[self.tp_rank % self.put_step :: self.put_step]
                 block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
+                key_block_ids = key_block_ids[self.tp_rank % self.put_step :: self.put_step]
 
             if not keys:
                 continue
@@ -331,6 +336,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ends = [ends[index] for index in missing_indices]
             keys = [keys[index] for index in missing_indices]
             block_hashes = [block_hashes[index] for index in missing_indices]
+            key_block_ids = [key_block_ids[index] for index in missing_indices]
 
             logger.info(
                 "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s in group %d",
@@ -360,6 +366,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     ends[index],
                     block_ids,
                     kv_cache_group_id=group_id,
+                    block_id=key_block_ids[index],
                 )
                 addrs.append(addr)
                 sizes.append(size)
@@ -435,7 +442,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 // group_block_size
                 * group_block_size
             )
-            for start, end, key, _ in self._process_tokens_with_block_ids(
+            for start, end, key, block_id in self._process_tokens_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
                 block_ids,
@@ -450,6 +457,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     end,
                     block_ids,
                     kv_cache_group_id=group_id,
+                    block_id=block_id,
                 )
                 key_list.append(key.to_string())
                 addr_list.append(addr)
