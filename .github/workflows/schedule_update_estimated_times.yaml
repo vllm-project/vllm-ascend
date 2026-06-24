@@ -54,6 +54,9 @@ jobs:
       has_tests: ${{ steps.scope.outputs.has_tests }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
+      main_commit_short: ${{ steps.vllm.outputs.main_commit_short }}
+      ascend_short: ${{ steps.ascend_short.outputs.ascend_short }}
+      build_matrix: ${{ steps.build-matrix.outputs.build_matrix }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -73,6 +76,12 @@ jobs:
           release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
           echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "main_commit_short=$(echo "$main_commit" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Compute ascend short hash
+        id: ascend_short
+        run: |
+          echo "ascend_short=$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
       - name: Select all tests
         id: scope
@@ -99,22 +108,96 @@ jobs:
           sed -i "s|^test_groups=.*|test_groups=${filtered}|" "$GITHUB_OUTPUT"
           sed -i "s|^has_tests=.*|has_tests=${has_tests}|" "$GITHUB_OUTPUT"
 
-  run-tests-main:
+      - name: Generate build matrix
+        id: build-matrix
+        env:
+          TEST_GROUPS: ${{ steps.scope.outputs.test_groups }}
+          MAIN_COMMIT: ${{ steps.vllm.outputs.main_commit }}
+          MAIN_COMMIT_SHORT: ${{ steps.vllm.outputs.main_commit_short }}
+          RELEASE_TAG: ${{ steps.vllm.outputs.release_tag }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          raw = os.environ.get("TEST_GROUPS", "[]")
+          try:
+              test_groups = json.loads(raw)
+          except (json.JSONDecodeError, TypeError):
+              test_groups = []
+
+          main_commit = os.environ["MAIN_COMMIT"]
+          main_commit_short = os.environ["MAIN_COMMIT_SHORT"]
+          release_tag = os.environ["RELEASE_TAG"]
+
+          cfg = {
+              "a2":   {"cann_tag": "9.0.0-910b-ubuntu22.04-py3.12",
+                       "soc": "ascend910b1",    "arch": "arm64",
+                       "mode": "device",        "runner": "linux-arm64-cpu-16"},
+              "a3":   {"cann_tag": "9.0.0-a3-ubuntu22.04-py3.12",
+                       "soc": "ascend910_9391",  "arch": "arm64",
+                       "mode": "device",        "runner": "linux-arm64-cpu-16"},
+              "310p": {"cann_tag": "9.1.0-beta.1-310p-ubuntu22.04-py3.12",
+                       "soc": "ascend310p1",     "arch": "arm64",
+                       "mode": "device",        "runner": "linux-arm64-cpu-16"},
+              "cpu":  {"cann_tag": "9.0.0-910b-ubuntu22.04-py3.12",
+                       "soc": "ascend910b1",    "arch": "amd64",
+                       "mode": "nodevice",      "runner": "linux-amd64-cpu-16-hk"},
+          }
+
+          npu_types = sorted({g["npu_type"] for g in test_groups
+                              if g.get("npu_type") in cfg})
+          if not npu_types:
+              print("build_matrix=[]")
+              sys.exit(0)
+
+          vllm_versions = [
+              (main_commit, main_commit_short),
+              (release_tag, release_tag),
+          ]
+
+          matrix = []
+          for nt in npu_types:
+              c = cfg[nt]
+              for ver, short in vllm_versions:
+                  matrix.append({"npu_type": nt, **c,
+                                  "vllm_version": ver, "vllm_short": short})
+
+          print(f"build_matrix={json.dumps(matrix)}")
+          PY
+
+  build-test-image:
     needs: select-tests
+    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_build_test_image.yaml
+    with:
+      build_matrix: ${{ needs.select-tests.outputs.build_matrix }}
+      ascend_ref: ${{ github.sha }}
+      quay_temp_username: ${{ vars.QUAY_TEMP_USERNAME }}
+    secrets:
+      QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
+
+  run-tests-main:
+    needs: [select-tests, build-test-image]
     if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ needs.select-tests.outputs.main_commit }}
+      vllm_short: ${{ needs.select-tests.outputs.main_commit_short }}
+      ascend_short: ${{ needs.select-tests.outputs.ascend_short }}
+      ref: ${{ github.sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
       upload_timing: true
       continue_on_error: true
 
   run-tests-release:
-    needs: select-tests
+    needs: [select-tests, build-test-image]
     if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ needs.select-tests.outputs.release_tag }}
+      vllm_short: ${{ needs.select-tests.outputs.release_tag }}
+      ascend_short: ${{ needs.select-tests.outputs.ascend_short }}
+      ref: ${{ github.sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
       upload_timing: true
       continue_on_error: true
