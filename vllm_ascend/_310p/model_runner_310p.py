@@ -290,6 +290,8 @@ class NPUModelRunner310(NPUModelRunner):
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 self.input_batch.num_reqs,
+                self.input_batch.num_computed_tokens_cpu,
+                self.input_batch.num_prompt_tokens,
             )
 
         if self.speculative_config and self.use_cp:

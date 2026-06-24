@@ -82,6 +82,16 @@ def create_common_attn_metadata(
     max_seq_len = int(seq_lens_cpu.max())
     context_lens = [batch_spec.seq_lens[i] - batch_spec.query_lens[i] for i in range(batch_spec.batch_size)]
     num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
+    # Mirror model_runner: is_prefilling = num_computed < num_prompt_tokens.
+    # Chunked prefills still have prompt tokens beyond num_computed; decodes do not.
+    num_prompt_tokens_cpu = torch.tensor(
+        [
+            context_lens[i] + batch_spec.query_lens[i] if batch_spec.query_lens[i] > 1 else context_lens[i]
+            for i in range(batch_spec.batch_size)
+        ],
+        dtype=torch.int32,
+    )
+    is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
     max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
     block_table_tensor = torch.arange(
         batch_spec.batch_size * max_blocks,
@@ -103,6 +113,7 @@ def create_common_attn_metadata(
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         causal=True,
+        is_prefilling=is_prefilling,
     )
 
 

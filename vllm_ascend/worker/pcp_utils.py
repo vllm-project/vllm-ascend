@@ -49,6 +49,7 @@ class PCPManager:
     num_decode_reqs: int = 0
     num_prefill_reqs: int = 0
     num_decode_tokens: int = 0
+    decode_req_mask: np.ndarray | None = None
 
     def __init__(
         self,
@@ -137,7 +138,6 @@ class PCPManager:
             "qwen3_5",
             "qwen3_5_moe",
         )
-
         self.dcp_mtp_attn_mask = CpuGpuBuffer(
             (max_num_reqs, self.decode_threshold, vllm_config.model_config.max_model_len),
             dtype=torch.bool,
@@ -195,20 +195,42 @@ class PCPManager:
 
         return cu_num_tokens, arange
 
+    @staticmethod
+    def classify_decode_request_mask(
+        num_scheduled_tokens: np.ndarray | torch.Tensor,
+        num_computed_tokens: np.ndarray | torch.Tensor,
+        num_prompt_tokens: np.ndarray | torch.Tensor,
+        decode_threshold: int,
+    ) -> np.ndarray:
+        """Return a per-request mask for true decode requests.
+
+        Matches vLLM ``reorder_batch_to_split_decodes_and_prefills``:
+        decode = has context, scheduled tokens <= threshold, and prompt finished.
+        """
+
+        has_context = num_computed_tokens > 0
+        done_prefilling = num_computed_tokens >= num_prompt_tokens
+        is_below_threshold = num_scheduled_tokens <= decode_threshold
+        return has_context & is_below_threshold & done_prefilling
+
     def init_batch_info(
         self,
         num_scheduled_tokens: np.ndarray,
         num_reqs: int,
+        num_computed_tokens: np.ndarray,
+        num_prompt_tokens: np.ndarray,
     ) -> None:
         self.num_reqs = num_reqs
-        is_prefill = num_scheduled_tokens[:num_reqs] > self.decode_threshold
-        if not any(is_prefill):
-            first_prefill = num_reqs
-        else:
-            first_prefill = is_prefill.argmax()
-        self.num_decode_reqs = first_prefill
+        scheduled = num_scheduled_tokens[:num_reqs]
+        self.decode_req_mask = self.classify_decode_request_mask(
+            scheduled,
+            num_computed_tokens[:num_reqs],
+            num_prompt_tokens[:num_reqs],
+            self.decode_threshold,
+        )
+        self.num_decode_reqs = int(self.decode_req_mask.sum())
         self.num_prefill_reqs = num_reqs - self.num_decode_reqs
-        self.num_decode_tokens = num_scheduled_tokens[: self.num_decode_reqs].sum()
+        self.num_decode_tokens = int(scheduled[: self.num_decode_reqs].sum())
         self.num_scheduled_tokens_padded = num_scheduled_tokens  # for graph compiling in hybrid_attn
 
         self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens)
@@ -857,8 +879,8 @@ class PCPManager:
             )
         else:
             tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
-            num_prefill_reqs = (tokens_original_tensor > self.decode_threshold).sum().item()
-            num_decode_reqs = num_reqs - num_prefill_reqs
+            assert self.decode_req_mask is not None
+            num_decode_reqs = int(self.decode_req_mask.sum())
             decode_pads = self.pcp_pads_logits_hybrid_attn[:num_decode_reqs]
             pad_len = tokens_original_tensor.shape[0] - num_decode_reqs
             tokens_logits = tokens_original_tensor + F.pad(decode_pads, (0, pad_len), value=0)
