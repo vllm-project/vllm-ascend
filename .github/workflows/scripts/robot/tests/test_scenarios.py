@@ -93,15 +93,34 @@ def get_bot_comments(api_base: str, number: int) -> list[dict]:
     return [c for c in comments if c.get("user", {}).get("login", "").endswith("[bot]")]
 
 
+PR_WORKFLOW_ID = None  # lazy-loaded per repo
+
+
+def _get_pr_workflow_id(api_base: str) -> int:
+    """Get the workflow ID for bot_pr_review.yaml."""
+    global PR_WORKFLOW_ID
+    if PR_WORKFLOW_ID is None:
+        workflows = api_get(f"{api_base}/actions/workflows")
+        for wf in workflows.get("workflows", []):
+            if wf.get("path") == ".github/workflows/bot_pr_review.yaml":
+                PR_WORKFLOW_ID = wf["id"]
+                break
+    if PR_WORKFLOW_ID is None:
+        raise RuntimeError("Could not find bot_pr_review.yaml workflow ID")
+    return PR_WORKFLOW_ID
+
+
 def wait_for_workflow_run(repo: str, branch: str, after: float, max_wait: int = PR_MAX_WAIT) -> dict | None:
-    """Wait for a new workflow run to appear and complete."""
+    """Wait for the bot_pr_review.yaml workflow run to appear and complete."""
     api_base = f"https://api.github.com/repos/{repo}"
+    workflow_id = _get_pr_workflow_id(api_base)
     start = time.time()
     run_id = None
 
     # Phase 1: wait for a new run to appear
     while time.time() - start < max_wait:
-        runs = api_get(f"{api_base}/actions/runs?branch={branch}&event=pull_request_target&per_page=3")
+        url = f"{api_base}/actions/runs?branch={branch}&event=pull_request_target&workflow_id={workflow_id}&per_page=3"
+        runs = api_get(url)
         for run in runs.get("workflow_runs", []):
             created = run.get("created_at", "")
             if created and created >= after and run["id"] != run_id:
