@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.worker.pcp_utils import PCPManager
 
 
@@ -150,7 +151,14 @@ def test_generate_pcp_metadata_mla_tail_projection_indices(pcp_size, pcp_rank, q
 
     num_reqs = len(query_lens)
     num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
-    pcp_manager.init_batch_info(num_scheduled_tokens, num_reqs)
+    num_computed_tokens = np.zeros(num_reqs, dtype=np.int32)
+    num_prompt_tokens = np.array(query_lens, dtype=np.int32)
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs,
+        num_computed_tokens,
+        num_prompt_tokens,
+    )
 
     input_batch = MagicMock()
     input_batch.num_reqs = num_reqs
@@ -251,7 +259,12 @@ def test_update_tokens_for_pcp_basic(
     input_batch.num_prompt_tokens = np.array(num_prompt_tokens, dtype=np.int32)
     arange_np = np.arange(10000)
     num_scheduled_tokens = np.array(tokens)
-    pcp_manager.init_batch_info(num_scheduled_tokens, num_reqs)
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs,
+        input_batch.num_computed_tokens_cpu,
+        input_batch.num_prompt_tokens,
+    )
     pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(num_scheduled_tokens, arange_np)
 
     assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), (
@@ -262,6 +275,39 @@ def test_update_tokens_for_pcp_basic(
     assert positions_result.shape == (total_pcp_tokens,), (
         f"Positions shape mismatch. Expected length {total_pcp_tokens}, got {positions_result.shape}"
     )
+
+
+def test_split_decodes_short_extend_with_default_false():
+    """Short extends should be treated as prefills by default."""
+    long_seq_metadata = MagicMock()
+    long_seq_metadata.query_lens_pcp_full_cpu = torch.tensor([3], dtype=torch.int32)
+    long_seq_metadata.max_query_len_pcp_full = 3
+
+    query_start_loc_cpu = torch.tensor([0, 2], dtype=torch.int32)
+    common_attn_metadata = AscendCommonAttentionMetadata(
+        query_start_loc=query_start_loc_cpu,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=torch.tensor([173], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=2,
+        max_query_len=2,
+        max_seq_len=173,
+        block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(2, dtype=torch.int32),
+        is_prefilling=torch.tensor([True]),
+        prefill_context_parallel_metadata=long_seq_metadata,
+    )
+
+    num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
+        common_attn_metadata,
+        decode_threshold=4,
+        treat_short_extends_as_decodes=False,
+    )
+
+    assert num_decodes == 0
+    assert num_prefills == 1
+    assert num_decode_tokens == 0
+    assert num_prefill_tokens == 2
 
 
 # yapf: disable
@@ -417,7 +463,20 @@ def test_generate_pcp_mtp_input(
     for i, token_ids_tensor in enumerate(token_ids_tensor_list):
         token_ids_cpu_tensor[i][:token_ids_tensor.size(0)] = token_ids_tensor
 
-    pcp_manager.init_batch_info(np.array(list(num_scheduled_tokens.values())), num_reqs)
+    num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+    for i, req_id in enumerate(req_ids):
+        if num_computed_tokens[i] > 0:
+            num_prompt_tokens[i] = num_computed_tokens[i]
+        else:
+            num_prompt_tokens[i] = num_scheduled_tokens[req_id]
+    input_batch.num_prompt_tokens = num_prompt_tokens
+
+    pcp_manager.init_batch_info(
+        np.array(list(num_scheduled_tokens.values())),
+        num_reqs,
+        input_batch.num_computed_tokens_cpu,
+        input_batch.num_prompt_tokens,
+    )
     pcp_manager.generate_pcp_mtp_input(total_num_scheduled_tokens, num_scheduled_tokens, False,
                                        input_batch, arange_np)
     assert torch.equal(
