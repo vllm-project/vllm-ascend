@@ -12,7 +12,7 @@ Usage:
 import argparse
 import csv
 import os
-import re
+import regex as re
 import time
 
 import requests

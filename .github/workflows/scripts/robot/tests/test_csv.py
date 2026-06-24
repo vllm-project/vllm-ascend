@@ -27,7 +27,7 @@ environment variables (same as production).
 import argparse
 import csv
 import json
-import re
+import regex as re
 import sys
 import time
 from pathlib import Path

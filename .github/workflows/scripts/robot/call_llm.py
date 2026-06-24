@@ -10,7 +10,7 @@ Used as step 4 of both the Issue Review and PR Review Bot workflows.
 import argparse
 import json
 import os
-import re
+import regex as re
 from pathlib import Path
 
 from lib.llm import call_llm
