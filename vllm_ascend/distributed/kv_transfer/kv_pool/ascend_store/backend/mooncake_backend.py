@@ -116,7 +116,7 @@ class MooncakeBackend(Backend):
         # and only can be used for 800 I/T A3 series.
         # Required supporting hardware versions are as follows:
         if not self._use_fabric_mem:
-            transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
+            transfer_engine = global_te.get_transfer_engine(local_hostname)
             self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
             ret = store.setup(
                 local_hostname=self.local_seg,
@@ -170,7 +170,7 @@ class MooncakeBackend(Backend):
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
         if not self._use_fabric_mem:
             local_hostname = get_ip()
-            global_te.get_transfer_engine(local_hostname, device_name=None)
+            global_te.get_transfer_engine(local_hostname)
             global_te.register_buffer(ptrs, lengths)
 
     def exists(self, keys: list[str]) -> list[int]:
