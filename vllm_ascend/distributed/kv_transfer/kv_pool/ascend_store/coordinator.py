@@ -96,6 +96,9 @@ class AscendStoreCoordinator:
         for group_id, group in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(group.kv_cache_spec)
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
+            if not _uses_reachable_mask(self.group_cache_families[group_id]):
+                # External compressed keys are already grouped by the effective block size.
+                effective_spec = replace(effective_spec, compress_ratio=1)
             self.group_effective_specs.append(effective_spec)
             manager_cls = _get_manager_class(spec)
 

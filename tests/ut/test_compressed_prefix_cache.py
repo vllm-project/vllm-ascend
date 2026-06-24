@@ -24,6 +24,14 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    _block_hash_to_bytes,
+    get_block_hashes,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+    AscendStoreCoordinator,
+    ExternalCachedBlockPool,
+)
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
 from vllm_ascend.patch.platform.patch_prefix_cache_retention import (
     _sliding_window_reachable_block_mask,
@@ -270,3 +278,38 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
 
     assert hit_length == 0
     assert hit_blocks == ([], [])
+
+
+def test_external_coordinator_does_not_double_apply_compress_ratio() -> None:
+    block_size = 128
+    compress_ratio = 4
+    logical_block_size = block_size * compress_ratio
+    request = _make_request("a", list(range(logical_block_size)), block_size)
+    compressed_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        compress_ratio=compress_ratio,
+        model_version="deepseek_v4",
+    )
+    coordinator = AscendStoreCoordinator(
+        kv_cache_groups=[KVCacheGroupSpec(["compressed"], compressed_spec)],
+        scheduler_block_size=logical_block_size,
+        hash_block_size=block_size,
+        group_block_sizes=[block_size],
+        group_cache_families=[f"c{compress_ratio}"],
+    )
+    chunk_hash = get_block_hashes(
+        request.block_hashes,
+        logical_block_size,
+        block_size,
+    )[0]
+
+    _, hit_length = coordinator.find_longest_cache_hit(
+        request.block_hashes,
+        logical_block_size,
+        ExternalCachedBlockPool({(0, _block_hash_to_bytes(chunk_hash))}),
+    )
+
+    assert hit_length == logical_block_size
