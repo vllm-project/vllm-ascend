@@ -835,11 +835,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             sparse_mode = 0
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = graph_params.workspaces.get(num_tokens)
-        update_workspace = False
+        should_update_workspace_cache = False
         if use_max_workspace:
             # Gemma4 mixes attention layer shapes under the same graph size.
             # During capture, keep the largest required workspace for that size.
-            new_workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+            candidate_workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
                 key=key,
                 value=value,
@@ -860,10 +860,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             workspace = cache_graph_workspace(
                 graph_params,
                 num_tokens,
-                new_workspace,
+                candidate_workspace,
                 use_max_workspace=use_max_workspace,
             )
-            update_workspace = True
+            should_update_workspace_cache = True
         elif workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
@@ -883,8 +883,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 scale=self.scale,
                 **extra_args,
             )
-            update_workspace = True
-        if update_workspace:
+            should_update_workspace_cache = True
+        if should_update_workspace_cache:
             if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(num_tokens, workspace)
             else:
@@ -976,11 +976,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = graph_params.workspaces.get(num_tokens)
-        update_workspace = False
+        should_update_workspace_cache = False
         if use_max_workspace:
             # See full_graph_fia: Gemma4 needs the max workspace across layer
             # variants sharing the same graph size.
-            new_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
+            candidate_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                 query=query,
                 key=key,
                 value=value,
@@ -1001,10 +1001,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             workspace = cache_graph_workspace(
                 graph_params,
                 num_tokens,
-                new_workspace,
+                candidate_workspace,
                 use_max_workspace=use_max_workspace,
             )
-            update_workspace = True
+            should_update_workspace_cache = True
         elif workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                 query=query,
@@ -1024,8 +1024,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 next_tokens=0,
                 learnable_sink=self.sinks,
             )
-            update_workspace = True
-        if update_workspace:
+            should_update_workspace_cache = True
+        if should_update_workspace_cache:
             if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(num_tokens, workspace)
             else:

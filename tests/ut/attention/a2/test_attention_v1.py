@@ -20,18 +20,18 @@ from vllm_ascend.attention.utils import (
 class TestAttentionGraphHelpers(TestBase):
     def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
         graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
-        new_workspace = torch.empty(8)
+        candidate_workspace = torch.empty(8)
 
-        result = cache_graph_workspace(graph_params, 1, new_workspace, use_max_workspace=False)
+        result = cache_graph_workspace(graph_params, 1, candidate_workspace, use_max_workspace=False)
 
         self.assertEqual(result.numel(), 4)
         self.assertEqual(graph_params.workspaces[1].numel(), 4)
 
     def test_cache_graph_workspace_updates_to_larger_workspace(self):
         graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
-        new_workspace = torch.empty(8)
+        candidate_workspace = torch.empty(8)
 
-        result = cache_graph_workspace(graph_params, 1, new_workspace, use_max_workspace=True)
+        result = cache_graph_workspace(graph_params, 1, candidate_workspace, use_max_workspace=True)
 
         self.assertEqual(result.numel(), 8)
         self.assertEqual(graph_params.workspaces[1].numel(), 8)

@@ -16,7 +16,7 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 def cache_graph_workspace(
     graph_params,
     num_tokens: int,
-    new_workspace: torch.Tensor,
+    candidate_workspace: torch.Tensor,
     *,
     use_max_workspace: bool,
 ) -> torch.Tensor:
@@ -26,12 +26,12 @@ def cache_graph_workspace(
     current_workspace = graph_params.workspaces.get(num_tokens)
     if use_max_workspace:
         if current_workspace is None or (
-            new_workspace.numel() * new_workspace.element_size()
+            candidate_workspace.numel() * candidate_workspace.element_size()
             > current_workspace.numel() * current_workspace.element_size()
         ):
-            graph_params.workspaces[num_tokens] = new_workspace
+            graph_params.workspaces[num_tokens] = candidate_workspace
     elif current_workspace is None:
-        graph_params.workspaces[num_tokens] = new_workspace
+        graph_params.workspaces[num_tokens] = candidate_workspace
     return graph_params.workspaces[num_tokens]
 
 
