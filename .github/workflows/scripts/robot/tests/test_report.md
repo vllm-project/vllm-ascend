@@ -53,7 +53,7 @@ PRs collected via time-based stratified sampling across 400 PRs (4 pages of 100)
 Each case is evaluated using the **same pipeline** as the production
 `bot_issue_review.yaml` and `bot_pr_review.yaml` workflows:
 
-```
+```text
 Title + Body → System Prompt → LLM (deepseek-v4-flash) → JSON Result
      │              │                                          │
      │    ┌────────┘                                   ┌──────┘

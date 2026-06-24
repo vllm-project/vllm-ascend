@@ -4,7 +4,7 @@
 
 ### Guard
 
-```
+```text
 state == open
 AND (opened OR edited with title/body changes)
 AND title prefix matches [Bug]: [Install]: [Doc]: [Misc]: [Feature]: [Perf]:
@@ -12,7 +12,7 @@ AND title prefix matches [Bug]: [Install]: [Doc]: [Misc]: [Feature]: [Perf]:
 
 ### Steps
 
-```
+```text
 Extract type → Load template → Load prompt → LLM check → Post comment → Manage label
 ```
 
@@ -44,7 +44,7 @@ concurrency:
 
 Rapid open+edit on the same issue. With `false`, they queue:
 
-```
+```text
 opened  ──► run ████████████ done
 edited  ──────────────── queued ──► run ████████ done
 ```
@@ -64,7 +64,7 @@ Trade-off: `edited` waits for `opened`'s LLM call (~30s). Acceptable.
 
 ### Guard
 
-```
+```text
 state == open (all PRs, no title prefix filter)
 ```
 
@@ -82,7 +82,7 @@ When desc is skipped, a placeholder JSON with `"executed": false` is written.
 
 ### Steps
 
-```
+```text
 Extract PR info → Load template → Load prompt → LLM desc → (skip placeholder)
 → Post comment → Manage label
 ```
@@ -94,7 +94,7 @@ Extract PR info → Load template → Load prompt → LLM desc → (skip placeho
 
 ### Label logic
 
-```
+```text
 Desc executed + PASS  → remove need-detail-desc
 Desc executed + FAIL  → add    need-detail-desc
 Desc skipped          → (don't touch need-detail-desc)
@@ -152,7 +152,7 @@ Force-push fires both `edited` + `synchronize`. Each does different work:
 If `edited` is cancelled, the desc check is **lost** — `synchronize` may skip desc.
 The desc label is never updated. With `false`, both complete in order:
 
-```
+```text
 edited ──► run ████████ done
 sync   ──────────────── queued ──► run ████████ done
 ```
