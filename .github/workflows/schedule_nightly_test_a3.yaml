@@ -62,7 +62,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-a3${{ github.event.inputs.request_id && format('-{0}', github.event.inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.ref }}-a3${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
