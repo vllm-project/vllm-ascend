@@ -70,9 +70,13 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group}
-        # Conservatively fall back to flag all groups when no group is flagged.
+        # Compressed groups already use coarse chunks; dropping their last chunk can erase the whole hit.
         if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+            self.eagle_group_ids = {
+                i
+                for i, g in enumerate(kv_cache_config.kv_cache_groups)
+                if (getattr(g.kv_cache_spec, "compress_ratio", 1) or 1) <= 1
+            }
 
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
