@@ -241,6 +241,7 @@ jobs:
         if: ${{ matrix.group.npu_type == 'cpu' }}
         continue-on-error: ${{ inputs.continue_on_error }}
         env:
+          VLLM_VERSION: 0.22.1
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
