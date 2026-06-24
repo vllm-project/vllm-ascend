@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
@@ -31,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -44,6 +46,41 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor
 
 _ATTENTION_MASK_BUILDER = None
+
+
+def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
+    """Build Ascend-specific KV cache specs for v2 worker patching."""
+    kv_cache_spec: dict[str, KVCacheSpec] = {}
+    layer_type = AttentionLayerBase
+    attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+
+    for layer_name, attn_module in attn_layers.items():
+        if getattr(attn_module, "kv_sharing_target_layer_name", None):
+            continue
+        if isinstance(attn_module, Attention):
+            if spec := attn_module.get_kv_cache_spec(vllm_config):
+                kv_cache_spec[layer_name] = spec
+            continue
+        if isinstance(attn_module, MLAAttention):
+            spec = attn_module.get_kv_cache_spec(vllm_config)
+            if spec is None:
+                continue
+            if getattr(attn_module.impl, "fa_quant_layer", False):
+                head_size = attn_module.head_size + attn_module.qk_rope_head_dim
+                dtype, cache_dtype_str = attn_module.impl.dtype, None
+            else:
+                head_size = spec.head_size
+                dtype = spec.dtype
+                cache_dtype_str = spec.cache_dtype_str
+            kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                block_size=spec.block_size,
+                num_kv_heads=spec.num_kv_heads,
+                head_size=head_size,
+                dtype=dtype,
+                cache_dtype_str=cache_dtype_str,
+            )
+
+    return kv_cache_spec
 
 
 def get_attn_mask_builder(device: torch.device):
@@ -436,17 +473,23 @@ def _reshape_kv_cache_v2(
                 cache_dtype,
             )
 
-            if not isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+            print(100*"^")
+            print(f"{kv_cache_spec=}")
+            if not isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
                 k_shape = kv_cache_shape[1:]
                 if hasattr(kv_cache_spec, "head_size_v"):
                     v_shape = (*kv_cache_shape[1:-1], kv_cache_spec.head_size_v)
                 else:
                     v_shape = k_shape
             else:
+                print(100*"^")
+                print(f"{kv_cache_shape=}")
                 mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 k_shape = (mla_num_blocks, mla_block_size, num_kv_heads, k_dim)
                 v_shape = (mla_num_blocks, mla_block_size, num_kv_heads, v_dim)
+                print(f"{k_shape=}")
+                print(f"{v_shape=}")
 
             k_cache_dtype = v_cache_dtype = kv_cache_spec.dtype
             if is_kv_consumer and enable_fa_quant(vllm_config):
