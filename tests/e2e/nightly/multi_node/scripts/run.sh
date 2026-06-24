@@ -228,14 +228,14 @@ run_tests_with_log() {
             if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
                 set +e; aop_pipeline; set -e
             fi
-            local done_file="${LOG_PREFIX}/../done"
+            local done_file="${LOG_PREFIX}/aop_done"
             touch "$done_file"
             echo "Leader: notifying workers (${done_file})"
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
             exit 1
         elif [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
             local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
-            local release="${LOG_PREFIX}/../done"
+            local release="${LOG_PREFIX}/aop_done"
             mkdir -p "$coord"
             touch "${coord}/worker_ready_${LWS_WORKER_INDEX}"
             echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
@@ -246,7 +246,7 @@ run_tests_with_log() {
                 --config-yaml "${CONFIG_YAML_PATH}" \
                 --bad-commit HEAD \
                 --coord-dir "${coord}" \
-                --release-file "${release}"
+                --release-file "${release}" || true
             while [ ! -f "$release" ]; do sleep 5; done
             echo "Worker: release signal received, exiting"
             exit 1
@@ -263,12 +263,12 @@ run_tests_with_log() {
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
-            touch "${LOG_PREFIX}/../done" 2>/dev/null || true
+            touch "${LOG_PREFIX}/aop_done" 2>/dev/null || true
         else
             if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
                 set +e; aop_pipeline; set -e
             fi
-            local done_file="${LOG_PREFIX}/../done"
+            local done_file="${LOG_PREFIX}/aop_done"
             touch "$done_file"
             echo "Leader: notifying workers (${done_file})"
             echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Some tests failed${NC}"
@@ -276,7 +276,7 @@ run_tests_with_log() {
         fi
     elif [ $ret -ne 0 ] && [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
         local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
-        local release="${LOG_PREFIX}/../done"
+        local release="${LOG_PREFIX}/aop_done"
         mkdir -p "$coord"
         touch "${coord}/worker_ready_${LWS_WORKER_INDEX}"
         echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
@@ -287,7 +287,7 @@ run_tests_with_log() {
             --config-yaml "${CONFIG_YAML_PATH}" \
             --bad-commit HEAD \
             --coord-dir "${coord}" \
-            --release-file "${release}"
+            --release-file "${release}" || true
         while [ ! -f "$release" ]; do sleep 5; done
         echo "Worker: release signal received, exiting"
         exit 1
@@ -440,7 +440,7 @@ aop_pipeline() {
         --bad-commit HEAD \
         --good-table "${table}" \
         --name "${case_name}" \
-        --coord-dir "${coord}"
+        --coord-dir "${coord}" || true
     echo "  bisect completed (exit code: $?)"
     echo "=== AOP Pipeline (Pod) - END (bisect done) ==="
     return 1
