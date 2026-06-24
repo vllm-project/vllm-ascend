@@ -629,7 +629,7 @@ class KVPoolWorker:
             addr_list = []
             size_list = []
             key_list = []
-            block_id_list: list[int] = []
+            block_id_list: list[set[int]] = []
             for group_id in load_group_ids:
                 block_ids = request.block_ids_by_group[group_id]
                 group_block_size = self.grouped_block_size[group_id]
@@ -652,7 +652,23 @@ class KVPoolWorker:
                     key_list.append(key.to_string())
                     addr_list.append(addr)
                     size_list.append(size)
-                    block_id_list.append(block_id)
+                    peer_block_ids: set[int] = set()
+                    for peer_group_id in load_group_ids:
+                        if peer_group_id >= len(request.block_ids_by_group):
+                            continue
+                        peer_block_ids_for_group = request.block_ids_by_group[peer_group_id]
+                        peer_block_idx = start // self.grouped_block_size[peer_group_id]
+                        if peer_block_idx >= len(peer_block_ids_for_group):
+                            continue
+                        peer_block_id = peer_block_ids_for_group[peer_block_idx]
+                        peer_skip_null = (
+                            peer_group_id < len(self.group_uses_align_state)
+                            and self.group_uses_align_state[peer_group_id]
+                        )
+                        if peer_skip_null and peer_block_id <= 0:
+                            continue
+                        peer_block_ids.add(peer_block_id)
+                    block_id_list.append(peer_block_ids or {block_id})
             if not key_list:
                 continue
             key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))

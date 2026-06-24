@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -504,6 +505,32 @@ class KVTransferThread(threading.Thread):
         except TypeError:
             return self.token_database.prepare_value(start, end, block_ids)
 
+    def _collect_peer_block_ids(
+        self,
+        start: int,
+        block_ids_by_group: list[list[int]],
+        group_ids: list[int],
+        skip_null_blocks_by_group: list[bool] | None = None,
+    ) -> set[int]:
+        peer_block_ids: set[int] = set()
+        for group_id in group_ids:
+            if group_id >= len(block_ids_by_group):
+                continue
+            group_block_ids = block_ids_by_group[group_id]
+            block_idx = start // self._get_block_size(group_id)
+            if block_idx >= len(group_block_ids):
+                continue
+            block_id = group_block_ids[block_idx]
+            skip_null = (
+                skip_null_blocks_by_group is not None
+                and group_id < len(skip_null_blocks_by_group)
+                and skip_null_blocks_by_group[group_id]
+            )
+            if skip_null and block_id <= 0:
+                continue
+            peer_block_ids.add(block_id)
+        return peer_block_ids
+
     def _decode_adaptor_prefill_pp(
         self,
         keys: list[str],
@@ -737,7 +764,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         addr_list = []
         size_list = []
         key_list = []
-        block_id_list: list[int] = []
+        block_id_list: list[set[int]] = []
         group_ids = req_meta.kv_cache_group_ids or [0]
         for group_id in group_ids:
             block_ids = req_meta.block_ids_by_group[group_id]
@@ -764,7 +791,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 key_list.append(key.to_string())
                 addr_list.append(addr)
                 size_list.append(size)
-                block_id_list.append(block_id)
+                block_id_list.append(
+                    self._collect_peer_block_ids(
+                        start,
+                        req_meta.block_ids_by_group,
+                        group_ids,
+                        req_meta.skip_null_blocks_by_group,
+                    )
+                    or {block_id}
+                )
         if not key_list:
             self.set_finished_request(req_id)
             self.request_queue.task_done()
@@ -1341,13 +1376,17 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
 
 def record_failed_blocks(
-    block_ids: list[int],
-    ret_codes: list[int],
+    block_ids: Sequence[int | set[int]],
+    ret_codes: Sequence[int],
 ) -> set[int]:
     failed_blocks: set[int] = set()
-    for block_id, code in zip(block_ids, ret_codes):
-        if code != 0:
-            failed_blocks.add(block_id)
+    for block_id_or_group, code in zip(block_ids, ret_codes):
+        if code == 0:
+            continue
+        if isinstance(block_id_or_group, set):
+            failed_blocks.update(block_id_or_group)
+        else:
+            failed_blocks.add(block_id_or_group)
     if failed_blocks:
         logger.error(
             "Failed to load blocks. failed_count=%d, failed_blocks=%s. Check block availability and memory state.",
