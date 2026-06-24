@@ -218,7 +218,7 @@ run_tests_with_log() {
         if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
             python -c "import sys; print('AssertionError: Timeout waiting for engine core processes to start'); sys.exit(1)" 2>&1 | tee "$log_file"
         else
-            python -c "import sys; print('RuntimeError: Timeout worker failure');  sys.exit(1) " 2>&1 | tee "$log_file"
+            python -c "import sys; print('AssertionError: Timeout worker failure');  sys.exit(1) " 2>&1 | tee "$log_file"
         fi
         ret=$?
         echo "pytest exit code: ret=${ret}"
