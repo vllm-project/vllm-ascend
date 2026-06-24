@@ -150,6 +150,7 @@ vllm serve ${MODEL_PATH} \
 
 :::{note}
 On Atlas 300 inference products:
+
 - Only `float16` dtype is supported.
 - The `--max_model_len` option is added to prevent errors when generating the attention operator mask.
 - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
@@ -167,7 +168,6 @@ Key Parameter Descriptions:
 - `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
 
 Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
-
 
 ### 5.2 Multi-Node PD Separation Deployment
 
