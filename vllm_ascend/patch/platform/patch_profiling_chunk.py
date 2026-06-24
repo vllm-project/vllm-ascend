@@ -168,17 +168,18 @@ def _ensure_schedule_wrapped(scheduler):
 
     cls = type(scheduler)
     _original_schedule = cls.schedule
+    original_schedule_fn = cls.schedule
 
     def _wrapped_schedule(self, throttle_prefills: bool = False):
         from vllm_ascend.utils import vllm_version_is
 
         if vllm_version_is("0.23.0"):
-            output = _original_schedule(self)
+            output = original_schedule_fn(self)
         else:
             # Some scheduler subclasses (e.g. ProfilingChunkScheduler) override
             # schedule() with a no-arg signature.  Only forward throttle_prefills
             # when the original method actually accepts it.
-            output = _original_schedule(self, throttle_prefills)
+            output = original_schedule_fn(self, throttle_prefills)
         if getattr(self, "_profiling_timing_done", False) and output is not None:
             output.disable_profiling_timing = True
         return output
