@@ -835,11 +835,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             sparse_mode = 0
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = graph_params.workspaces.get(num_tokens)
-        if workspace is None or use_max_workspace:
+        update_workspace = False
+        if use_max_workspace:
             # Gemma4 mixes attention layer shapes under the same graph size.
-            # During capture, keep the largest required workspace for that
-            # num_tokens bucket; other models preserve the original first-cache
-            # behavior and do not pay repeated workspace-query cost.
+            # During capture, keep the largest required workspace for that size.
             new_workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
                 key=key,
@@ -864,6 +863,28 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 new_workspace,
                 use_max_workspace=use_max_workspace,
             )
+            update_workspace = True
+        elif workspace is None:
+            workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=attn_mask,
+                block_table=block_table,
+                input_layout=input_layout,
+                block_size=block_size,
+                actual_seq_lengths=actual_seq_lengths_q,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                sparse_mode=sparse_mode,
+                pre_tokens=pre_tokens,
+                next_tokens=next_tokens,
+                scale=self.scale,
+                **extra_args,
+            )
+            update_workspace = True
+        if update_workspace:
             if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(num_tokens, workspace)
             else:
@@ -955,10 +976,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = graph_params.workspaces.get(num_tokens)
-        if workspace is None or use_max_workspace:
+        update_workspace = False
+        if use_max_workspace:
             # See full_graph_fia: Gemma4 needs the max workspace across layer
-            # variants sharing the same graph size, while non-Gemma4 keeps the
-            # original cached-workspace behavior.
+            # variants sharing the same graph size.
             new_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                 query=query,
                 key=key,
@@ -983,6 +1004,28 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 new_workspace,
                 use_max_workspace=use_max_workspace,
             )
+            update_workspace = True
+        elif workspace is None:
+            workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                block_table=block_table,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_qlen=actual_seq_lengths_q,
+                actual_seq_kvlen=actual_seq_lengths_kv,
+                num_key_value_heads=self.num_kv_heads,
+                softmax_scale=self.scale,
+                num_query_heads=self.num_heads,
+                sparse_mode=4 if self.sliding_window is not None else 3,
+                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
+                next_tokens=0,
+                learnable_sink=self.sinks,
+            )
+            update_workspace = True
+        if update_workspace:
             if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(num_tokens, workspace)
             else:
