@@ -53,6 +53,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
@@ -2532,6 +2533,12 @@ class MooncakeConnectorWorker:
         return list(rank_group_pulls), dict(rank_group_pulls)
 
     def _get_attention_group_num_need_pulls(self, group_spec: dict[str, Any], prefill_tp_size: int) -> int:
+        layer_name = group_spec["layer_names"][0]
+        layer_spec = self._get_layer_spec(layer_name)
+
+        if isinstance(layer_spec, MLAAttentionSpec):
+            return self._get_tp_num_need_pulls(prefill_tp_size)
+
         num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
         num_d_block_heads = max(1, num_key_value_heads // self.tp_size)
         num_p_block_heads = max(1, num_key_value_heads // prefill_tp_size)
