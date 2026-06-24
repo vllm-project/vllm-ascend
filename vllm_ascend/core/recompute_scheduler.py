@@ -834,6 +834,13 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
 
+        # Dynamic speculative decoding: pick K for the next step from the
+        # batch-size schedule built by the base Scheduler. Defaults to the
+        # configured K when the feature is disabled.
+        num_spec_tokens_to_schedule = self.num_spec_tokens
+        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
+            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
+
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -850,6 +857,7 @@ class RecomputeScheduler(ShortRequestFirstSchedulerMixin, Scheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             preempted_reqs=preempted_req_data,
             recomputed_reqs=recomputed_reqs,
         )
