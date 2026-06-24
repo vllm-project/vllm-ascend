@@ -27,6 +27,7 @@ multi-node, non-master node (``LWS_WORKER_INDEX != 0``).
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from tests.e2e.nightly.bisect import git_ops, runner
@@ -76,10 +77,14 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("[worker] node %d started; waiting for master commands", opt.node_index)
+    # Only DONE/release files created AFTER this moment count as stop signals, so
+    # a stale sentinel from a previous run on the persistent PVC is ignored.
+    start_ts = time.time()
     rnd = 0
     while True:
         rnd += 1
-        cmd = coord.wait_command(rnd, opt.barrier_timeout_s, release_file=opt.release_file)
+        cmd = coord.wait_command(rnd, opt.barrier_timeout_s,
+                                 release_file=opt.release_file, since_ts=start_ts)
         if cmd is None:
             logger.info("[worker] stop signal received; exiting after %d rounds", rnd - 1)
             return 0

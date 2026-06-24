@@ -45,6 +45,27 @@ class Coordinator:
         self.node_index = node_index
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def reset(self) -> None:
+        """Master-only: clear stale coordination state from a previous run.
+
+        The coord dir often lives on a persistent PVC, so a leftover DONE flag or
+        round_*/ from an earlier run would make this run's workers exit instantly
+        (seeing a stale DONE) or read a stale command. Called once by the master
+        BEFORE publishing round 1 -- workers only write ready files after they see
+        round 1, so nothing of this run is destroyed.
+        """
+        import shutil
+
+        removed = []
+        if self._done_flag.exists():
+            self._done_flag.unlink()
+            removed.append("DONE")
+        for d in self.root.glob("round_*"):
+            shutil.rmtree(d, ignore_errors=True)
+            removed.append(d.name)
+        if removed:
+            logger.info("[coord] reset stale coordination state: %s", removed)
+
     # --------------------------------------------------------------- paths
     def _round_dir(self, rnd: int) -> Path:
         d = self.root / f"round_{rnd}"
@@ -83,21 +104,41 @@ class Coordinator:
         path.write_text(json.dumps({"node": self.node_index, "head": head}))
         logger.info("[coord] node %d ready for round %d at %s", self.node_index, rnd, head[:12])
 
+    @staticmethod
+    def _fresh(path: Path, since_ts: float | None) -> bool:
+        """True if ``path`` exists and (when since_ts given) was modified after it.
+
+        Guards against stale sentinels on a persistent PVC: a DONE / release file
+        left over from a previous run has an mtime older than this worker's start,
+        so it is ignored rather than causing an immediate (wrong) exit.
+        """
+        if not path.exists():
+            return False
+        if since_ts is None:
+            return True
+        try:
+            return path.stat().st_mtime >= since_ts
+        except OSError:
+            return False
+
     # -------------------------------------------------------------- reads
-    def wait_command(self, rnd: int, timeout_s: float, release_file: str | None = None) -> dict | None:
+    def wait_command(self, rnd: int, timeout_s: float, release_file: str | None = None,
+                     since_ts: float | None = None) -> dict | None:
         """Worker: block until the round command appears, or a stop signal.
 
         Returns the command dict, or None when the bisect is over -- signalled by
         either the coordinator DONE sentinel or an external ``release_file`` (the
         AOP leader's ``done`` file, touched even when it decides not to bisect).
+        ``since_ts`` (the worker's start time) makes a *stale* DONE/release file
+        from a previous run on a persistent PVC be ignored.
         """
         path = self._round_dir(rnd) / "command.json"
         release = Path(release_file) if release_file else None
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            if self.is_done():
+            if self._fresh(self._done_flag, since_ts):
                 return None
-            if release is not None and release.exists():
+            if release is not None and self._fresh(release, since_ts):
                 logger.info("[coord] external release file %s present; worker exiting", release)
                 return None
             if path.exists():

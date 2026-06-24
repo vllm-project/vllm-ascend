@@ -304,6 +304,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--release-file", default=None,
                    help="multi-node worker: also exit when this file appears (the AOP "
                         "leader's 'done' file), so workers don't hang if the leader skips")
+    p.add_argument("--barrier-timeout-s", type=float, default=3600.0,
+                   help="multi-node: how long the master waits for all workers to "
+                        "signal ready each round before failing (default 3600). Lower "
+                        "it (e.g. 300) to fail fast when debugging worker join issues")
     p.add_argument("--fail-confirm-retries", type=int, default=1)
     p.add_argument("--no-verify-good", action="store_true")
     p.add_argument("--no-verify-bad", action="store_true")
@@ -375,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         num_nodes=num_nodes,
         node_index=args.node_index,
         release_file=args.release_file,
+        barrier_timeout_s=args.barrier_timeout_s,
         trial_timeout_s=args.trial_timeout_s,
         assume_built_head=not args.no_assume_built_head,
         force_initial_build=args.force_initial_build,
