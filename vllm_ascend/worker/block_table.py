@@ -34,8 +34,8 @@ class BlockTable:
             and hasattr(kv_cache_group, "kv_cache_spec")
             and isinstance(kv_cache_group.kv_cache_spec, UniformTypeKVCacheSpecs)
         ):
-            kv_cache_spec = next(iter(kv_cache_group.kv_cache_spec.kv_cache_specs.values()))
-            if hasattr(kv_cache_spec, "compress_ratio"):
+            kv_cache_spec = next(iter(kv_cache_group.kv_cache_spec.kv_cache_specs.values()), None)
+            if kv_cache_spec is not None and hasattr(kv_cache_spec, "compress_ratio"):
                 compress_ratio = kv_cache_spec.compress_ratio
         if (
             kv_cache_group is not None
