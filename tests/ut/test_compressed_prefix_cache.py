@@ -18,11 +18,15 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
+from vllm_ascend.patch.platform.patch_prefix_cache_retention import (
+    _sliding_window_reachable_block_mask,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -149,6 +153,30 @@ def test_upstream_coordinator_factory_uses_compress_manager() -> None:
     )
 
     assert isinstance(manager, CompressAttentionManager)
+
+
+def test_unset_retention_keeps_sliding_window_dense() -> None:
+    spec = SlidingWindowSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=512,
+    )
+
+    assert (
+        _sliding_window_reachable_block_mask(
+            type(None),
+            start_block=0,
+            end_block=16,
+            alignment_tokens=2048,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=None,
+            num_prompt_tokens=2048,
+        )
+        is None
+    )
 
 
 def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
