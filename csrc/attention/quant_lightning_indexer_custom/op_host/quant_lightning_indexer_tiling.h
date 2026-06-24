@@ -103,7 +103,7 @@ TILING_DATA_FIELD_DEF(uint32_t, returnValues)
 TILING_DATA_FIELD_DEF(int64_t, stride)
 TILING_DATA_FIELD_DEF(int64_t, scaleStride)
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(QuantLightningIndexer, QLITilingData)
+REGISTER_TILING_DATA_CLASS(QuantLightningIndexerCustom, QLITilingData)
 
 // -----------算子CompileInfo定义-------------------
 struct QLICompileInfo {};
@@ -249,9 +249,9 @@ public:
 };
 
 // ---------------算子Tiling类---------------
-class QuantLightningIndexerTiling {
+class QuantLightningIndexerCustomTiling {
 public:
-    explicit QuantLightningIndexerTiling(gert::TilingContext *context) : context_(context) {};
+    explicit QuantLightningIndexerCustomTiling(gert::TilingContext *context) : context_(context) {};
     ge::graphStatus DoTiling(QLITilingInfo *tilingInfo);
 
 private:
