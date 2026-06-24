@@ -323,11 +323,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # overflows and `[:num_reqs_padded]` silently truncates them. FIA then
         # fails (error 561002) checking, in order, the `actualSeqLengthsKv` length
         # and then the block_table row count against batchSize. Pad them to match:
-        # the dummy request points at block 0 and its output is discarded, so any
-        # valid positive KV length / zero block row works. Pad both seq_lens_list
-        # and the seq_lens tensor: full_graph_fia_v2 passes the seq_lens tensor
-        # (not seq_lens_list) as actual_seq_kvlen during graph capture, and
-        # _get_fia_params derives the PrefillCacheHit batch size from
+        # the dummy request points at block 0, and its output is harmless because:
+        #   (1) read side: the attention output for padding tokens is trimmed by
+        #       `hidden_states = hidden_states[:-pad_size, :]` downstream;
+        #   (2) write side: reshape_and_cache slices key/value/slot_mapping to
+        #       `[:num_actual_tokens]` (unpadded count), so the dummy request
+        #       never writes to KV cache.
+        # So any valid positive KV length / zero block row is fine. Pad both
+        # seq_lens_list and the seq_lens tensor: full_graph_fia_v2 passes the
+        # seq_lens tensor (not seq_lens_list) as actual_seq_kvlen during graph
+        # capture, and _get_fia_params derives the PrefillCacheHit batch size from
         # seq_lens.shape[0], so the tensor has to carry the dummy request too.
         num_reqs_fia = len(actual_seq_lengths_q)
         if len(seq_lens_list) < num_reqs_fia:
