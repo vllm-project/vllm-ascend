@@ -2542,7 +2542,7 @@ class MooncakeConnectorWorker:
         if self.use_sparse:
             return 1
 
-        num_key_value_heads = (self._get_attention_group_num_key_value_heads(group_spec))
+        num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
         num_d_block_heads = max(
             1,
             num_key_value_heads // self.tp_size,
@@ -2564,7 +2564,7 @@ class MooncakeConnectorWorker:
                     "num_key_value_heads",
                 ):
                     num_heads = value.get(key)
-                    if (isinstance(num_heads, int) and not isinstance(num_heads, bool) and num_heads > 0):
+                    if isinstance(num_heads, int) and not isinstance(num_heads, bool) and num_heads > 0:
                         return num_heads
 
                 for nested_value in value.values():
