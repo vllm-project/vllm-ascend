@@ -854,9 +854,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.o_proj_full_weight_gather_dim == 0:
             self.o_proj_tp_weight_gather_input = self.o_proj_tp_weight
         else:
-            self.o_proj_tp_weight_gather_input = (
-                self.o_proj_tp_weight.transpose(0, 1).contiguous()
-            )
+            self.o_proj_tp_weight_gather_input = self.o_proj_tp_weight.transpose(0, 1).contiguous()
         self.o_proj_tp_aclnn_input_params = {}
         self.o_proj_full_aclnn_input_params = {}
         for param_name in O_PROJ_ACLNN_INPUT_PARAMS:
