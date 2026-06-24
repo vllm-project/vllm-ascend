@@ -1203,15 +1203,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
-            assert self.valid_sampled_token_count_event is not None
-            assert self.valid_sampled_token_count_cpu is not None
-            correct_optimistic_seq_lens_cpu(
-                self.optimistic_seq_lens_cpu.numpy(),
-                self.prev_positions.np,
-                self.prev_num_draft_tokens.np,
-                self.valid_sampled_token_count_cpu.numpy(),
-                num_reqs,
-            )
+            self._correct_optimistic_seq_lens_cpu(num_reqs)
 
         num_computed_tokens_for_compress = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs]
@@ -1595,6 +1587,34 @@ class NPUModelRunner(GPUModelRunner):
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
+        )
+
+    def _correct_optimistic_seq_lens_cpu(self, num_reqs: int) -> None:
+        """Correct ``optimistic_seq_lens_cpu`` for async spec-decode drift.
+
+        The valid-sampled-token counts that drive the correction are copied
+        device->host on a side stream at the end of the *previous* step (see
+        :meth:`_copy_valid_sampled_token_count`). The host buffer must not be
+        read until that copy has completed, otherwise the correction consumes
+        stale counts and corrupts the CPU seq_lens. DeepSeek-V4 builds its
+        compressed-KV slot mapping from these CPU seq_lens, so the race
+        surfaces as an accuracy regression there.
+
+        Synchronizing on the event before the host read mirrors vLLM's own
+        :meth:`_get_valid_sampled_token_count`. Because the copy was launched a
+        full step earlier, the event is already signalled in steady state and
+        the synchronize is effectively a no-op -- it does not reintroduce the
+        seq_lens device->host copy + synchronize that this optimization removed.
+        """
+        assert self.valid_sampled_token_count_event is not None
+        assert self.valid_sampled_token_count_cpu is not None
+        self.valid_sampled_token_count_event.synchronize()
+        correct_optimistic_seq_lens_cpu(
+            self.optimistic_seq_lens_cpu.numpy(),
+            self.prev_positions.np,
+            self.prev_num_draft_tokens.np,
+            self.valid_sampled_token_count_cpu.numpy(),
+            num_reqs,
         )
 
     def _copy_valid_sampled_token_count(

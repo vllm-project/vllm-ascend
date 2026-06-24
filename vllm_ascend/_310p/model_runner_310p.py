@@ -50,7 +50,6 @@ from vllm_ascend._310p.sample.rejection_sampler import AscendRejectionSampler310
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.utils import (
-    correct_optimistic_seq_lens_cpu,
     update_num_computed_tokens_for_batch_change,
 )
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, lmhead_tp_enable
@@ -508,15 +507,9 @@ class NPUModelRunner310(NPUModelRunner):
             # Correct optimistic_seq_lens_cpu on CPU using the asynchronously
             # copied valid-sampled-token counts; avoids an extra NPU->CPU copy
             # of seq_lens and the event.synchronize() in attention metadata.
-            assert self.valid_sampled_token_count_event is not None
-            assert self.valid_sampled_token_count_cpu is not None
-            correct_optimistic_seq_lens_cpu(
-                self.optimistic_seq_lens_cpu.numpy(),
-                self.prev_positions.np,
-                self.prev_num_draft_tokens.np,
-                self.valid_sampled_token_count_cpu.numpy(),
-                num_reqs,
-            )
+            # The shared helper synchronizes on the D2H copy event before the
+            # host read to avoid consuming stale counts (see its docstring).
+            self._correct_optimistic_seq_lens_cpu(num_reqs)
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
