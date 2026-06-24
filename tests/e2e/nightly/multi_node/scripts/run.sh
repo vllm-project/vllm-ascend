@@ -403,6 +403,12 @@ aop_pipeline() {
     echo "  Matched row: $(grep -m1 "$best_date" <<< "$success_rows")"
     local last_ts now_ts age_days
     last_ts=$(date -d "$best_date" +%s 2>/dev/null || echo 0)
+    if [ "$last_ts" = "0" ] || [ -z "$last_ts" ]; then
+        echo "  Date parse failed: ${best_date}"
+        echo "  Decision: invalid date → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (age skip) ==="
+        return 1
+    fi
     now_ts=$(date +%s)
     age_days=$(( (now_ts - last_ts) / 86400 ))
     echo "  Last success: ${best_date} (${age_days} days ago, threshold: 3 days)"
