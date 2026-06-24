@@ -210,50 +210,6 @@ run_tests_with_log() {
     set +e
     kill_npu_processes
 
-    # TODO: remove this block after AOP testing
-    if [[ "${CONFIG_YAML_PATH:-}" == *"Kimi-K2_5-W4A8-A2-dual-nodes"* ]]; then
-        echo "====> TEST MODE: forced failure ===="
-        mkdir -p "${LOG_PREFIX}"
-        local log_file="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-?}_pytest.log"
-        if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
-            python -c "import sys; print('AssertionError: Timeout waiting for engine core processes to start'); sys.exit(1)" 2>&1 | tee "$log_file"
-        else
-            python -c "import sys; print('AssertionError: Timeout worker failure');  sys.exit(1) " 2>&1 | tee "$log_file"
-        fi
-        ret=$?
-        echo "pytest exit code: ret=${ret}"
-        if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
-            echo "Leader: waiting 10s for worker logs..."
-            sleep 10
-            if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
-                set +e; aop_pipeline; set -e
-            fi
-            local done_file="${LOG_PREFIX}/aop_done"
-            touch "$done_file"
-            echo "Leader: notifying workers (${done_file})"
-            echo -e "${RED}${FAIL_TAG:-test_failed} ✗ ERROR: Test mode forced failure${NC}"
-            exit 1
-        elif [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
-            local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
-            local release="${LOG_PREFIX}/aop_done"
-            mkdir -p "$coord"
-            touch "${coord}/worker_ready_${LWS_WORKER_INDEX}"
-            echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
-            echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
-            cd "$WORKSPACE/vllm-ascend"
-            # python -m tests.e2e.nightly.bisect.auto_bisect \
-            #     --scene multi_node \
-            #     --config-yaml "${CONFIG_YAML_PATH}" \
-            #     --bad-commit HEAD \
-            #     --coord-dir "${coord}" \
-            #     --release-file "${release}" || true
-            while [ ! -f "$release" ]; do sleep 5; done
-            echo "Worker: release signal received, exiting"
-            exit 1
-        fi
-        return
-    fi
-
     echo "====> Run pytest entry: $MULTI_NODE_TEST_PATH"
     local log_file="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-?}_pytest.log"
     pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH" 2>&1 | tee "$log_file"
@@ -282,12 +238,12 @@ run_tests_with_log() {
         echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
         echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
         cd "$WORKSPACE/vllm-ascend"
-        # python -m tests.e2e.nightly.bisect.auto_bisect \
-        #     --scene multi_node \
-        #     --config-yaml "${CONFIG_YAML_PATH}" \
-        #     --bad-commit HEAD \
-        #     --coord-dir "${coord}" \
-        #     --release-file "${release}" || true
+        python -m tests.e2e.nightly.bisect.auto_bisect \
+            --scene multi_node \
+            --config-yaml "${CONFIG_YAML_PATH}" \
+            --bad-commit HEAD \
+            --coord-dir "${coord}" \
+            --release-file "${release}" || true
         while [ ! -f "$release" ]; do sleep 5; done
         echo "Worker: release signal received, exiting"
         exit 1
@@ -440,14 +396,14 @@ aop_pipeline() {
     done
 
     cd "$WORKSPACE/vllm-ascend"
-    # python -m tests.e2e.nightly.bisect.auto_bisect \
-    #     --scene multi_node \
-    #     --config-yaml "${CONFIG_YAML_PATH}" \
-    #     --bad-commit HEAD \
-    #     --good-table "${table}" \
-    #     --name "${case_name}" \
-    #     --coord-dir "${coord}" || true
-    echo "  bisect skipped (commented out)"
+    python -m tests.e2e.nightly.bisect.auto_bisect \
+        --scene multi_node \
+        --config-yaml "${CONFIG_YAML_PATH}" \
+        --bad-commit HEAD \
+        --good-table "${table}" \
+        --name "${case_name}" \
+        --coord-dir "${coord}" || true
+    echo "  bisect completed (exit code: $?)"
     echo "=== AOP Pipeline (Pod) - END ==="
     return 1
 }
@@ -474,13 +430,6 @@ main() {
     check_and_config
     if [[ "$IS_PR_TEST" == "true" ]]; then
         checkout_src
-        # TODO: remove this block after AOP testing
-        if [[ "${CONFIG_YAML_PATH:-}" == *"Kimi-K2_5-W4A8-A2-dual-nodes"* ]]; then
-            echo "====> TEST MODE: skip install, go straight to failure ===="
-            cd "$WORKSPACE/vllm-ascend"
-            run_tests_with_log
-            return
-        fi
         install_vllm_ascend
         install_aisbench
     fi
