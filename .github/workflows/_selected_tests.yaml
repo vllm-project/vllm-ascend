@@ -208,6 +208,7 @@ jobs:
         env:
           SOC_VERSION: ascend910b1
           COMPILE_CUSTOM_KERNELS: 0
+          VLLM_VERSION: 0.22.1
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
@@ -240,6 +241,7 @@ jobs:
         if: ${{ matrix.group.npu_type == 'cpu' }}
         continue-on-error: ${{ inputs.continue_on_error }}
         env:
+          VLLM_VERSION: 0.22.1
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
