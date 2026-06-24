@@ -43,13 +43,15 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from vllm_ascend.attention.msa_m3_ops import (
+from vllm_ascend.attention.msa_m3_triton import (
     SPARSE_BLOCK_SIZE,
+    minimax_m3_sparse_attn,
+    minimax_m3_sparse_attn_decode,
+)
+from vllm_ascend.attention.msa_m3_ops import (
     minimax_m3_index_decode_torch,
     minimax_m3_index_score_torch,
     minimax_m3_index_topk_torch,
-    minimax_m3_sparse_attn_decode_torch,
-    minimax_m3_sparse_attn_torch,
 )
 import vllm_ascend.ops.minimax_m3_sparse  # noqa: F401
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
@@ -616,7 +618,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None and decode_topk is not None
-            minimax_m3_sparse_attn_decode_torch(
+            minimax_m3_sparse_attn_decode(
                 q[:nd],
                 kv_cache,
                 decode_topk,
@@ -626,13 +628,12 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 self.scale,
                 out[:nd],
                 d.decode_query_len,
-                max_seq_len=d.max_seq_len,
             )
 
         if main_md.num_prefills > 0:
             p = main_md.prefill
             assert p is not None and prefill_topk is not None
-            minimax_m3_sparse_attn_torch(
+            minimax_m3_sparse_attn(
                 q[nd:],
                 kv_cache,
                 prefill_topk,
