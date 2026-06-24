@@ -405,6 +405,7 @@
   optional: true
   source_file_dependencies:
     - vllm_ascend/sample
+    - vllm_ascend/worker/v2/sample
   tests:
     - tests/ut/sample
     - tests/e2e/pull_request/one_card/test_sampler.py
