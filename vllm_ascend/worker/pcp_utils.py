@@ -255,7 +255,6 @@ class PCPManager:
         # cu[1:] - cu[:-1] would drop the first req's length and the base
         # below would index cu[-1] instead of 0.
         padded_cu = np.concatenate(([0], cu_num_scheduled_tokens))
-        per_req_lens = padded_cu[1:] - padded_cu[:-1]
 
         prefill_lens = self.pcp_tokens[self.num_decode_reqs : self.num_decode_reqs + self.num_prefill_reqs]
         pads = copy.deepcopy(num_pcp_pads)
