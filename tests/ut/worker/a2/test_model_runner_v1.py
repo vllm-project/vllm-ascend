@@ -292,9 +292,7 @@ class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
 
         runner = self._build_runner(optimistic, prev_positions, prev_drafts, counts_cpu)
         event = MagicMock()
-        event.synchronize.side_effect = lambda: counts_cpu.copy_(
-            torch.from_numpy(true_counts)
-        )
+        event.synchronize.side_effect = lambda: counts_cpu.copy_(torch.from_numpy(true_counts))
         runner.valid_sampled_token_count_event = event
 
         runner._correct_optimistic_seq_lens_cpu(num_reqs)
@@ -302,9 +300,7 @@ class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
         event.synchronize.assert_called_once()
         # correction = (prev_drafts + 1 - true_counts) = [1, 3, 0]
         # corrected  = optimistic - correction          = [105, 205, 54]
-        np.testing.assert_array_equal(
-            optimistic.numpy(), np.array([105, 205, 54])
-        )
+        np.testing.assert_array_equal(optimistic.numpy(), np.array([105, 205, 54]))
 
     def test_asserts_event_present(self):
         runner = self._build_runner(
