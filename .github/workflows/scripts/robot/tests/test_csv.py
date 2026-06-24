@@ -27,11 +27,10 @@ environment variables (same as production).
 import argparse
 import csv
 import json
+import re
 import sys
 import time
 from pathlib import Path
-
-import regex as re
 
 # Add parent to path so we can import the step modules
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

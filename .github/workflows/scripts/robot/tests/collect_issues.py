@@ -12,9 +12,9 @@ Usage:
 import argparse
 import csv
 import os
+import re
 import time
 
-import regex as re
 import requests
 
 REPO = "vllm-project/vllm-ascend"

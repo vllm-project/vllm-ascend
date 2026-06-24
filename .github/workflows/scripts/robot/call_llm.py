@@ -10,9 +10,9 @@ Used as step 4 of both the Issue Review and PR Review Bot workflows.
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 
-import regex as re
 from lib.llm import call_llm
 from lib.prefix_map import PREFIX_TO_TYPE_KEY
 
