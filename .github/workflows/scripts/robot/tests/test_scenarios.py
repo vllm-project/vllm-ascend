@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
@@ -90,10 +91,8 @@ def api_patch(url: str, data: dict) -> dict:
 
 
 def _close_entity(api_base: str, number: int):
-    try:
+    with contextlib.suppress(Exception):
         api_patch(f"{api_base}/issues/{number}", {"state": "closed"})
-    except Exception:
-        pass
 
 
 def get_labels(api_base: str, number: int) -> list[str]:
@@ -137,44 +136,32 @@ def run_cmd(cmd: list[str], cwd: str | None = None) -> str:
 
 
 def _remove_worktree(worktree_path: Path):
-    try:
+    with contextlib.suppress(Exception):
         run_cmd(["git", "worktree", "remove", str(worktree_path), "--force"])
-    except Exception:
-        pass
     if worktree_path.exists():
         shutil.rmtree(worktree_path)
 
 
 def _cleanup_temp_branches():
-    try:
+    with contextlib.suppress(Exception):
         result = subprocess.run(["git", "branch"], capture_output=True, text=True)
         for line in result.stdout.split("\n"):
             bt = line.strip().lstrip("* ")
             if bt.startswith("test/"):
-                try:
+                with contextlib.suppress(Exception):
                     run_cmd(["git", "branch", "-D", bt])
-                except Exception:
-                    pass
-    except Exception:
-        pass
 
 
 def _cleanup_pr(branch_name: str, pr_number: int, api_base: str):
     worktree_path = WORKTREE_BASE / branch_name
     _remove_worktree(worktree_path)
-    try:
+    with contextlib.suppress(Exception):
         run_cmd(["git", "worktree", "prune"])
-    except Exception:
-        pass
     _close_entity(api_base, pr_number)
-    try:
+    with contextlib.suppress(Exception):
         run_cmd(["git", "push", "origin", "--delete", branch_name])
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         run_cmd(["git", "branch", "-D", branch_name])
-    except Exception:
-        pass
     _cleanup_temp_branches()
 
 

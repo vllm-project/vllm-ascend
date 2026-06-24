@@ -150,7 +150,7 @@ def main() -> None:
 
         for pr in selected:
             body = (pr.get("body") or "").replace("\r\n", "\n")
-            labels = ",".join(l["name"] for l in pr.get("labels", []))
+            labels = ",".join(label["name"] for label in pr.get("labels", []))
             writer.writerow({
                 "pr_number": pr["number"],
                 "title": pr["title"],

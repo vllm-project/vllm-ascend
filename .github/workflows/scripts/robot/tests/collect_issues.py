@@ -143,7 +143,7 @@ def main() -> None:
 
         for issue in selected:
             body = (issue.get("body") or "").replace("\r\n", "\n")
-            labels = ",".join(l["name"] for l in issue.get("labels", []))
+            labels = ",".join(label["name"] for label in issue.get("labels", []))
             writer.writerow({
                 "issue_number": issue["number"],
                 "title": issue["title"],
