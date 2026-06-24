@@ -23,8 +23,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class CompressAttentionManager(FullAttentionManager):
     def __init__(self, kv_cache_spec: MLAAttentionSpec, block_pool: BlockPool, **kwargs) -> None:
@@ -201,11 +199,9 @@ class CompressAttentionManager(FullAttentionManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        use_eagle: bool = False,
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...]:
-        # vLLM B renamed ``use_eagle`` to ``drop_eagle_block``; accept both.
-        eagle_drop = use_eagle if vllm_version_is("0.22.1") else drop_eagle_block
+        eagle_drop = drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
         # ), (
@@ -264,15 +260,10 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
-    if vllm_version_is("0.22.1"):
-        from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map  # type: ignore[import-not-found]
+    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
 
-        manager_class = spec_manager_map[type(kv_cache_spec)]
-    else:
-        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
-
-        manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
-        assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
+    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
     if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
         if max_model_len is not None:
