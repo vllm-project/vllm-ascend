@@ -633,6 +633,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                 l for l in seq_lens
                                 for _ in range(tokens_per_seq)
                             ]
+                            seq_lens = [
+                                l for l in seq_lens
+                                for _ in range(tokens_per_seq)
+                            ]
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -723,6 +727,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             tokens_per_seq = num_tokens // len(per_seq_lens)
             actual_seq_lengths_q = [
                 l for l in per_seq_lens for _ in range(tokens_per_seq)
+            ]
+            actual_seq_lengths_kv = [
+                l for l in actual_seq_lengths_kv for _ in range(tokens_per_seq)
             ]
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
