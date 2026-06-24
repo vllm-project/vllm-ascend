@@ -651,8 +651,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         # Handle MXFP case
         if use_mxfp_quant:
-                experts_indices_2d_copy = global_input_tokens_local_experts_indices.reshape(
-                    global_input_tokens_local_experts_indices.shape[0], 1)
+            experts_indices_2d_copy = global_input_tokens_local_experts_indices.reshape(
+                global_input_tokens_local_experts_indices.shape[0], 1)
             dynamic_scale_fp8_copy = dynamic_scale_after_all2all.view(torch.float8_e8m0fnu)
 
             global_input_tokens, reversed_global_input_permutation_mapping, _, dynamic_scale_fp8_copy = \
