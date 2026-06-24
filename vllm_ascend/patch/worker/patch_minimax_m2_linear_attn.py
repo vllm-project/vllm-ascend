@@ -29,7 +29,6 @@ from vllm.distributed import (
 )
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
-
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.22.1"):
