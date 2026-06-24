@@ -278,6 +278,8 @@ def _sliding_window_reachable_block_mask(
     num_prompt_tokens: int | None = None,
 ) -> list[bool] | None:
     assert _is_sliding_window_spec(kv_cache_spec)
+    if retention_interval is None:
+        return None
     if alignment_tokens is None:
         return None
     assert alignment_tokens % kv_cache_spec.block_size == 0
@@ -291,8 +293,8 @@ def _sliding_window_reachable_block_mask(
     shift = 1 if use_eagle else 0
     mask = [False] * (end_block - start_block)
 
-    segment_tokens = alignment_tokens if retention_interval is None else None
-    if retention_interval is not None and retention_interval > 0:
+    segment_tokens = None
+    if retention_interval > 0:
         segment_tokens = retention_interval
     if segment_tokens is not None:
         per_segment = segment_tokens // block_size
