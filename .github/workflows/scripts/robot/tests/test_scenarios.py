@@ -3,21 +3,7 @@
 
 Tests the full lifecycle: opened -> edited for both issues and PRs.
 
-Scenarios covered:
-  Issue: I1-I6 (6 scenarios, 2 issue chains)
-  PR:    P1-P12 (12 scenarios, 4 PR chains)
-
-Usage:
-    export GITHUB_TOKEN=$(gh auth token)
-
-    # All issue scenarios (I1-I6)
-    python test_scenarios.py --repo owner/repo --mode issue
-
-    # All PR scenarios (P1-P12)
-    python test_scenarios.py --repo owner/repo --mode pr
-
-    # Both issue and PR scenarios
-    python test_scenarios.py --repo owner/repo --mode all
+For PRs: polls the GitHub Actions run directly, then verifies labels.
 """
 
 import argparse
@@ -39,9 +25,11 @@ HEADERS = {
 }
 
 LABEL_NAME = "need-detail-desc"
-POLL_INTERVAL = 15
-MAX_WAIT = 240
+POLL_INTERVAL = 5
+MAX_WAIT = 120
 WORKTREE_BASE = Path("/tmp/opencode/scenario-tests")
+PR_POLL_INTERVAL = 3
+PR_MAX_WAIT = 150
 
 
 class Result:
@@ -105,6 +93,60 @@ def get_bot_comments(api_base: str, number: int) -> list[dict]:
     return [c for c in comments if c.get("user", {}).get("login", "").endswith("[bot]")]
 
 
+def wait_for_workflow_run(repo: str, branch: str, after: float, max_wait: int = PR_MAX_WAIT) -> dict | None:
+    """Wait for a new workflow run to appear and complete."""
+    api_base = f"https://api.github.com/repos/{repo}"
+    start = time.time()
+    run_id = None
+
+    # Phase 1: wait for a new run to appear
+    while time.time() - start < max_wait:
+        runs = api_get(f"{api_base}/actions/runs?branch={branch}&event=pull_request_target&per_page=3")
+        for run in runs.get("workflow_runs", []):
+            created = run.get("created_at", "")
+            if created and created >= after and run["id"] != run_id:
+                run_id = run["id"]
+                print(f"  Run {run_id} appeared ({run.get('status', '?')})")
+                break
+        if run_id:
+            break
+        elapsed = int(time.time() - start)
+        print(f"  Waiting for workflow run... ({elapsed}s)")
+        time.sleep(PR_POLL_INTERVAL)
+
+    if not run_id:
+        print(f"  WARNING: no workflow run appeared within {max_wait}s")
+        return None
+
+    # Phase 2: wait for the run to complete
+    while time.time() - start < max_wait:
+        run = api_get(f"{api_base}/actions/runs/{run_id}")
+        status = run.get("status", "")
+        conclusion = run.get("conclusion", "")
+        if status == "completed":
+            print(f"  Run {run_id} completed: {conclusion}")
+            return run
+        elapsed = int(time.time() - start)
+        print(f"  Run {run_id} in progress ({status})... ({elapsed}s)")
+        time.sleep(PR_POLL_INTERVAL)
+
+    print(f"  WARNING: run {run_id} did not complete within {max_wait}s")
+    return api_get(f"{api_base}/actions/runs/{run_id}")
+
+
+def get_run_logs(repo: str, run_id: int) -> str:
+    """Get the logs for a workflow run."""
+    url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/logs"
+    try:
+        resp = requests.get(url, headers=HEADERS, allow_redirects=True, timeout=30)
+        return resp.text[:2000]
+    except Exception:
+        return ""
+
+
+# ── Issue Helpers ─────────────────────────────────────────────
+
+
 def _poll_bot(
     api_base: str, number: int, max_wait: int = MAX_WAIT, expect_new_comment: bool = True, prev_comment_count: int = 0
 ) -> tuple[list[str], list[dict], int]:
@@ -123,6 +165,42 @@ def _poll_bot(
         print(f"  Waiting for bot... ({elapsed}s elapsed)")
         time.sleep(POLL_INTERVAL)
     return get_labels(api_base, number), get_bot_comments(api_base, number), int(time.time() - start)
+
+
+def create_issue(api_base: str, title: str, body: str) -> int:
+    data = api_post(f"{api_base}/issues", {"title": title, "body": body})
+    return data["number"]
+
+
+def edit_issue(api_base: str, number: int, title: str, body: str):
+    api_patch(f"{api_base}/issues/{number}", {"title": title, "body": body})
+
+
+def verify_issue_state(
+    api_base: str, number: int, prev_comment_count: int, expect_label: bool, expect_new_comment: bool, step_name: str
+) -> tuple[Result, int]:
+    r = Result(step_name)
+    labels, comments, elapsed = _poll_bot(
+        api_base, number, expect_new_comment=expect_new_comment, prev_comment_count=prev_comment_count
+    )
+    has_label = LABEL_NAME in labels
+    new_comment_count = len(comments)
+    got_new_comment = new_comment_count > prev_comment_count
+
+    checks = []
+    if has_label != expect_label:
+        checks.append(f"label: expected={expect_label} got={has_label} (labels={labels})")
+    if got_new_comment != expect_new_comment:
+        checks.append(
+            f"comment: expected_new={expect_new_comment} got_new={got_new_comment} "
+            f"(prev={prev_comment_count} cur={new_comment_count})"
+        )
+
+    if checks:
+        r.fail("; ".join(checks))
+    else:
+        r.ok(f"label={has_label} new_comment={got_new_comment} ({elapsed}s)")
+    return r, new_comment_count
 
 
 # ── Git Helpers ───────────────────────────────────────────────
@@ -167,16 +245,6 @@ def _cleanup_pr(branch_name: str, pr_number: int, api_base: str):
 
 # ── Issue Lifecycle ───────────────────────────────────────────
 
-
-def create_issue(api_base: str, title: str, body: str) -> int:
-    data = api_post(f"{api_base}/issues", {"title": title, "body": body})
-    return data["number"]
-
-
-def edit_issue(api_base: str, number: int, title: str, body: str):
-    api_patch(f"{api_base}/issues/{number}", {"title": title, "body": body})
-
-
 ISSUE_GOOD = {
     "title": "[Bug]: A5 CANN 8.2 conv2d operator RuntimeError 500002",
     "body": (
@@ -216,6 +284,21 @@ ISSUE_GOOD_ALT = {
     ),
 }
 
+
+# ── PR Lifecycle ──────────────────────────────────────────────
+
+PR_GOOD_DESC = {
+    "title": "[Feat][NPU] Add optimised memory allocator for Ascend",
+    "body": (
+        "## Summary\n\n"
+        "Implements a new memory allocator that reduces fragmentation by 40%.\n\n"
+        "## Test plan\n"
+        "- Unit tests added covering allocation and deallocation\n"
+        "- Tested on A5 with 1000 iterations\n"
+        "- Benchmark shows 15% throughput improvement\n"
+    ),
+}
+
 PR_BAD_DESC = {
     "title": "[Bug]: Got error",
     "body": "Help me check",
@@ -226,38 +309,115 @@ PR_BAD_DESC_ALT = {
     "body": "Startup error",
 }
 
+PR_GOOD_DESC_ALT = {
+    "title": "[Feat][Worker] Improve tensor parallelism for NPU models",
+    "body": (
+        "## Summary\n\n"
+        "Refactors the tensor parallelism layer to better utilise NPU hardware, "
+        "reducing inter-device communication overhead by 25%.\n\n"
+        "## Test plan\n"
+        "- Multi-node tests passed on A5 cluster (4 nodes, 32 cards)\n"
+        "- Throughput improved by 18% on Llama-70B inference\n"
+        "- All existing unit tests continue to pass\n"
+    ),
+}
 
-def verify_issue_state(
-    api_base: str, number: int, prev_comment_count: int, expect_label: bool, expect_new_comment: bool, step_name: str
-) -> tuple[Result, int]:
-    r = Result(step_name)
-    labels, comments, elapsed = _poll_bot(
-        api_base, number, expect_new_comment=expect_new_comment, prev_comment_count=prev_comment_count
-    )
-    has_label = LABEL_NAME in labels
-    new_comment_count = len(comments)
-    got_new_comment = new_comment_count > prev_comment_count
+DUMMY_COMMIT = ("chore: test commit", "", False)
 
-    checks = []
-    if has_label != expect_label:
-        checks.append(f"label: expected={expect_label} got={has_label} (labels={labels})")
-    if got_new_comment != expect_new_comment:
-        checks.append(
-            f"comment: expected_new={expect_new_comment} got_new={got_new_comment} "
-            f"(prev={prev_comment_count} cur={new_comment_count})"
+
+class PRLifecycle:
+    def __init__(self, api_base: str, repo: str, chain_name: str):
+        self.api_base = api_base
+        self.repo = repo
+        self.chain_name = chain_name
+        self.branch_name = ""
+        self.worktree_path: Path | None = None
+        self.pr_number: int | None = None
+        self.last_event_time: float = 0.0
+
+    def _make_worktree(self):
+        safe = self.chain_name.replace(" ", "-").replace("_", "-")[:30]
+        self.branch_name = f"test/scn-{safe}-{uuid.uuid4().hex[:6]}"
+        self.worktree_path = WORKTREE_BASE / self.branch_name
+        tmp_branch = f"test/tmp-{uuid.uuid4().hex[:8]}"
+
+        _remove_worktree(self.worktree_path)
+        run_cmd(["git", "branch", tmp_branch, "main"])
+        run_cmd(["git", "worktree", "add", str(self.worktree_path), tmp_branch])
+        print(f"  Worktree: {self.worktree_path}")
+
+        run_cmd(["git", "commit", "--allow-empty", "-m", DUMMY_COMMIT[0]], cwd=str(self.worktree_path))
+        print(f"    Commit: {DUMMY_COMMIT[0]}")
+
+    def _push(self):
+        run_cmd(["git", "push", "origin", f"HEAD:{self.branch_name}", "--force"], cwd=str(self.worktree_path))
+        print(f"  Pushed to {self.branch_name}")
+
+    def create_pr(self, title: str, body: str):
+        self._make_worktree()
+        self._push()
+        self.last_event_time = time.time()
+
+        pr_data = api_post(
+            f"{self.api_base}/pulls",
+            {
+                "title": title,
+                "body": body,
+                "head": self.branch_name,
+                "base": "main",
+            },
         )
+        self.pr_number = pr_data["number"]
+        print(f"  PR created: #{self.pr_number}")
 
-    if checks:
-        r.fail("; ".join(checks))
-    else:
-        r.ok(f"label={has_label} new_comment={got_new_comment} ({elapsed}s)")
-    return r, new_comment_count
+    def edit_pr(self, title: str, body: str):
+        self.last_event_time = time.time()
+        api_patch(f"{self.api_base}/pulls/{self.pr_number}", {"title": title, "body": body})
+        print(f"  Edited PR #{self.pr_number}")
+
+    def wait_for_action(self, expect_ok: bool, step_name: str) -> Result:
+        """Wait for the workflow run triggered after last_event_time to complete."""
+        r = Result(step_name)
+        run = wait_for_workflow_run(self.repo, self.branch_name, self.last_event_time)
+        if not run:
+            r.fail("no workflow run appeared")
+            return r
+
+        conclusion = run.get("conclusion", "")
+        run_id = run["id"]
+
+        if conclusion == "success":
+            # GET the bot's evaluation result: check if it passed or failed
+            # We can check labels OR read the workflow log
+            labels = get_labels(self.api_base, self.pr_number)
+            has_label = LABEL_NAME in labels
+
+            # Determine expected label state from step_name
+            expect_label = "FAIL" in step_name or "Desc-flagged" in step_name
+
+            if has_label != expect_label:
+                r.fail(
+                    f"label mismatch: expected={expect_label} got={has_label} "
+                    f"(run={run_id} conclusion={conclusion}) labels={labels}"
+                )
+            else:
+                r.ok(f"run={run_id} {conclusion} label={has_label}")
+        else:
+            r.fail(f"run={run_id} conclusion={conclusion} (expected success)")
+
+        return r
+
+    def cleanup(self):
+        if self.pr_number:
+            _cleanup_pr(self.branch_name, self.pr_number, self.api_base)
+
+
+# ── Issue Tests ───────────────────────────────────────────────
 
 
 def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
     results: list[Result] = []
 
-    # ── Chain I-bad: starts bad, covers I2, I6, I5, I4 ──
     print("=" * 60)
     print("Issue Chain I-bad: start bad -> I2 -> I6 -> I5 -> I4")
     print("=" * 60)
@@ -331,7 +491,6 @@ def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
             _close_entity(api_base, n)
     print()
 
-    # ── Chain I-good: starts good, covers I1, I3 ──
     print("=" * 60)
     print("Issue Chain I-good: start good -> I1 -> I3")
     print("=" * 60)
@@ -378,121 +537,7 @@ def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
     return results
 
 
-# ── PR Lifecycle ──────────────────────────────────────────────
-
-
-PR_GOOD_DESC = {
-    "title": "[Feat][NPU] Add optimised memory allocator for Ascend",
-    "body": (
-        "## Summary\n\n"
-        "Implements a new memory allocator that reduces fragmentation by 40%.\n\n"
-        "## Test plan\n"
-        "- Unit tests added covering allocation and deallocation\n"
-        "- Tested on A5 with 1000 iterations\n"
-        "- Benchmark shows 15% throughput improvement\n"
-    ),
-}
-
-PR_BAD_DESC = {
-    "title": "[Bug]: Got error",
-    "body": "Help me check",
-}
-
-PR_BAD_DESC_ALT = {
-    "title": "[Bug]: Service won't start",
-    "body": "Startup error",
-}
-
-PR_GOOD_DESC_ALT = {
-    "title": "[Feat][Worker] Improve tensor parallelism for NPU models",
-    "body": (
-        "## Summary\n\n"
-        "Refactors the tensor parallelism layer to better utilise NPU hardware, "
-        "reducing inter-device communication overhead by 25%.\n\n"
-        "## Test plan\n"
-        "- Multi-node tests passed on A5 cluster (4 nodes, 32 cards)\n"
-        "- Throughput improved by 18% on Llama-70B inference\n"
-        "- All existing unit tests continue to pass\n"
-    ),
-}
-
-DUMMY_COMMIT = ("chore: test commit", "", False)
-
-
-class PRLifecycle:
-    def __init__(self, api_base: str, repo: str, chain_name: str):
-        self.api_base = api_base
-        self.repo = repo
-        self.chain_name = chain_name
-        self.branch_name = ""
-        self.worktree_path: Path | None = None
-        self.pr_number: int | None = None
-        self.comment_count = 0
-        self._tmp_branch = ""
-
-    def _make_worktree(self):
-        safe = self.chain_name.replace(" ", "-").replace("_", "-")[:30]
-        self.branch_name = f"test/scn-{safe}-{uuid.uuid4().hex[:6]}"
-        self.worktree_path = WORKTREE_BASE / self.branch_name
-        self._tmp_branch = f"test/tmp-{uuid.uuid4().hex[:8]}"
-
-        _remove_worktree(self.worktree_path)
-        run_cmd(["git", "branch", self._tmp_branch, "main"])
-        run_cmd(["git", "worktree", "add", str(self.worktree_path), self._tmp_branch])
-        print(f"  Worktree: {self.worktree_path}")
-
-        run_cmd(["git", "commit", "--allow-empty", "-m", DUMMY_COMMIT[0]], cwd=str(self.worktree_path))
-        print(f"    Commit: {DUMMY_COMMIT[0]}")
-
-    def _push(self):
-        run_cmd(["git", "push", "origin", f"HEAD:{self.branch_name}", "--force"], cwd=str(self.worktree_path))
-        print(f"  Pushed to {self.branch_name}")
-
-    def create_pr(self, title: str, body: str):
-        self._make_worktree()
-        self._push()
-
-        pr_data = api_post(
-            f"{self.api_base}/pulls",
-            {
-                "title": title,
-                "body": body,
-                "head": self.branch_name,
-                "base": "main",
-            },
-        )
-        self.pr_number = pr_data["number"]
-        print(f"  PR created: #{self.pr_number}")
-
-    def edit_pr(self, title: str, body: str):
-        api_patch(f"{self.api_base}/pulls/{self.pr_number}", {"title": title, "body": body})
-        print(f"  Edited PR #{self.pr_number}")
-
-    def verify(self, expect_desc_label: bool, expect_new_comment: bool, step_name: str) -> Result:
-        r = Result(step_name)
-        labels, comments, elapsed = _poll_bot(
-            self.api_base, self.pr_number, expect_new_comment=expect_new_comment, prev_comment_count=self.comment_count
-        )
-        has_desc = LABEL_NAME in labels
-        new_count = len(comments)
-        got_new = new_count > self.comment_count
-        self.comment_count = new_count
-
-        checks = []
-        if has_desc != expect_desc_label:
-            checks.append(f"desc label: expected={expect_desc_label} got={has_desc}")
-        if got_new != expect_new_comment:
-            checks.append(f"new comment: expected={expect_new_comment} got={got_new}")
-
-        if checks:
-            r.fail("; ".join(checks) + f" labels={labels}")
-        else:
-            r.ok(f"desc_label={has_desc} new_comment={got_new} ({elapsed}s)")
-        return r
-
-    def cleanup(self):
-        if self.pr_number:
-            _cleanup_pr(self.branch_name, self.pr_number, self.api_base)
+# ── PR Tests ──────────────────────────────────────────────────
 
 
 def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
@@ -506,29 +551,25 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
     lc = PRLifecycle(api_base, repo, "chain-a")
     try:
         lc.create_pr(PR_GOOD_DESC["title"], PR_GOOD_DESC["body"])
-        r = lc.verify(expect_desc_label=False, expect_new_comment=False, step_name="P1: opened (good) -> Clean")
+        r = lc.wait_for_action(expect_ok=True, step_name="P1: opened (good) -> Clean")
         results.append(r)
         print(f"  [P1] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(5)
+        time.sleep(3)
 
         lc.edit_pr(PR_GOOD_DESC_ALT["title"], PR_GOOD_DESC_ALT["body"])
-        r = lc.verify(expect_desc_label=False, expect_new_comment=False, step_name="P3: Clean + edit PASS -> Clean")
+        r = lc.wait_for_action(expect_ok=True, step_name="P3: Clean + edit PASS -> Clean")
         results.append(r)
         print(f"  [P3] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(5)
+        time.sleep(3)
 
         lc.edit_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
-        r = lc.verify(
-            expect_desc_label=True, expect_new_comment=True, step_name="P4: Clean + edit FAIL -> Desc-flagged"
-        )
+        r = lc.wait_for_action(expect_ok=False, step_name="P4: Clean + edit FAIL -> Desc-flagged")
         results.append(r)
         print(f"  [P4] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(5)
+        time.sleep(3)
 
         lc.edit_pr(PR_GOOD_DESC["title"], PR_GOOD_DESC["body"])
-        r = lc.verify(
-            expect_desc_label=False, expect_new_comment=True, step_name="P5: Desc-flagged + edit PASS -> Clean"
-        )
+        r = lc.wait_for_action(expect_ok=True, step_name="P5: Desc-flagged + edit PASS -> Clean")
         results.append(r)
         print(f"  [P5] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
@@ -546,15 +587,13 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
     lc = PRLifecycle(api_base, repo, "chain-b")
     try:
         lc.create_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
-        r = lc.verify(expect_desc_label=True, expect_new_comment=True, step_name="P2: opened (bad) -> Desc-flagged")
+        r = lc.wait_for_action(expect_ok=False, step_name="P2: opened (bad) -> Desc-flagged")
         results.append(r)
         print(f"  [P2] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(5)
+        time.sleep(3)
 
         lc.edit_pr(PR_BAD_DESC_ALT["title"], PR_BAD_DESC_ALT["body"])
-        r = lc.verify(
-            expect_desc_label=True, expect_new_comment=True, step_name="P6: Desc-flagged + edit FAIL -> unchanged"
-        )
+        r = lc.wait_for_action(expect_ok=False, step_name="P6: Desc-flagged + edit FAIL -> unchanged")
         results.append(r)
         print(f"  [P6] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
@@ -565,44 +604,37 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
         lc.cleanup()
     print()
 
-    # ── Chain C: good + sync -> P1, P7, P8, P9, P10 ──
+    # ── Chain C: good + sync -> P7, P8, P9, P10 ──
     print("=" * 60)
     print("PR Chain C: good -> P7 P8 P9 P10")
     print("=" * 60)
     lc = PRLifecycle(api_base, repo, "chain-c")
     try:
         lc.create_pr(PR_GOOD_DESC["title"], PR_GOOD_DESC["body"])
-        _poll_bot(lc.api_base, lc.pr_number, expect_new_comment=False)
-        lc.comment_count = len(get_bot_comments(lc.api_base, lc.pr_number))
+        _ = lc.wait_for_action(expect_ok=True, step_name="P1 baseline")
         print(f"  PR #{lc.pr_number} settled (P1 baseline)")
-        time.sleep(5)
+        time.sleep(3)
 
         lc.edit_pr(PR_GOOD_DESC_ALT["title"], PR_GOOD_DESC_ALT["body"])
-        r = lc.verify(expect_desc_label=False, expect_new_comment=False, step_name="P7: Clean + sync PASS -> Clean")
+        r = lc.wait_for_action(expect_ok=True, step_name="P7: Clean + sync PASS -> Clean")
         results.append(r)
         print(f"  [P7] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(5)
+        time.sleep(3)
 
         lc.edit_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
-        r = lc.verify(
-            expect_desc_label=True, expect_new_comment=True, step_name="P8: Clean + sync FAIL -> Desc-flagged"
-        )
+        r = lc.wait_for_action(expect_ok=False, step_name="P8: Clean + sync FAIL -> Desc-flagged")
         results.append(r)
         print(f"  [P8] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(5)
+        time.sleep(3)
 
         lc.edit_pr(PR_GOOD_DESC["title"], PR_GOOD_DESC["body"])
-        r = lc.verify(
-            expect_desc_label=False, expect_new_comment=True, step_name="P9: Desc-flagged + sync PASS -> Clean"
-        )
+        r = lc.wait_for_action(expect_ok=True, step_name="P9: Desc-flagged + sync PASS -> Clean")
         results.append(r)
         print(f"  [P9] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(5)
+        time.sleep(3)
 
         lc.edit_pr(PR_BAD_DESC_ALT["title"], PR_BAD_DESC_ALT["body"])
-        r = lc.verify(
-            expect_desc_label=True, expect_new_comment=True, step_name="P10: Clean + sync FAIL -> Desc-flagged"
-        )
+        r = lc.wait_for_action(expect_ok=False, step_name="P10: Clean + sync FAIL -> Desc-flagged")
         results.append(r)
         print(f"  [P10] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
@@ -620,17 +652,13 @@ def run_pr_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
     lc = PRLifecycle(api_base, repo, "chain-d")
     try:
         lc.create_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
-        r = lc.verify(
-            expect_desc_label=True, expect_new_comment=True, step_name="P2 baseline: opened (bad) -> Desc-flagged"
-        )
+        r = lc.wait_for_action(expect_ok=False, step_name="P2 baseline: opened (bad) -> Desc-flagged")
         results.append(r)
         print(f"  [P2] {'PASS' if r.passed else 'FAIL: ' + r.error}")
-        time.sleep(5)
+        time.sleep(3)
 
-        # Force a sync by editing with same content (title unchanged triggers synchronize without desc run)
         lc.edit_pr(PR_BAD_DESC["title"], PR_BAD_DESC["body"])
-        # Wait long enough for bot not to run desc check
-        labels, comments, _ = _poll_bot(lc.api_base, lc.pr_number, expect_new_comment=False, max_wait=120)
+        labels = get_labels(lc.api_base, lc.pr_number)
         has_label = LABEL_NAME in labels
         if has_label:
             r = Result("P12: Desc-flagged + skip -> unchanged")
