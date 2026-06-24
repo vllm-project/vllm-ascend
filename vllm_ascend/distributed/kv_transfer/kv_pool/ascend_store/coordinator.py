@@ -85,7 +85,8 @@ class AscendStoreCoordinator:
 
         self.eagle_group_ids = {i for i, group in enumerate(kv_cache_groups) if getattr(group, "is_eagle_group", False)}
         if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_groups)))
+            # Compressed groups already use coarse chunks; dropping their last chunk can erase the whole hit.
+            self.eagle_group_ids = {i for i, family in enumerate(group_cache_families) if _uses_reachable_mask(family)}
 
         self._verify_and_split_kv_cache_groups()
 
@@ -120,7 +121,11 @@ class AscendStoreCoordinator:
             if any(group_id in self.eagle_group_ids for group_id in group_ids)
         }
         if self.use_eagle and not self.eagle_attn_group_indices:
-            self.eagle_attn_group_indices = set(range(len(self.attention_groups)))
+            self.eagle_attn_group_indices = {
+                index
+                for index, (_, group_ids, _) in enumerate(self.attention_groups)
+                if any(_uses_reachable_mask(self.group_cache_families[group_id]) for group_id in group_ids)
+            }
 
     def find_longest_cache_hit(
         self,
