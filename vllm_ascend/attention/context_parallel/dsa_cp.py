@@ -352,8 +352,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def build_for_drafting(
         self,
-        draft_step: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        draft_index: int,
         fast_build: bool = False,
         **kwargs,
     ) -> AscendDSAMetadata:
@@ -381,13 +381,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
 
         assert self.spec_slot_mapping is not None
-        self.spec_slot_mapping[draft_step - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
+        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
             slot_mapping, self.block_size
         )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         req_metadata = self.build_req_metadata_for_drafting(
-            draft_step=draft_step,
+            draft_index=draft_index,
             common_attn_metadata=common_attn_metadata,
             input_positions=input_positions,
             num_input_tokens=num_input_tokens,
@@ -413,7 +413,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def build_req_metadata_for_drafting(
         self,
-        draft_step: int,
+        draft_index: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         input_positions: torch.Tensor,
         num_input_tokens: int,
@@ -442,8 +442,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc=query_start_loc,
             seq_lens=self.seq_lens[:num_reqs],
             use_cache=False,
-            local_query_start_loc=self.spec_local_query_start_loc[draft_step - 1],
-            local_seq_lens=self.spec_local_seq_lens[draft_step - 1],
+            local_query_start_loc=self.spec_local_query_start_loc[draft_index - 1],
+            local_seq_lens=self.spec_local_seq_lens[draft_index - 1],
         )
         local_query_start_loc = local_query_start_loc.clone()
         local_seq_lens = local_seq_lens.clone()
@@ -463,7 +463,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         start_pos = self.seq_lens[:num_reqs] - seq_lens_q
 
         assert self.spec_slot_mapping is not None
-        slot_mapping = self.spec_slot_mapping[draft_step - 1][: self.num_actual_tokens]
+        slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
 
         num_heads = self.model_config.hf_config.num_attention_heads
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()

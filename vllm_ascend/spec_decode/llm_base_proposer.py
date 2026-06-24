@@ -480,7 +480,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # when update. So we can use the shallow copy.
         return copy.copy(attn_metadata)
 
-    def _freeze_draft_step_attn_metadata(self, attn_metadata):
+    def _freeze_draft_index_attn_metadata(self, attn_metadata):
         decode_metadata = getattr(attn_metadata, "decode", None)
         if decode_metadata is not None:
             if decode_metadata.sas_metadata is not None:
@@ -563,13 +563,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
             # update the tensor's address for each step.
-            for draft_step in range(self.num_speculative_tokens):
+            for draft_index in range(self.num_speculative_tokens):
                 common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
                 # Set the real slot_mapping.
-                common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
-                common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][:num_reqs]
-                common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
-                if self.pcp_size * self.dcp_size > 1 and draft_step > 0:
+                common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
+                common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
+                common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
+                if self.pcp_size * self.dcp_size > 1 and draft_index > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                     common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
                 attn_metadata_eagle = builder.build_for_graph_capture(
@@ -900,11 +900,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
                 # Copy the old attn_metadata and update
                 if not self.parallel_drafting:
-                    for draft_step in range(1, self.num_speculative_tokens):
+                    for draft_index in range(1, self.num_speculative_tokens):
                         per_layer_attn_metadata = dict()
                         for attn_group in self.draft_attn_groups:
                             common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                                draft_step,
+                                draft_index,
                                 attn_metadata,
                                 common_attn_metadata,
                                 batch_size,
@@ -922,11 +922,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             # Copy the old attn_metadata and update
             if not self.parallel_drafting:
-                for draft_step in range(1, self.num_speculative_tokens):
+                for draft_index in range(1, self.num_speculative_tokens):
                     per_layer_attn_metadata = dict()
                     for attn_group in self.draft_attn_groups:
                         common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                            draft_step,
+                            draft_index,
                             attn_metadata,
                             common_attn_metadata,
                             batch_size,
@@ -1133,7 +1133,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         _EXTRA_CTX.num_tokens = input_batch_size
         _EXTRA_CTX.num_accept_tokens = batch_size
 
-        for draft_step in range(self.num_speculative_tokens - 1):
+        for draft_index in range(self.num_speculative_tokens - 1):
             # Reset MOE layer index for each draft step iteration
             forward_context = get_forward_context()
             if forward_context is not None:
@@ -1142,7 +1142,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
-            input_ids = draft_token_ids_tensor[draft_step]
+            input_ids = draft_token_ids_tensor[draft_index]
             positions += 1
 
             # NOTE(woosuk): We should handle the case where the draft model
@@ -1187,7 +1187,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
 
             forward_context.attn_metadata = (
-                multi_steps_attn_metadata[draft_step + 1] if multi_steps_attn_metadata else None
+                multi_steps_attn_metadata[draft_index + 1] if multi_steps_attn_metadata else None
             )
 
             model_kwargs = {
@@ -1251,7 +1251,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids_tensor[draft_step + 1] = draft_token_ids
+            draft_token_ids_tensor[draft_index + 1] = draft_token_ids
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
@@ -1474,8 +1474,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def attn_update_stack_num_spec_norm(
         self,
-        # `draft_step` must start from `1`, no `0`
-        draft_step,
+        # `draft_index` must start from `1`, no `0`
+        draft_index,
         old_attn_metadata,
         old_common_metadata,
         batch_size,
@@ -1487,11 +1487,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         mtp_slot_mapping=None,
         attn_group=None,
     ):
-        assert draft_step > 0
+        assert draft_index > 0
         assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
 
-        if draft_step == 1:
+        if draft_index == 1:
             if aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 common_attn_metadata.num_reqs = input_batch_size
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
@@ -1586,7 +1586,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.pcp_size * self.dcp_size > 1:
             num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
-                ori_seq_len + draft_step + 1,
+                ori_seq_len + draft_index + 1,
                 self.pcp_size,
                 self.dcp_size,
                 self.runner.parallel_config.cp_kv_cache_interleave_size,
@@ -1595,8 +1595,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # update slot_mapping
             slot_indices += self.pcp_size
             slot_mapping = mtp_slot_mapping[slot_indices]
-            self.slot_mapping_group[draft_step][: batch_size * self.pcp_size] = slot_mapping
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
+            self.slot_mapping_group[draft_index][: batch_size * self.pcp_size] = slot_mapping
+            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
         else:
             # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
             # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
@@ -1621,25 +1621,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
             slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
-            self.slot_mapping_group[draft_step][: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
-            self.slot_mapping_group[draft_step][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
+            self.slot_mapping_group[draft_index][: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
+            self.slot_mapping_group[draft_index][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
+            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
 
-        self.seq_lens_group[draft_step][: common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
-        self.seq_lens_group[draft_step][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
-        common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][: common_attn_metadata.seq_lens.shape[0]]
+        self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
+        self.seq_lens_group[draft_index][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
+        common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]]
 
-        self.query_start_loc_group[draft_step][: common_attn_metadata.query_start_loc.shape[0]].copy_(
+        self.query_start_loc_group[draft_index][: common_attn_metadata.query_start_loc.shape[0]].copy_(
             common_attn_metadata.query_start_loc
         )
-        self.query_start_loc_group[draft_step][common_attn_metadata.query_start_loc.shape[0] :].fill_(0)
-        common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][
+        self.query_start_loc_group[draft_index][common_attn_metadata.query_start_loc.shape[0] :].fill_(0)
+        common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][
             : common_attn_metadata.query_start_loc.shape[0]
         ]
 
         attn_metadata_builder = attn_group.get_metadata_builder()
 
+        extra_attn_metadata_args = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
                 prefill_ratio_to_sas_metadata=dict(),
@@ -1647,17 +1648,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
-            attn_metadata = attn_metadata_builder.build_for_drafting(
-                draft_step,
-                common_attn_metadata,
-                **extra_attn_metadata_args,
-            )
-        else:
-            attn_metadata = attn_metadata_builder.build(
-                0,
-                common_attn_metadata,
-                self.runner.get_model(),
-            )
+        attn_metadata = attn_metadata_builder.build_for_drafting(
+            common_attn_metadata,
+            draft_index,
+            **extra_attn_metadata_args,
+        )
 
         if self.pcp_size * self.dcp_size > 1:
             kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
