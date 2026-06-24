@@ -1652,13 +1652,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata,
                 **extra_attn_metadata_args,
             )
-        elif hasattr(attn_metadata_builder, "build_for_drafting"):
-            # e.g. SFA (dsa_cp): route draft steps through a draft-aware build so
-            # per-draft-step buffers are used and cross-step aliasing is avoided.
-            attn_metadata = attn_metadata_builder.build_for_drafting(
-                draft_step,
-                common_attn_metadata,
-            )
         else:
             attn_metadata = attn_metadata_builder.build(
                 0,
