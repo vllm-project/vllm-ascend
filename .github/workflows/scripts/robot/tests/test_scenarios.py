@@ -407,9 +407,11 @@ PR_GOOD_DESC_ALT = {
     "title": "[Feat][Worker] Improve tensor parallelism for NPU models",
     "body": (
         "## Summary\n\n"
-        "Refactors the tensor parallelism layer to better utilise NPU hardware.\n\n"
+        "Refactors the tensor parallelism layer to better utilise NPU hardware, "
+        "reducing inter-device communication overhead by 25%.\n\n"
         "## Test plan\n"
-        "- Multi-node tests passed on A5 cluster\n"
+        "- Multi-node tests passed on A5 cluster (4 nodes, 32 cards)\n"
+        "- Throughput improved by 18% on Llama-70B inference\n"
         "- All existing unit tests continue to pass\n"
     ),
 }
