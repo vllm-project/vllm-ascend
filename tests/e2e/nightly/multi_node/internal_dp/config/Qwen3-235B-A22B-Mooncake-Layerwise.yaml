@@ -50,8 +50,8 @@ deployment:
                           "tp_size": 8
                   },
                   "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
+                          "dp_size": 4,
+                          "tp_size": 4
                   }
             }
         }'
@@ -68,7 +68,7 @@ deployment:
         --data-parallel-rpc-port 13389
         --tensor-parallel-size 4
         --seed 1024
-        --max-num-seqs 16
+        --max-num-seqs 32
         --max-model-len 8192
         --max-num-batched-tokens 8192
         --enable-expert-parallel
@@ -82,8 +82,8 @@ deployment:
         "kv_port": "30200",
         "kv_connector_extra_config": {
                   "prefill": {
-                          "dp_size": 4,
-                          "tp_size": 4
+                          "dp_size": 2,
+                          "tp_size": 8
                   },
                   "decode": {
                           "dp_size": 4,
