@@ -23,7 +23,6 @@ from vllm.reasoning.deepseek_v3_reasoning_parser import (
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
 from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401
-
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.23.0"):

@@ -14,7 +14,6 @@ from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
 from vllm_ascend.patch.platform import (
     patch_minimax_m2_tool_call_parser as minimax_m2_patch,
 )
-
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.23.0"):

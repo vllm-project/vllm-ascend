@@ -123,4 +123,5 @@ def _apply_patch() -> None:
     if vllm_version_is("0.23.0"):
         _patch_v2_model_runner_supported()
 
+
 _apply_patch()

@@ -8,7 +8,6 @@ from vllm.entrypoints.anthropic.protocol import (
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 
 from vllm_ascend.patch.platform import patch_anthropic_system_message  # noqa: F401
-
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.23.0"):
@@ -19,7 +18,9 @@ else:
     if isinstance(_convert_fn, classmethod):
         _convert_fn = _convert_fn.__func__
     _upstream_co_varnames = getattr(_convert_fn, "__code__", None)
-    _UPSTREAM_HAS_MERGE = _upstream_co_varnames is not None and "merge_inline_system" in _upstream_co_varnames.co_varnames
+    _UPSTREAM_HAS_MERGE = (
+        _upstream_co_varnames is not None and "merge_inline_system" in _upstream_co_varnames.co_varnames
+    )
 
     # TODO: @QwertyJack please fix this patch.
     # Skip tests when upstream already has the feature (patch not active)

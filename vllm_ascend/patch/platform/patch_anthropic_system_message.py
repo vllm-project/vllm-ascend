@@ -28,7 +28,6 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 
-
 # TODO: @QwertyJack please fix this patch.
 from vllm_ascend.utils import vllm_version_is
 

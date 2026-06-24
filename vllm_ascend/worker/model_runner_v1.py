@@ -155,7 +155,8 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
     set_weight_prefetch_method,
-    should_skip_allreduce_across_dp_group, vllm_version_is,
+    should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager

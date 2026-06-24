@@ -24,9 +24,11 @@ class AscendSuffixDecodingProposer(SuffixDecodingProposer):
         pass
 
     if vllm_version_is("0.23.0"):
+
         def propose(self, valid_sampled_token_ids):
             return super().propose(self.runner.input_batch, valid_sampled_token_ids)
     else:
+
         def propose(
             self,
             sampled_token_ids: list[list[int]],
