@@ -155,6 +155,9 @@ jobs:
           - name: multi-node-deepseek-v3.2-W8A8-EP
             config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
             size: 4
+          - name: multi-node-qwen3-dp-mooncake-layerwise
+            config_file_path: Qwen3-235B-A22B-Mooncake-Layerwise.yaml
+            size: 3
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -204,9 +207,6 @@ jobs:
             size: 2
           - name: multi-node-dpsk3.2-2node
             config_file_path: DeepSeek-V3_2-W8A8-A3-dual-nodes.yaml
-            size: 2
-          - name: multi-node-qwen3-dp-mooncake-layerwise
-            config_file_path: Qwen3-235B-A22B-Mooncake-Layerwise.yaml
             size: 2
           - name: multi-node-qwenw8a8-2node-longseq
             config_file_path: Qwen3-235B-W8A8-longseq.yaml
