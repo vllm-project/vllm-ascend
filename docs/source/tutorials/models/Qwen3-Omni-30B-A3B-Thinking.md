@@ -1,27 +1,27 @@
 # Qwen3-Omni-30B-A3B-Thinking
 
-## Introduction
+## 1 Introduction
 
 Qwen3-Omni is a native end-to-end multilingual omni-modal foundation model. It processes text, images, audio, and video, and delivers real-time streaming responses in both text and natural speech. We introduce several architectural upgrades to improve performance and efficiency. The Thinking model of Qwen3-Omni-30B-A3B, which contains the thinker component, is equipped with chain-of-thought reasoning and supports audio, video, and text input, with text output.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, accuracy and performance evaluation.
 
-## Supported Features
+## 2 Supported Features
 
 Refer to [supported features](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/support_matrix/supported_models.html) to get the model's supported feature matrix.
 
 Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/index.html) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Environment Preparation
 
 Release v0.13.0 or later versions are all acceptable.
 
-### Model Weight
+### 3.1 Model Weight
 
 - `Qwen3-Omni-30B-A3B-Thinking` requires 2 NPU 910B Cards (64G × 2)（or 1 card Ascend910）.[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
-## Installation
+## 4 Installation
 
 :::::{tab-set}
 ::::{tab-item} Use docker image
@@ -86,11 +86,11 @@ Required to avoid HcclAllreduce failures caused by the default FFTS+ mode's stre
 export HCCL_OP_EXPANSION_MODE="AIV"
 ```
 
-## Deployment
+## 5 Deployment
 
-### Single-node Deployment
+### 5.1 Single-node Deployment
 
-#### Offline Inference on Multi-NPU
+#### 5.1.1 Offline Inference on Multi-NPU
 
 Run the following script to execute offline inference on multi-NPU:
 
@@ -179,7 +179,7 @@ if __name__ == "__main__":
     main()
 ```
 
-#### Online Inference on Multi-NPU
+#### 5.1.2 Online Inference on Multi-NPU
 
 Run the following script to start the vLLM server on Multi-NPU:
 For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 1, and for 32 GB of memory, tensor-parallel-size should be at least 2.
@@ -193,7 +193,7 @@ export HCCL_OP_EXPANSION_MODE=AIV
 vllm serve Qwen/Qwen3-Omni-30B-A3B-Thinking --tensor-parallel-size 2 --enable_expert_parallel
 ```
 
-## Functional Verification
+## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts.
 
@@ -267,11 +267,11 @@ The output should resemble the following.
 
 ```
 
-## Accuracy Evaluation
+## 7 Accuracy Evaluation
 
 Here are accuracy evaluation methods.
 
-### Using EvalScope
+### 7.1 Using EvalScope
 
 As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 
@@ -305,9 +305,9 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
     +-----------------------------+------------+----------+----------+-------+---------+---------+
     ```
 
-## Performance
+## 8 Performance
 
-### Using vLLM Benchmark  
+### 8.1 Using vLLM Benchmark  
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
 Refer to vllm benchmark for more details.
