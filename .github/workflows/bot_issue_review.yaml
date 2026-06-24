@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   review:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-2-hk
     if: |
       github.event.issue.state == 'open' &&
       (

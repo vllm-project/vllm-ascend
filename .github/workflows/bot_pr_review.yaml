@@ -13,7 +13,8 @@ permissions:
 
 jobs:
   review:
-    runs-on: ubuntu-latest
+
+    runs-on: linux-amd64-cpu-2-hk
     if: |
       github.event.pull_request.state == 'open' &&
       (
@@ -21,6 +22,7 @@ jobs:
         github.event.action == 'reopened' ||
         (github.event.action == 'edited' && (github.event.changes.title || github.event.changes.body))
       )
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
