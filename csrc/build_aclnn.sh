@@ -19,7 +19,7 @@ setup_catlass_dependency() {
         echo "dependency catlass is missing, try to fetch it..."
         git submodule sync
         if ! git submodule update --init --recursive; then
-            echo "fetch failed"
+            log "fetch failed"
             exit 1
         fi
         cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
