@@ -859,6 +859,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         for param_name, param in params.items():
             getattr(self.o_proj, param_name).set_(param)
 
+    def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
+        quant_method = self.o_proj.quant_method
+        linear_method = getattr(quant_method, "quant_method", quant_method)
+        return linear_method.apply(self.o_proj, attn_output)
+
     def _handle_o_proj_weight_switch_and_forward(
         self,
         attn_output: torch.Tensor,
@@ -885,7 +890,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self._switch_o_proj_params(self.o_proj_full_input_sharded_quant_params)
 
             # Apply quantization method and execute forward computation
-            output[...] = self.o_proj.quant_method.quant_method.apply(self.o_proj, attn_output)
+            output[...] = self._apply_o_proj_full_weight(attn_output)
 
             # Switch o_proj back to TP-mode for subsequent decode operations
             self.o_proj.weight.set_(self.o_proj_tp_weight)
