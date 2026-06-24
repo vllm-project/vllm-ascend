@@ -270,7 +270,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_input_tokens = common_attn_metadata.num_input_tokens
         if self.common_ratio_to_sas_metadata.get("input_positions", None) is None:
             self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
-                split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
+                split_decodes_and_prefills(
+                    common_attn_metadata,
+                    decode_threshold=self.decode_threshold,
+                    treat_short_extends_as_decodes=False,
+                )
             )
             self.common_ratio_to_sas_metadata["num_decodes"] = self.num_decodes
             self.common_ratio_to_sas_metadata["num_prefills"] = self.num_prefills
@@ -346,7 +350,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=self.decode_threshold
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=False,
         )
 
         self.num_decodes = num_decodes

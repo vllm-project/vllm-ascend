@@ -57,6 +57,8 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     CUSTOM_OPS_ARRAY=(
         "causal_conv1d_v310"
         "recurrent_gated_delta_rule_v310"
+        "chunk_fwd_o"
+        "chunk_gated_delta_rule_fwd_h"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend310p"
@@ -100,7 +102,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "causal_conv1d"
         "lightning_indexer_quant"
         "compressor"
-        "quant_lightning_indexer"
+        "quant_lightning_indexer_custom"
         "quant_lightning_indexer_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
@@ -164,7 +166,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "moe_grouped_matmul"
         "lightning_indexer_quant"
         "compressor"
-        "quant_lightning_indexer"
+        "quant_lightning_indexer_custom"
         "quant_lightning_indexer_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
@@ -217,7 +219,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "inplace_partial_rotary_mul"
         "kv_compress_epilog"
         "compressor"
-        "quant_lightning_indexer"
+        "quant_lightning_indexer_custom"
         "quant_lightning_indexer_metadata"
         "kv_quant_sparse_attn_sharedkv"
         "kv_quant_sparse_attn_sharedkv_metadata"

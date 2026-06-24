@@ -376,11 +376,11 @@ def _make_fake_self(
     if gather_kv_cross_cp_compact_fn is not None:
         fake_self.gather_kv_cross_cp_compact = MagicMock(side_effect=gather_kv_cross_cp_compact_fn)
 
-    fake_self.gather_block_table = lambda block_num, block_tables, block_arange: (
-        AscendSFACPImpl.gather_block_table(fake_self, block_num, block_tables, block_arange)
+    fake_self.gather_block_table = lambda block_num, block_tables, block_arange: AscendSFACPImpl.gather_block_table(
+        fake_self, block_num, block_tables, block_arange
     )
-    fake_self._execute_sparse_flash_attention = lambda *args, **kwargs: (
-        AscendSFACPImpl._execute_sparse_flash_attention(fake_self, *args, **kwargs)
+    fake_self._execute_sparse_flash_attention = lambda *args, **kwargs: AscendSFACPImpl._execute_sparse_flash_attention(
+        fake_self, *args, **kwargs
     )
     fake_self._align_to_graph_bucket_tokens = lambda x, m: x
     return fake_self
