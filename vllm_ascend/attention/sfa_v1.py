@@ -439,7 +439,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     """
 
     # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
-    o_proj_full_pool: torch.Tensor | None = None
+    o_proj_full_pools: dict[tuple[str, int | None, torch.dtype, tuple[int, ...]], torch.Tensor] = {}
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
@@ -827,11 +827,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         - Use original TP o_proj weight for decode phase
         - Need full-gather o_proj weight from all TP ranks for prefill phase
         """
-        if AscendSFAImpl.o_proj_full_pool is None:
-            sample = self.o_proj.weight
-            AscendSFAImpl.o_proj_full_pool = torch.empty(
-                (sample.shape[0] * self.tp_size, sample.shape[1]), dtype=sample.dtype, device=sample.device
+        sample = self.o_proj.weight
+        full_shape = (sample.shape[0] * self.tp_size, sample.shape[1])
+        pool_key = (sample.device.type, sample.device.index, sample.dtype, full_shape)
+        if pool_key not in AscendSFAImpl.o_proj_full_pools:
+            AscendSFAImpl.o_proj_full_pools[pool_key] = torch.empty(
+                full_shape, dtype=sample.dtype, device=sample.device
             )
+        self.o_proj_full_pool = AscendSFAImpl.o_proj_full_pools[pool_key]
 
         # Save TP-mode parameters (original sharded weights)
         self.o_proj_tp_weight = self.o_proj.weight.clone().detach()
@@ -885,7 +888,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     handle.wait()
 
             # Switch o_proj to Full-mode (gathered weight from all TP ranks)
-            self.o_proj.weight.set_(AscendSFAImpl.o_proj_full_pool)
+            self.o_proj.weight.set_(self.o_proj_full_pool)
             self._switch_o_proj_params(self.o_proj_full_aclnn_input_params)
             self._switch_o_proj_params(self.o_proj_full_input_sharded_quant_params)
 
@@ -1359,7 +1362,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             reach_layer_for_shard_weight_series(layer)
                 elif full_gather_o_proj_enabled:
                     _, o_proj_full_handle = all_gather_async(
-                        self.o_proj_tp_weight, get_tp_group(), output=AscendSFAImpl.o_proj_full_pool
+                        self.o_proj_tp_weight, get_tp_group(), output=self.o_proj_full_pool
                     )
                     o_proj_full_param_handles = []
                     for param_name, param in self.o_proj_tp_input_sharded_quant_params.items():
