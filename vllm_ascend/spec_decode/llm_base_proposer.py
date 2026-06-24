@@ -1040,6 +1040,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # in the context of the dummy‑run accompaniment of p‑eagle.
             if num_indices > max_num_reqs_across_dp:
                 ori_token_indices_to_sample = token_indices_to_sample
+            else:
+                ori_token_indices_to_sample = None
 
         if self.pcp_size > 1:
             # remove graph padding before all_gather
@@ -1072,29 +1074,25 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if get_ascend_config().enable_reduce_sample and self.method in ("eagle3", "dflash"):
             draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
             if lmhead_tp_enable():
-                if num_indices < draft_token_ids.shape[0]:
-                    draft_token_ids = draft_token_ids[:num_indices]
-                    token_indices_to_sample = token_indices_to_sample[:num_indices]
-                elif num_indices > draft_token_ids.shape[0]:
-                    # In the context of the dummy‑run accompaniment of p‑eagle, when num_indices becomes large,
-                    # enabling the LM head feature causes token_indices_to_sample to switch from padding to trimming.
-                    # The trimmed length may not be an integer multiple of the speculative length,
-                    # in which case padding is required to restore it to the original length.
-                    pad_size = num_indices - draft_token_ids.shape[0]
-                    draft_token_ids = nn.functional.pad(draft_token_ids, (0, pad_size))
-                    token_indices_to_sample = ori_token_indices_to_sample
+                draft_token_ids, token_indices_to_sample = self._align_tensor_and_indices(
+                    draft_token_ids,
+                    num_indices,
+                    token_indices_to_sample,
+                    ori_token_indices_to_sample,
+                    is_logits=False,
+                )
         else:
             if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
                 if not hasattr(self.model.model, "compute_logits"):
                     draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                     if lmhead_tp_enable():
-                        if num_indices < draft_token_ids.shape[0]:
-                            draft_token_ids = draft_token_ids[:num_indices]
-                            token_indices_to_sample = token_indices_to_sample[:num_indices]
-                        elif num_indices > draft_token_ids.shape[0]:
-                            pad_size = num_indices - draft_token_ids.shape[0]
-                            draft_token_ids = nn.functional.pad(draft_token_ids, (0, pad_size))
-                            token_indices_to_sample = ori_token_indices_to_sample
+                        draft_token_ids, token_indices_to_sample = self._align_tensor_and_indices(
+                            draft_token_ids,
+                            num_indices,
+                            token_indices_to_sample,
+                            ori_token_indices_to_sample,
+                            is_logits=False,
+                        )
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable():
@@ -1102,24 +1100,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     else:
                         logits = self.model.model.logits_processor._gather_logits(logits)
                     if lmhead_tp_enable():
-                        if num_indices < logits.shape[0]:
-                            logits = logits[:num_indices]
-                            token_indices_to_sample = token_indices_to_sample[:num_indices]
-                        elif num_indices > logits.shape[0]:
-                            pad_size = num_indices - logits.shape[0]
-                            logits = nn.functional.pad(logits, (0, 0, 0, pad_size), value=-1e9)
-                            token_indices_to_sample = ori_token_indices_to_sample
+                        logits, token_indices_to_sample = self._align_tensor_and_indices(
+                            logits,
+                            num_indices,
+                            token_indices_to_sample,
+                            ori_token_indices_to_sample,
+                            is_logits=True,
+                        )
                     draft_token_ids = logits.argmax(dim=-1)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
-                    if num_indices < logits.shape[0]:
-                        logits = logits[:num_indices]
-                        token_indices_to_sample = token_indices_to_sample[:num_indices]
-                    elif num_indices > logits.shape[0]:
-                        pad_size = num_indices - logits.shape[0]
-                        logits = nn.functional.pad(logits, (0, 0, 0, pad_size), value=-1e9)
-                        token_indices_to_sample = ori_token_indices_to_sample
+                    logits, token_indices_to_sample = self._align_tensor_and_indices(
+                        logits,
+                        num_indices,
+                        token_indices_to_sample,
+                        ori_token_indices_to_sample,
+                        is_logits=True,
+                    )
                 draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
@@ -2095,3 +2093,48 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if hidden_states is not None:
                     hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), True)
         return last_hidden_states, positions, hidden_states
+
+    # In the context of the dummy‑run accompaniment of p‑eagle, when num_indices becomes large,
+    # enabling the LM head feature causes token_indices_to_sample to switch from padding to trimming.
+    # The trimmed length may not be an integer multiple of the speculative length,
+    # in which case padding is required to restore it to the original length.
+    def _align_tensor_and_indices(
+        self,
+        tensor,
+        num_indices,
+        token_indices_to_sample,
+        ori_token_indices_to_sample,
+        is_logits=False,
+    ):
+        """
+        Align the tensor (either draft_token_ids or logits) and token_indices_to_sample to the length specified by num_indices.
+
+        Args:
+        tensor: The tensor to be aligned (draft_token_ids or logits)
+        num_indices: The target length
+        token_indices_to_sample: The current index tensor
+        ori_token_indices_to_sample: The original index tensor (used for restoration)
+        is_logits: Whether the tensor is logits (affects the padding dimension and padding value)
+
+        Returns:
+        The adjusted tensor and token_indices_to_sample
+        """
+        if tensor.shape[0] == num_indices:
+            return tensor, token_indices_to_sample
+
+        if tensor.shape[0] > num_indices:
+            # Trim to the target length.
+            tensor = tensor[:num_indices]
+            token_indices_to_sample = token_indices_to_sample[:num_indices]
+        else:
+            # Padding to the target length.
+            pad_size = num_indices - tensor.shape[0]
+            if is_logits:
+                # logits: shape [seq_len, vocab_size], Padding at the end of the seq dimension.
+                tensor = nn.functional.pad(tensor, (0, 0, 0, pad_size), value=-1e9)
+            else:
+                # draft_token_ids: shape [seq_len], Padding at the end
+                tensor = nn.functional.pad(tensor, (0, pad_size))
+            token_indices_to_sample = ori_token_indices_to_sample
+
+        return tensor, token_indices_to_sample
