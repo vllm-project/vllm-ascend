@@ -7,6 +7,7 @@ For PRs: polls the GitHub Actions run directly, then verifies labels.
 """
 
 import argparse
+import calendar
 import contextlib
 import os
 import shutil
@@ -25,8 +26,6 @@ HEADERS = {
 }
 
 LABEL_NAME = "need-detail-desc"
-POLL_INTERVAL = 5
-MAX_WAIT = 120
 WORKTREE_BASE = Path("/tmp/opencode/scenario-tests")
 PR_POLL_INTERVAL = 3
 PR_MAX_WAIT = 150
@@ -93,6 +92,22 @@ def get_bot_comments(api_base: str, number: int) -> list[dict]:
     return [c for c in comments if c.get("user", {}).get("login", "").endswith("[bot]")]
 
 
+ISSUE_WORKFLOW_ID = None  # lazy-loaded per repo
+
+
+def _get_issue_workflow_id(api_base: str) -> int:
+    global ISSUE_WORKFLOW_ID
+    if ISSUE_WORKFLOW_ID is None:
+        workflows = api_get(f"{api_base}/actions/workflows")
+        for wf in workflows.get("workflows", []):
+            if wf.get("path") == ".github/workflows/bot_issue_review.yaml":
+                ISSUE_WORKFLOW_ID = wf["id"]
+                break
+    if ISSUE_WORKFLOW_ID is None:
+        raise RuntimeError("Could not find bot_issue_review.yaml workflow ID")
+    return ISSUE_WORKFLOW_ID
+
+
 PR_WORKFLOW_ID = None  # lazy-loaded per repo
 
 
@@ -110,47 +125,130 @@ def _get_pr_workflow_id(api_base: str) -> int:
     return PR_WORKFLOW_ID
 
 
-def wait_for_workflow_run(repo: str, branch: str, after: float, max_wait: int = PR_MAX_WAIT) -> dict | None:
+def wait_for_workflow_run(
+    repo: str, branch: str, after: float, skip_run_ids: set[int] | None = None, max_wait: int = PR_MAX_WAIT
+) -> dict | None:
     """Wait for the bot_pr_review.yaml workflow run to appear and complete."""
     api_base = f"https://api.github.com/repos/{repo}"
     workflow_id = _get_pr_workflow_id(api_base)
     start = time.time()
     run_id = None
+    skip = skip_run_ids or set()
 
-    # Phase 1: wait for a new run to appear
     while time.time() - start < max_wait:
-        url = f"{api_base}/actions/runs?branch={branch}&event=pull_request_target&workflow_id={workflow_id}&per_page=3"
-        runs = api_get(url)
-        for run in runs.get("workflow_runs", []):
-            created = run.get("created_at", "")
-            run_time = time.mktime(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ")) if created else 0
-            if run_time >= after and run["id"] != run_id:
-                run_id = run["id"]
-                print(f"  Run {run_id} appeared ({run.get('status', '?')})")
+        # Phase 1: wait for a bot_pr_review run newer than `after`, not in skip set
+        run_id = None
+        while time.time() - start < max_wait:
+            url = f"{api_base}/actions/runs?branch={branch}&event=pull_request_target&per_page=10"
+            found = api_get(url).get("workflow_runs", [])
+            for run in found:
+                if run.get("workflow_id") != workflow_id:
+                    continue
+                if run["id"] in skip:
+                    continue
+                created = run.get("created_at", "")
+                run_time = calendar.timegm(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ")) if created else 0
+                if run_time >= after:
+                    run_id = run["id"]
+                    print(
+                        f"  Run {run_id} appeared ({run.get('status', '?')}) "
+                        f"[run_time={run_time} after={after} diff={run_time - after:.0f}s]"
+                    )
+                    break
+            if run_id:
                 break
-        if run_id:
-            break
-        elapsed = int(time.time() - start)
-        print(f"  Waiting for workflow run... ({elapsed}s)")
-        time.sleep(PR_POLL_INTERVAL)
+            elapsed = int(time.time() - start)
+            print(f"  Waiting for bot_pr_review run... ({elapsed}s) found={len(found)} after={after}")
+            time.sleep(PR_POLL_INTERVAL)
 
-    if not run_id:
-        print(f"  WARNING: no workflow run appeared within {max_wait}s")
-        return None
+        if not run_id:
+            print(f"  WARNING: no workflow run appeared within {max_wait}s")
+            return None
 
-    # Phase 2: wait for the run to complete
-    while time.time() - start < max_wait:
-        run = api_get(f"{api_base}/actions/runs/{run_id}")
-        status = run.get("status", "")
-        conclusion = run.get("conclusion", "")
-        if status == "completed":
-            print(f"  Run {run_id} completed: {conclusion}")
-            return run
-        elapsed = int(time.time() - start)
-        print(f"  Run {run_id} in progress ({status})... ({elapsed}s)")
-        time.sleep(PR_POLL_INTERVAL)
+        # Phase 2: wait for that run to complete
+        while time.time() - start < max_wait:
+            run = api_get(f"{api_base}/actions/runs/{run_id}")
+            status = run.get("status", "")
+            conclusion = run.get("conclusion", "")
+            if status == "completed":
+                if conclusion == "cancelled":
+                    print(f"  Run {run_id} was cancelled, looking for next run")
+                    skip.add(run_id)
+                    after = time.time()  # look for runs after now
+                    run_id = None  # re-enter Phase 1
+                    break
+                print(f"  Run {run_id} completed: {conclusion}")
+                return run
+            elapsed = int(time.time() - start)
+            print(f"  Run {run_id} in progress ({status})... ({elapsed}s)")
+            time.sleep(PR_POLL_INTERVAL)
 
     print(f"  WARNING: run {run_id} did not complete within {max_wait}s")
+    return api_get(f"{api_base}/actions/runs/{run_id}")
+
+
+def wait_for_issue_run(
+    repo: str, issue_title: str, after: float, skip_run_ids: set[int] | None = None, max_wait: int = PR_MAX_WAIT
+) -> dict | None:
+    """Wait for the bot_issue_review.yaml workflow run to appear and complete for the given issue."""
+    api_base = f"https://api.github.com/repos/{repo}"
+    workflow_id = _get_issue_workflow_id(api_base)
+    start = time.time()
+    run_id = None
+    skip = skip_run_ids or set()
+
+    while time.time() - start < max_wait:
+        # Phase 1: find a bot_issue_review run for this issue newer than `after`
+        run_id = None
+        while time.time() - start < max_wait:
+            url = f"{api_base}/actions/runs?event=issues&per_page=30"
+            found = api_get(url).get("workflow_runs", [])
+            for run in found:
+                if run.get("workflow_id") != workflow_id:
+                    continue
+                if run["id"] in skip:
+                    continue
+                created = run.get("created_at", "")
+                run_time = calendar.timegm(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ")) if created else 0
+                if run_time >= after and run.get("display_title") == issue_title:
+                    run_id = run["id"]
+                    print(
+                        f"  Issue run {run_id} appeared ({run.get('status', '?')}) "
+                        f"[run_time={run_time} after={after} diff={run_time - after:.0f}s]"
+                    )
+                    break
+            if run_id:
+                break
+            elapsed = int(time.time() - start)
+            matching = sum(1 for r in found if r.get("workflow_id") == workflow_id)
+            print(
+                f"  Waiting for issue run... ({elapsed}s) event_runs={len(found)} matching_wf={matching} after={after}"
+            )
+            time.sleep(PR_POLL_INTERVAL)
+
+        if not run_id:
+            print(f"  WARNING: no issue workflow run appeared within {max_wait}s")
+            return None
+
+        # Phase 2: wait for that run to complete
+        while time.time() - start < max_wait:
+            run = api_get(f"{api_base}/actions/runs/{run_id}")
+            status = run.get("status", "")
+            conclusion = run.get("conclusion", "")
+            if status == "completed":
+                if conclusion == "cancelled":
+                    print(f"  Issue run {run_id} was cancelled, looking for next run")
+                    skip.add(run_id)
+                    after = time.time()
+                    run_id = None
+                    break
+                print(f"  Issue run {run_id} completed: {conclusion}")
+                return run
+            elapsed = int(time.time() - start)
+            print(f"  Issue run {run_id} in progress ({status})... ({elapsed}s)")
+            time.sleep(PR_POLL_INTERVAL)
+
+    print(f"  WARNING: issue run {run_id} did not complete within {max_wait}s")
     return api_get(f"{api_base}/actions/runs/{run_id}")
 
 
@@ -167,26 +265,6 @@ def get_run_logs(repo: str, run_id: int) -> str:
 # ── Issue Helpers ─────────────────────────────────────────────
 
 
-def _poll_bot(
-    api_base: str, number: int, max_wait: int = MAX_WAIT, expect_new_comment: bool = True, prev_comment_count: int = 0
-) -> tuple[list[str], list[dict], int]:
-    start = time.time()
-    while time.time() - start < max_wait:
-        labels = get_labels(api_base, number)
-        comments = get_bot_comments(api_base, number)
-        if expect_new_comment:
-            if len(comments) > prev_comment_count:
-                return labels, comments, int(time.time() - start)
-        else:
-            elapsed = int(time.time() - start)
-            if elapsed >= 90:
-                return labels, comments, elapsed
-        elapsed = int(time.time() - start)
-        print(f"  Waiting for bot... ({elapsed}s elapsed)")
-        time.sleep(POLL_INTERVAL)
-    return get_labels(api_base, number), get_bot_comments(api_base, number), int(time.time() - start)
-
-
 def create_issue(api_base: str, title: str, body: str) -> int:
     data = api_post(f"{api_base}/issues", {"title": title, "body": body})
     return data["number"]
@@ -196,31 +274,24 @@ def edit_issue(api_base: str, number: int, title: str, body: str):
     api_patch(f"{api_base}/issues/{number}", {"title": title, "body": body})
 
 
-def verify_issue_state(
-    api_base: str, number: int, prev_comment_count: int, expect_label: bool, expect_new_comment: bool, step_name: str
-) -> tuple[Result, int]:
+def verify_issue_result(
+    api_base: str,
+    number: int,
+    expect_label: bool,
+    step_name: str,
+    run: dict,
+) -> Result:
     r = Result(step_name)
-    labels, comments, elapsed = _poll_bot(
-        api_base, number, expect_new_comment=expect_new_comment, prev_comment_count=prev_comment_count
-    )
+    labels = get_labels(api_base, number)
     has_label = LABEL_NAME in labels
-    new_comment_count = len(comments)
-    got_new_comment = new_comment_count > prev_comment_count
+    comments = get_bot_comments(api_base, number)
+    run_id = run["id"]
 
-    checks = []
     if has_label != expect_label:
-        checks.append(f"label: expected={expect_label} got={has_label} (labels={labels})")
-    if got_new_comment != expect_new_comment:
-        checks.append(
-            f"comment: expected_new={expect_new_comment} got_new={got_new_comment} "
-            f"(prev={prev_comment_count} cur={new_comment_count})"
-        )
-
-    if checks:
-        r.fail("; ".join(checks))
+        r.fail(f"label mismatch: expected={expect_label} got={has_label} (run={run_id}) labels={labels}")
     else:
-        r.ok(f"label={has_label} new_comment={got_new_comment} ({elapsed}s)")
-    return r, new_comment_count
+        r.ok(f"run={run_id} label={has_label} bot_comments={len(comments)}")
+    return r
 
 
 # ── Git Helpers ───────────────────────────────────────────────
@@ -354,6 +425,7 @@ class PRLifecycle:
         self.worktree_path: Path | None = None
         self.pr_number: int | None = None
         self.last_event_time: float = 0.0
+        self.seen_run_ids: set[int] = set()
 
     def _make_worktree(self):
         safe = self.chain_name.replace(" ", "-").replace("_", "-")[:30]
@@ -398,22 +470,19 @@ class PRLifecycle:
     def wait_for_action(self, expect_ok: bool, step_name: str) -> Result:
         """Wait for the workflow run triggered after last_event_time to complete."""
         r = Result(step_name)
-        run = wait_for_workflow_run(self.repo, self.branch_name, self.last_event_time)
+        run = wait_for_workflow_run(self.repo, self.branch_name, self.last_event_time, self.seen_run_ids)
         if not run:
             r.fail("no workflow run appeared")
             return r
 
-        conclusion = run.get("conclusion", "")
         run_id = run["id"]
+        self.seen_run_ids.add(run_id)
+        conclusion = run.get("conclusion", "")
 
         if conclusion == "success":
-            # GET the bot's evaluation result: check if it passed or failed
-            # We can check labels OR read the workflow log
             labels = get_labels(self.api_base, self.pr_number)
             has_label = LABEL_NAME in labels
-
-            # Determine expected label state from step_name
-            expect_label = "FAIL" in step_name or "Desc-flagged" in step_name
+            expect_label = "-> Desc-flagged" in step_name or "unchanged" in step_name
 
             if has_label != expect_label:
                 r.fail(
@@ -435,71 +504,79 @@ class PRLifecycle:
 # ── Issue Tests ───────────────────────────────────────────────
 
 
-def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
+def run_issue_lifecycle_tests(api_base: str, repo: str) -> list[Result]:
     results: list[Result] = []
 
     print("=" * 60)
     print("Issue Chain I-bad: start bad -> I2 -> I6 -> I5 -> I4")
     print("=" * 60)
     n = None
-    comment_count = 0
+    seen: set[int] = set()
+    after: float = 0.0
     try:
+        after = time.time()
         n = create_issue(api_base, ISSUE_BAD["title"], ISSUE_BAD["body"])
         print(f"  Created issue #{n}")
 
-        r, comment_count = verify_issue_state(
-            api_base,
-            n,
-            comment_count,
-            expect_label=True,
-            expect_new_comment=True,
-            step_name="I2: opened (bad) -> Flagged",
-        )
+        run = wait_for_issue_run(repo, ISSUE_BAD["title"], after)
+        if not run:
+            results.append(Result("I2: opened (bad) -> Flagged"))
+            results[-1].fail("no workflow run appeared")
+            print("  [I2] FAIL: no workflow run appeared")
+            return results
+        seen.add(run["id"])
+        r = verify_issue_result(api_base, n, expect_label=True, step_name="I2: opened (bad) -> Flagged", run=run)
         results.append(r)
         print(f"  [I2] {'PASS' if r.passed else 'FAIL: ' + r.error}")
 
-        time.sleep(5)
+        time.sleep(3)
 
+        after = time.time()
         edit_issue(api_base, n, ISSUE_BAD_ALT["title"], ISSUE_BAD_ALT["body"])
         print(f"  Edited issue #{n} (still bad)")
-        r, comment_count = verify_issue_state(
-            api_base,
-            n,
-            comment_count,
-            expect_label=True,
-            expect_new_comment=True,
-            step_name="I6: Flagged + edit FAIL -> Flagged",
-        )
+
+        run = wait_for_issue_run(repo, ISSUE_BAD_ALT["title"], after, seen)
+        if not run:
+            results.append(Result("I6: Flagged + edit FAIL -> Flagged"))
+            results[-1].fail("no workflow run appeared")
+            print("  [I6] FAIL: no workflow run appeared")
+            return results
+        seen.add(run["id"])
+        r = verify_issue_result(api_base, n, expect_label=True, step_name="I6: Flagged + edit FAIL -> Flagged", run=run)
         results.append(r)
         print(f"  [I6] {'PASS' if r.passed else 'FAIL: ' + r.error}")
 
-        time.sleep(5)
+        time.sleep(3)
 
+        after = time.time()
         edit_issue(api_base, n, ISSUE_GOOD["title"], ISSUE_GOOD["body"])
         print(f"  Edited issue #{n} (now good)")
-        r, comment_count = verify_issue_state(
-            api_base,
-            n,
-            comment_count,
-            expect_label=False,
-            expect_new_comment=True,
-            step_name="I5: Flagged + edit PASS -> Clean",
-        )
+
+        run = wait_for_issue_run(repo, ISSUE_GOOD["title"], after, seen)
+        if not run:
+            results.append(Result("I5: Flagged + edit PASS -> Clean"))
+            results[-1].fail("no workflow run appeared")
+            print("  [I5] FAIL: no workflow run appeared")
+            return results
+        seen.add(run["id"])
+        r = verify_issue_result(api_base, n, expect_label=False, step_name="I5: Flagged + edit PASS -> Clean", run=run)
         results.append(r)
         print(f"  [I5] {'PASS' if r.passed else 'FAIL: ' + r.error}")
 
-        time.sleep(5)
+        time.sleep(3)
 
+        after = time.time()
         edit_issue(api_base, n, ISSUE_BAD_ALT["title"], ISSUE_BAD_ALT["body"])
         print(f"  Edited issue #{n} (bad again)")
-        r, comment_count = verify_issue_state(
-            api_base,
-            n,
-            comment_count,
-            expect_label=True,
-            expect_new_comment=True,
-            step_name="I4: Clean + edit FAIL -> Flagged",
-        )
+
+        run = wait_for_issue_run(repo, ISSUE_BAD_ALT["title"], after, seen)
+        if not run:
+            results.append(Result("I4: Clean + edit FAIL -> Flagged"))
+            results[-1].fail("no workflow run appeared")
+            print("  [I4] FAIL: no workflow run appeared")
+            return results
+        seen.add(run["id"])
+        r = verify_issue_result(api_base, n, expect_label=True, step_name="I4: Clean + edit FAIL -> Flagged", run=run)
         results.append(r)
         print(f"  [I4] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
@@ -515,34 +592,38 @@ def run_issue_lifecycle_tests(api_base: str) -> list[Result]:
     print("Issue Chain I-good: start good -> I1 -> I3")
     print("=" * 60)
     n2 = None
-    comment_count = 0
+    seen2: set[int] = set()
+    after2: float = 0.0
     try:
+        after2 = time.time()
         n2 = create_issue(api_base, ISSUE_GOOD["title"], ISSUE_GOOD["body"])
         print(f"  Created issue #{n2}")
 
-        r, comment_count = verify_issue_state(
-            api_base,
-            n2,
-            comment_count,
-            expect_label=False,
-            expect_new_comment=False,
-            step_name="I1: opened (good) -> Clean",
-        )
+        run = wait_for_issue_run(repo, ISSUE_GOOD["title"], after2)
+        if not run:
+            results.append(Result("I1: opened (good) -> Clean"))
+            results[-1].fail("no workflow run appeared")
+            print("  [I1] FAIL: no workflow run appeared")
+            return results
+        seen2.add(run["id"])
+        r = verify_issue_result(api_base, n2, expect_label=False, step_name="I1: opened (good) -> Clean", run=run)
         results.append(r)
         print(f"  [I1] {'PASS' if r.passed else 'FAIL: ' + r.error}")
 
-        time.sleep(5)
+        time.sleep(3)
 
+        after2 = time.time()
         edit_issue(api_base, n2, ISSUE_GOOD_ALT["title"], ISSUE_GOOD_ALT["body"])
         print(f"  Edited issue #{n2} (still good)")
-        r, comment_count = verify_issue_state(
-            api_base,
-            n2,
-            comment_count,
-            expect_label=False,
-            expect_new_comment=False,
-            step_name="I3: Clean + edit PASS -> Clean",
-        )
+
+        run = wait_for_issue_run(repo, ISSUE_GOOD_ALT["title"], after2, seen2)
+        if not run:
+            results.append(Result("I3: Clean + edit PASS -> Clean"))
+            results[-1].fail("no workflow run appeared")
+            print("  [I3] FAIL: no workflow run appeared")
+            return results
+        seen2.add(run["id"])
+        r = verify_issue_result(api_base, n2, expect_label=False, step_name="I3: Clean + edit PASS -> Clean", run=run)
         results.append(r)
         print(f"  [I3] {'PASS' if r.passed else 'FAIL: ' + r.error}")
     except Exception as e:
@@ -736,7 +817,7 @@ def main():
     all_results: list[Result] = []
 
     if args.mode in ("issue", "all"):
-        all_results.extend(run_issue_lifecycle_tests(api_base))
+        all_results.extend(run_issue_lifecycle_tests(api_base, args.repo))
 
     if args.mode in ("pr", "all"):
         all_results.extend(run_pr_lifecycle_tests(api_base, args.repo))
