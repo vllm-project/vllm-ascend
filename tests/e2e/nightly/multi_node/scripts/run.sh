@@ -246,7 +246,7 @@ run_tests_with_log() {
                 --config-yaml "${CONFIG_YAML_PATH}" \
                 --bad-commit HEAD \
                 --coord-dir "${coord}" \
-                --release-file "${release}" || true
+                --release-file "${release}"
             while [ ! -f "$release" ]; do sleep 5; done
             echo "Worker: release signal received, exiting"
             exit 1
@@ -287,7 +287,7 @@ run_tests_with_log() {
             --config-yaml "${CONFIG_YAML_PATH}" \
             --bad-commit HEAD \
             --coord-dir "${coord}" \
-            --release-file "${release}" || true
+            --release-file "${release}"
         while [ ! -f "$release" ]; do sleep 5; done
         echo "Worker: release signal received, exiting"
         exit 1
@@ -440,8 +440,8 @@ aop_pipeline() {
         --bad-commit HEAD \
         --good-table "${table}" \
         --name "${case_name}" \
-        --coord-dir "${coord}" || true
-    echo "  bisect completed (exit code: ${PIPESTATUS[0]:-$?})"
+        --coord-dir "${coord}"
+    echo "  bisect completed (exit code: $?)"
     echo "=== AOP Pipeline (Pod) - END (bisect done) ==="
     return 1
 }
