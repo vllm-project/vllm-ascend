@@ -5,6 +5,7 @@ check and commit message check bots.
 """
 
 import os
+
 import requests
 
 DEFAULT_MAX_TOKENS = 2048

@@ -4,6 +4,7 @@ All functions read ``GITHUB_TOKEN`` and ``REPO`` from the environment.
 """
 
 import os
+
 import requests
 
 DEFAULT_TIMEOUT = 30
@@ -106,7 +107,7 @@ def manage_labels(
     Raises:
         requests.HTTPError: If any non-404 API call fails.
     """
-    for label in (remove or []):
+    for label in remove or []:
         try:
             remove_label(issue_number, label)
         except requests.HTTPError as e:
