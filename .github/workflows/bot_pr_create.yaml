@@ -29,7 +29,7 @@ jobs:
       contents: read
       pull-requests: write
     name: PR create action
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     steps:
