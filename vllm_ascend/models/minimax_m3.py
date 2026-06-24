@@ -937,6 +937,26 @@ def _get_minimax_m3_num_image_tokens(
     return int(num_patches) // (merge_size**2)
 
 
+def _get_minimax_m3_num_video_tokens(
+    video_processor: object,
+    *,
+    video_width: int,
+    video_height: int,
+    num_frames: int,
+) -> int:
+    patch_size = int(getattr(video_processor, "patch_size", 14))
+    merge_size = int(getattr(video_processor, "merge_size", 2))
+    temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 2))
+    padded_frames = num_frames
+    pad = -padded_frames % temporal_patch_size
+    if pad:
+        padded_frames += pad
+    grid_t = max(padded_frames // temporal_patch_size, 1)
+    grid_h = video_height // patch_size
+    grid_w = video_width // patch_size
+    return int(grid_t * grid_h * grid_w) // (merge_size**2)
+
+
 class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
     IMAGE_TOKEN = "]<]image[>["
     VIDEO_TOKEN = "]<]video[>["
@@ -952,15 +972,21 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_video_processor(self, **kwargs: object):
+        return self.get_hf_processor(**kwargs).video_processor
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
+        return {"image": None, "video": None}
 
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
+        return {
+            "image": self.get_max_image_tokens(),
+            "video": self.get_max_video_tokens(seq_len, mm_counts),
+        }
 
     def get_image_size_with_most_features(self) -> ImageSize:
         return _get_minimax_m3_image_size(self.get_image_processor())
@@ -974,12 +1000,52 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
             image_height=size.height,
         )
 
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        video_processor = self.get_video_processor()
+        size = self.get_image_size_with_most_features()
+        patch_size = int(getattr(video_processor, "patch_size", 14))
+        merge_size = int(getattr(video_processor, "merge_size", 2))
+        temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 2))
+        max_frames = int(getattr(video_processor, "max_frames", 768))
+
+        grid_h = max(size.height // patch_size, 1)
+        grid_w = max(size.width // patch_size, 1)
+        tokens_per_temporal_grid = max(grid_h * grid_w // (merge_size**2), 1)
+
+        num_images = mm_counts.get("image", 0)
+        num_videos = max(mm_counts.get("video", 0), 1)
+        remaining = max(seq_len - num_images * self.get_max_image_tokens(), 1)
+        max_grid_t = max(remaining // tokens_per_temporal_grid // num_videos, 1)
+        num_frames = max_grid_t * temporal_patch_size
+        return max(min(num_frames, max_frames), temporal_patch_size)
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        video_processor = self.get_video_processor()
+        size = self.get_image_size_with_most_features()
+        return _get_minimax_m3_num_video_tokens(
+            video_processor,
+            video_width=size.width,
+            video_height=size.height,
+            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+        )
+
 
 class MiniMaxM3VLDummyInputsBuilder(
     BaseDummyInputsBuilder[MiniMaxM3VLProcessingInfo]
 ):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.info.IMAGE_TOKEN * mm_counts.get("image", 0)
+        return (
+            self.info.IMAGE_TOKEN * mm_counts.get("image", 0)
+            + self.info.VIDEO_TOKEN * mm_counts.get("video", 0)
+        )
 
     def get_dummy_mm_data(
         self,
@@ -988,12 +1054,22 @@ class MiniMaxM3VLDummyInputsBuilder(
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         size = self.info.get_image_size_with_most_features()
+        num_frames = self.info.get_num_frames_with_most_features(
+            seq_len, mm_counts
+        )
         return {
             "image": self._get_dummy_images(
                 width=size.width,
                 height=size.height,
                 num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
+            ),
+            "video": self._get_dummy_videos(
+                width=size.width,
+                height=size.height,
+                num_frames=num_frames,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -1009,11 +1085,15 @@ class MiniMaxM3VLMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        video_processor = self.info.get_video_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
         image_token = getattr(
             hf_processor, "image_token", MiniMaxM3VLProcessingInfo.IMAGE_TOKEN
+        )
+        video_token = getattr(
+            hf_processor, "video_token", MiniMaxM3VLProcessingInfo.VIDEO_TOKEN
         )
         start_token = getattr(
             hf_processor,
@@ -1027,25 +1107,56 @@ class MiniMaxM3VLMultiModalProcessor(
         )
 
         image_token_id = vocab[image_token]
+        video_token_id = vocab[video_token]
         start_token_id = vocab[start_token]
         end_token_id = vocab[end_token]
-        merge_length = int(getattr(image_processor, "merge_size", 2)) ** 2
+        image_merge_length = int(getattr(image_processor, "merge_size", 2)) ** 2
+        video_merge_length = int(getattr(video_processor, "merge_size", 2)) ** 2
+        temporal_patch_size = int(
+            getattr(video_processor, "temporal_patch_size", 2)
+        )
+        fps = float(getattr(video_processor, "fps", 1.0) or 1.0)
 
         def get_image_replacement(item_idx: int):
             grid_thw = out_mm_kwargs["image"][item_idx]["image_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
-            num_tokens = int(grid_thw.prod().item()) // merge_length
+            num_tokens = int(grid_thw.prod().item()) // image_merge_length
             full = [start_token_id] + [image_token_id] * num_tokens + [
                 end_token_id
             ]
             return PromptUpdateDetails.select_token_id(full, image_token_id)
+
+        def get_video_replacement(item_idx: int):
+            grid_thw = out_mm_kwargs["video"][item_idx]["video_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            grid_t, grid_h, grid_w = [int(x) for x in grid_thw.tolist()]
+            frame_seqlen = grid_h * grid_w // video_merge_length
+
+            full: list[int] = []
+            for frame_idx in range(grid_t):
+                timestamp = frame_idx * temporal_patch_size / fps
+                full.extend(
+                    tokenizer.encode(
+                        f"]<]{timestamp:.1f} seconds[>[",
+                        add_special_tokens=False,
+                    )
+                )
+                full.append(start_token_id)
+                full.extend([video_token_id] * frame_seqlen)
+                full.append(end_token_id)
+            return PromptUpdateDetails.select_token_id(full, video_token_id)
 
         return [
             PromptReplacement(
                 modality="image",
                 target=[image_token_id],
                 replacement=get_image_replacement,
-            )
+            ),
+            PromptReplacement(
+                modality="video",
+                target=[video_token_id],
+                replacement=get_video_replacement,
+            ),
         ]
 
     def _get_mm_fields_config(
@@ -1059,12 +1170,24 @@ class MiniMaxM3VLMultiModalProcessor(
         else:
             image_grid_sizes = image_grid_thw.prod(-1)
 
+        video_grid_thw = hf_inputs.get("video_grid_thw")
+        if video_grid_thw is None:
+            video_grid_sizes = torch.empty(0, dtype=torch.long)
+        else:
+            video_grid_sizes = video_grid_thw.prod(-1)
+
         return {
             "pixel_values": MultiModalFieldConfig.flat_from_sizes(
                 "image", image_grid_sizes
             ),
             "image_grid_thw": MultiModalFieldConfig.batched(
                 "image", keep_on_cpu=True
+            ),
+            "pixel_values_videos": MultiModalFieldConfig.flat_from_sizes(
+                "video", video_grid_sizes
+            ),
+            "video_grid_thw": MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
             ),
         }
 
