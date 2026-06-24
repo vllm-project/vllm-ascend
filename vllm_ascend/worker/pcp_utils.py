@@ -249,12 +249,6 @@ class PCPManager:
         if self.num_prefill_reqs <= 0:
             return cu_num_scheduled_tokens
 
-        # Prepend 0 so per-req lengths come out of the diff cleanly. This
-        # also fixes the num_decode_reqs == 0 case, where the raw diff
-        # cu[1:] - cu[:-1] would drop the first req's length and the base
-        # below would index cu[-1] instead of 0.
-        padded_cu = np.concatenate(([0], cu_num_scheduled_tokens))
-
         prefill_lens = self.pcp_tokens[self.num_decode_reqs : self.num_decode_reqs + self.num_prefill_reqs]
         pads = copy.deepcopy(num_pcp_pads)
         pads[self.num_decode_reqs :] = np.cumsum(pads[self.num_decode_reqs :])
