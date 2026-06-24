@@ -28,11 +28,16 @@ class AscendNgramProposer(NgramProposer):
 
     def propose(
         self,
+        num_speculative_tokens: int,
         sampled_token_ids: list[list[int]],
         num_tokens_no_spec=None,
         token_ids_cpu=None,
         slot_masks: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     ) -> list[list[int]]:
+        # Dynamic speculative decoding may request fewer tokens than the
+        # configured maximum ``self.k``; the n-gram kernel honors any value
+        # up to ``self.k``.
+        assert num_speculative_tokens <= self.k
         valid_ngram_requests = []
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
@@ -59,6 +64,7 @@ class AscendNgramProposer(NgramProposer):
             valid_ngram_requests,
             self.runner.input_batch.num_tokens_no_spec,
             self.runner.input_batch.token_ids_cpu,
+            num_speculative_tokens,
         )
 
         return draft_token_ids
