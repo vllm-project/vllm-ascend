@@ -51,7 +51,10 @@ plugins.md029.enabled = false # ol-prefix
 # TODO: according to PEP8, there should be 120 characters per line
 line-length = 120
 # Folder to be modified
-exclude = []
+exclude = [
+    ".github/workflows/scripts/robot/tests/issues.csv",
+    ".github/workflows/scripts/robot/tests/prs.csv",
+]
 
 [tool.ruff.lint]
 select = [

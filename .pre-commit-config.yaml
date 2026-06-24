@@ -21,7 +21,7 @@ repos:
     - id: codespell
       args: [
         --toml, pyproject.toml,
-        '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml',
+        '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml,.github/workflows/scripts/robot/tests/issues.csv,.github/workflows/scripts/robot/tests/prs.csv',
         '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,outter,mata'
       ]
       additional_dependencies:
