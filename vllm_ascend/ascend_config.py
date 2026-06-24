@@ -723,11 +723,11 @@ class EplbConfig:
     _defaults = {
         "dynamic_eplb": False,
         "expert_map_path": None,
-        "expert_heat_collection_interval": 400,
-        "algorithm_execution_interval": 30,
+        "expert_heat_collection_interval": 600,
+        "algorithm_execution_interval": 50,
         "expert_map_record_path": None,
         "num_redundant_experts": 0,
-        "eplb_policy_type": 1,
+        "eplb_policy_type": 2,
         "eplb_heat_collection_stage": "all",
     }
 
