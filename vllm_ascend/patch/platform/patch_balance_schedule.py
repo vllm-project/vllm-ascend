@@ -25,6 +25,8 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
+from vllm_ascend.utils import vllm_version_is
+
 _ORIGINAL_RUN_ENGINE_CORE = EngineCoreProc.run_engine_core
 _ORIGINAL_SCHEDULER = Scheduler
 
@@ -81,7 +83,10 @@ class BalanceScheduler(Scheduler):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         if not self._balance_enabled:
-            return super().schedule(throttle_prefills)
+            if vllm_version_is("0.23.0"):
+                return super().schedule()
+            else:
+                return super().schedule(throttle_prefills)
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and

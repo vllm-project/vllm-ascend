@@ -27,10 +27,10 @@ class AscendNgramProposerNPU(NgramProposerGPU):
 
     def propose(
         self,
-        num_speculative_tokens: int,
         num_tokens_no_spec: torch.Tensor,  # [batch_size]
         token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
         valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
         valid_sampled_tokens_count: torch.Tensor,  # [batch_size]
+        num_speculative_tokens: int = 0,
     ):
         pass

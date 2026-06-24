@@ -24,8 +24,13 @@ from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
 from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401
 
-# TODO: @QwertyJack please fix this patch.
-_LEGACY_PARSER = False  # Always skip: legacy parser no longer supported
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.23.0"):
+    _LEGACY_PARSER = True
+else:
+    # TODO: @QwertyJack please fix this patch.
+    _LEGACY_PARSER = False  # Always skip: legacy parser no longer supported
 
 
 class _WrappedParser(DelegatingParser):

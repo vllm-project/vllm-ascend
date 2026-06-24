@@ -1,6 +1,8 @@
 import torch
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class AscendNgramProposer(NgramProposer):
     def __init__(self, vllm_config, runner):
@@ -28,10 +30,10 @@ class AscendNgramProposer(NgramProposer):
 
     def propose(
         self,
-        num_speculative_tokens: int,
         sampled_token_ids: list[list[int]],
         num_tokens_no_spec=None,
         token_ids_cpu=None,
+        num_speculative_tokens: int = 0,
         slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     ) -> list[list[int]]:
         valid_ngram_requests = []
@@ -55,12 +57,20 @@ class AscendNgramProposer(NgramProposer):
 
             valid_ngram_requests.append(i)
 
-        draft_token_ids = self.batch_propose(
-            len(sampled_token_ids),
-            valid_ngram_requests,
-            self.runner.input_batch.num_tokens_no_spec,
-            self.runner.input_batch.token_ids_cpu,
-            num_speculative_tokens,
-        )
+        if vllm_version_is("0.23.0"):
+            draft_token_ids = self.batch_propose(
+                len(sampled_token_ids),
+                valid_ngram_requests,
+                self.runner.input_batch.num_tokens_no_spec,
+                self.runner.input_batch.token_ids_cpu,
+            )
+        else:
+            draft_token_ids = self.batch_propose(
+                len(sampled_token_ids),
+                valid_ngram_requests,
+                self.runner.input_batch.num_tokens_no_spec,
+                self.runner.input_batch.token_ids_cpu,
+                num_speculative_tokens,
+            )
 
         return draft_token_ids

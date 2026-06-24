@@ -28,8 +28,11 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 
+
 # TODO: @QwertyJack please fix this patch.
-if False:
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.23.0"):
     _ANTHROPIC_MESSAGE_ROLES = Literal["user", "assistant", "system"]
 
     AnthropicMessage.__annotations__["role"] = _ANTHROPIC_MESSAGE_ROLES
@@ -38,60 +41,66 @@ if False:
     AnthropicMessagesRequest.model_rebuild(force=True)
     AnthropicCountTokensRequest.model_rebuild(force=True)
 
-    def _append_system_text(system_parts: list[str], text: str | None) -> None:
-        if not text:
-            return
-        if text.startswith("x-anthropic-billing-header"):
-            return
-        system_parts.append(text)
 
-    def _append_system_content(
-        system_parts: list[str],
-        content: str | list[Any],
-    ) -> None:
-        if isinstance(content, str):
-            _append_system_text(system_parts, content)
-            return
+def _append_system_text(system_parts: list[str], text: str | None) -> None:
+    if not text:
+        return
+    if text.startswith("x-anthropic-billing-header"):
+        return
+    system_parts.append(text)
 
-        for block in content:
-            if block.type == "text":
-                _append_system_text(system_parts, block.text)
 
-    def _patched_convert_system_message(
-        cls,
-        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
-        openai_messages: list[dict[str, Any]],
-    ) -> None:
-        system_parts: list[str] = []
+def _append_system_content(
+    system_parts: list[str],
+    content: str | list[Any],
+) -> None:
+    if isinstance(content, str):
+        _append_system_text(system_parts, content)
+        return
 
-        if anthropic_request.system:
-            _append_system_content(system_parts, anthropic_request.system)
+    for block in content:
+        if block.type == "text":
+            _append_system_text(system_parts, block.text)
 
-        for msg in anthropic_request.messages:
-            if msg.role == "system":
-                _append_system_content(system_parts, msg.content)
 
-        if system_parts:
-            openai_messages.append({"role": "system", "content": "".join(system_parts)})
+def _patched_convert_system_message(
+    cls,
+    anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+    openai_messages: list[dict[str, Any]],
+) -> None:
+    system_parts: list[str] = []
 
-    def _patched_convert_messages(
-        cls,
-        messages: list,
-        openai_messages: list[dict[str, Any]],
-    ) -> None:
-        for msg in messages:
-            if msg.role == "system":
-                continue
+    if anthropic_request.system:
+        _append_system_content(system_parts, anthropic_request.system)
 
-            openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
+    for msg in anthropic_request.messages:
+        if msg.role == "system":
+            _append_system_content(system_parts, msg.content)
 
-            if isinstance(msg.content, str):
-                openai_msg["content"] = msg.content
-            else:
-                cls._convert_message_content(msg, openai_msg, openai_messages)
+    if system_parts:
+        openai_messages.append({"role": "system", "content": "".join(system_parts)})
 
-            if not (msg.role == "user" and "content" not in openai_msg):
-                openai_messages.append(openai_msg)
 
+def _patched_convert_messages(
+    cls,
+    messages: list,
+    openai_messages: list[dict[str, Any]],
+) -> None:
+    for msg in messages:
+        if msg.role == "system":
+            continue
+
+        openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
+
+        if isinstance(msg.content, str):
+            openai_msg["content"] = msg.content
+        else:
+            cls._convert_message_content(msg, openai_msg, openai_messages)
+
+        if not (msg.role == "user" and "content" not in openai_msg):
+            openai_messages.append(openai_msg)
+
+
+if vllm_version_is("0.23.0"):
     AnthropicServingMessages._convert_system_message = classmethod(_patched_convert_system_message)
     AnthropicServingMessages._convert_messages = classmethod(_patched_convert_messages)

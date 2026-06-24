@@ -15,8 +15,13 @@ from vllm_ascend.patch.platform import (
     patch_minimax_m2_tool_call_parser as minimax_m2_patch,
 )
 
-# TODO: @QwertyJack please fix this patch.
-_LEGACY_PARSER = False  # Always skip: legacy parser no longer supported
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.23.0"):
+    _LEGACY_PARSER = True
+else:
+    # TODO: @QwertyJack please fix this patch.
+    _LEGACY_PARSER = False  # Always skip: legacy parser no longer supported
 
 TC_START_ID = 1
 TC_END_ID = 2

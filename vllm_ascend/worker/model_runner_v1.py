@@ -155,7 +155,7 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
     set_weight_prefetch_method,
-    should_skip_allreduce_across_dp_group,
+    should_skip_allreduce_across_dp_group, vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -1696,10 +1696,13 @@ class NPUModelRunner(GPUModelRunner):
             # Speculative decoding is not enabled.
             draft_token_ids = None
         elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
-            draft_token_ids = self.drafter.propose(
-                self.speculative_config.num_speculative_tokens,
-                valid_sampled_token_ids,
-            )
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+            else:
+                draft_token_ids = self.drafter.propose(
+                    self.speculative_config.num_speculative_tokens,
+                    valid_sampled_token_ids,
+                )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
@@ -1746,13 +1749,18 @@ class NPUModelRunner(GPUModelRunner):
                 batch_size,
             )
         elif isinstance(self.drafter, AscendMedusaProposer):
-            draft_token_ids = self.drafter.propose(
-                self.speculative_config.num_speculative_tokens,
-                valid_sampled_token_ids,
-                sampling_metadata,
-                spec_decode_metadata,
-                sample_hidden_states,
-            )
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(
+                    valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
+                )
+            else:
+                draft_token_ids = self.drafter.propose(
+                    self.speculative_config.num_speculative_tokens,
+                    valid_sampled_token_ids,
+                    sampling_metadata,
+                    spec_decode_metadata,
+                    sample_hidden_states,
+                )
         elif self.speculative_config.uses_extract_hidden_states():
             # Handle extract_hidden_states method
             assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
@@ -1767,12 +1775,19 @@ class NPUModelRunner(GPUModelRunner):
             common_attn_metadata = spec_decode_common_attn_metadata
             target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
 
-            draft_token_ids = self.drafter.propose(
-                self.speculative_config.num_speculative_tokens,
-                sampled_token_ids=valid_sampled_token_ids,
-                target_hidden_states=target_hidden_states,
-                common_attn_metadata=common_attn_metadata,
-            )
+            if vllm_version_is("0.23.0"):
+                draft_token_ids = self.drafter.propose(
+                    sampled_token_ids=valid_sampled_token_ids,
+                    target_hidden_states=target_hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                )
+            else:
+                draft_token_ids = self.drafter.propose(
+                    self.speculative_config.num_speculative_tokens,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    target_hidden_states=target_hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                )
             next_token_ids, valid_sampled_tokens_count = (
                 self.drafter.prepare_next_token_ids_padded(
                     valid_sampled_token_ids,

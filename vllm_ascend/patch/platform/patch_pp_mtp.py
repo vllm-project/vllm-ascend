@@ -29,6 +29,8 @@ from functools import wraps
 
 from vllm.logger import logger
 
+from vllm_ascend.utils import vllm_version_is
+
 _PATCHED = False
 
 
@@ -115,13 +117,10 @@ def _patch_v2_model_runner_supported() -> None:
 def _apply_patch() -> None:
     global _PATCHED
     if _PATCHED:
-        logger.info("[Patch] patch_pp_mtp already applied, skipping")
         return
     _PATCHED = True
-    logger.info("[Patch] Applying patch_pp_mtp patches...")
     _patch_model_config_validation()
-    _patch_v2_model_runner_supported()
-    logger.info("[Patch] patch_pp_mtp patches applied successfully")
-
+    if vllm_version_is("0.23.0"):
+        _patch_v2_model_runner_supported()
 
 _apply_patch()
