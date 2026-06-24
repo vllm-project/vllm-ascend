@@ -50,7 +50,7 @@ jobs:
           (
             github.event.action == 'opened' ||
             github.event.action == 'reopened' ||
-            (github.event.action == 'edited' && (github.event.changes.title || github.event.changes.body)) ||
+            github.event.action == 'edited' ||
             (github.event.action == 'synchronize' && github.event.changes.body)
           )
         env:
