@@ -451,11 +451,13 @@
   source_file_dependencies:
     - vllm_ascend/spec_decode/llm_base_proposer.py
     - vllm_ascend/spec_decode/eagle_proposer.py
+    - vllm_ascend/models/llama_eagle3_vwn.py
   tests:
     - tests/e2e/pull_request/one_card/spec_decode/test_eagle.py
     - tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py
     - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py
     - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
+    - tests/ut/spec_decode/test_speculators_vwn_eagle3.py
 
 - name: spec_decode_ngram
   optional: false

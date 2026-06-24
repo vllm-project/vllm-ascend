@@ -10,7 +10,7 @@ To facilitate reproduction and deployment, vLLM Ascend supports the deployed EP 
 
 ## How to Use EPLB?
 
-Please refer to the EPLB section of the user guide for detailed information: [How to Use EPLB](../../user_guide/feature_guide/eplb_swift_balancer.md)
+Please refer to the EPLB section of the user guide for detailed information: [How to Use EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md)
 
 ## How It Works?
 

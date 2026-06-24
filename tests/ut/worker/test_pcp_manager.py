@@ -11,6 +11,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import math
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -424,3 +425,116 @@ def test_generate_pcp_mtp_input(
         target_input_ids_pcp_full)
     assert torch.equal(pcp_manager.query_start_loc_pcp_full.cpu[:num_reqs + 1],
                        target_query_start_loc_pcp_full)
+
+
+def _realistic_num_pcp_pads(
+    num_scheduled_tokens: list[int],
+    pcp_world_size: int,
+    num_decode_reqs: int,
+) -> list[int]:
+    """Compute num_pcp_pads exactly as PCPManager.update_tokens_for_pcp would.
+
+    Decode reqs duplicate tokens across pcp_world_size ranks, so their pad
+    count is num_tokens * (pcp_world_size - 1). Prefill reqs are padded up
+    to a multiple of 2 * pcp_world_size, so their pad count is the difference
+    between the padded and original length.
+    """
+    pads: list[int] = []
+    pad_multiple = 2 * pcp_world_size
+    for i, n in enumerate(num_scheduled_tokens):
+        if i < num_decode_reqs:
+            pads.append(n * (pcp_world_size - 1))
+        else:
+            padded = math.ceil(n / pad_multiple) * pad_multiple
+            pads.append(padded - n)
+    return pads
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    "pcp_size, num_scheduled_tokens, num_decode_reqs,"
+    " expected_cu_num_scheduled_tokens",
+    [
+        # Case 1: no prefill reqs -> returned unchanged.
+        (2, [1, 1], 2, [1, 2]),
+        # Case 2: prefill only (num_decode_reqs == 0). Exercises the case where
+        # the diff-based per-req length derivation would otherwise drop the
+        # first req's length.
+        #   num_scheduled=[3, 5], realistic pads=[1, 3] -> cumsum=[1, 4]
+        #   cu=[3, 8]; padded prefill_lens=[4, 8]; base=0
+        #   prefill_cu=[4, 12]; final = [4*2-1, 12*2-4] = [7, 20]
+        (2, [3, 5], 0, [7, 20]),
+        # Case 3: mix decode + prefill, pcp_size=2.
+        #   num_scheduled=[1, 1, 3, 5], realistic pads=[1, 1, 1, 3]
+        #   prefill pads cumsum=[1, 4]
+        #   cu=[1, 2, 5, 10]; padded prefill_lens=[4, 8]; base=cu[1]=2
+        #   prefill_cu=[6, 14]; final[2:] = [12, 28] - [1, 4] = [11, 24]
+        (2, [1, 1, 3, 5], 2, [1, 2, 11, 24]),
+        # Case 4: pcp_size=4, mix decode + prefill with uneven prefill tokens.
+        #   num_scheduled=[1, 1, 5, 9], realistic pads=[3, 3, 3, 7]
+        #   prefill pads cumsum=[3, 10]
+        #   cu=[1, 2, 7, 16]; padded prefill_lens=[8, 16]; base=cu[1]=2
+        #   prefill_cu=[10, 26]; final[2:] = [40, 104] - [3, 10] = [37, 94]
+        (4, [1, 1, 5, 9], 2, [1, 2, 37, 94]),
+        # Case 5: single prefill req, pcp_size=2.
+        #   num_scheduled=[7], realistic pads=[1]
+        #   cu=[7]; padded prefill_lens=[8]; base=0
+        #   prefill_cu=[8]; final = [8*2-1] = [15]
+        (2, [7], 0, [15]),
+        # Case 6: prefill req that's already aligned to 2*pcp_size.
+        #   num_scheduled=[8], realistic pads=[0]
+        #   cu=[8]; padded prefill_lens=[8]; base=0
+        #   prefill_cu=[8]; final = [8*2-0] = [16]
+        (2, [8], 0, [16]),
+    ],
+)
+# yapf: enable
+def test_adjust_cu_num_scheduled_tokens_for_pcp(
+    pcp_size,
+    num_scheduled_tokens,
+    num_decode_reqs,
+    expected_cu_num_scheduled_tokens,
+):
+    vllm_config = MagicMock()
+    vllm_config.model_config = MagicMock()
+    vllm_config.speculative_config.num_speculative_tokens = 0
+
+    pcp_manager = PCPManager(
+        pcp_world_size=pcp_size,
+        pcp_rank=0,
+        dcp_world_size=1,
+        dcp_rank=0,
+        max_buffer_num_tokens=10000,
+        max_num_reqs=1000,
+        device="cpu",
+        vllm_config=vllm_config,
+        use_async_scheduling=False,
+        pin_memory=False,
+    )
+
+    num_reqs = len(num_scheduled_tokens)
+    cu_num_scheduled_tokens = np.cumsum(
+        np.array(num_scheduled_tokens, dtype=np.int32)
+    )
+    # Use realistic pads that match what update_tokens_for_pcp would produce
+    # for the given num_scheduled_tokens / pcp_world_size combination.
+    # Tests previously fed zeros for prefill pads, which made the math look
+    # correct but never exercised the real runtime path.
+    num_pcp_pads = np.array(
+        _realistic_num_pcp_pads(num_scheduled_tokens, pcp_size, num_decode_reqs),
+        dtype=np.int32,
+    )
+
+    # Seed the manager state normally populated by init_batch_info.
+    pcp_manager.num_decode_reqs = num_decode_reqs
+    pcp_manager.num_prefill_reqs = num_reqs - num_decode_reqs
+
+    result = pcp_manager.adjust_cu_num_scheduled_tokens_for_pcp(
+        cu_num_scheduled_tokens, num_pcp_pads
+    )
+
+    assert np.array_equal(
+        result, np.array(expected_cu_num_scheduled_tokens, dtype=np.int32)
+    ), (
+        f"Expected {expected_cu_num_scheduled_tokens}, got {result.tolist()}"
+    )
