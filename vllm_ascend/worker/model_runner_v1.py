@@ -1701,8 +1701,8 @@ class NPUModelRunner(GPUModelRunner):
                 draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
             else:
                 draft_token_ids = self.drafter.propose(
-                    self.speculative_config.num_speculative_tokens,
                     valid_sampled_token_ids,
+                    num_speculative_tokens=self.speculative_config.num_speculative_tokens,
                 )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])

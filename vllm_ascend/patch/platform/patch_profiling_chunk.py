@@ -29,12 +29,14 @@ an import of this module, which re-applies the ``EngineCore.__init__``
 patches inside the child process before any ``EngineCore`` is instantiated.
 """
 
+from collections.abc import Callable
+
 from vllm.logger import logger
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
 _profiling_patches_applied = False
-_original_update_from_output = None
-_original_schedule = None
+_original_update_from_output: Callable | None = None
+_original_schedule: Callable | None = None
 
 
 # ---------------------------------------------------------------------------

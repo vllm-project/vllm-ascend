@@ -499,7 +499,7 @@ def graph_manager_wrapper(model_runner):
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
-        lora_capture_cases: list[int] = None,
+        lora_capture_cases: list[int] | None = None,
     ):
         return ModelAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, model_runner)
 
