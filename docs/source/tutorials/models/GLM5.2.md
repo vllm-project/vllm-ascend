@@ -969,7 +969,7 @@ python load_balance_proxy_server_example.py \
       $node_d1_ip \
     --decoder-ports \
       9900 9901 9902 9903 \
-      9900 9901 9902 9903 \  
+      9900 9901 9902 9903
 ```
 
 #### Deployment on 8 Atlas 800 A2
@@ -1197,7 +1197,7 @@ python load_balance_proxy_server_example.py \
       $node_d3_ip \
     --decoder-ports \
       9900 9901 9900 9901 \
-      9900 9901 9900 9901 \  
+      9900 9901 9900 9901
 ```
 
 **Notice:**
