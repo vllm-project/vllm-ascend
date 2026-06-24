@@ -260,6 +260,11 @@ def build_runner(inp: BisectInput, opt: BisectOptions, builder: BuildManager):
     """Factory: pick the runner for the scene."""
     if inp.scene == "multi_node":
         coord = Coordinator(opt.coord_dir, opt.num_nodes, opt.node_index)
+        if opt.is_master:
+            # Clear stale DONE/round_* from a previous run before driving (the
+            # coord dir is usually on a persistent PVC). Safe: workers only write
+            # ready files after round 1 is published, which happens after this.
+            coord.reset()
         return MultiNodeRunner(inp, opt, builder, coord)
     return SingleNodeRunner(inp, opt, builder)
 
