@@ -123,7 +123,8 @@ def wait_for_workflow_run(repo: str, branch: str, after: float, max_wait: int = 
         runs = api_get(url)
         for run in runs.get("workflow_runs", []):
             created = run.get("created_at", "")
-            if created and created >= after and run["id"] != run_id:
+            run_time = time.mktime(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ")) if created else 0
+            if run_time >= after and run["id"] != run_id:
                 run_id = run["id"]
                 print(f"  Run {run_id} appeared ({run.get('status', '?')})")
                 break
