@@ -51,7 +51,9 @@ def _iter_kv_cache_specs(kv_cache_config: KVCacheConfig) -> Iterable[KVCacheSpec
 
 
 def _is_sliding_window_spec(kv_cache_spec: KVCacheSpec) -> bool:
-    return isinstance(kv_cache_spec, SlidingWindowSpec) or kv_cache_spec.__class__.__name__ == "SlidingWindowMLASpec"
+    return isinstance(kv_cache_spec, SlidingWindowSpec) or kv_cache_spec.__class__.__name__.endswith(
+        "SlidingWindowMLASpec"
+    )
 
 
 def _validate_prefix_cache_retention_interval(
@@ -396,6 +398,67 @@ def _patch_single_type_cache_blocks() -> None:
     SlidingWindowManager.reachable_block_mask = classmethod(_sliding_window_reachable_block_mask)  # type: ignore[attr-defined]
 
 
+def _patch_sliding_window_find_longest_cache_hit() -> None:
+    def find_longest_cache_hit(
+        cls: type[SlidingWindowManager],
+        block_hashes: Any,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+        alignment_tokens: int,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        assert _is_sliding_window_spec(kv_cache_spec)
+        assert dcp_world_size == 1, "DCP not support sliding window attn now."
+        assert pcp_world_size == 1, "PCP not support sliding window attn now."
+
+        need = _contiguous_blocks_for_hit(
+            window_size=kv_cache_spec.sliding_window,
+            block_size=kv_cache_spec.block_size,
+            use_eagle=use_eagle,
+        )
+        max_num_blocks = max_length // kv_cache_spec.block_size
+        computed_blocks = tuple([block_pool.null_block] * max_num_blocks for _ in range(len(kv_cache_group_ids)))
+        block_size = kv_cache_spec.block_size
+        num_contiguous_blocks = 0
+        match_found = False
+        for i in range(max_num_blocks - 1, -1, -1):
+            cached_block = block_pool.get_cached_block(block_hashes[i], kv_cache_group_ids)
+            if cached_block:
+                if num_contiguous_blocks == 0 and block_size != alignment_tokens:
+                    post_pop_blocks = i if use_eagle else i + 1
+                    if post_pop_blocks * block_size % alignment_tokens != 0:
+                        continue
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed[i] = cached
+                num_contiguous_blocks += 1
+                if num_contiguous_blocks >= need:
+                    for computed in computed_blocks:
+                        del computed[i + num_contiguous_blocks :]
+                    match_found = True
+                    break
+            else:
+                num_contiguous_blocks = 0
+        if not match_found:
+            for computed in computed_blocks:
+                del computed[num_contiguous_blocks:]
+            while block_size != alignment_tokens and len(computed_blocks[0]) * block_size % alignment_tokens != 0:
+                for computed in computed_blocks:
+                    computed.pop()
+        if use_eagle and computed_blocks[0]:
+            for computed in computed_blocks:
+                computed.pop()
+            while block_size != alignment_tokens and len(computed_blocks[0]) * block_size % alignment_tokens != 0:
+                for computed in computed_blocks:
+                    computed.pop()
+        return computed_blocks
+
+    SlidingWindowManager.find_longest_cache_hit = classmethod(find_longest_cache_hit)  # type: ignore[method-assign]
+
+
 def _patch_sliding_window_free() -> None:
     def remove_skipped_blocks(
         self: SingleTypeKVCacheManager,
@@ -558,5 +621,6 @@ _patch_block_pool_free_blocks()
 _patch_block_pool_cache_full_blocks()
 _patch_compress_manager_factory()
 _patch_single_type_cache_blocks()
+_patch_sliding_window_find_longest_cache_hit()
 _patch_sliding_window_free()
 _patch_upstream_coordinators()
