@@ -14,12 +14,14 @@ Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user
 
 ## Environment Preparation
 
+Release v0.13.0 or later versions are all acceptable.
+
 ### Model Weight
 
-- `Qwen3-Omni-30B-A3B-Thinking` requires 2 NPU Cards (64G × 2).[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
+- `Qwen3-Omni-30B-A3B-Thinking` requires 2 NPU 910B Cards (64G × 2)（or 1 card Ascend910）.[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
-### Installation
+## Installation
 
 :::::{tab-set}
 ::::{tab-item} Use docker image
