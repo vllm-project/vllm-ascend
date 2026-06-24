@@ -60,9 +60,8 @@ from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enab
 def patch_tensor_parallel_group(tp_group):
     """Temporarily swap the global TP group for draft-model spec decode.
 
-    Backports vllm 0.21's ``patch_tensor_parallel_group`` which was removed
-    on vLLM main. Used so the draft model can run with a TP degree that
-    differs from the target model.
+    vllm-ascend local implementation for swapping the global TP group so the
+    draft model can run with a TP degree that differs from the target model.
     """
     old_tp_group = _ps.get_tp_group()
     _ps._TP_STATE_PATCHED = True
@@ -1651,13 +1650,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_step,
                 common_attn_metadata,
                 **extra_attn_metadata_args,
-            )
-        elif hasattr(attn_metadata_builder, "build_for_drafting"):
-            # e.g. SFA (dsa_cp): route draft steps through a draft-aware build so
-            # per-draft-step buffers are used and cross-step aliasing is avoided.
-            attn_metadata = attn_metadata_builder.build_for_drafting(
-                draft_step,
-                common_attn_metadata,
             )
         else:
             attn_metadata = attn_metadata_builder.build(
