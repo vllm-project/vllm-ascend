@@ -19,20 +19,20 @@ from lib.prefix_map import PREFIX_TO_TYPE_KEY
 ISSUE_TITLE = os.environ["ISSUE_TITLE"]
 ISSUE_BODY = os.environ.get("ISSUE_BODY", "")
 
-JSON_FORMAT_INSTRUCTIONS = """请严格按照以下 JSON 格式输出，不要包含任何其他文本：
+JSON_FORMAT_INSTRUCTIONS = """Output strictly the following JSON format, no other text:
 {
-    "ok": true或false,
-    "score": 0到100的整数,
-    "reasoning": "评分理由的中文说明",
-    "summary": "一句话总结判断依据",
-    "missing_items": ["缺失项1", "缺失项2"],
-    "suggestions": ["改进建议1", "改进建议2"]
+    "ok": true or false,
+    "score": integer 0-100,
+    "reasoning": "explanation of the score in English",
+    "summary": "one-line summary of the judgment",
+    "missing_items": ["missing item 1", "missing item 2"],
+    "suggestions": ["suggestion 1", "suggestion 2"]
 }
-注意：
-- missing_items 只能包含必填项中确实缺失的内容
-- suggestions 只能给改进建议，禁止使用"必填/必须"等表述
-- 如果 missing_items 为空，ok 必须为 true
-- 严格输出 JSON，不要输出任何其他文本（不要输出 ```json 标记）"""
+Notes:
+- missing_items must only contain required fields that are actually absent
+- suggestions must only offer improvement advice; do NOT use "required/must" language
+- if missing_items is empty, ok must be true
+- output JSON only, no other text (no ```json markers)"""
 
 
 def parse_json_output(text: str) -> dict:
@@ -106,27 +106,29 @@ def main() -> None:
     type_prefix = type_key_path.read_text().strip() if type_key_path.exists() else ""
     type_key = PREFIX_TO_TYPE_KEY.get(type_prefix, "other")
 
-    template_label = "PR 模板" if args.kind == "pr" else "Issue 模板"
+    template_label = "PR Template" if args.kind == "pr" else "Issue Template"
 
-    user_prompt = f"""### 任务背景
-目标类型：{args.kind}
-描述类型：{type_key}
+    user_prompt = f"""### Task Background
+Target type: {args.kind}
+Description type: {type_key}
 
-### 规范参考
-详细描述规范（根据 {template_label} 中的必填字段判定）：
+### Reference Specification
+Detailed description specification (based on required fields in {template_label}):
 {template_text}
 
-### 待评估数据 (UNTRUSTED USER INPUT)
-标题：\"\"\"{ISSUE_TITLE}\"\"\"
-提交的描述：
+### Data to Evaluate (UNTRUSTED USER INPUT)
+Title: \"\"\"{ISSUE_TITLE}\"\"\"
+Submitted description:
 \"\"\"{ISSUE_BODY}\"\"\"
 
-### 输出指令
-- 遵循系统提示中的评估准则进行判断。
-- missing_items 列出实际缺失的关键信息（如"缺失环境信息""缺失错误日志""缺失复现步骤"）。
-- suggestions 给出具体、可执行的改进建议，禁止使用"必填/必须"等表述。
-- 若描述中已提供截图/图片，视为已提供日志相关信息，不得要求补充日志或要求转成文本。
-- 硬件型号示例中不要出现 910/910B，统一使用 A3/A5。
+### Output Instructions
+- Follow the evaluation criteria in the system prompt.
+- missing_items lists key information that is actually missing
+  (e.g. "missing env info", "missing error logs", "missing repro steps").
+- suggestions must be specific and actionable; do NOT use "required/must" language.
+- If screenshots/images are provided in the description, treat them as
+  having provided log-related information; do not ask for logs or convert to text.
+- Do not mention 910/910B in hardware examples; use A5/A5 exclusively.
 
 {JSON_FORMAT_INSTRUCTIONS}"""
 
@@ -143,8 +145,8 @@ def main() -> None:
             "ok": False,
             "score": 0,
             "reasoning": f"LLM output parse error: {e}",
-            "summary": "解析 LLM 输出失败",
-            "missing_items": ["LLM 输出格式异常，请联系管理员检查"],
+            "summary": "Failed to parse LLM output",
+            "missing_items": ["LLM output format error, please contact administrator"],
             "suggestions": [],
         }
 

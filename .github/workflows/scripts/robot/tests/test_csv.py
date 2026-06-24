@@ -40,62 +40,64 @@ from lib.prefix_map import PREFIX_TO_TYPE_KEY, extract_issue_type
 from lib.prompts import load_system_prompt
 from lib.templates import load_issue_template, load_pr_template
 
-JSON_FORMAT_INSTRUCTIONS = """请严格按照以下 JSON 格式输出，不要包含任何其他文本：
+JSON_FORMAT_INSTRUCTIONS = """Output strictly the following JSON format, no other text:
 {
-    "ok": true或false,
-    "score": 0到100的整数,
-    "reasoning": "评分理由的中文说明",
-    "summary": "一句话总结判断依据",
-    "missing_items": ["缺失项1", "缺失项2"],
-    "suggestions": ["改进建议1", "改进建议2"]
+    "ok": true or false,
+    "score": integer 0-100,
+    "reasoning": "explanation of the score in English",
+    "summary": "one-line summary of the judgment",
+    "missing_items": ["missing item 1", "missing item 2"],
+    "suggestions": ["suggestion 1", "suggestion 2"]
 }
-注意：
-- missing_items 只能包含必填项中确实缺失的内容
-- suggestions 只能给改进建议，禁止使用"必填/必须"等表述
-- 如果 missing_items 为空，ok 必须为 true
-- 严格输出 JSON，不要输出任何其他文本（不要输出 ```json 标记）"""
+Notes:
+- missing_items must only contain required fields that are actually absent
+- suggestions must only offer improvement advice; do NOT use "required/must" language
+- if missing_items is empty, ok must be true
+- output JSON only, no other text (no ```json markers)"""
 
-JUDGE_SYSTEM_PROMPT = """你是一个评审质量审核员。
-你的任务是审核另一个 LLM（评审 Bot）对 Issue/PR 描述完整性的评审结果是否正确。
+JUDGE_SYSTEM_PROMPT = """You are a review quality auditor.
+Your task is to audit whether another LLM (Review Bot)'s evaluation
+of Issue/PR description completeness is correct.
 
-审核维度：
-1. **ok 判断是否合理**：评审 Bot 给出的 ok=true/false 是否符合实际情况。判断标准：
-   - 如果描述确实是高质量的（信息充分、清晰），ok 应为 true
-   - 如果描述严重缺失关键信息（空描述、无实质性内容），ok 应为 false
-   - 评分标准应与描述质量一致
+Audit dimensions:
+1. **Is the ok judgment reasonable**: Whether the Review Bot's ok=true/false matches the actual situation. Criteria:
+   - If the description is truly high-quality (informative, clear), ok should be true
+   - If the description severely lacks key information (empty, no substance), ok should be false
+   - The scoring standard should match the description quality
 
-2. **missing_items 是否准确**：missing_items 中列出的缺失项是否真的缺失：
-   - 如果描述的确定中已经包含了某项信息，不应列为缺失
-   - 缺失项应该是必填信息，不应包含可选项目
+2. **Are missing_items accurate**: Whether the items listed in missing_items are genuinely missing:
+   - If the description already contains certain information, it should not be listed as missing
+   - Missing items should be required information, not optional items
 
-3. **suggestions 是否有效**：改进建议是否：
-   - 具体、可执行（不是泛泛而谈）
-   - 没有使用"必填""必须"等强制性表述
-   - 是对缺失信息的建设性补充引导
+3. **Are suggestions effective**: Whether the improvement suggestions are:
+   - Specific and actionable (not vague generalities)
+   - Do not use "required"/"must" type language
+   - Constructive guidance for supplementing missing information
 
-4. **reasoning 是否自洽**：评审理由是否与 ok 判断和 score 一致，逻辑是否连贯。
+4. **Is reasoning self-consistent**: Whether the review reasoning aligns
+   with ok judgment and score, and the logic is coherent.
 
-输出格式：
+Output format:
 {
-    "ok_reasonable": true或false,
-    "reasoning_valid": true或false,
-    "suggestions_valid": true或false,
-    "judge_reasoning": "整体审核说明，指出具体问题"
+    "ok_reasonable": true or false,
+    "reasoning_valid": true or false,
+    "suggestions_valid": true or false,
+    "judge_reasoning": "overall audit notes, pointing out specific issues"
 }
 
-注意：
-- 严格输出 JSON，不要输出任何其他文本（不要输出 ```json 标记）
-- judge_reasoning 用中文，简洁指出审核结论和问题
+Notes:
+- Output JSON only, no other text (no ```json markers)
+- judge_reasoning should be concise, stating the audit conclusion and issues
 """
 
-JUDGE_JSON_FORMAT = """请严格按照以下 JSON 格式输出：
+JUDGE_JSON_FORMAT = """Output strictly the following JSON format:
 {
-    "ok_reasonable": true或false,
-    "reasoning_valid": true或false,
-    "suggestions_valid": true或false,
-    "judge_reasoning": "整体审核说明"
+    "ok_reasonable": true or false,
+    "reasoning_valid": true or false,
+    "suggestions_valid": true or false,
+    "judge_reasoning": "overall audit notes"
 }
-注意：严格输出 JSON，不要输出任何其他文本（不要输出 ```json 标记）"""
+Notes: output JSON only, no other text (no ```json markers)"""
 
 
 def build_judge_prompt(row: dict, kind: str) -> str:
@@ -112,22 +114,22 @@ def build_judge_prompt(row: dict, kind: str) -> str:
     except Exception:
         eval_summary = raw_output[:2000]
 
-    return f"""### 待审核的原始内容
-{kind_label} 标题：{title}
-{kind_label} 描述：
+    return f"""### Original Content to Audit
+{kind_label} title: {title}
+{kind_label} description:
 \"\"\"{body}\"\"\"
 
-### 评审 Bot 的输出
-预期 ok 判断：{expected_ok}
-评审详细输出：
+### Review Bot Output
+Expected ok judgment: {expected_ok}
+Detailed review output:
 {eval_summary}
 
-### 审核任务
-请审核评审 Bot 的输出是否正确：
-- ok 判断是否合理？
-- reasoning 是否自洽？
-- suggestions 是否有效且不包含"必填"等强制表述？
-- missing_items 中列出的缺失项是否真的缺失？
+### Audit Task
+Please audit whether the Review Bot's output is correct:
+- Is the ok judgment reasonable?
+- Is the reasoning self-consistent?
+- Are the suggestions effective and free of "required"/"must" language?
+- Are the items in missing_items genuinely missing?
 
 {JUDGE_JSON_FORMAT}"""
 
@@ -193,26 +195,28 @@ def validate_result(data: dict) -> dict:
 
 
 def build_user_prompt(title: str, body: str, template_text: str, type_key: str, kind: str = "issue") -> str:
-    template_label = "PR 模板" if kind == "pr" else "Issue 模板"
-    return f"""### 任务背景
-目标类型：{kind}
-描述类型：{type_key}
+    template_label = "PR Template" if kind == "pr" else "Issue Template"
+    return f"""### Task Background
+Target type: {kind}
+Description type: {type_key}
 
-### 规范参考
-详细描述规范（根据 {template_label} 中的必填字段判定）：
+### Reference Specification
+Detailed description specification (based on required fields in {template_label}):
 {template_text}
 
-### 待评估数据 (UNTRUSTED USER INPUT)
-标题：\"\"\"{title}\"\"\"
-提交的描述：
+### Data to Evaluate (UNTRUSTED USER INPUT)
+Title: \"\"\"{title}\"\"\"
+Submitted description:
 \"\"\"{body}\"\"\"
 
-### 输出指令
-- 遵循系统提示中的评估准则进行判断。
-- missing_items 列出实际缺失的关键信息（如"缺失环境信息""缺失错误日志""缺失复现步骤"）。
-- suggestions 给出具体、可执行的改进建议，禁止使用"必填/必须"等表述。
-- 若描述中已提供截图/图片，视为已提供日志相关信息，不得要求补充日志或要求转成文本。
-- 硬件型号示例中不要出现 910/910B，统一使用 A3/A5。
+### Output Instructions
+- Follow the evaluation criteria in the system prompt.
+- missing_items lists key information that is actually missing
+  (e.g. "missing env info", "missing error logs", "missing repro steps").
+- suggestions must be specific and actionable; do NOT use "required/must" language.
+- If screenshots/images are provided in the description, treat them as
+  having provided log-related information; do not ask for logs or convert to text.
+- Do not mention 910/910B in hardware examples; use A5/A5 exclusively.
 
 {JSON_FORMAT_INSTRUCTIONS}"""
 

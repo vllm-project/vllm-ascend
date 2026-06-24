@@ -178,42 +178,52 @@ def edit_issue(api_base: str, number: int, title: str, body: str):
 
 
 ISSUE_GOOD = {
-    "title": "[Bug]: A5 CANN 8.2 conv2d 算子报错 RuntimeError 500002",
+    "title": "[Bug]: A5 CANN 8.2 conv2d operator RuntimeError 500002",
     "body": (
-        "### 环境信息\n"
-        "- 操作系统: Ubuntu 22.04\n"
-        "- 昇腾硬件: A5\n"
-        "- CANN 版本: 8.2.0\n"
-        "- vLLM 版本: main\n"
-        "### 问题描述\n"
-        "运行 conv2d 时 RuntimeError: conv2d forward failed\n"
-        "### 复现步骤\n"
+        "### Environment\n"
+        "- OS: Ubuntu 22.04\n"
+        "- Ascend hardware: A5\n"
+        "- CANN version: 8.2.0\n"
+        "- vLLM version: main\n"
+        "### Problem Description\n"
+        "Running conv2d triggers: RuntimeError: conv2d forward failed\n"
+        "### Steps to Reproduce\n"
         "1. pip install vllm vllm-ascend\n"
-        "2. 运行测试脚本\n"
-        "3. 报错信息: RuntimeError: conv2d forward failed, error code 500002\n"
+        "2. Run test script\n"
+        "3. Error: RuntimeError: conv2d forward failed, error code 500002\n"
     ),
 }
 
 ISSUE_BAD = {
-    "title": "[Bug]: 调用接口报错",
-    "body": "有个错误 帮忙看看",
+    "title": "[Bug]: API call error",
+    "body": "There's an error, help me check",
 }
 
 ISSUE_BAD_ALT = {
-    "title": "[Bug]: 服务启动失败",
-    "body": "启动不起来了 报错了",
+    "title": "[Bug]: Service startup failed",
+    "body": "Won't start, got an error",
 }
 
 ISSUE_GOOD_ALT = {
-    "title": "[Bug]: A5 CANN 8.2 安装时 pip install 报错",
+    "title": "[Bug]: A5 CANN 8.2 pip install error",
     "body": (
-        "### 环境信息\n"
+        "### Environment\n"
         "- Ubuntu 22.04\n"
         "- A5\n"
         "- CANN 8.2.0\n"
-        "### 问题描述\n"
-        "pip install vllm-ascend 时报错: ERROR: No matching distribution found\n"
+        "### Problem Description\n"
+        "pip install vllm-ascend fails: ERROR: No matching distribution found\n"
     ),
+}
+
+PR_BAD_DESC = {
+    "title": "[Bug]: Got error",
+    "body": "Help me check",
+}
+
+PR_BAD_DESC_ALT = {
+    "title": "[Bug]: Service won't start",
+    "body": "Startup error",
 }
 
 
@@ -384,13 +394,13 @@ PR_GOOD_DESC = {
 }
 
 PR_BAD_DESC = {
-    "title": "[Bug]: 报错了",
-    "body": "帮我看看",
+    "title": "[Bug]: Got error",
+    "body": "Help me check",
 }
 
 PR_BAD_DESC_ALT = {
-    "title": "[Bug]: 服务启动不了",
-    "body": "启动报错",
+    "title": "[Bug]: Service won't start",
+    "body": "Startup error",
 }
 
 PR_GOOD_DESC_ALT = {
