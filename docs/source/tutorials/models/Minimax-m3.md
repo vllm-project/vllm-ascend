@@ -1,4 +1,4 @@
-# Minimax m3
+# Minimax M3
 
 ## Environment Preparation
 
@@ -69,6 +69,10 @@ It is recommended to place the model weight in a shared cache directory.
 Start the online serving service with the following command:
 
 ```
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+export HCCL_OP_EXPANSION_MODE="AIV"
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
 vllm serve ${WEIGHT_PATH} \
   --served-model-name minimax-m3 \
   --trust-remote-code \
