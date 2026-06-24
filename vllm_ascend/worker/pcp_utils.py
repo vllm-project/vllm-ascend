@@ -257,9 +257,7 @@ class PCPManager:
         padded_cu = np.concatenate(([0], cu_num_scheduled_tokens))
         per_req_lens = padded_cu[1:] - padded_cu[:-1]
 
-        prefill_lens = per_req_lens[self.num_decode_reqs :]
-        pad_multiple = self.pcp_world_size * 2
-        prefill_lens = [math.ceil(num / pad_multiple) * pad_multiple for num in prefill_lens]
+        prefill_lens = self.pcp_tokens[self.num_decode_reqs : self.num_decode_reqs + self.num_prefill_reqs]
         pads = copy.deepcopy(num_pcp_pads)
         pads[self.num_decode_reqs :] = np.cumsum(pads[self.num_decode_reqs :])
         base = int(cu_num_scheduled_tokens[self.num_decode_reqs - 1]) if self.num_decode_reqs > 0 else 0
