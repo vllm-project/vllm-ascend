@@ -829,6 +829,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         """
         sample = self.o_proj.weight
         full_shape = (sample.shape[0] * self.tp_size, sample.shape[1])
+        # Main and MTP layers can use different quantized o_proj weight dtypes,
+        # so key the shared full-gather pool by dtype and shape.
         pool_key = (sample.device.type, sample.device.index, sample.dtype, full_shape)
         if pool_key not in AscendSFAImpl.o_proj_full_pools:
             AscendSFAImpl.o_proj_full_pools[pool_key] = torch.empty(
