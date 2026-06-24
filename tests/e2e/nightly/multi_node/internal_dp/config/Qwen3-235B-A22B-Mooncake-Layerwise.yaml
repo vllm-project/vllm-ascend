@@ -39,7 +39,6 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --additional-config '{"recompute_scheduler_enable": true,"enable_shared_expert_dp": true}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeLayerwiseConnector",
         "kv_role": "kv_producer",
@@ -50,8 +49,8 @@ deployment:
                           "tp_size": 8
                   },
                   "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
+                          "dp_size": 4,
+                          "tp_size": 4
                   }
             }
         }'
@@ -62,20 +61,21 @@ deployment:
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
         --port $SERVER_PORT
-        --data-parallel-size 2
-        --data-parallel-size-local 2
+        --data-parallel-size 4
+        --data-parallel-size-local 4
         --data-parallel-address $MASTER_IP
         --data-parallel-rpc-port 13389
-        --tensor-parallel-size 8
+        --tensor-parallel-size 4
         --seed 1024
-        --max-num-seqs 16
+        --max-num-seqs 32
         --max-model-len 8192
         --max-num-batched-tokens 8192
         --enable-expert-parallel
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --additional-config '{"torchair_graph_config":{"enabled":true}}'
+        --async-scheduling
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeLayerwiseConnector",
         "kv_role": "kv_consumer",
@@ -86,8 +86,8 @@ deployment:
                           "tp_size": 8
                   },
                   "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
+                          "dp_size": 4,
+                          "tp_size": 4
                   }
             }
         }'
@@ -102,7 +102,7 @@ benchmarks:
     max_out_len: 1500
     batch_size: 700
     request_rate: 11.2
-    baseline: 183
+    baseline: 2046
     threshold: 0.97
   acc:
     case_type: accuracy
