@@ -28,6 +28,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -37,6 +38,9 @@ GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
 @pytest.fixture(params=[False, True], ids=["v1", "v2"])
 def model_runner_env(request):
     use_v2_model_runner = request.param
+    if use_v2_model_runner and vllm_version_is("0.23.0"):
+        pytest.skip("No need to support v2 model runner for vLLM tag version.")
+
     with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}):
         yield
 
