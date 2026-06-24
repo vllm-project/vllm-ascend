@@ -124,8 +124,18 @@ class GroupPull:
     group_id: int
     remote_tp_offset: int
     num_group_pulls: int
+    remote_tp_rank: int = 0
+    remote_tp_size: int = 1
     prefill_pp_rank: int = 0
     is_group_transfer_end: bool = False
+
+
+@dataclass(frozen=True)
+class TransferPlan:
+    local_region_offset: int
+    remote_region_offset: int
+    transfer_len: int
+    split_by_token: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,6 +143,95 @@ class GroupTransferInfo:
     tokens_per_block: int
     blocks_per_window: int
     is_state_group: bool
+
+
+def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
+    if local_tp_size >= remote_tp_size:
+        assert local_tp_size % remote_tp_size == 0, (
+            f"Local tensor parallel size {local_tp_size} is not divisible "
+            f"by remote tensor parallel size {remote_tp_size}."
+        )
+        return local_tp_size // remote_tp_size
+
+    assert remote_tp_size % local_tp_size == 0, (
+        f"Remote tensor parallel size {remote_tp_size} is not divisible by local tensor parallel size {local_tp_size}."
+    )
+    return -(remote_tp_size // local_tp_size)
+
+
+def _producer_cache_is_replicated(
+    *,
+    is_mla: bool,
+    is_sparse: bool,
+    producer_tp_size: int,
+    num_key_value_heads: int,
+) -> bool:
+    return is_mla or is_sparse or producer_tp_size > num_key_value_heads
+
+
+def _compute_receiver_transfer_plan(
+    *,
+    local_tp_rank: int,
+    local_tp_size: int,
+    remote_tp_rank: int,
+    remote_tp_size: int,
+    local_block_len: int,
+    remote_block_len: int,
+    producer_cache_replicated: bool,
+    block_size: int | None = None,
+    split_remote_block_by_token: bool = False,
+) -> TransferPlan:
+    """Plan one Decode-rank read from one Prefill-rank KV block."""
+    tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
+
+    if tp_ratio == 1:
+        assert local_block_len == remote_block_len, (
+            f"Homogeneous TP KV block length mismatch: local={local_block_len}, remote={remote_block_len}."
+        )
+        return TransferPlan(0, 0, local_block_len)
+
+    if tp_ratio > 0:
+        if producer_cache_replicated:
+            assert local_block_len == remote_block_len, (
+                "Replicated producer KV block length must match Decode KV block "
+                f"length, got local={local_block_len}, remote={remote_block_len}."
+            )
+            return TransferPlan(0, 0, local_block_len)
+
+        assert remote_block_len == local_block_len * tp_ratio, (
+            "Prefill KV block length must cover all Decode TP slices when "
+            f"Decode TP is larger, got local={local_block_len}, "
+            f"remote={remote_block_len}, tp_ratio={tp_ratio}."
+        )
+        if split_remote_block_by_token:
+            assert block_size is not None and block_size > 0
+            assert local_block_len % block_size == 0 and remote_block_len % block_size == 0
+            local_token_len = local_block_len // block_size
+            return TransferPlan(0, (local_tp_rank % tp_ratio) * local_token_len, local_token_len, True)
+        return TransferPlan(
+            0,
+            (local_tp_rank % tp_ratio) * local_block_len,
+            local_block_len,
+        )
+
+    ratio_abs = -tp_ratio
+    if producer_cache_replicated:
+        assert local_block_len == remote_block_len, (
+            "Replicated producer KV block length must match Decode KV block "
+            f"length, got local={local_block_len}, remote={remote_block_len}."
+        )
+        return TransferPlan(0, 0, local_block_len)
+
+    assert local_block_len == remote_block_len * ratio_abs, (
+        "Decode KV block length must cover all Prefill TP shards when Prefill "
+        f"TP is larger, got local={local_block_len}, remote={remote_block_len}, "
+        f"tp_ratio={tp_ratio}."
+    )
+    return TransferPlan(
+        local_region_offset=(remote_tp_rank % ratio_abs) * remote_block_len,
+        remote_region_offset=0,
+        transfer_len=remote_block_len,
+    )
 
 
 @dataclass
@@ -495,6 +594,7 @@ class KVCacheRecvingThread(threading.Thread):
         except AttributeError:
             hf_text_config = self.model_config.hf_config
         self.use_sparse = hasattr(hf_text_config, "index_topk")
+        self.num_key_value_heads = hf_text_config.num_key_value_heads
         self.num_layers = hf_text_config.num_hidden_layers
         if block_size_scale is None:
             block_size_scale = []
@@ -668,31 +768,29 @@ class KVCacheRecvingThread(threading.Thread):
         grouped_local_block_ids: list[list[int]],
         tp_num_need_pulls: int,
         remote_tp_offset: int,
+        remote_tp_rank: int,
+        remote_tp_size: int,
     ) -> None:
-        if self.use_mla or self.use_sparse or tp_num_need_pulls == 1:
-            if local_kv_block_len != remote_kv_block_len:
-                raise RuntimeError(
-                    "Mooncake HND transfer expects equal KV block lengths for replicated or homogeneous TP "
-                    f"caches, got local={local_kv_block_len}, remote={remote_kv_block_len}."
-                )
-            local_region_offset = 0
-            remote_region_offset = 0
-            transfer_len = local_kv_block_len
-        else:
-            if local_kv_block_len != remote_kv_block_len * tp_num_need_pulls:
-                raise RuntimeError(
-                    "Mooncake HND transfer expects Decode KV block length to cover all Prefill TP shards, "
-                    f"got local={local_kv_block_len}, remote={remote_kv_block_len}, pulls={tp_num_need_pulls}."
-                )
-            local_region_offset = remote_tp_offset * remote_kv_block_len
-            remote_region_offset = 0
-            transfer_len = remote_kv_block_len
+        transfer_plan = _compute_receiver_transfer_plan(
+            local_tp_rank=self.tp_rank,
+            local_tp_size=self.tp_size,
+            remote_tp_rank=remote_tp_rank,
+            remote_tp_size=remote_tp_size,
+            local_block_len=local_kv_block_len,
+            remote_block_len=remote_kv_block_len,
+            producer_cache_replicated=_producer_cache_is_replicated(
+                is_mla=self.use_mla,
+                is_sparse=self.use_sparse,
+                producer_tp_size=remote_tp_size,
+                num_key_value_heads=self.num_key_value_heads,
+            ),
+        )
 
         can_coalesce = (
-            local_region_offset == 0
-            and remote_region_offset == 0
-            and transfer_len == local_block_stride
-            and transfer_len == remote_block_stride
+            transfer_plan.local_region_offset == 0
+            and transfer_plan.remote_region_offset == 0
+            and transfer_plan.transfer_len == local_block_stride
+            and transfer_plan.transfer_len == remote_block_stride
         )
         for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
             if can_coalesce:
@@ -700,15 +798,15 @@ class KVCacheRecvingThread(threading.Thread):
                 dst = remote_layer_base_addr + remote_block_id[0] * remote_block_stride
                 src_list.append(src)
                 dst_list.append(dst)
-                length_list.append(transfer_len * len(local_block_id))
+                length_list.append(transfer_plan.transfer_len * len(local_block_id))
                 continue
 
             for remote_block, local_block in zip(remote_block_id, local_block_id):
-                src = local_layer_base_addr + local_block * local_block_stride + local_region_offset
-                dst = remote_layer_base_addr + remote_block * remote_block_stride + remote_region_offset
+                src = local_layer_base_addr + local_block * local_block_stride + transfer_plan.local_region_offset
+                dst = remote_layer_base_addr + remote_block * remote_block_stride + transfer_plan.remote_region_offset
                 src_list.append(src)
                 dst_list.append(dst)
-                length_list.append(transfer_len)
+                length_list.append(transfer_plan.transfer_len)
 
     def _transfer_hnd_kv_cache_all_groups(self, req_meta: dict[str, Any]):
         """Transfer HND KV cache shards directly to their final head interval."""
@@ -821,6 +919,8 @@ class KVCacheRecvingThread(threading.Thread):
                         grouped_local_block_ids=grouped_local_block_ids,
                         tp_num_need_pulls=tp_num_need_pulls,
                         remote_tp_offset=remote_tp_offset,
+                        remote_tp_rank=group_pull.remote_tp_rank,
+                        remote_tp_size=group_pull.remote_tp_size,
                     )
 
         if not src_list:
@@ -875,6 +975,7 @@ class KVCacheRecvingThread(threading.Thread):
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
         remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         remote_block_size_scale = self.remote_block_size_scale[remote_engine_id][remote_handshake_port]
+        remote_block_len_per_addr = self.remote_block_len_per_addr[remote_engine_id][remote_handshake_port]
         remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
         session_id = f"{remote_host}:{remote_transfer_port}"
 
@@ -904,6 +1005,8 @@ class KVCacheRecvingThread(threading.Thread):
                 is_group_transfer_end = group_pull.is_group_transfer_end
                 local_scale = self.block_size_scale[layer_indices[0]][0]
                 remote_scale = remote_block_size_scale[layer_indices[0]][0]
+                local_block_tokens = self.block_size // local_scale
+                remote_block_tokens = self.block_size // remote_scale
                 kernel_local_block_ids = expand_block_ids(local_group_block_ids, local_scale)
                 kernel_remote_block_ids = expand_block_ids(remote_group_block_ids, remote_scale)
                 # For FullAttentionSpec prefix cache with hybrid kernel blocks.
@@ -979,19 +1082,77 @@ class KVCacheRecvingThread(threading.Thread):
                     dst_layer_base_addr = remote_kv_caches_base_addrs[layer_idx][cache_idx]
                     block_len = self.block_len_per_addr[layer_idx][cache_idx]
                     block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
+                    remote_block_len = remote_block_len_per_addr[layer_idx][cache_idx]
                     remote_block_stride = remote_block_stride_per_addr[layer_idx][cache_idx]
-                    inner_block_len = block_len // tp_num_need_pulls
-                    transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
-                        grouped_remote_block_ids,
-                        grouped_local_block_ids,
-                        src_block_stride=remote_block_stride,
-                        dst_block_stride=block_stride,
-                        block_len=inner_block_len,
+                    transfer_plan = _compute_receiver_transfer_plan(
+                        local_tp_rank=self.tp_rank,
+                        local_tp_size=self.tp_size,
+                        remote_tp_rank=group_pull.remote_tp_rank,
+                        remote_tp_size=group_pull.remote_tp_size,
+                        local_block_len=block_len,
+                        remote_block_len=remote_block_len,
+                        producer_cache_replicated=_producer_cache_is_replicated(
+                            is_mla=self.use_mla,
+                            is_sparse=self.use_sparse,
+                            producer_tp_size=group_pull.remote_tp_size,
+                            num_key_value_heads=self.num_key_value_heads,
+                        ),
+                        block_size=local_block_tokens,
+                        split_remote_block_by_token=True,
                     )
+                    if transfer_plan.split_by_token:
+                        if local_block_tokens != remote_block_tokens:
+                            raise RuntimeError(
+                                "Mooncake NHD token-wise TP split requires matching local/remote block token counts, "
+                                f"got local={local_block_tokens}, remote={remote_block_tokens}."
+                            )
+                        remote_token_len = remote_block_len // remote_block_tokens
+                        for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
+                            for remote_block, local_block in zip(remote_block_id, local_block_id):
+                                for token_idx in range(local_block_tokens):
+                                    src = (
+                                        src_layer_base_addr
+                                        + local_block * block_stride
+                                        + token_idx * transfer_plan.transfer_len
+                                    )
+                                    dst = (
+                                        dst_layer_base_addr
+                                        + remote_block * remote_block_stride
+                                        + token_idx * remote_token_len
+                                        + transfer_plan.remote_region_offset
+                                    )
+                                    src_list.append(src)
+                                    dst_list.append(dst)
+                                    length_list.append(transfer_plan.transfer_len)
+                        continue
+
+                    can_coalesce = (
+                        transfer_plan.local_region_offset == 0
+                        and transfer_plan.remote_region_offset == 0
+                        and transfer_plan.transfer_len == block_stride
+                        and transfer_plan.transfer_len == remote_block_stride
+                    )
+                    if can_coalesce:
+                        transfer_remote_block_ids, transfer_local_block_ids = (
+                            grouped_remote_block_ids,
+                            grouped_local_block_ids,
+                        )
+                    else:
+                        transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
+                            grouped_remote_block_ids,
+                            grouped_local_block_ids,
+                            src_block_stride=remote_block_stride,
+                            dst_block_stride=block_stride,
+                            block_len=transfer_plan.transfer_len,
+                        )
                     for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
-                        src = src_layer_base_addr + local_block_id[0] * block_stride + inner_offset * inner_block_len
-                        dst = dst_layer_base_addr + remote_block_id[0] * remote_block_stride
-                        length = inner_block_len * len(local_block_id)
+                        src = src_layer_base_addr + local_block_id[0] * block_stride + transfer_plan.local_region_offset
+                        dst = (
+                            dst_layer_base_addr
+                            + remote_block_id[0] * remote_block_stride
+                            + transfer_plan.remote_region_offset
+                        )
+                        length = transfer_plan.transfer_len * len(local_block_id)
                         src_list.append(src)
                         dst_list.append(dst)
                         length_list.append(length)
@@ -1948,10 +2109,17 @@ class MooncakeConnectorWorker:
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         self._get_prefill_decode_size(vllm_config)
         os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
-        if self._prefill_tp_size < self._decode_tp_size:
-            raise ValueError(
-                f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
-                f" or equal to the decode_tp_size: {self._decode_tp_size}"
+        self.kv_cache_layout = get_kv_cache_layout()
+        self.use_hnd_transfer = self.kv_cache_layout == HND_KV_CACHE_LAYOUT
+        if self.use_hnd_transfer:
+            check_hnd_kv_cache_layout_supported(self.kv_cache_layout)
+        if self._prefill_tp_size >= self._decode_tp_size:
+            assert self._prefill_tp_size % self._decode_tp_size == 0, (
+                "Prefill TP size must be divisible by Decode TP size when Prefill TP is larger."
+            )
+        else:
+            assert self._decode_tp_size % self._prefill_tp_size == 0, (
+                "Decode TP size must be divisible by Prefill TP size when Decode TP is larger."
             )
 
         # Metadata.
@@ -1978,10 +2146,6 @@ class MooncakeConnectorWorker:
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
-        self.kv_cache_layout = get_kv_cache_layout()
-        self.use_hnd_transfer = self.kv_cache_layout == HND_KV_CACHE_LAYOUT
-        if self.use_hnd_transfer:
-            check_hnd_kv_cache_layout_supported(self.kv_cache_layout)
 
         # kv cache config
         self.kv_cache_config = kv_cache_config
@@ -2023,7 +2187,7 @@ class MooncakeConnectorWorker:
         # kv_transfer variables
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        if self.vllm_config.model_config.is_deepseek_mla:
+        if self.vllm_config.model_config.is_deepseek_mla or self._prefill_tp_size < self._decode_tp_size:
             self.tp_num_need_pulls = 1
         else:
             num_d_block_heads = max(1, self.num_key_value_heads // self.tp_size)
@@ -2393,6 +2557,14 @@ class MooncakeConnectorWorker:
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
+        if prefill_tp_size < self.tp_size and (
+            self._is_hma_required or meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size > 1
+        ):
+            raise NotImplementedError(
+                "Mooncake transfer does not support Prefill TP < Decode TP together with "
+                "hybrid KV cache, prefill context parallel, or decode context parallel yet."
+            )
+
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
             if self._is_hma_required:
                 chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
@@ -2665,12 +2837,14 @@ class MooncakeConnectorWorker:
         tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
         group_ids = [group_id for group_id, (_, layer_indices) in self.kv_group2layeridx.items() if layer_indices]
 
-        def make_group_pulls(remote_tp_offset: int, prefill_pp_rank: int) -> list[GroupPull]:
+        def make_group_pulls(remote_tp_offset: int, prefill_pp_rank: int, remote_tp_rank: int) -> list[GroupPull]:
             return [
                 GroupPull(
                     group_id=group_id,
                     remote_tp_offset=remote_tp_offset,
                     num_group_pulls=tp_num_need_pulls,
+                    remote_tp_rank=remote_tp_rank,
+                    remote_tp_size=prefill_tp_size,
                     prefill_pp_rank=prefill_pp_rank,
                     is_group_transfer_end=remote_tp_offset == tp_num_need_pulls - 1,
                 )
@@ -2681,6 +2855,7 @@ class MooncakeConnectorWorker:
         for pcp_dcp_rank, remote_ports in enumerate(remote_handshake_port_list):
             if len(remote_ports) == 1:
                 remote_tp_offsets = [pcp_dcp_rank % tp_num_need_pulls]
+                remote_tp_ranks = [(remote_ports[0] - remote_base_port) % prefill_tp_size]
                 prefill_pp_ranks = [
                     ((remote_ports[0] - remote_base_port) % (prefill_tp_size * self._prefill_pp_size))
                     // prefill_tp_size
@@ -2690,14 +2865,17 @@ class MooncakeConnectorWorker:
                     f"tp_num_need_pulls: {tp_num_need_pulls}, remote_ports: {remote_ports}"
                 )
                 remote_tp_offsets = [rank_idx % tp_num_need_pulls for rank_idx in range(len(remote_ports))]
+                remote_tp_ranks = [(remote_port - remote_base_port) % prefill_tp_size for remote_port in remote_ports]
                 prefill_pp_ranks = [
                     ((remote_port - remote_base_port) % (prefill_tp_size * self._prefill_pp_size)) // prefill_tp_size
                     for remote_port in remote_ports
                 ]
             group_pulls_list.append(
                 [
-                    make_group_pulls(remote_tp_offset, prefill_pp_rank)
-                    for remote_tp_offset, prefill_pp_rank in zip(remote_tp_offsets, prefill_pp_ranks)
+                    make_group_pulls(remote_tp_offset, prefill_pp_rank, remote_tp_rank)
+                    for remote_tp_offset, prefill_pp_rank, remote_tp_rank in zip(
+                        remote_tp_offsets, prefill_pp_ranks, remote_tp_ranks
+                    )
                 ]
             )
         return group_pulls_list
@@ -2733,6 +2911,8 @@ class MooncakeConnectorWorker:
                                 group_id=group_id,
                                 remote_tp_offset=remote_tp_offset,
                                 num_group_pulls=num_group_pulls,
+                                remote_tp_rank=remote_rank % prefill_tp_size,
+                                remote_tp_size=prefill_tp_size,
                                 prefill_pp_rank=pp_rank,
                                 is_group_transfer_end=remote_tp_offset == num_group_pulls - 1,
                             ),
@@ -2753,6 +2933,8 @@ class MooncakeConnectorWorker:
                         group_id=group_id,
                         remote_tp_offset=rank_idx % num_group_pulls,
                         num_group_pulls=num_group_pulls,
+                        remote_tp_rank=remote_rank % prefill_tp_size,
+                        remote_tp_size=prefill_tp_size,
                         prefill_pp_rank=prefill_pp_rank,
                         is_group_transfer_end=rank_idx % num_group_pulls == num_group_pulls - 1,
                     ),
@@ -2819,11 +3001,12 @@ class MooncakeConnectorWorker:
                         meta.remote_engine_id,
                         meta.remote_multi_nodes_meta_mapping,
                     )
-                    remote_port_send_num = (
-                        self.remote_port_send_num[meta.remote_engine_id]
-                        if meta.remote_pcp_size * meta.remote_dcp_size > 1
-                        else None
-                    )
+                    if meta.remote_pcp_size * meta.remote_dcp_size > 1:
+                        remote_port_send_num = self.remote_port_send_num[meta.remote_engine_id]
+                    elif prefill_tp_size < self.tp_size:
+                        remote_port_send_num = self._get_remote_port_send_num_for_tp_split(meta, prefill_tp_size)
+                    else:
+                        remote_port_send_num = None
                     self.kv_recv_thread.add_request(
                         request_id=req_id,
                         remote_request_id=remote_req_id,
@@ -2852,6 +3035,29 @@ class MooncakeConnectorWorker:
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
 
+    def _get_remote_port_send_num_for_tp_split(
+        self,
+        meta: ReqMeta,
+        prefill_tp_size: int,
+    ) -> dict[int, RemotePortInfo]:
+        assert self.tp_size % prefill_tp_size == 0, (
+            f"Decode TP size {self.tp_size} is not divisible by Prefill TP size {prefill_tp_size}."
+        )
+        split_ratio = self.tp_size // prefill_tp_size
+        remote_port_send_num: dict[int, RemotePortInfo] = {}
+        remote_multi_nodes_meta_mapping = meta.remote_multi_nodes_meta_mapping or {}
+        for pp_rank in range(self._prefill_pp_size):
+            for tp_rank in range(prefill_tp_size):
+                remote_rank = pp_rank * prefill_tp_size + tp_rank
+                remote_port = meta.remote_port + remote_rank
+                remote_host_info = remote_multi_nodes_meta_mapping.get(str(remote_rank), None)
+                remote_host = meta.remote_host if remote_host_info is None else remote_host_info["host"]
+                remote_port_send_num[remote_port] = {
+                    "num": split_ratio,
+                    "host": remote_host,
+                }
+        return remote_port_send_num
+
     def _get_tp_num_need_pulls(self, prefill_tp_size: int | None) -> int:
         if prefill_tp_size is None:
             prefill_tp_size = self._prefill_tp_size
@@ -2859,7 +3065,7 @@ class MooncakeConnectorWorker:
         if prefill_tp_size == self._prefill_tp_size:
             return self.tp_num_need_pulls
 
-        if self.vllm_config.model_config.is_deepseek_mla:
+        if self.vllm_config.model_config.is_deepseek_mla or prefill_tp_size < self.tp_size:
             tp_num_need_pulls = 1
         else:
             num_d_block_heads = max(1, self.num_key_value_heads // self.tp_size)
@@ -2918,6 +3124,16 @@ class MooncakeConnectorWorker:
 
         # Divide the ports according to the TP within the PP
         sampled_nums = []
+        if prefill_tp_size < self._decode_tp_size:
+            assert self._decode_tp_size % prefill_tp_size == 0, (
+                f"Decode TP size {self._decode_tp_size} is not divisible by Prefill TP size {prefill_tp_size}."
+            )
+            split_ratio = self._decode_tp_size // prefill_tp_size
+            for decode_tp_rank in range(self._decode_tp_size):
+                prefill_tp_rank = decode_tp_rank // split_ratio
+                sampled_nums.append([prefill_tp_rank + pp * prefill_tp_size for pp in range(self._prefill_pp_size)])
+            return sampled_nums
+
         if prefill_tp_size == self._decode_tp_size:
             sampled_nums = list(
                 map(

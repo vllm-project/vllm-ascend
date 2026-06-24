@@ -197,8 +197,8 @@ class AscendConfig:
                 assert decode_tp_size % prefill_tp_size == 0, (
                     "Decode TP size must be divisible by Prefill TP size when Decode TP is larger."
                 )
-            self.pd_tp_ratio = prefill_tp_size // decode_tp_size
-            if self.pd_tp_ratio > 1:
+            self.pd_tp_ratio = max(prefill_tp_size, decode_tp_size) // min(prefill_tp_size, decode_tp_size)
+            if prefill_tp_size > decode_tp_size and self.pd_tp_ratio > 1:
                 # Total KV heads from vLLM's resolved architecture (ModelArchConfigConvertor).
                 num_kv_head = vllm_config.model_config.get_total_num_kv_heads()
                 if not num_kv_head or num_kv_head < 1:
