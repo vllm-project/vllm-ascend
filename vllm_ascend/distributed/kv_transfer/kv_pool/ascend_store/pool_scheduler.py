@@ -90,7 +90,9 @@ class KVPoolScheduler:
             "consumer_is_to_put", False
         )
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
-        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get("save_decode_cache", True)
+        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "save_decode_cache", False
+        )
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
@@ -778,13 +780,16 @@ class KVPoolScheduler:
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
     ) -> ReqMeta | None:
-        if not self.save_decode_cache:
+        # Chunked-prefill increments (prompt not yet fully computed) are always
+        # saved; only decode increments are gated by save_decode_cache.
+        req_tuple = self._unfinished_requests.get(req_id)
+        is_decoding = req_tuple is not None and req_tuple[0].num_computed_tokens >= req_tuple[0].num_prompt_tokens
+        if is_decoding and not self.save_decode_cache:
             return None
         request_tracker = self._request_trackers.get(req_id)
         if request_tracker is None:
             raise ValueError(f"Request {req_id} is not in _request_trackers, but it is scheduled to be cached")
         num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        req_tuple = self._unfinished_requests.get(req_id)
         if req_tuple:
             request = req_tuple[0]
             num_current_tokens = request_tracker.token_len
