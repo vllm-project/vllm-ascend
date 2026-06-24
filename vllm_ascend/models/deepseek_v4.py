@@ -102,6 +102,14 @@ def _get_ascend_dsa_backend():
     return AscendDSABackend
 
 
+def _dsv4_block_sizes():
+    # Lazy import to avoid the circular import chain (layer -> dsa_v1 ->
+    # attention_v1 -> device_op) hit during vLLM subprocess model inspection.
+    from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+
+    return DSV4_BLOCK_SIZES
+
+
 class AscendCompressorStateCache(CompressorStateCache):
     def __init__(
         self,
@@ -116,10 +124,8 @@ class AscendCompressorStateCache(CompressorStateCache):
         self.block_size = block_size
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            page_size_padded = 16896 if self.state_dim == 2 * 256 and self.compress_ratio == 4 else 81920
-        else:
-            page_size_padded = 16640 if self.state_dim == 2 * 256 and self.compress_ratio == 4 else 131072
+        pads = _dsv4_block_sizes()[vllm_config.cache_config.block_size][1]
+        page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
         return SlidingWindowMLASpec(
             block_size=self.block_size,
@@ -156,7 +162,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
         return MLAAttentionSpec(
-            block_size=128,
+            block_size=_dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0],
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
@@ -185,7 +191,7 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         super().__init__(head_dim, window_size, torch.uint8, prefix, cache_config)
         self.dtype = dtype
 
-        self.block_size = 128
+        self.block_size = _dsv4_block_sizes()[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if get_ascend_device_type() in {AscendDeviceType.A5}:
@@ -644,7 +650,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=8,
+                block_size=_dsv4_block_sizes()[cache_config.block_size][0][2],  # type: ignore[union-attr]
             )
         elif compress_ratio == 128:
             self.state_cache = AscendCompressorStateCache(
@@ -652,7 +658,7 @@ class Compressor(nn.Module):
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=16 if get_ascend_device_type() in {AscendDeviceType.A5} else 32,
+                block_size=_dsv4_block_sizes()[cache_config.block_size][0][3],  # type: ignore[union-attr]
             )
         else:
             raise ValueError(

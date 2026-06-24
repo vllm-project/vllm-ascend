@@ -899,6 +899,46 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/parser/test_streaming.py
     estimated_time: 20
+  - name: tests/entrypoints/pooling/token_classify/test_offline.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/token_embed/test_offline.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/embed/test_offline.py
+    estimated_time: 20
+  - name: tests/entrypoints/pooling/classify/test_offline.py
+    estimated_time: 20
+  - name: tests/config/test_config_generation.py
+    estimated_time: 20
+  - name: tests/entrypoints/openai/test_return_tokens_as_ids.py
+    estimated_time: 20
+  - name: tests/lora/test_add_lora.py
+    estimated_time: 20
+  - name: tests/lora/test_qwenvl.py
+    estimated_time: 20
+  - name: tests/lora/test_chatglm3_tp.py
+    estimated_time: 20
+  - name: tests/model_executor/test_enabled_custom_ops.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_siglip.py
+    estimated_time: 20
+  - name: tests/v1/engine/test_engine_args.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_cache_pollution_prevention.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_config.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_decode_bench_connector.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_error_propagation.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_invalid_blocks_correctness.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_kv_load_failure_recovery.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_remote_decode_lifecycle.py
+    estimated_time: 20
+  - name: tests/v1/kv_connector/unit/test_remote_prefill_lifecycle.py
+    estimated_time: 20
 e2e-upstream_a2_2:
   - name: tests/v1/distributed/test_async_llm_dp.py
     estimated_time: 20
