@@ -1007,7 +1007,6 @@
 # ** 29. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
-#      `vllm.v1.core.single_type_kv_cache_manager.spec_manager_map[MambaSpec]`
 #    Why:
 #       Upstream hybrid prefix cache lookup does not support PCP/DCP.
 #    How:

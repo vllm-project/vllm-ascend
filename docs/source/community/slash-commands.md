@@ -65,7 +65,7 @@ Use `--branch <name>` to specify a target branch. Without `--branch`, all argume
 /nightly qwen3-vl-32b-instruct-w8a8
 
 # Run on a specific release branch
-/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.22.1
+/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.23.0
 
 # Run all tests on a specific branch
 /nightly all --branch my-feature-branch

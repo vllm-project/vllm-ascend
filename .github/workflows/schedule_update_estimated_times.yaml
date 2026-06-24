@@ -109,22 +109,18 @@ jobs:
       upload_timing: true
       continue_on_error: true
 
-  # Dropped vLLM v0.22.1 (release-tag) compatibility from main. Uncomment this
-  # job to re-enable release-tag timing collection when maintaining a new
-  # release tag (update .github/vllm-release-tag.commit accordingly).
-  # run-tests-release:
-  #   needs: select-tests
-  #   if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
-  #   uses: ./.github/workflows/_selected_tests.yaml
-  #   with:
-  #     vllm: ${{ needs.select-tests.outputs.release_tag }}
-  #     test_groups: ${{ needs.select-tests.outputs.test_groups }}
-  #     upload_timing: true
-  #     continue_on_error: true
+  run-tests-release:
+    needs: select-tests
+    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ needs.select-tests.outputs.release_tag }}
+      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+      upload_timing: true
+      continue_on_error: true
 
   update-estimated-times:
-    needs: [run-tests-main]
-    # needs: [run-tests-main, run-tests-release]
+    needs: [run-tests-main, run-tests-release]
     if: always()
     runs-on: ubuntu-latest
     steps:

@@ -181,10 +181,7 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.e2e-test.outputs.main_commit }}
-          # Dropped vLLM v0.22.1 (release-tag) compatibility from main. Uncomment
-          # the line below to re-enable release-tag e2e when maintaining a new
-          # release tag (update .github/vllm-release-tag.commit accordingly).
-          # - ${{ needs.e2e-test.outputs.release_tag }}
+          - ${{ needs.e2e-test.outputs.release_tag }}
     needs: [e2e-test]
     if: ${{ needs.e2e-test.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
