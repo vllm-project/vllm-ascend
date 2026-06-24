@@ -911,7 +911,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_output: torch.Tensor,
         output: torch.Tensor,
         o_proj_full_handle: torch.distributed.Work | None,
-        o_proj_full_weight_scale_handle: torch.distributed.Work | None,
+        o_proj_full_weight_scale_handles: list[torch.distributed.Work] | None,
         should_shard_weight: bool,
     ) -> tuple[torch.Tensor, bool]:
         """
@@ -922,8 +922,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Wait for the completion of o_proj weight all-gather operation
             if o_proj_full_handle is not None:
                 o_proj_full_handle.wait()
-            if o_proj_full_weight_scale_handle is not None:
-                o_proj_full_weight_scale_handle.wait()
+            if o_proj_full_weight_scale_handles is not None:
+                for handle in o_proj_full_weight_scale_handles:
+                    handle.wait()
 
             # Switch o_proj to Full-mode (gathered weight from all TP ranks)
             self.o_proj.weight.set_(AscendSFAImpl.o_proj_full_pool)
@@ -1307,7 +1308,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # all-gather o_proj weight for prefill stage of PD mix node
         o_proj_full_handle = None
-        o_proj_full_weight_scale_handle = None
+        o_proj_full_weight_scale_handles = None
         # if is PD mix stage, using original TP o_proj weight, and also need to full gather for o_proj
         # weight for prefill stage.
         full_gather_o_proj_enabled = self.enable_dsa_cp_with_o_proj_tp and attn_metadata.attn_state not in {
@@ -1448,14 +1449,14 @@ class AscendSFAImpl(MLAAttentionImpl):
                     _, o_proj_full_handle = all_gather_async(
                         self.o_proj_tp_weight, get_tp_group(), output=AscendSFAImpl.o_proj_full_pool
                     )
-                    o_proj_full_weight_scale_handle = []
+                    o_proj_full_weight_scale_handles = []
                     for param_name, param in self.o_proj_tp_input_sharded_quant_params.items():
                         _, param_handle = all_gather_async(
                             param,
                             get_tp_group(),
                             output=self.o_proj_full_input_sharded_quant_params[param_name],
                         )
-                        o_proj_full_weight_scale_handle.append(param_handle)
+                        o_proj_full_weight_scale_handles.append(param_handle)
 
                 if kv_cache is not None:
                     assert fused_kv_no_split is not None
@@ -1574,7 +1575,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     attn_output=attn_output,
                     output=output,
                     o_proj_full_handle=o_proj_full_handle,
-                    o_proj_full_weight_scale_handle=o_proj_full_weight_scale_handle,
+                    o_proj_full_weight_scale_handles=o_proj_full_weight_scale_handles,
                     should_shard_weight=full_gather_o_proj_enabled,
                 )
             else:
