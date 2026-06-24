@@ -525,66 +525,6 @@ class AddRMSNormDynamicMXQuantPattern(BasePattern):
         return replacement
 
 
-class AddRMSNormDynamicMXQuantPatternWithBias(BasePattern):
-    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
-
-    def get_inputs(self):
-        """
-        Generate example inputs for the AddRMSNormDynamicMXQuant fusion pattern.
-        """
-        rms_norm_input = torch.randn(2, 64, device="npu", dtype=self.dtype)
-        residual = torch.randn(2, 64, device="npu", dtype=self.dtype)
-        rms_norm_weight = torch.randn(64, device="npu", dtype=self.dtype)
-        rmsnorm_bias = torch.randn(64, device="npu", dtype=self.dtype)
-        return [rms_norm_input, residual, rms_norm_weight, rmsnorm_bias]
-
-    def get_pattern(self):
-        def pattern(
-            rms_norm_input: torch.Tensor,
-            residual: torch.Tensor,
-            rms_norm_weight: torch.Tensor,
-            bias: torch.Tensor,
-        ):
-            """
-            Pattern for AddRMSNormDynamicMXQuant fusion.
-            """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
-            out0 = output[0]
-            out1 = output[2]
-            out0 = out0 + bias
-            quantized_output = torch.ops.npu.npu_dynamic_mx_quant(out0, dst_type=torch.float8_e4m3fn)
-            return quantized_output[0], quantized_output[1], out1
-
-        return pattern
-
-    def get_replacement(self):
-        def replacement(
-            rms_norm_input: torch.Tensor,
-            residual: torch.Tensor,
-            rms_norm_weight: torch.Tensor,
-            bias: torch.Tensor,
-        ):
-            """
-            Replacement for the AddRMSNormDynamicMXQuant fusion.
-            """
-            output = torch.ops.npu.npu_add_rms_norm_dynamic_mx_quant(
-                rms_norm_input,
-                residual,
-                rms_norm_weight,
-                epsilon=self.eps,
-                beta=bias,
-                dst_type=torch.float8_e4m3fn,
-            )
-            return (
-                output[0],
-                output[2],
-                output[1],
-            )
-
-        return replacement
-
-
 class AddRMSNormDynamicMXQuantSPPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
@@ -632,66 +572,6 @@ class AddRMSNormDynamicMXQuantSPPattern(BasePattern):
         return replacement
 
 
-class AddRMSNormDynamicMXQuantSPPatternWithBias(BasePattern):
-    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
-
-    def get_inputs(self):
-        """
-        Generate example inputs for the AddRMSNormDynamicMXQuant fusion pattern.
-        """
-        rms_norm_input = torch.randn(2, 64, device="npu", dtype=self.dtype)
-        residual = torch.randn(2, 64, device="npu", dtype=self.dtype)
-        rms_norm_weight = torch.randn(64, device="npu", dtype=self.dtype)
-        rmsnorm_bias = torch.randn(64, device="npu", dtype=self.dtype)
-        return [rms_norm_input, residual, rms_norm_weight, rmsnorm_bias]
-
-    def get_pattern(self):
-        def pattern(
-            rms_norm_input: torch.Tensor,
-            residual: torch.Tensor,
-            rms_norm_weight: torch.Tensor,
-            bias: torch.Tensor,
-        ):
-            """
-            Pattern for AddRMSNormDynamicMXQuant fusion.
-            """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
-            out0 = output[0]
-            out1 = output[2]
-            out0 = out0 + bias
-            out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
-            quantized_output = torch.ops.npu.npu_dynamic_mx_quant(out0, dst_type=torch.float8_e4m3fn)
-            return quantized_output[0], quantized_output[1], out1
-
-        return pattern
-
-    def get_replacement(self):
-        def replacement(
-            rms_norm_input: torch.Tensor,
-            residual: torch.Tensor,
-            rms_norm_weight: torch.Tensor,
-            bias: torch.Tensor,
-        ):
-            """
-            Replacement for the AddRMSNormDynamicMXQuant fusion.
-            """
-            output = torch.ops.npu.npu_add_rms_norm_dynamic_mx_quant(
-                rms_norm_input,
-                residual,
-                rms_norm_weight,
-                epsilon=self.eps,
-                beta=bias,
-                dst_type=torch.float8_e4m3fn,
-            )
-            mxscale = output[2]
-            quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(output[0], True)
-            mxscale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(mxscale, True)
-            return quantized_output, mxscale, output[1]
-
-        return replacement
-
-
 class RMSNormDynamicMXQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
@@ -724,49 +604,6 @@ class RMSNormDynamicMXQuantPattern(BasePattern):
             output = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
                 rms_norm_input,
                 rms_norm_weight,
-                epsilon=self.eps,
-                dst_type=torch.float8_e4m3fn,
-            )
-            return output[0], output[1]
-
-        return replacement
-
-
-class RMSNormDynamicMXQuantPatternWithBias(BasePattern):
-    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
-
-    def get_inputs(self):
-        """
-        Generate example inputs for the RMSNormDynamicMXQuant fusion pattern.
-        """
-        rms_norm_input = torch.randn(2, 64, device="npu", dtype=self.dtype)
-        rms_norm_weight = torch.randn(64, device="npu", dtype=self.dtype)
-        rmsnorm_bias = torch.randn(64, device="npu", dtype=self.dtype)
-        return [rms_norm_input, rms_norm_weight, rmsnorm_bias]
-
-    def get_pattern(self):
-        def pattern(rms_norm_input: torch.Tensor, rms_norm_weight: torch.Tensor, bias: torch.Tensor):
-            """
-            Pattern for RMSNormDynamicMXQuant fusion.
-            """
-            output = torch.ops.npu.npu_rms_norm(rms_norm_input, rms_norm_weight, self.eps)
-            out0 = output[0]
-            out0 = out0 + bias
-            quantized_output = torch.ops.npu.npu_dynamic_mx_quant(out0, dst_type=torch.float8_e4m3fn)
-            return quantized_output[0], quantized_output[1]
-
-        return pattern
-
-    def get_replacement(self):
-        def replacement(rms_norm_input: torch.Tensor, rms_norm_weight: torch.Tensor, bias: torch.Tensor):
-            """
-            Replacement for the RMSNormDynamicMXQuant fusion.
-            """
-            output = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
-                rms_norm_input,
-                rms_norm_weight,
-                beta=bias,
                 epsilon=self.eps,
                 dst_type=torch.float8_e4m3fn,
             )
@@ -818,52 +655,6 @@ class RMSNormDynamicMXQuantSPPattern(BasePattern):
         return replacement
 
 
-class RMSNormDynamicMXQuantSPPatternWithBias(BasePattern):
-    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
-        super().__init__(vllm_config, eps)
-
-    def get_inputs(self):
-        """
-        Generate example inputs for the RMSNormDynamicMXQuant fusion pattern.
-        """
-        rms_norm_input = torch.randn(2, 64, device="npu", dtype=self.dtype)
-        rms_norm_weight = torch.randn(64, device="npu", dtype=self.dtype)
-        rmsnorm_bias = torch.randn(64, device="npu", dtype=self.dtype)
-        return [rms_norm_input, rms_norm_weight, rmsnorm_bias]
-
-    def get_pattern(self):
-        def pattern(rms_norm_input: torch.Tensor, rms_norm_weight: torch.Tensor, bias: torch.Tensor):
-            """
-            Pattern for RMSNormDynamicMXQuant fusion.
-            """
-            output = torch.ops.npu.npu_rms_norm(rms_norm_input, rms_norm_weight, self.eps)
-            out0 = output[0]
-            out0 = out0 + bias
-            out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
-            quantized_output = torch.ops.npu.npu_dynamic_mx_quant(out0, dst_type=torch.float8_e4m3fn)
-            return quantized_output[0], quantized_output[1]
-
-        return pattern
-
-    def get_replacement(self):
-        def replacement(rms_norm_input: torch.Tensor, rms_norm_weight: torch.Tensor, bias: torch.Tensor):
-            """
-            Replacement for the RMSNormDynamicMXQuant fusion.
-            """
-            output = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
-                rms_norm_input,
-                rms_norm_weight,
-                beta=bias,
-                epsilon=self.eps,
-                dst_type=torch.float8_e4m3fn,
-            )
-            quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(output[0], True)
-            mxscale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(output[1], True)
-            return quantized_output, mxscale
-
-        return replacement
-
-
 class AddRMSNormQuantFusionPass(VllmInductorPass):
     """
     A pass for fusing AddRMSNorm and W8A8 quantization operations on Ascend.
@@ -898,13 +689,9 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
             if dynamic_mx_quant_fusion_available:
                 AddRMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormDynamicMXQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-                AddRMSNormDynamicMXQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
-                AddRMSNormDynamicMXQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
             if rms_norm_dynamic_mx_quant_fusion_available:
                 RMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 RMSNormDynamicMXQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-                RMSNormDynamicMXQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
-                RMSNormDynamicMXQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
             if enable_custom_op():
                 AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
