@@ -30,7 +30,11 @@ You can use our official docker image to run `PaddleOCR-VL` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-**A2 series**
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A2 series
+:sync: A2
 
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
@@ -52,7 +56,10 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-**Atlas 300 inference products**
+::::
+
+::::{tab-item} Atlas 300 inference products
+:sync: atlas300
 
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
@@ -73,6 +80,9 @@ docker run --rm \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
 ```
+
+::::
+:::::
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
@@ -98,11 +108,13 @@ Follow these steps to start the inference service:
 2. Set the `MODEL_PATH` environment variable to point to your model directory.
 3. Create and execute the deployment script (save as `deploy.sh`).
 
-**A2 series**
-
-Run the following script to start the vLLM server on single A2 series:
-
 Startup Command:
+
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A2 series
+:sync: A2
 
 ```bash
 #!/bin/sh
@@ -123,11 +135,10 @@ vllm serve ${MODEL_PATH} \
           --port 8000
 ```
 
-**Atlas 300 inference products**
+::::
 
-Run the following script to start the vLLM server on single Atlas 300 inference products:
-
-Startup Command:
+::::{tab-item} Atlas 300 inference products
+:sync: atlas300
 
 ```bash
 #!/bin/sh
@@ -148,9 +159,11 @@ vllm serve ${MODEL_PATH} \
           --port 8000
 ```
 
+::::
+:::::
+
 :::{note}
 On Atlas 300 inference products:
-
 - Only `float16` dtype is supported.
 - The `--max_model_len` option is added to prevent errors when generating the attention operator mask.
 - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
@@ -169,6 +182,7 @@ Key Parameter Descriptions:
 
 Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
+
 ### 5.2 Multi-Node PD Separation Deployment
 
 Not supported yet.
@@ -183,7 +197,11 @@ In the above example, we demonstrated how to use vLLM to infer the PaddleOCR-VL-
 Use separate virtual environments for VLLM and PP-DocLayoutV2 to prevent dependency conflicts.
 :::
 
-**PaddlePaddle**
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A2 series
+:sync: A2
 
 The A2 series device supports inference using the PaddlePaddle framework.
 
@@ -229,12 +247,19 @@ The A2 series device supports inference using the PaddlePaddle framework.
     python -m pip install numpy==1.26.4
     python -m pip install opencv-python==3.4.18.65
     ```
+    :::
 
-**OM inference**
+::::
+
+::::{tab-item} Atlas 300 inference products
+:sync: atlas300
 
 The Atlas 300 inference products support only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
 
-#### 5.3.2 Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
+::::
+:::::
+
+##### 5.3.2 Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
 
 ```python
 from paddleocr import PaddleOCRVL
