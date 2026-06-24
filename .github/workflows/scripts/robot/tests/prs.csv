@@ -1,4 +1,4 @@
-pr_number,title,prefix,state,labels,created_at,body,deepseek_v4_flash_output,expected_ok_dsv4
+pr_number,title,prefix,state,labels,created_at,body,deepseek_v4_flash_output,expected_ok_dsv4,judge_raw_output,ok_reasonable,reasoning_valid,suggestions_valid,judge_reasoning
 10854,[BugFix][v0.22.1] Fix Error when GLM5 MTP layer has BF16 weights,[BugFix],open,,2026-06-23T11:37:57Z,"🔄 Backport of https://github.com/vllm-project/vllm-ascend/pull/10842 to releases/v0.22.1rc.
 
 ### What this PR does / why we need it?
@@ -24,7 +24,21 @@ No
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 88,
+    ""reasoning"": ""描述详细分析了根因、修复方案以及不同 dtype 场景下的行为，明确指出了问题的来源和解决思路。虽然没有提供完整的测试步骤（如具体运行哪些用例），但给出了 vLLM 版本信息和原始 PR 链接，足以让维护者理解变更内容并判断其合理性。backport 场景下信息基本完整，且标题准确，达到合规标准。"",
+    ""summary"": ""提供了清晰的根因分析和修复方法，测试信息基本足够，整体描述丰富且专业。"",
+    ""missing_items"": [],
+    ""suggestions"": [
+        ""可以补充具体的测试命令或预期结果以进一步方便审查，但当前内容已满足理解需求""
+    ]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok=true判断合理，PR描述信息充分且清晰；missing_items为空符合实际，无关键缺失；建议建设性且非强制；reasoning自洽。""
+}",true,true,true,评审Bot的ok=true判断合理，PR描述信息充分且清晰；missing_items为空符合实际，无关键缺失；建议建设性且非强制；reasoning自洽。
 10851,[BugFix][v0.22.1] Fix Index Cache when DSA_CP is Enable,[BugFix],open,,2026-06-23T11:14:21Z,"> 🔄 Backport of #10827 to `releases/v0.22.1rc`.
 
 ### What this PR does / why we need it?
@@ -38,7 +52,19 @@ No
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 80,
+    ""reasoning"": ""标题明确说明为BugFix及版本，描述解释了问题根因（self._get_indexcache_topk_indices 未考虑 DSA-CP 场景）和修复方式（从 DSA_CP context 获取 num_input_token），虽未提供测试计划但属于简单修复，维护者可理解变更意图并开始审查。"",
+    ""summary"": ""变更原因清楚，但缺少测试验证说明。"",
+    ""missing_items"": [""测试计划""],
+    ""suggestions"": [""在 'How was this patch tested?' 部分简要描述测试方式，例如是否添加了单元测试或通过现有 CI 验证，或提供原始 PR 中的测试结果。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的判断合理，reasoning自洽，suggestions有效，missing_items准确。整体审核通过。""
+}",true,true,true,评审Bot的判断合理，reasoning自洽，suggestions有效，missing_items准确。整体审核通过。
 10849,[BugFix] Pad actual_seq_lengths with 0 for EOD scenario in npu_fusion_attention,[BugFix],open,,2026-06-23T10:03:34Z,"### What this PR does / why we need it?
 On CANN 9.0, a strict validation was added for EOD in npu_fusion_attention. The actual_seq_qlen and actual_seq_kvlen parameters must end with 0 to pass the validation.
 In the current fuse_attention path, when handling EOD scenarios, these parameters may not end with 0, causing npu_fusion_attention call to fail on CANN 9.0.
@@ -50,7 +76,19 @@ NO
 
 - vLLM version: 
 - vLLM main: https://github.com/vllm-project/vllm/commit/
-",,
+","{
+    ""ok"": true,
+    ""score"": 72,
+    ""reasoning"": ""标题明确指出了修复目标和修改点（在EOD场景下对actual_seq_lengths补零），描述部分详细解释了问题背景（CANN 9.0新增严格校验）、影响的现象（调用npufusion_attention失败）及修复思路（确保参数以0结尾）。用户无感知变更明确回答了“NO”。虽然测试计划部分仅保留了模板框架，未提供实际的测试方式或验证结果，但核心信息已基本齐全，维护者能够理解变更意图和原因。测试细节缺失是主要扣分点，但不影响对PR整体意图的判断。"",
+    ""summary"": ""描述充分说明了问题、原因和修复方法，但未提供测试验证信息。"",
+    ""missing_items"": [""缺失测试验证信息（未说明如何测试、是否通过CI、是否新增测试用例）""],
+    ""suggestions"": [""补充测试步骤，例如说明是否通过现有单元测试覆盖，或添加了新的测试用例来验证npufusion_attention在EOD场景下的行为"", ""如果有CI结果，可以附上相关链接""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok=true判断合理，描述核心信息齐全，测试缺失但不影响整体判断；reasoning自洽，score与描述一致；suggestions具体可执行且无强制表述；missing_items准确反映了测试信息缺失。""
+}",true,true,true,评审Bot的ok=true判断合理，描述核心信息齐全，测试缺失但不影响整体判断；reasoning自洽，score与描述一致；suggestions具体可执行且无强制表述；missing_items准确反映了测试信息缺失。
 10846,[BugFix]mega moe w4a8 assert bias fix,[BugFix],open,module:ops,2026-06-23T09:42:58Z,"What this PR does / why we need it?
 Problem Background
 When MC=2 (MegaMoE fused kernel mode 2), the bias argument is passed as None in the current branch logic, and there is no dedicated judgment branch to handle empty bias. The original valid null-bias handling logic only exists under the MC=1 branch, leading to abnormal weight calculation, incorrect fused GEMM output, or runtime NPU kernel launch failure when enabling MC=2 MegaMoE.
@@ -68,7 +106,19 @@ Stress test: Continuous batch inference with mixed long text prompts for 30min, 
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 95,
+    ""reasoning"": ""该 PR 描述详细阐述了 bug 背景（MC=2 分支下 bias 参数为 None 导致逻辑缺失）、解决方案（统一空 bias 处理）、用户影响（无）、测试方法（单元测试和端到端测试）以及软件版本信息，信息完整清晰，维护者可以直接开始审查。"",
+    ""summary"": ""描述信息完整，测试充分，符合审查要求。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok判断合理，描述信息完整清晰；reasoning与ok判断自洽；missing_items准确，确实无缺失；suggestions为空，无强制表述问题，整体评审正确。""
+}",true,true,true,评审Bot的ok判断合理，描述信息完整清晰；reasoning与ok判断自洽；missing_items准确，确实无缺失；suggestions为空，无强制表述问题，整体评审正确。
 10844,[BugFix] Pad actual_seq_lengths with 0 for EOD scenario in fusion attention,[BugFix],closed,,2026-06-23T09:16:34Z,"### What this PR does / why we need it?
 On CANN 9.0, a strict validation was added for EOD in npu_fusion_attention.
 The actual_seq_qlen and actual_seq_kvlen parameters must end with 0 to pass the validation.
@@ -82,7 +132,19 @@ no
 
 - vLLM version: 
 - vLLM main: https://github.com/vllm-project/vllm/commit/
-",,
+","{
+    ""ok"": false,
+    ""score"": 65,
+    ""reasoning"": ""PR描述了问题和原因，明确了修改内容，但测试验证部分几乎空白，仅提供了版本号和commit链接，未说明如何测试或验证修复效果，这是关键信息缺失，维护者无法确认改动是否经过验证。"",
+    ""summary"": ""问题解释清楚但缺少测试验证方法，不足以让维护者直接审查"",
+    ""missing_items"": [""测试验证方法""],
+    ""suggestions"": [""补充测试验证方法，例如手动测试步骤、CI测试信息，或说明为何难以添加测试""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot对PR描述完整性评审合理，ok=false符合实际缺失，理由自洽，缺失项准确，建议具体且无强制表述。""
+}",true,true,true,评审Bot对PR描述完整性评审合理，ok=false符合实际缺失，理由自洽，缺失项准确，建议具体且无强制表述。
 10841,[CI]Fixed the installation error caused by redundant C++ header files added during the cache building process.,[CI],merged,ci/build,2026-06-23T08:46:00Z,"### What this PR does / why we need it?
 Fixed the installation error caused by redundant C++ header files added during the cache building process.
 ### Does this PR introduce _any_ user-facing change?
@@ -91,7 +153,19 @@ Fixed the installation error caused by redundant C++ header files added during t
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 65,
+    ""reasoning"": ""标题清晰地指明了修复内容（CI 安装错误，由冗余头文件缓存引起），描述中也复述了该目的，便于维护者理解变更意图。但模板中的‘How was this patch tested’完全未填写，缺少测试验证方式，对审查和后续验证有一定影响。综合考虑，标题信息较全，但测试说明缺失，评分 65，依然可视为基本合规。"",
+    ""summary"": ""标题明确，但测试计划缺失。"",
+    ""missing_items"": [""测试验证说明（How was this patch tested 为空）""],
+    ""suggestions"": [""建议补充测试验证方式，例如在 CI 上已成功运行或提供本地验证步骤。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok=true 合理，描述信息充分但测试部分缺失，仍可视为基本合规；missing_items 列出的测试缺失真实存在；suggestions 具体且无强制表述；reasoning 与 ok 判断一致。整体评审结果正确。""
+}",true,true,true,评审 Bot 的 ok=true 合理，描述信息充分但测试部分缺失，仍可视为基本合规；missing_items 列出的测试缺失真实存在；suggestions 具体且无强制表述；reasoning 与 ok 判断一致。整体评审结果正确。
 10838,fix(kv_pool): free blocks immediately on request finish in layerwise mode,[Misc],closed,"documentation,module:tests,module:core,merge-conflicts",2026-06-23T08:12:55Z,"### What this PR does / why we need it?
 AscendStoreConnector is SupportsHMA, so vLLM invokes request_finished_all_groups (not request_finished). The HMA path missed the layerwise early-return present in request_finished, so a layerwise producer with saved tokens returned `delay_free_blocks=True`. vLLM then deferred the free, but layerwise never records a sending event (only touch_sending_mamba_blocks does), so update_connector_output never freed those blocks -- GPU KV cache usage climbed monotonically to 100%.
 
@@ -103,7 +177,19 @@ Add the same `if self.use_layerwise: return False` guard so blocks are freed imm
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 75,
+    ""reasoning"": ""标题明确说明了修复内容和范围。描述部分详细解释了问题根因（HMA路径缺失layerwise early-return导致延迟释放块，GPU KV缓存攀升至100%）以及修复方法（添加相同的guard）。关键信息充分，维护者可以理解变更的必要性和实现。但`How was this patch tested?`部分为空，未提供任何测试验证方式或结果，信息完整度不足，因此总分75分，仍属于可理解范围。"",
+    ""summary"": ""描述提供了清晰的变更原因和实现方法，但未说明测试验证过程。"",
+    ""missing_items"": [""测试验证方法或步骤""],
+    ""suggestions"": [""建议补充测试方式，例如是否在 layerwise 模式下验证了 KV cache 使用不再单调增长，或是否通过了相关单元测试。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的判断合理：ok=true与描述总体清晰一致，reasoning自洽且指出测试部分缺失，missing_items准确只列了真正缺失的测试信息，suggestions具体可执行且无强制表述。整体评审输出正确。""
+}",true,true,true,评审Bot的判断合理：ok=true与描述总体清晰一致，reasoning自洽且指出测试部分缺失，missing_items准确只列了真正缺失的测试信息，suggestions具体可执行且无强制表述。整体评审输出正确。
 10835,request_num leaks on user cancellation before generate_stream(),[Misc],open,,2026-06-23T07:55:50Z,"### What this PR does / why we need it?
 In our production scenario, the proxy relies on request_num to enforce rate limiting by capping concurrent requests via MAX_CONCURRENT_REQUESTS. After running for some time, we observed that request_num had grown far beyond the actual number of in-flight requests. Investigation revealed that requests cancelled before entering generate_stream() did not decrement request_num as expected—the counter leaked by one each time. Over time, this accumulated leak caused the proxy to incorrectly reject new requests even when the system was lightly loaded.
 The reason is:
@@ -116,7 +202,19 @@ No. This is a bugfix that ensures the internal request counter remains accurate 
 Reviewed the control flow manually across all exit paths . Confirmed on Python 3.11+ that asyncio.CancelledError is a subclass of BaseException, not Exception, and verified the fix properly catches it before the generic except Exception clause.
 - vLLM version: 
 - vLLM main: https://github.com/vllm-project/vllm/commit/
-",,
+","{
+    ""ok"": true,
+    ""score"": 92,
+    ""reasoning"": ""该PR描述非常清晰，完整叙述了问题背景、根因分析、影响范围及修复方式。标题准确概括了问题（用户取消请求导致request_num泄漏）。描述中明确指出了Python版本差异（3.11+ vs ≤3.10）并解释了CancelledError继承关系变化导致异常未被捕获。虽然缺少明确的复现步骤，但问题发生场景已详细描述（在generate_stream()注册前客户端断开），且手动验证了所有退出路径和异常层次结构。测试方法虽未自动化，但对于此类逻辑修复而言足够。同时说明无用户可见变更。整体信息充分，维护者可立即理解并着手审查。"",
+    ""summary"": ""描述包含完整的问题分析、原因解释和修复验证，信息量充足，符合合规要求。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok=true判断合理，原始描述质量高；reasoning自洽且与评分一致；suggestions为空有效，未包含强制性表述；missing_items虽未列出可能的复现步骤，但评审Bot认为描述已足够详细，因此缺失项为空可以接受。整体输出符合审核标准。""
+}",true,true,true,评审Bot的ok=true判断合理，原始描述质量高；reasoning自洽且与评分一致；suggestions为空有效，未包含强制性表述；missing_items虽未列出可能的复现步骤，但评审Bot认为描述已足够详细，因此缺失项为空可以接受。整体输出符合审核标准。
 10832,[EPLB][Doc] Update EPLB document,[EPLB],open,"documentation,module:core,merge-conflicts",2026-06-23T07:50:58Z,"
 ### What this PR does / why we need it?
 1. Update the EPLB documentation #10718 
@@ -129,7 +227,19 @@ Reviewed the control flow manually across all exit paths . Confirmed on Python 3
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 75,
+    ""reasoning"": ""标题明确说明了文档更新内容（EPLB文档），描述具体列出了更新点（更新文档和默认值）并引用了关联issue #10718，整体意图清楚。虽然“How was this patch tested？”部分为空，但作为文档类PR，缺少测试计划不算致命，主要信息基本完整，可让维护者了解变更。得分75，属于基本合规。"",
+    ""summary"": ""标题明确，描述有具体变更点和issue引用，但缺少测试计划说明。"",
+    ""missing_items"": [""缺失测试计划（How was this patch tested部分未填写）""],
+    ""suggestions"": [""建议在How was this patch tested部分填写验证方式，例如检查文档渲染是否正常、确认默认值更新后配置生效。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的判断总体合理。ok=true符合实际情况，描述信息充分；缺失项准确；建议具体且无强制表述；推理自洽。""
+}",true,true,true,评审Bot的判断总体合理。ok=true符合实际情况，描述信息充分；缺失项准确；建议具体且无强制表述；推理自洽。
 10825,[BugFix][SpecDecode] Fix low MTP acceptance rate for SFA+DSA_CP (MTP>1),[BugFix],open,,2026-06-23T06:54:17Z,"### What this PR does / why we need it?
 Fixes a degraded multi-token-prediction (MTP) / speculative-decoding acceptance rate on Ascend when num_speculative_tokens > 1 when enable dsa_cp for sfa models.
 
@@ -150,7 +260,19 @@ No
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 85,
+    ""reasoning"": ""描述详细说明了问题、根因分析和具体代码变更，整体信息完整，维护者能够理解修改意图和影响。测试部分虽缺乏详细步骤，但提及了版本信息，结合变更内容的明确性，可以认为信息足够。"",
+    ""summary"": ""描述提供了清晰的变更说明和根因分析，但测试部分较为简略。"",
+    ""missing_items"": [],
+    ""suggestions"": [""可以考虑补充具体的测试步骤、复现方法或性能对比数据，以便其他维护者验证修复效果。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理，描述信息充分；reasoning 自洽，与判断一致；suggestions 具体可执行，无强制表述；missing_items 为空准确，无遗漏必要信息。""
+}",true,true,true,评审 Bot 的 ok 判断合理，描述信息充分；reasoning 自洽，与判断一致；suggestions 具体可执行，无强制表述；missing_items 为空准确，无遗漏必要信息。
 10817,[BugFix][v0.20.2rc] Avoid streaming partial MiniMax parameter tags,[BugFix],open,module:tests,2026-06-23T03:23:23Z,"## Summary
 - stop MiniMax-M2 streaming tool parser from emitting argument JSON for an incomplete <parameter> value
 - keep early tool-name emission, but stream arguments at completed-parameter granularity to avoid leaking partial </parameter> token pieces
@@ -169,7 +291,19 @@ Current vLLM main moved MiniMax-M2 to the parser engine in vllm#45701, but that 
 
 - vLLM version: 
 - vLLM main: https://github.com/vllm-project/vllm/commit/
-",,
+","{
+    ""ok"": true,
+    ""score"": 95,
+    ""reasoning"": ""描述非常详尽，包含了清晰的变更说明（Summary）、问题背景和设计决策（Context）以及具体的测试步骤和命令（Tests），还引用了关联的issue #10758。信息完整，维护者可以直接理解变更内容并开始审查。虽然没有单独说明user-facing change，但根据内容判断不影响用户体验，且这并非硬性要求。"",
+    ""summary"": ""描述信息完整，提供了变更内容、背景和测试验证，足以支持审查。"",
+    ""missing_items"": [],
+    ""suggestions"": [""如果可能，可以简要说明该修复是否对用户有可见影响（如API、行为变化），但不是必需的。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的评审结果正确，ok判断合理（描述质量高），missing_items为空准确，suggestions有效且非强制，reasoning自洽。整体审核通过。""
+}",true,true,true,评审Bot的评审结果正确，ok判断合理（描述质量高），missing_items为空准确，suggestions有效且非强制，reasoning自洽。整体审核通过。
 10813,[CI]modify euler dependencies which need to install for install vllm-ascend,[CI],merged,ci/build,2026-06-23T02:25:03Z,"### What this PR does / why we need it?
 https://github.com/vllm-project/vllm-ascend/actions/runs/27943551599/job/82857810618. 
 Referring to this error report, the probable cause is incomplete required installation dependencies. The Euler image does not come with `patch` pre-installed, which needs to be added.
@@ -179,7 +313,7 @@ Referring to this error report, the probable cause is incomplete required instal
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+",,false,,,,,
 10811,[Doc]:  Update additional_config.md with migrated env vars documentation and kv cache pool doc,[Doc],merged,documentation,2026-06-23T02:16:32Z,"### What this PR does / why we need it?
  Updates documentation references for the --additional-config migration, avoids prematurely marking environment variables as deprecated, and adds links to related PR/deployment docs.
 
@@ -192,7 +326,21 @@ documentation-only change.
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 85,
+    ""reasoning"": ""PR标题明确指示为文档更新，描述中清晰说明了变更内容（更新additional_config.md引用、避免过早弃用环境变量、添加相关链接）、影响范围（纯文档）和验证方式（文档变更无需复杂测试）。版本信息也已提供。对于纯文档类PR，这些信息已足够维护者理解并开始审查。"",
+    ""summary"": ""文档变更描述充分，标题具体，具备审查条件。"",
+    ""missing_items"": [],
+    ""suggestions"": [
+        ""如果方便，可以附上文档的预览链接或变更对比截图，以进一步加速审查。""
+    ]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理（描述信息充分），reasoning 自洽，suggestions 有效且无强制表述，missing_items 为空且准确。""
+}",true,true,true,评审 Bot 的 ok 判断合理（描述信息充分），reasoning 自洽，suggestions 有效且无强制表述，missing_items 为空且准确。
 10806,[Perf][Worker] Build DSV4 compressor slot mapping on device,[Perf],open,module:ops,2026-06-22T16:50:00Z,"### What this PR does / why we need it?
 
 This refresh limits candidate B to the B2 runtime-only path for removing the DSV4 compressor sync from the model runner hot path.
@@ -218,7 +366,21 @@ No. This is an internal metadata construction change for DSV4 compressed KV slot
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 85,
+    ""reasoning"": ""标题和主体内容完整，清晰说明了变更内容和目的（消除DSV4压缩机同步，构建设备端slot mapping），并列出具体改动点。用户无感知变更描述明确。测试部分虽然未添加单元测试，但解释了原因并说明将在远程机器进行NPU验证，同时有格式和编译检查步骤，评审者可以理解测试覆盖方式。整体信息量足够支持初步审查。"",
+    ""summary"": ""描述详尽说明了变更内容、目的、测试方式，信息较为完整。"",
+    ""missing_items"": [],
+    ""suggestions"": [
+        ""若后续有性能测试数据或对比结果，可以补充到描述中以更好地展示优化效果""
+    ]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的判断合理：描述信息充分，ok=true 恰当，reasoning 与判断一致，suggestions 具体且无强制表述，missing_items 列出正确。整体无误。""
+}",true,true,true,评审 Bot 的判断合理：描述信息充分，ok=true 恰当，reasoning 与判断一致，suggestions 具体且无强制表述，missing_items 列出正确。整体无误。
 10803,[Doc] Update summary formatting in context_parallel.md and correct syntax in eplb_swift_balancer.md,[Doc],merged,documentation,2026-06-22T14:24:47Z,"### What this PR does / why we need it?
 Improves documentation wording and removes a trailing comma from the EPLB JSON example.
 
@@ -230,7 +392,19 @@ Pass the test CI.
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 85,
+    ""reasoning"": ""该PR为文档更新，描述中明确说明了更改内容（改进措辞和修正逗号），以及用户影响（仅文档变更），并提及通过了CI测试。标题和描述共同提供了足够的上下文，维护者可以理解变更意图。虽然测试描述较为简单，但对于文档类PR已属合理，整体信息完整，符合要求。"",
+    ""summary"": ""PR描述提供了清晰的变更说明和影响范围，符合文档PR的要求。"",
+    ""missing_items"": [],
+    ""suggestions"": [""可以考虑补充更详细的测试步骤，例如是否进行了文档预览验证，但当前描述已足够。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot判断合理，ok=true符合文档类PR描述完整性；reasoning自洽，评价与分数一致；suggestions为可选改进，无强制措辞，有效且可执行；missing_items为空，准确无遗漏。""
+}",true,true,true,评审Bot判断合理，ok=true符合文档类PR描述完整性；reasoning自洽，评价与分数一致；suggestions为可选改进，无强制措辞，有效且可执行；missing_items为空，准确无遗漏。
 10798,[Misc]feat: adapt to vLLM main (967c5c3b...fa662b1a),[Misc],open,,2026-06-22T13:12:45Z,"# Cumulative Step Summary
 
 ## Step step-1
@@ -246,7 +420,19 @@ None required. Both upstream changes are internal implementation details that do
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 78,
+    ""reasoning"": ""PR 标题明确说明是同步上游 vLLM main 的 commit 范围，描述中逐一分析了两个上游变更的内容，并解释了为什么 vllm-ascend 不需要改动（内部实现细节，不涉及 Ascend 代码路径）。虽然未显式描述测试计划，但鉴于 PR 不含代码改动，CI 验证可隐含覆盖，且版本信息、commit 链接等关键信息齐全，维护者可以理解 PR 意图并开始审核。信息基本完整，给 78 分。"",
+    ""summary"": ""描述详细分析了上游变更，解释了无需改动的理由，并提供了版本和 commit 链接，基本满足审核要求。"",
+    ""missing_items"": [],
+    ""suggestions"": [""可考虑补充一句测试说明，例如‘CI 已通过，无行为变化’，以更显式地验证无回归。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的判断合理，ok=true 符合实际情况，理由自洽，建议有效且无强制表述，缺失项列表准确。""
+}",true,true,true,评审 Bot 的判断合理，ok=true 符合实际情况，理由自洽，建议有效且无强制表述，缺失项列表准确。
 10790,[BugFix][v0.22.1] Handle wrapped reasoning parsers in usage accounting,[BugFix],open,module:tests,2026-06-22T11:35:37Z,"### What this PR does / why we need it?
 
 Backports #10645 to `releases/v0.22.1rc`.
@@ -266,7 +452,19 @@ No API or schema change. This fixes an internal 500 for affected DeepSeek-V4 cha
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 95,
+    ""reasoning"": ""标题清晰指出是BugFix和版本分支，正文详细描述了PR的目的（backport #10645，修复#10628）、具体实现方式（解包reasoning parser对象，跳过不支持计数的细节）、用户影响（无API变动，修复内部500）以及测试方式（pytest、ruff检查和编译验证）。信息完整，维护者能够充分理解变更内容和验证方法，因此判定为高度合规。"",
+    ""summary"": ""描述包含清晰的变更目的、修复细节、影响说明和具体测试命令，信息充分，可直接用于审查。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok判断合理，理由充分自洽，missing_items和suggestions为空符合实际情况，没有强制表述。整体评审正确无误。""
+}",true,true,true,评审Bot的ok判断合理，理由充分自洽，missing_items和suggestions为空符合实际情况，没有强制表述。整体评审正确无误。
 10787,[Feature]refactor(device): centralize Ascend device type logic in _DeviceConfig,[Feature],open,"module:tests,module:ops,module:core,module:quantization,ready,merge-conflicts",2026-06-22T11:18:29Z,"- Move AscendDeviceType, get_ascend_device_type, check_ascend_device_type from vllm_ascend.utils to vllm_ascend.device.device_config
 - Add a singleton DeviceConfig with semantic properties (is_a2, is_a3, is_310p, is_a5, supports_triton, cpu_binding_mode, etc.) replacing scattered get_ascend_device_type() == AscendDeviceType.X checks
 - Initialize device type eagerly in DeviceConfig.__init__ from _build_info
@@ -280,7 +478,19 @@ No API or schema change. This fixes an internal 500 for affected DeepSeek-V4 cha
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 65,
+    ""reasoning"": ""变更描述非常详细，列出了所有重构要点，使维护者能清晰理解变更内容。但描述中没有提及任何测试计划或验证方法，对于这样一个涉及核心逻辑中心化的重构，测试覆盖是评审和合并的关键依据。缺少测试部分，维护者无法确认变更是否被验证过。"",
+    ""summary"": ""描述详细说明了重构内容，但缺少测试或验证方法。"",
+    ""missing_items"": [""测试/验证方法""],
+    ""suggestions"": [""建议补充如何验证这些变更，例如说明是否通过现有的单元测试、手动测试场景或新增测试来确保正确性。""]
+}",false,"{
+    ""ok_reasonable"": false,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断过于严格：描述非常详细，列出了所有重构要点，信息充分，未严重缺失关键信息，因此 ok 应为 true。reasoning 自洽地指出缺少测试验证，suggestions 有效且无强制表述。但 missing_items 中“测试/验证方法”是否属于必填项值得商榷，不过整体评审质量可以接受，主要问题在于 ok 判断不合理。""
+}",false,true,true,评审 Bot 的 ok 判断过于严格：描述非常详细，列出了所有重构要点，信息充分，未严重缺失关键信息，因此 ok 应为 true。reasoning 自洽地指出缺少测试验证，suggestions 有效且无强制表述。但 missing_items 中“测试/验证方法”是否属于必填项值得商榷，不过整体评审质量可以接受，主要问题在于 ok 判断不合理。
 10782,[BugFix] Propagate num_cached_tokens in disaggregated prefill,[BugFix],open,,2026-06-22T09:15:46Z,"  Forward the prefill node's real num_cached_tokens through kv_transfer_params
   (remote_num_cached_tokens) so the decode node reports correct cached_tokens.
 
@@ -294,7 +504,25 @@ No API or schema change. This fixes an internal 500 for affected DeepSeek-V4 cha
 
 - vLLM version: 
 - vLLM main: https://github.com/vllm-project/vllm/commit/
-",,
+","{
+    ""ok"": false,
+    ""score"": 68,
+    ""reasoning"": ""描述开头明确说明了变更内容和技术细节（转发 num_cached_tokens 以修正 cached_tokens 报告），并引用了关联 PR #46357，核心意图可以理解。但“How was this patch tested?”部分完全空白，未提供任何测试或验证方法，导致维护者无法判断变更是否经过充分验证；同时“Does this PR introduce any user-facing change?”部分也未填写，缺少对用户影响的说明。虽然标题清晰且技术说明具体，但缺失关键信息（测试计划）使得审查准备不充分。"",
+    ""summary"": ""描述中包含具体技术变更说明，但缺失测试计划和用户影响说明，不足以让维护者直接开始审查。"",
+    ""missing_items"": [
+        ""测试计划或验证方法"",
+        ""用户影响说明""
+    ],
+    ""suggestions"": [
+        ""补充测试方式，例如是否通过现有单元测试/集成测试覆盖，或在什么环境下手动验证过"",
+        ""说明该变更是否涉及用户可见的 API、接口或行为变化，若无则明确注明“无用户可见变化”""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok=false 判断合理，因为描述中关键信息（测试计划、用户影响说明）严重缺失，不符合高质量定义；reasoning 自洽地论证了理由并呼应了评分；suggestions 具体、可执行且无强制表述；missing_items 列出的两项确实在描述中缺失，因此整体输出正确。""
+}",true,true,true,评审 Bot 的 ok=false 判断合理，因为描述中关键信息（测试计划、用户影响说明）严重缺失，不符合高质量定义；reasoning 自洽地论证了理由并呼应了评分；suggestions 具体、可执行且无强制表述；missing_items 列出的两项确实在描述中缺失，因此整体输出正确。
 10780,[CI]model-reuse-NEW,[CI],open,"ci/build,module:tests",2026-06-22T09:10:39Z,"### What this PR does / why we need it?
 
 ### Does this PR introduce _any_ user-facing change?
@@ -303,7 +531,19 @@ No API or schema change. This fixes an internal 500 for affected DeepSeek-V4 cha
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 15,
+    ""reasoning"": ""PR描述仅有模板标题和版本信息，未提供任何变更描述、测试方法或实质内容，维护者无法了解该PR的目的和改动。"",
+    ""summary"": ""描述为空，完全无有效信息"",
+    ""missing_items"": [""变更内容描述"", ""变更原因说明"", ""测试计划与方法"", ""用户影响说明""],
+    ""suggestions"": [""请在\""## What this PR does / why we need it?\""部分详细说明本次变更的具体内容和动机，例如解决了什么问题或实现了什么功能"", ""请在\""How was this patch tested?\""部分描述测试步骤和结果，以便其他维护者验证"", ""请补充说明该变更是否会影响用户，例如API变化、行为变化等""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok判断合理，因为PR描述确实缺乏实质内容；reasoning与ok判断一致，自洽；missing_items准确列出了缺失的关键信息；suggestions具体、可执行，且未使用强制表述，符合要求。""
+}",true,true,true,评审Bot的ok判断合理，因为PR描述确实缺乏实质内容；reasoning与ok判断一致，自洽；missing_items准确列出了缺失的关键信息；suggestions具体、可执行，且未使用强制表述，符合要求。
 10775,[BugFix]  isolate KV cache from sleep cleanup with dedicated memory tag for hadamard matrix,[BugFix],open,ready,2026-06-22T07:37:36Z,"### What this PR does / why we need it?
 Use a dedicated memory tag for KV cache used by DSA Hadamard, instead of the shared tag that was previously being cleaned up during sleep(). This ensures the Hadamard tensor is properly tagged and excluded from sleep-mode memory release.
 Fixes #10684
@@ -316,14 +556,40 @@ No.
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 65,
+    ""reasoning"": ""标题清晰指出了修复方向，描述部分解释了变更内容并关联了 issue，但最为关键的测试部分（How was this patch tested?）仅给出了 vLLM 版本和 commit 链接，没有具体说明测试方法或验证过程。对于 bug 修复类 PR，维护者需要了解测试覆盖情况，当前信息不足以让维护者确信变更的正确性。因此判定为信息不够完整。"",
+    ""summary"": ""描述解释了变更原因和修复方法，但未提供具体的测试验证描述。"",
+    ""missing_items"": [""缺乏对测试方法的说明""],
+    ""suggestions"": [""请在 'How was this patch tested' 部分补充测试方式，例如运行了哪些现有测试、是否添加了新测试、或通过什么步骤手动验证了修复有效。""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的评审正确：ok判断合理（测试部分缺失关键内容），reasoning自洽，suggestions有效且无强制表述，missing_items准确。""
+}",true,true,true,评审Bot的评审正确：ok判断合理（测试部分缺失关键内容），reasoning自洽，suggestions有效且无强制表述，missing_items准确。
 10773,[CI]Adjust the dp_size and tp_size in the decode stage to 4 respectively,[CI],open,module:tests,2026-06-22T07:22:15Z,"### What this PR does / why we need it?
 This PR adjusts the dp_size and tp_size in the decode stage to 4 respectively in the Qwen3-235B-A22B-Mooncake-Layerwise configuration file.
 
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 80,
+    ""reasoning"": ""标题明确指出了调整的变量和场景，描述中直接说明了改动内容和涉及的文件，并提供了vLLM版本和commit信息。虽然缺少测试计划或验证说明，但对于这样简单的CI配置参数调整，改动意图清晰，足以让维护者理解并开始审查。整体信息比较完整，因此判定为合规。"",
+    ""summary"": ""描述清楚地说明了改动目的和内容，关键信息基本完整。"",
+    ""missing_items"": [],
+    ""suggestions"": [
+        ""可补充测试验证方式或运行结果，进一步增强描述的可审查性。""
+    ]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 对 PR 描述的完整性判断合理，ok 判定符合实际，缺失项列表准确，建议有效，推理自洽。""
+}",true,true,true,评审 Bot 对 PR 描述的完整性判断合理，ok 判定符合实际，缺失项列表准确，建议有效，推理自洽。
 10770,[CI] update A3 PVC name to gy005-az5-vllm-ascend,[CI],merged,ci/build,2026-06-22T07:03:08Z,"## Summary
 
 Update the PVC name for A3 nodes in the multi-node nightly workflow from `nv-action-vllm-benchmarks-v2` to `gy005-az5-vllm-ascend`.
@@ -334,7 +600,19 @@ Update the PVC name for A3 nodes in the multi-node nightly workflow from `nv-act
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 80,
+    ""reasoning"": ""PR 标题明确为 CI 配置变更，描述清晰指明了改动的目的（更新 A3 节点的 PVC 名称）和具体修改的文件及内容，维护者可以直观了解变更。但描述缺少测试验证说明，也未提及是否影响用户，不过对于简单的配置变更，这些信息不影响对变更意图的理解。整体信息基本完整，评分 80，判定为合规。"",
+    ""summary"": ""描述提供了变更目的、文件路径和具体修改，但缺少测试说明。"",
+    ""missing_items"": [""缺少测试说明""],
+    ""suggestions"": [""建议补充测试验证方式，例如是否通过 CI 作业验证、手动确认或无需测试的理由。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的判断合理。ok=true符合实际情况，描述清晰且信息充分；reasoning自洽，准确指出了优点和微小不足；suggestions具体可行且无强制表述；missing_items中'缺少测试说明'确实存在于描述中。整体审核无误。""
+}",true,true,true,评审Bot的判断合理。ok=true符合实际情况，描述清晰且信息充分；reasoning自洽，准确指出了优点和微小不足；suggestions具体可行且无强制表述；missing_items中'缺少测试说明'确实存在于描述中。整体审核无误。
 10767,[CI]fix deepseek long seq nightly,[CI],merged,module:tests,2026-06-22T06:35:37Z,"### What this PR does / why we need it?
 fix deepseek long seq nightly
 
@@ -347,7 +625,19 @@ No
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 65,
+    ""reasoning"": ""标题明确了是CI修复deepseek长序列nightly，描述中给出了具体改动（增加并发、减少输出token），但缺少关键信息：没有解释为什么需要这些改动（问题根因或背景），测试部分仅列出vLLM版本和commit号，未说明如何验证修复（例如是否通过nightly测试、重现步骤等），导致维护者无法确认修复的正确性和充分性。"",
+    ""summary"": ""描述提供了修改内容，但缺失了测试验证和问题背景，信息不足以让维护者充分审查。"",
+    ""missing_items"": [""缺失测试验证的具体方法和结果"", ""缺失问题背景或根因说明""],
+    ""suggestions"": [""提供具体的测试步骤和验证结果，例如是否通过nightly测试或手动验证"", ""解释为何需要增加并发大小和减少输出token数，如关联的失败日志或现象""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的判断合理，描述缺失关键背景和测试验证方法，OK=false 符合实际情况。reasoning 自洽地指出了缺失信息。suggestions 具体且无强制表述。missing_items 准确反映了缺失项。整体评审正确。""
+}",true,true,true,评审 Bot 的判断合理，描述缺失关键背景和测试验证方法，OK=false 符合实际情况。reasoning 自洽地指出了缺失信息。suggestions 具体且无强制表述。missing_items 准确反映了缺失项。整体评审正确。
 10763,[BugFix] Fix MTP DSA graph capture metadata,[BugFix],open,,2026-06-22T05:24:01Z,"## Summary
 
 Fix MTP speculative decoding with DSA compressed attention when FULL decode graph capture is enabled.
@@ -373,7 +663,19 @@ These paths are only exercised when the speculative drafter is allowed to use gr
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 95,
+    ""reasoning"": ""该PR描述非常详尽：标题明确指出了修复的问题类型和模块；正文包含Summary、Root cause、Fix、Validation等完整信息，清楚地解释了问题场景、根因分析和具体修复措施，并提供了验证命令和观察结果，确保评审者能够完全理解变更内容和验证过程。描述质量高，没有缺失关键信息。"",
+    ""summary"": ""描述信息完整，涵盖问题描述、根因分析、修复方案和验证结果，评审者可据此直接进行审核。"",
+    ""missing_items"": [],
+    ""suggestions"": [""若有单元测试覆盖DSA图捕获场景，可进一步提升代码健壮性。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理（描述信息完整详细），missing_items 为空准确，suggestions 具体且无强制表述，reasoning 自洽，综合评审正确。""
+}",true,true,true,评审 Bot 的 ok 判断合理（描述信息完整详细），missing_items 为空准确，suggestions 具体且无强制表述，reasoning 自洽，综合评审正确。
 10761,Bump actions/checkout from 6 to 7,[Misc],merged,"ci/build,dependencies,github_actions",2026-06-22T05:23:34Z,"Bumps [actions/checkout](https://github.com/actions/checkout) from 6 to 7.
 <details>
 <summary>Release notes</summary>
@@ -494,7 +796,19 @@ These paths are only exercised when the speculative drafter is allowed to use gr
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 85,
+    ""reasoning"": ""标题明确说明将 actions/checkout 从 v6 升级到 v7，描述中包含了完整的发布说明链接和变更摘要（通过折叠块呈现），维护者可以快速了解升级内容与潜在影响。对于这类自动化依赖升级 PR，该描述已提供足够信息供审查者开始 review，无需额外测试说明（CI 可承担验证）。虽未单独填写模板中的测试计划和用户面变更部分，但整体信息清晰、可用。"",
+    ""summary"": ""合规的依赖升级描述，标题清晰传达变更，描述附带了版本发布说明和变更日志，信息充分。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理，该 PR 为依赖升级 PR，描述包含版本变更链接和变更日志摘要，信息充分。missing_items 为空正确，无缺失关键项。suggestions 为空有效。reasoning 自洽，解释了评分依据。整体审核通过。""
+}",true,true,true,评审 Bot 的 ok 判断合理，该 PR 为依赖升级 PR，描述包含版本变更链接和变更日志摘要，信息充分。missing_items 为空正确，无缺失关键项。suggestions 为空有效。reasoning 自洽，解释了评分依据。整体审核通过。
 10755,[Scheduler][Feature] Implement LAPS-Inspired Prefill Scheduling for vllm-ascend,[Scheduler],open,"documentation,module:tests,module:core,merge-conflicts",2026-06-22T03:13:49Z,"### What this PR does / why we need it?
 
 This PR implements **LAPS (Length-Aware Prefill Scheduling)** for the Ascend recompute scheduler in `vllm-ascend`.
@@ -516,7 +830,22 @@ Yes, but it is **off by default** and **additive**:
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 88,
+    ""reasoning"": ""标题和描述明确说明了PR实现了LAPS预填充调度，解释了动机（解决头阻塞问题）、实现方式（三优先级队列和令牌桶防饿死机制）以及用户变更（默认关闭，新增配置项）。测试部分列出了单元测试和端到端测试的文件名，提供了测试覆盖范围，虽然未明确测试状态，但已有足够信息供维护者理解变更并能开始审查。尚可补充关联issue或更详细的测试结果，但不影响整体判断。"",
+    ""summary"": ""描述详细说明了功能动机、实现方法和测试覆盖，信息完整度较高，符合合规要求。"",
+    ""missing_items"": [],
+    ""suggestions"": [
+        ""可考虑添加关联的issue编号（如果有）以提供更多背景"",
+        ""如果测试已在CI中通过，可以明确说明测试结果""
+    ]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok判断合理，reasoning自洽，suggestions有效且无强制表述，missing_items准确。""
+}",true,true,true,评审Bot的ok判断合理，reasoning自洽，suggestions有效且无强制表述，missing_items准确。
 10752,[Doc][Misc] Update benchmarks README and fix MiniMax-M2.5 docker command,[Doc],merged,documentation,2026-06-22T02:58:26Z,"### What this PR does / why we need it?
 
 This PR synchronizes documentation updates from the release/v0.18.0 branch. Specifically, it:
@@ -537,7 +866,19 @@ Documentation changes only.
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 90,
+    ""reasoning"": ""描述完整填写了PR模板的主要部分（What、User-facing change、Test），具体说明了变更内容（更新benchmarks README中的文件名、修复MiniMax-M2.5的docker命令）及原因（从release分支同步），并明确为文档变更。虽然测试部分较简略，但文档类变更通常不需要复杂测试，且描述提供了版本信息。整体信息清晰，维护者可以理解并审查。"",
+    ""summary"": ""描述具体清晰，提供了必要的变更说明和上下文，符合要求。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的输出合理，ok=true 符合实际情况（描述信息充分、清晰），missing_items 和 suggestions 为空符合要求（没有缺失，无需建议），reasoning 自洽且与判断一致。""
+}",true,true,true,评审 Bot 的输出合理，ok=true 符合实际情况（描述信息充分、清晰），missing_items 和 suggestions 为空符合要求（没有缺失，无需建议），reasoning 自洽且与判断一致。
 10749,add mxfp quant for token dispatch to fit low acc communication,[Misc],open,module:ops,2026-06-22T02:30:02Z,"### What this PR does / why we need it?
 1. Added is_mxfp_quant to moe_stage_params
 2. Added logic for mxfp quant during low acc communication throw all2all
@@ -547,7 +888,19 @@ Documentation changes only.
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 55,
+    ""reasoning"": ""PR description 包含了变更的基本说明（添加 is_mxfp_quant 参数和 low acc 通信的 mxfp 量化逻辑）以及用户影响，但完全没有提及测试计划或验证方法。对于涉及通信量化、可能影响性能的修改，缺乏测试信息使得维护者无法判断代码正确性和稳定性，信息不足以开始审查。"",
+    ""summary"": ""描述提供了基本变更说明，但缺少测试计划，信息不够完整。"",
+    ""missing_items"": [""缺失测试计划或验证方法""],
+    ""suggestions"": [""建议补充测试信息，例如是否通过了现有 CI 测试、是否添加了新的单元测试或集成测试，以及手动测试的步骤和结果。""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的输出合理。ok=false符合描述缺失测试计划的实际情况，reasoning自洽，suggestions具体可执行且无强制表述，missing_items准确。""
+}",true,true,true,评审Bot的输出合理。ok=false符合描述缺失测试计划的实际情况，reasoning自洽，suggestions具体可执行且无强制表述，missing_items准确。
 10745,[Doc][Feature] Add Motor deployment guide,[Doc],open,documentation,2026-06-22T01:40:37Z,"### What this PR does / why we need it?
 
 This PR adds a deployment guide for using MindIE-PyMotor with vLLM-Ascend. MindIE-PyMotor provides one-click deployment for prefill–decode (PD) disaggregation and PD aggregation on Ascend NPUs.
@@ -563,7 +916,19 @@ Documentation-only change, no testing required.
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 95,
+    ""reasoning"": ""描述清晰地说明了 PR 的目的（添加 Motor 部署指南）、变更类型（文档更新）以及用户影响。虽然测试部分注明无需测试，但对于纯文档更新来说是合理的。附带了 vLLM 版本和主仓库提交引用，信息完整。没有缺失关键项，因此评为高分。"",
+    ""summary"": ""PR 描述包含清晰的目的、变更说明以及版本上下文，信息充分，符合文档类 PR 的合规要求。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok=true 判断合理，理由自洽，缺失项列表准确（无缺失），建议列表为空且没有强制表述，整体审核符合要求。""
+}",true,true,true,评审 Bot 的 ok=true 判断合理，理由自洽，缺失项列表准确（无缺失），建议列表为空且没有强制表述，整体审核符合要求。
 10743,[wip]Migrate kda to npu refactor,[wip],open,"module:tests,module:ops",2026-06-21T15:23:19Z,"### What this PR does / why we need it?
 
 ### Does this PR introduce _any_ user-facing change?
@@ -572,7 +937,19 @@ Documentation-only change, no testing required.
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 20,
+    ""reasoning"": ""描述仅包含模板标题和提交引用，正文为空或只填写了无关信息（版本号），完全没有说明具体变更内容、变更原因和测试方法，维护者无法理解此PR的目的和实现。"",
+    ""summary"": ""描述为空，模板标题下无内容，仅提供了一句提交引用，缺少关键信息。"",
+    ""missing_items"": [""具体变更内容描述"", ""变更原因或背景"", ""测试方法或验证结果"", ""用户面变更说明""],
+    ""suggestions"": [""请在模板标题下补充变更的具体内容和目的，例如本次重构涉及哪些模块和变更点"", ""添加测试步骤或说明如何验证本次修改"", ""如果存在用户面影响，请明确说明""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的判断合理，理由自洽，建议有效且无强制表述，缺失项准确。""
+}",true,true,true,评审Bot的判断合理，理由自洽，建议有效且无强制表述，缺失项准确。
 10740,[BugFix] Fix logic bug in patch_kv_coordinator to properly support vLLM 0.22.1,[BugFix],merged,ready,2026-06-21T02:05:35Z,"https://github.com/vllm-project/vllm-ascend/pull/10476
 ### What this PR does / why we need it?
 
@@ -604,7 +981,19 @@ No. This is a purely internal bug fix to adapt to different vLLM versions and do
 * **Manual Verification:** Verified that `eagle_kwarg` correctly resolves to `{""use_eagle"": ...}` when mock version is set to `0.22.1`. [CI]
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 92,
+    ""reasoning"": ""描述明确说明了修复的语法/逻辑错误，提供了修正后的代码片段，解释了变更原因，列出了测试方法（单元测试和手动验证），并提及了版本兼容性。信息足够详细，维护者能直接理解变更内容和验证方式。"",
+    ""summary"": ""描述完整，包含问题说明、修正方案和测试方法，符合合规标准。"",
+    ""missing_items"": [],
+    ""suggestions"": [""可考虑补充关联的 Issue 链接以提供更多背景，但非必需。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok判断合理，描述内容充分；reasoning自洽，与ok判断一致；suggestions有效且无强制表述；missing_items为空准确。整体审核通过。""
+}",true,true,true,评审Bot的ok判断合理，描述内容充分；reasoning自洽，与ok判断一致；suggestions有效且无强制表述；missing_items为空准确。整体审核通过。
 10737,[BugFix]  isolate KV cache from sleep cleanup with dedicated memory tag for hadamard matrix,[BugFix],open,,2026-06-20T07:53:35Z,"### What this PR does / why we need it?
 Use a dedicated memory tag for KV cache used by DSA Hadamard, instead of the shared tag that was previously being cleaned up during sleep(). This ensures the Hadamard tensor is properly tagged and excluded from sleep-mode memory release.
 
@@ -616,7 +1005,23 @@ No.
 
 - vLLM version: 
 - vLLM main: https://github.com/vllm-project/vllm/commit/
-",,
+","{
+    ""ok"": false,
+    ""score"": 65,
+    ""reasoning"": ""该PR描述解释了变更内容（使用专用内存标签隔离KV缓存以避免在sleep()中被清理）和用户影响（无），但完全没有提及任何测试或验证方法。对于Bug修复类PR，测试计划或验证步骤是维护者判断正确性和回归风险的关键信息，缺失此项导致信息不完整，难以直接开始审查。"",
+    ""summary"": ""描述了变更内容和原因，但缺少测试验证信息，无法确保变更正确性。"",
+    ""missing_items"": [
+        ""测试验证方法""
+    ],
+    ""suggestions"": [
+        ""建议补充测试方式，例如说明是否通过现有单元测试覆盖，或提供手动验证步骤（如观察mem占用、触发sleep后再检查Hadamard矩阵是否完好），也可说明为何难以添加测试。""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok=false 判断合理，因为 PR 描述缺少测试验证方法，属于关键信息缺失；reasoning 与缺失项一致，逻辑自洽；suggestions 具体、可执行且无强制表述；missing_items 准确反映了实际缺失项。""
+}",true,true,true,评审 Bot 的 ok=false 判断合理，因为 PR 描述缺少测试验证方法，属于关键信息缺失；reasoning 与缺失项一致，逻辑自洽；suggestions 具体、可执行且无强制表述；missing_items 准确反映了实际缺失项。
 10734,[Doc] Translated Doc files 2026-06-19,[Doc],closed,"documentation,merge-conflicts",2026-06-19T05:35:37Z,"## Auto-Translation Summary
 
 Translated **26** file(s):
@@ -653,7 +1058,22 @@ Translated **26** file(s):
 [Workflow run](https://github.com/vllm-project/vllm-ascend/actions/runs/27806872280)
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 82,
+    ""reasoning"": ""该PR为文档翻译，标题明确说明了变更类型和内容。描述详细列出了所有被翻译的文件、工作流运行链接及vLLM版本信息，使维护者能够清楚了解变更范围。虽然未明确说明翻译的必要性和测试验证方法，但作为自动化翻译的文档更新，信息已基本满足审查需求。"",
+    ""summary"": ""翻译文档PR，文件列表清晰，信息基本完整。"",
+    ""missing_items"": [],
+    ""suggestions"": [
+        ""考虑补充说明此次翻译的背景和必要性，例如是否为了覆盖新功能文档"",
+        ""可以考虑描述翻译的正确性或一致性验证方式，如是否经过语言审校或自动化检查""
+    ]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的判断合理：PR 描述清晰列出了翻译文件列表及版本信息，足以满足审查需求；推理逻辑自洽，指出虽缺少背景和验证说明但并非必需；建议具体且无强制表述；缺失项列表为空符合实际。整体审核结论正确。""
+}",true,true,true,评审 Bot 的判断合理：PR 描述清晰列出了翻译文件列表及版本信息，足以满足审查需求；推理逻辑自洽，指出虽缺少背景和验证说明但并非必需；建议具体且无强制表述；缺失项列表为空符合实际。整体审核结论正确。
 10732,[Doc]Update Qwen-VL-Dense & Qwen3-Next documentation ,[Doc],open,documentation,2026-06-18T10:46:06Z,"### What this PR does / why we need it?
 Update Qwen-VL-Dense & Qwen3-Next documentation 
 ### Does this PR introduce _any_ user-facing change?
@@ -662,7 +1082,19 @@ NO
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 50,
+    ""reasoning"": ""描述仅重复了标题（更新Qwen-VL-Dense & Qwen3-Next文档），未说明具体修改了哪些内容、为何更新、以及如何验证文档的正确性（如本地构建、链接检查等）。维护者无法从当前信息判断变更范围和影响，信息严重不足。"",
+    ""summary"": ""标题明确但描述过于简略，缺少关键细节，无法支持有效审查。"",
+    ""missing_items"": [""具体变更内容说明"", ""变更原因/背景"", ""测试验证方法""],
+    ""suggestions"": [""请列出具体更新了哪些部分（如新增模型说明、修正错误、更新示例等）"", ""请说明更新原因（如关联issue、用户反馈或兼容性需求）"", ""请描述如何测试文档更新（如本地构建检查、CI结果截图或手动验证步骤）""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok判断合理，因为描述确实缺少关键信息；reasoning自洽且与判断一致；suggestions有效且无强制表述；missing_items准确反映了缺失项。""
+}",true,true,true,评审Bot的ok判断合理，因为描述确实缺少关键信息；reasoning自洽且与判断一致；suggestions有效且无强制表述；missing_items准确反映了缺失项。
 10729,[Misc] main2main upgrade vllm to 0619,[Misc],open,"ci/build,module:tests,module:ops,module:core,module:quantization,ready,merge-conflicts",2026-06-18T09:42:31Z,"### What this PR does / why we need it?
 This PR adapts vllm-ascend to the latest upstream vLLM changes (commit `560fb8b867aaa444d471b35fd846368ebacf12b9`). The changes are organized by the upstream PRs they correspond to:
 
@@ -799,7 +1231,19 @@ https://github.com/vllm-project/vllm-ascend/actions/runs/27935695692/job/8265742
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 95,
+    ""reasoning"": ""该PR描述极其详尽，涵盖了变更动机、每个更改对应的上游PR、具体文件修改说明、是否有用户可见影响、测试验证方式（附CI运行链接）以及版本信息。维护者可以直接基于此描述进行审查，无需额外追问。所有关键信息均完整，符合高评分标准。"",
+    ""summary"": ""描述提供了完整的变更清单、上游PR对照、测试验证结果，信息充分，可直接用于审查。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的判断符合实际情况，PR 描述详尽，ok=true 合理；reasoning 逻辑自洽，与 ok 和 score 一致；missing_items 为空准确，无遗漏关键信息；suggestions 为空且无强制性表述，整体有效。""
+}",true,true,true,评审 Bot 的判断符合实际情况，PR 描述详尽，ok=true 合理；reasoning 逻辑自洽，与 ok 和 score 一致；missing_items 为空准确，无遗漏关键信息；suggestions 为空且无强制性表述，整体有效。
 10727,[BugFix][Performance] fix performance issue when enable return router experts with async scheduling,[BugFix],merged,ready,2026-06-18T09:37:59Z,"### What this PR does / why we need it?
 This pull request addresses a performance and stability issue related to routed experts when using asynchronous scheduling. By introducing a snapshot mechanism with cloned tensors, the changes ensure that data remains consistent during asynchronous transfers, avoiding race conditions where buffers might be overwritten before the transfer completes. The logic for synchronous scheduling was also optimized to better align with existing bookkeeping flows.
 
@@ -815,7 +1259,23 @@ not involved
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 65,
+    ""reasoning"": ""描述详细解释了变更的背景、原因和实现方法（异步调度快照机制、同步路径优化等），但“How was this patch tested?”部分仅列出了 vLLM 版本和 commit hash，没有说明具体的测试步骤、测试覆盖范围或是否通过了现有/新增测试，不符合模板对验证信息的基本要求。维护者看到后无法判断改动是否经过充分验证，因此不能算作信息完整。不过标题清晰，变更描述详细，故给予中低分。"",
+    ""summary"": ""变更内容说明充分，但测试验证信息缺失，不够合规。"",
+    ""missing_items"": [
+        ""缺失具体的测试方法或验证结果""
+    ],
+    ""suggestions"": [
+        ""建议补充是如何测试的，例如是否通过了现有单元测试、新增了哪些测试用例，或者手动验证的步骤和结果""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的判断合理：PR 描述缺少具体的测试方法和结果，因此 ok=false 正确；missing_items 准确；建议具体且无强制表述；推理自洽。""
+}",true,true,true,评审 Bot 的判断合理：PR 描述缺少具体的测试方法和结果，因此 ok=false 正确；missing_items 准确；建议具体且无强制表述；推理自洽。
 10722,[CI]model reuse,[CI],closed,"ci/build,module:tests",2026-06-18T09:29:22Z,"### What this PR does / why we need it?
 
 ### Does this PR introduce _any_ user-facing change?
@@ -824,7 +1284,27 @@ not involved
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 15,
+    ""reasoning"": ""PR 描述几乎为空，仅包含版本号和 commit 链接，没有说明改动的具体内容、原因或测试方法。标题 '[CI]model reuse' 信息量不足，无法让维护者理解变更意图。"",
+    ""summary"": ""描述内容严重不足，缺失关键信息，无法进行审查。"",
+    ""missing_items"": [
+        ""PR 改动说明（做了什么及原因）"",
+        ""测试方法或验证结果"",
+        ""用户影响说明""
+    ],
+    ""suggestions"": [
+        ""详细描述本次改动的内容和目的，例如 model reuse 在 CI 中的具体用途"",
+        ""补充测试计划或验证步骤，说明如何确保改动正确"",
+        ""如果涉及用户可见的变化，请说明 API 或行为是否改变""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok=false 判断合理，因为 PR 描述确实缺失关键信息；missing_items 准确列出了缺失项；suggestions 具体可执行且无强制表述；reasoning 自洽，符合描述实际状况。""
+}",true,true,true,评审 Bot 的 ok=false 判断合理，因为 PR 描述确实缺失关键信息；missing_items 准确列出了缺失项；suggestions 具体可执行且无强制表述；reasoning 自洽，符合描述实际状况。
 10717,[bugfix][performance] fix performance issue when enable return router experts with async scheduling,[BugFix],closed,,2026-06-18T08:42:49Z,"### What this PR does / why we need it?
 This pull request addresses a performance and stability issue related to routed experts when using asynchronous scheduling. By introducing a snapshot mechanism with cloned tensors, the changes ensure that data remains consistent during asynchronous transfers, avoiding race conditions where buffers might be overwritten before the transfer completes. The logic for synchronous scheduling was also optimized to better align with existing bookkeeping flows.
 
@@ -840,7 +1320,19 @@ not-involved
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 75,
+    ""reasoning"": ""PR描述详细说明了性能问题的背景、解决方案以及代码变更的三个主要方面，内容清晰，使维护者能够理解修改意图。但是，'How was this patch tested?'部分没有提供具体的测试方法或验证结果，仅列出了版本信息，缺少测试描述，这是关键信息不足。综合考虑，描述整体质量较好，但测试部分缺失导致分数为75，仍可判断为基本合规。"",
+    ""summary"": ""描述详细说明了变更内容和原因，但测试部分缺少具体说明，总体可接受但可改进"",
+    ""missing_items"": [""测试步骤或验证方法""],
+    ""suggestions"": [""在'How was this patch tested?'部分补充具体测试方式，例如是否通过了现有CI测试、是否添加了新的单元测试、或进行了哪些手动验证测试来确认性能修复。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的判断基本合理。ok=true符合描述整体质量较高（除测试部分外信息充分），missing_items列出的测试缺失项准确，suggestions具体可执行且无强制表述，reasoning与评分一致，逻辑自洽。""
+}",true,true,true,评审Bot的判断基本合理。ok=true符合描述整体质量较高（除测试部分外信息充分），missing_items列出的测试缺失项准确，suggestions具体可执行且无强制表述，reasoning与评分一致，逻辑自洽。
 10713,[CI] run test only if the change is only for test,[CI],closed,ci/build,2026-06-18T08:21:44Z,"### What this PR does / why we need it?
 
 ### Does this PR introduce _any_ user-facing change?
@@ -849,7 +1341,26 @@ not-involved
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 30,
+    ""reasoning"": ""标题指出了CI相关的改动意图，但描述部分完全空白（只包含vLLM版本号和commit链接，未填写任何实质内容）。缺失对具体改动逻辑、实现方式及测试验证的说明，维护者无法理解PR到底做了什么以及如何验证。根据评分参考，信息严重不足，无法进行审查。"",
+    ""summary"": ""描述几乎空白，标题虽有一定提示但不够具体，无法支撑审查。"",
+    ""missing_items"": [
+        ""具体变更内容的说明（What this PR does）"",
+        ""变更原因或动机（why we need it）"",
+        ""测试计划或验证方法（How was this patch tested）""
+    ],
+    ""suggestions"": [
+        ""请在「What this PR does / why we need it」中描述具体实现了什么逻辑（例如判断条件是仅修改test目录下的文件，还是其他规则）以及为什么需要此改动。"",
+        ""请在「How was this patch tested」中说明如何验证此规则生效，例如是否新增CI步骤、手工测试了哪些场景。""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的判断合理：描述为空，ok=false 正确；missing_items 准确列出缺失项；suggestions 具体且无强制表述；reasoning 逻辑自洽。""
+}",true,true,true,评审 Bot 的判断合理：描述为空，ok=false 正确；missing_items 准确列出缺失项；suggestions 具体且无强制表述；reasoning 逻辑自洽。
 10712,[BugFix][Worker] Align encoder ACL graph with vLLM main encoder cudagraph API,[BugFix],merged,"module:tests,ready",2026-06-18T08:11:07Z,"### What this PR does / why we need it?
 
 Aligns ViT encoder ACL graph (FIA graph-task) with upstream encoder cudagraph API changes.
@@ -902,7 +1413,19 @@ Yes, but only when `compilation_config.cudagraph_mm_encoder=True`: encoder NPUGr
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 95,
+    ""reasoning"": ""标题和描述均清晰且详细。标题明确指出了BUG修复和工作范围；描述部分具体列出了变更内容（捕获/重放逻辑、FIA上下文）、使用了Mermaid图对比前后行为、说明了用户可见变更（仅在特定配置下生效）、并提供了可执行的E2E测试用例和版本信息。信息完整度极高，维护者可以直接理解并开展审查。"",
+    ""summary"": ""描述信息完整，提供了变更动机、具体实现方式、影响范围、测试方法及版本信息，评定为合规。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理，描述信息完整、清晰；missing_items 为空符合实际；suggestions 无强制表述且有效；reasoning 自洽，评分与判断一致。整体评审正确。""
+}",true,true,true,评审 Bot 的 ok 判断合理，描述信息完整、清晰；missing_items 为空符合实际；suggestions 无强制表述且有效；reasoning 自洽，评分与判断一致。整体评审正确。
 10697,[Feature] Support Step3P7/Step3P5 with Step3P5 MTP on Ascend,[Feature],open,"module:tests,module:ops,module:quantization",2026-06-18T06:17:36Z,"### What this PR does / why we need it?
 
 This PR adds Ascend support for Step3P5 and Step3P7 models with MTP speculative decoding.
@@ -968,7 +1491,21 @@ evalscope eval \
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 88,
+    ""reasoning"": ""标题明确指出了特性（Ascend上的Step3P7/Step3P5 MTP支持），描述详细解释了变更目的和必要性，并提供了完整的e2e测试命令和精度验证步骤（含截图），信息足以让维护者理解并开始审查。用户可见变化部分虽未显式填写，但描述整体已足够清晰。"",
+    ""summary"": ""PR描述提供了充分的变更说明和测试方案，符合合规要求。"",
+    ""missing_items"": [],
+    ""suggestions"": [
+        ""可考虑在“用户可见变化”部分明确说明是否影响API或行为，以帮助评审者全面理解影响。""
+    ]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的判断合理。PR描述提供了清晰的技术说明和测试验证，ok=true符合实际质量；评理自洽，missing_items未将用户可见变化部分列为缺失项是恰当的（该部分为空但不影响关键信息，建议已覆盖），suggestions具体可行且无强制表述。""
+}",true,true,true,评审Bot的判断合理。PR描述提供了清晰的技术说明和测试验证，ok=true符合实际质量；评理自洽，missing_items未将用户可见变化部分列为缺失项是恰当的（该部分为空但不影响关键信息，建议已覆盖），suggestions具体可行且无强制表述。
 10685,[CI] Add E2E weekly multi-node config for MiniMax-PD-in32k-bs4-1,[CI],open,"ci/build,module:tests",2026-06-18T03:34:58Z,"### What this PR does / why we need it?
 
 1、Fixing the problem that historical PR changes are overwritten: Add external DP test orchestration under tests/e2e/nightly/multi_node/external_dp/
@@ -984,10 +1521,42 @@ by the running the test
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 75,
+    ""reasoning"": ""标题明确（[CI] 标签+具体配置），描述主体说清了变更内容（修复历史覆盖问题、添加配置、更新基线）和原因，并引用了相关PR和提交版本。测试部分虽只写了“by running the test”，但鉴于CI配置类的变更，该方法基本可接受。整体信息对维护者理解意图足够，但测试细节尚可补充。"",
+    ""summary"": ""描述提供充分变更内容与测试方法，基本满足评审需要。"",
+    ""missing_items"": [],
+    ""suggestions"": [""建议在测试部分补充CI运行状态链接或简要验证结果，使测试验证更透明。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok判断合理（描述信息充分，无严重缺失）；reasoning自洽地支持了判断；suggestions具体可执行且无强制性表述；missing_items为空准确（无真正缺失项）。整体评审结果正确。""
+}",true,true,true,评审Bot的ok判断合理（描述信息充分，无严重缺失）；reasoning自洽地支持了判断；suggestions具体可执行且无强制性表述；missing_items为空准确（无真正缺失项）。整体评审结果正确。
 10635,[CI] Fix gh install error,[CI],merged,,2026-06-17T15:28:32Z,"1.Fix gh install error
 2. speed up bot_pr_create
-",,
+","{
+    ""ok"": false,
+    ""score"": 45,
+    ""reasoning"": ""标题指明了CI修复，但描述仅重复标题并另加一句加速说明，无任何具体错误信息、修复方法、测试验证或用户影响说明。描述字符少于100且缺乏实质性内容，无法让维护者开始审查。"",
+    ""summary"": ""描述信息严重不足，未说明具体问题与测试方式"",
+    ""missing_items"": [
+        ""错误的具体表现和原因"",
+        ""修复方法的设计思路"",
+        ""测试验证方式或CI结果""
+    ],
+    ""suggestions"": [
+        ""补充gh install error的具体错误输出和出现场景"",
+        ""说明如何修复该错误（如修改的命令、配置等）"",
+        ""添加测试说明，例如是否已在CI上运行通过或如何手动验证""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok判断合理（描述信息严重不足，重复标题），missing_items准确（错误原因、修复方法、测试验证均缺失），suggestions具体可行且无强制表述，reasoning自洽与判断一致。""
+}",true,true,true,评审Bot的ok判断合理（描述信息严重不足，重复标题），missing_items准确（错误原因、修复方法、测试验证均缺失），suggestions具体可行且无强制表述，reasoning自洽与判断一致。
 10619, [BugFix] align spec_sequence_masks device tensor capacity with CPU,[Misc],merged,"module:ops,ready",2026-06-17T10:01:09Z,"### What this PR does / why we need it?
 Problem: When max_num_seqs > decode_cudagraph_max_bs, spec_sequence_masks device tensor (decode_cudagraph_max_bs sized) is smaller than its CPU
   counterpart (max(max_num_seqs, decode_cudagraph_max_bs) sized), causing RuntimeError on copy_ in _build_attn_group_metadata.
@@ -1001,7 +1570,7 @@ no
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+",,false,,,,,
 10605,Minimax m3 dev,[Misc],closed,"module:ops,module:quantization",2026-06-17T08:08:06Z,"### What this PR does / why we need it?
 
 ### Does this PR introduce _any_ user-facing change?
@@ -1010,7 +1579,27 @@ no
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 20,
+    ""reasoning"": ""标题 'Minimax m3 dev' 过于模糊，无法推断具体变更内容。提交的描述为空，仅包含模板的空白章节和一行版本信息及 commit 引用，没有说明更改了什么、为什么需要以及如何测试。这样的描述对维护者几乎无帮助，完全无法开展审查。"",
+    ""summary"": ""描述几乎为空，仅包含模板标题和版本信息，无法评估变更。"",
+    ""missing_items"": [
+        ""缺失变更内容描述"",
+        ""缺失测试方法或验证说明"",
+        ""缺失变更目的或动机""
+    ],
+    ""suggestions"": [
+        ""建议在 'What this PR does / why we need it?' 部分详细说明本次修改的内容和原因，例如新增了哪种模型支持、解决了什么问题"",
+        ""建议在 'How was this patch tested?' 部分说明测试环境、测试步骤或测试结果"",
+        ""如果有相关 issue 链接，建议在描述中关联以便 reviewers 了解背景""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的判断完全正确：PR 描述严重缺失关键信息，仅为空模板和版本号，ok 应为 false；推理逻辑自洽，missing_items 准确列出缺失项，suggestions 具体且无强制表述。整体输出合理。""
+}",true,true,true,评审 Bot 的判断完全正确：PR 描述严重缺失关键信息，仅为空模板和版本号，ok 应为 false；推理逻辑自洽，missing_items 准确列出缺失项，suggestions 具体且无强制表述。整体输出合理。
 10588,[Doc][Misc] Improve readability and fix typos in documentation,[Doc],merged,documentation,2026-06-17T02:49:51Z,"### What this PR does / why we need it?
 This PR improves the readability and correctness of the GLM-5/5.1 tutorial documentation by:
 - Correcting the model cache paths for GLM-5 quantized models (from `GLM-5-w4a8` to `GLM5-w4a8` and from `/root/.cache/glm5-w8a8` to `/root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8`) to ensure consistency and accuracy.
@@ -1025,7 +1614,19 @@ Documentation changes only.
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 85,
+    ""reasoning"": ""该PR描述清晰说明了变更内容（修正路径和添加解释），标题明确，并声明为文档更新，无用户面向变更。对于文档类PR，测试部分以'Documentation changes only.'说明，虽未提供具体验证步骤，但整体信息充分，维护者可以理解变更意图。因此判定为合规，评分85。"",
+    ""summary"": ""文档更新描述具体，变更内容明确，测试说明可接受。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理，理由自洽，missing_items 和 suggestions 均为空且符合实际情况。""
+}",true,true,true,评审 Bot 的 ok 判断合理，理由自洽，missing_items 和 suggestions 均为空且符合实际情况。
 10573,[CI] Auto-update estimated test times in test_config.yaml,[CI],merged,,2026-06-16T23:28:53Z,"## Summary
 
 This PR was auto-generated by the **Update estimated test times** [workflow](https://github.com/vllm-project/vllm-ascend/actions/runs/27618625841).
@@ -1046,7 +1647,19 @@ It updates the `estimated_times` values in `.github/workflows/scripts/test_confi
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 90,
+    ""reasoning"": ""标题和描述清晰地说明了PR目的是通过CI自动更新估计测试时间，提供了方法论（使用中位数和安全缓冲）、审查清单以及相关参考信息（版本、commit）。描述信息完整，足够维护者理解变更内容和验证方式，符合合规标准。"",
+    ""summary"": ""描述内容详细，包含变更动机、实现方法、验证要点，满足审查需求"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的输出完全正确。ok 判断合理，reasoning 自洽，suggestions 为空有效，missing_items 为空合理。""
+}",true,true,true,评审 Bot 的输出完全正确。ok 判断合理，reasoning 自洽，suggestions 为空有效，missing_items 为空合理。
 10556,[Feature] [Ascend950] Support Step3p5 Flash,[Feature],open,"module:ops,module:core,module:quantization",2026-06-16T10:20:31Z,"### What this PR does / why we need it?
 
 ### Does this PR introduce _any_ user-facing change?
@@ -1055,7 +1668,22 @@ It updates the `estimated_times` values in `.github/workflows/scripts/test_confi
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 20,
+    ""reasoning"": ""提交描述几乎为空，只包含了 vLLM 版本号和 commit 引用，未填写任何实际的变更说明（What/Why）、用户影响描述以及测试方法。标题虽然指出了功能和芯片，但缺乏具体实现细节和验证信息，无法让维护者理解 PR 的内容或开始审查。"",
+    ""summary"": ""描述仅包含版本信息，缺乏变更内容和测试说明，不满足基本信息要求。"",
+    ""missing_items"": [""缺少变更描述（What this PR does / why we need it）"", ""缺少测试方法（How was this patch tested）""],
+    ""suggestions"": [
+        ""请补充变更的具体内容，例如为何需要支持 Step3p5 Flash、实现原理或关键改动点。"",
+        ""请说明测试该功能的方式，如运行了哪些测试用例或手动验证步骤。""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的判断合理：描述确实严重缺失关键信息，ok=false正确；reasoning自洽；suggestions具体可行；missing_items准确。整体评审结果正确。""
+}",true,true,true,评审Bot的判断合理：描述确实严重缺失关键信息，ok=false正确；reasoning自洽；suggestions具体可行；missing_items准确。整体评审结果正确。
 10543,[CI] Added the nightly test case DeepSeek-V4-Flash-W8A8-A3 and fixed the failed weekly test case.,[CI],merged,"ci/build,module:tests",2026-06-16T07:48:58Z,"### What this PR does / why we need it?
 
 We run the nightly and weekly test case at a fixed period. Add nightly case: DeepSeek-V4-Flash-W8A8-A3. Fixed the failed weekly test case: Kimi-K2.5.yaml.
@@ -1070,7 +1698,22 @@ by running the DeepSeek-V4-Flash-W8A8-A3 test and failed weekly test.
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 85,
+    ""reasoning"": ""描述基本清晰：明确说明了PR添加了DeepSeek-V4-Flash-W8A8-A3的nightly测试用例并修复了失败的weekly测试用例Kimi-K2.5.yaml。用户无感知变更，测试方式为运行相关测试。提供了vLLM版本和commit引用，有助于复现。虽然测试验证细节不够详细（例如未明确说明测试是否通过），但整体信息对CI类变更是足够的，维护者能够理解变更内容并开始审查。"",
+    ""summary"": ""描述了变更目的、具体内容及测试方式，信息基本完整。"",
+    ""missing_items"": [],
+    ""suggestions"": [
+        ""可以考虑在测试方法部分更明确地说明测试通过状态，例如'CI passed'或'test completed successfully'。"",
+        ""如果修复涉及具体故障，可以简要补充故障原因以帮助理解修复逻辑。""
+    ]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理，PR 描述信息充分清晰；reasoning 自洽，与评分一致；suggestions 有效且无强制表述；missing_items 准确，无遗漏。整体输出符合质量标准。""
+}",true,true,true,评审 Bot 的 ok 判断合理，PR 描述信息充分清晰；reasoning 自洽，与评分一致；suggestions 有效且无强制表述；missing_items 准确，无遗漏。整体输出符合质量标准。
 10542,[bugfix]Fix division by zero risk in unpermute stage of dispatch_ffn_combine operator,[BugFix],open,,2026-06-16T07:48:19Z,"### What this PR does / why we need it?
 
 ### Does this PR introduce _any_ user-facing change?
@@ -1079,7 +1722,27 @@ by running the DeepSeek-V4-Flash-W8A8-A3 test and failed weekly test.
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 45,
+    ""reasoning"": ""标题说明了修复了 dispatch_ffn_combine 算子 unpermute 阶段的除零风险，但描述部分完全没有填写任何实质性内容（模板标题下均为空行），仅提供了 vLLM 版本和 commit 信息。缺少对变更动机、用户影响和测试方法的说明，reviewer 无法了解背景和验证方式，信息严重不足。"",
+    ""summary"": ""描述字段未填写任何实际内容，仅含版本号，缺少必要信息。"",
+    ""missing_items"": [
+        ""变更动机与背景说明"",
+        ""用户影响评估"",
+        ""测试验证方法""
+    ],
+    ""suggestions"": [
+        ""在 'What this PR does / why we need it?' 部分补充 bug 的具体场景、触发条件和修复思路"",
+        ""在 'How was this patch tested?' 部分说明测试方式（如新增单元测试、CI 验证或手动测试步骤）"",
+        ""简要说明本次修复是否影响用户接口或行为""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok判断合理（描述信息严重不足），reasoning自洽，suggestions有效且无强制表述，missing_items准确列出确实缺失的项。""
+}",true,true,true,评审Bot的ok判断合理（描述信息严重不足），reasoning自洽，suggestions有效且无强制表述，missing_items准确列出确实缺失的项。
 10510,[Feature]Support IndexCache top-k index reuse for DeepSeek Sparse MLA's MTP Layer,[Feature],open,module:tests,2026-06-15T12:57:45Z,"
 ### What this PR does / why we need it?
 This PR aligns the Ascend backend with the upstream implementation of IndexCache top-k index reuse for DeepSeek Sparse MLA's MTP Layer, inspired by IndexCache: Accelerating Sparse Attention via Cross-Layer Index Reuse.{GLM5.2}
@@ -1110,7 +1773,19 @@ vllm serve /home/jjz/mnt/GLM-5.2-0610-Provider
 
 - vLLM version: v0.22.1
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": true,
+    ""score"": 80,
+    ""reasoning"": ""描述提供了变更目的（对齐上游 IndexCache 实现）、参考链接（vllm PR）、测试方法（启动命令及版本信息）。虽然测试部分仅列出了命令而无明确的验证结果或预期行为说明，但整体信息较完整，维护者可理解变更意图和测试方式。根据灵活评估原则，判定为合规。"",
+    ""summary"": ""变更目的和测试方法已提及，信息基本完整，但测试验证结果可进一步明确。"",
+    ""missing_items"": [],
+    ""suggestions"": [""建议在测试部分补充验证结果，例如描述测试通过情况、输出是否符合预期，或说明已通过哪些自动化测试。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理，理由与判断一致，missing_items 准确，suggestions 有效且无强制表述，整体评审正确。""
+}",true,true,true,评审 Bot 的 ok 判断合理，理由与判断一致，missing_items 准确，suggestions 有效且无强制表述，整体评审正确。
 10474,[MISC][ops]Log main,[Misc],closed,"ci/build,module:tests,module:ops,module:core,module:quantization,merge-conflicts",2026-06-15T04:01:53Z,"### What this PR does / why we need it?
 
 ### Does this PR introduce _any_ user-facing change?
@@ -1119,7 +1794,25 @@ vllm serve /home/jjz/mnt/GLM-5.2-0610-Provider
 
 - vLLM version: v0.21.0
 - vLLM main: https://github.com/vllm-project/vllm/commit/967c5c3bc38891f4465d3f4e99917ed837bb3833
-",,
+","{
+    ""ok"": false,
+    ""score"": 25,
+    ""reasoning"": ""标题虽然指明了类别（MISC/ops）和大致方向（Log main），但并未具体说明变更内容和意图。描述部分仅包含模板标题和版本信息，实质内容为空，缺少对PR做什么、为什么需要以及如何测试的任何说明，信息严重不足，维护者无法理解变更并开始审查。"",
+    ""summary"": ""PR描述为空，标题不明确，缺少必要的变更说明和测试信息"",
+    ""missing_items"": [
+        ""缺乏对PR变更内容的描述"",
+        ""缺乏测试方法或验证过程""
+    ],
+    ""suggestions"": [
+        ""请在 'What this PR does / why we need it?' 部分详细说明变更的内容和动机，例如具体是在哪个ops中添加了何种日志记录"",
+        ""请补充 'How was this patch tested?' 部分，描述测试方式或验证过程，例如是否通过运行特定测试或手动验证""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot判断合理，reasoning自洽，suggestions有效且无强制表述，missing_items准确指向缺失信息。""
+}",true,true,true,评审Bot判断合理，reasoning自洽，suggestions有效且无强制表述，missing_items准确指向缺失信息。
 10445,"[CI] Refactor test selection: config-driven routing, partition, estimated_times",[CI],merged,"ci/build,module:tests,ready",2026-06-13T16:25:30Z,"### What this PR does / why we need it?
 - Replace hardcoded UT/E2E routing patterns with config-driven runner_mapping (regex) in test_config.yaml second doc
 - Add partition logic to split test groups across parallel runners by estimated time (greedy algorithm)
@@ -1138,7 +1831,22 @@ vllm serve /home/jjz/mnt/GLM-5.2-0610-Provider
 
 - vLLM version: v0.21.0
 - vLLM main: https://github.com/vllm-project/vllm/commit/efc347f1b2e635753ae8a594e9714109c200fcd3
-",,
+","{
+    ""ok"": true,
+    ""score"": 78,
+    ""reasoning"": ""描述详细列举了具体变更意图（如改用配置驱动路由、分区逻辑、预计时间收集等），让维护者可以直接理解 PR 做了哪些改动。但“How was this patch tested?”部分完全空白，缺少测试验证方式，是信息完整性上的主要不足。标题清晰且变更列表充实，总体能达到中等偏上的可审查水平，但建议补充测试说明。"",
+    ""summary"": ""提供了详细变更列表，但未描述如何测试这些改动"",
+    ""missing_items"": [""测试验证描述 / 执行计划""],
+    ""suggestions"": [
+        ""在 'How was this patch tested?' 中说明测试方法，例如是否依赖 CI 现有测试覆盖、是否运行特定脚本来验证分区逻辑/计时上传、或是否会在合并后观察 CI 行为"",
+        ""考虑填写 'Does this PR introduce any user-facing change?' 以便让维护者了解是否存在配置格式或工作流影响""
+    ]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的ok判断合理，描述信息充分，缺失测试部分但未达严重缺失；reasoning自洽且与评分一致；suggestions具体有效，无强制表述；missing_items准确反映了测试缺失，user-facing change虽空但未被列为缺失项，不影响整体判断。""
+}",true,true,true,评审Bot的ok判断合理，描述信息充分，缺失测试部分但未达严重缺失；reasoning自洽且与评分一致；suggestions具体有效，无强制表述；missing_items准确反映了测试缺失，user-facing change虽空但未被列为缺失项，不影响整体判断。
 10421,[CI] fix sample ut,[CI],closed,module:tests,2026-06-12T11:52:24Z,"### What this PR does / why we need it?
 
 ### Does this PR introduce _any_ user-facing change?
@@ -1147,7 +1855,19 @@ vllm serve /home/jjz/mnt/GLM-5.2-0610-Provider
 
 - vLLM version: v0.21.0
 - vLLM main: https://github.com/vllm-project/vllm/commit/9090368b650896bf5fc990c921df7eb4c20355a5
-",,
+","{
+    ""ok"": false,
+    ""score"": 20,
+    ""reasoning"": ""标题\""[CI] fix sample ut\""不够清晰，未说明具体修复了哪个单元测试以及修复内容；描述几乎为空，仅包含模板占位符和版本号，未提供任何变更说明、测试计划或用户影响分析，维护者无法理解PR意图和验证方式。"",
+    ""summary"": ""描述严重不足，无法支撑审阅。"",
+    ""missing_items"": [""变更内容说明"", ""测试验证方法"", ""用户影响评估""],
+    ""suggestions"": [""在\""What this PR does / why we need it?\""中具体描述修复了哪个sample ut、错误的根因以及修复方式"", ""在\""How was this patch tested?\""中说明如何运行测试验证修复有效"", ""如果涉及用户可见行为，请在\""Does this PR introduce any user-facing change?\""中补充说明""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的判断合理：PR描述几乎为空，仅含模板占位符和版本号，缺少关键信息，因此ok=false正确。reasoning自洽，与评分一致。suggestions具体可执行，无强制表述。missing_items所列项确实缺失。""
+}",true,true,true,评审Bot的判断合理：PR描述几乎为空，仅含模板占位符和版本号，缺少关键信息，因此ok=false正确。reasoning自洽，与评分一致。suggestions具体可执行，无强制表述。missing_items所列项确实缺失。
 10380,[BugFix] Fix garbled output for Qwen3.6-27B with dflash/suffix num_speculative_tokens > 7,[BugFix],open,,2026-06-12T02:53:34Z,"Fix garbled output for Qwen3.6-27B with dflash/suffix when num_speculative_tokens > 7
 
 ### What this PR does / why we need it?
@@ -1167,7 +1887,19 @@ Tested manually on Ascend 910B with Qwen3.6-27B using dflash/suffix speculative 
 
 - vLLM version: v0.21.0
 - vLLM main: https://github.com/vllm-project/vllm/commit/9090368b650896bf5fc990c921df7eb4c20355a5
-",,
+","{
+    ""ok"": true,
+    ""score"": 85,
+    ""reasoning"": ""PR描述清晰完整，提供了问题现象、根本原因（UB内存分配在recurrent gated delta rule tiling逻辑中未正确考虑缓冲区限制）、修复思路及具体测试结果（不同num_speculative_tokens值下的验证）。同时说明了用户面无影响，并给出了环境信息和软件版本。虽然未关联具体Issue且未添加自动化测试，但这些不是必须项；描述已满足维护者审查PR的基本要求。"",
+    ""summary"": ""描述包含变更原因、技术解释、测试验证和版本信息，信息充足，可支持审查。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok=true 判断合理，PR 描述信息充分；reasoning 自洽且与 ok 判断一致；missing_items 为空准确，描述没有明显缺失；suggestions 为空有效，未包含强制表述。整体评审正确。""
+}",true,true,true,评审 Bot 的 ok=true 判断合理，PR 描述信息充分；reasoning 自洽且与 ok 判断一致；missing_items 为空准确，描述没有明显缺失；suggestions 为空有效，未包含强制表述。整体评审正确。
 10350,[Feature][DSv4] Support partial compressed prefix cache hits,[Feature],open,,2026-06-11T08:50:55Z,"## What this PR does / why we need it?
 Adds partial compressed prefix-cache hits for DeepSeek V4. When a prompt is
 shorter than one compressed cache block and gets zero full-block hits, the
@@ -1182,7 +1914,19 @@ to the scheduler block size.
 No.
 
 ---
-Co-authored with @wangzhao-11a.",,
+Co-authored with @wangzhao-11a.","{
+    ""ok"": true,
+    ""score"": 80,
+    ""reasoning"": ""描述了变更的详细实现原理和目的，明确了功能使用场景和行为。但缺少测试验证说明，可以根据需要补充。"",
+    ""summary"": ""提供了充分的变更描述和实施细节，但缺少测试计划。"",
+    ""missing_items"": [""缺失测试计划或验证方法""],
+    ""suggestions"": [""考虑补充测试说明，例如如何验证部分压缩前缀缓存命中的正确性，是否通过新增单元测试或集成测试验证。""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理，描述质量高；missing_items 指出的测试缺失属实；reasoning 自洽；suggestions 是建设性建议，无强制用语。整体评审正确。""
+}",true,true,true,评审 Bot 的 ok 判断合理，描述质量高；missing_items 指出的测试缺失属实；reasoning 自洽；suggestions 是建设性建议，无强制用语。整体评审正确。
 10323,[CI][Misc] Read Dockerfile vLLM ref from verified anchor,[CI],open,merge-conflicts,2026-06-11T06:19:33Z,"Fixes #9800.
 
 ## What this PR does / why we need it?
@@ -1217,7 +1961,19 @@ No. It only changes the default source of the vLLM ref used during Docker image 
 
 - vLLM version: v0.21.0
 - vLLM main: https://github.com/vllm-project/vllm/commit/9090368b650896bf5fc990c921df7eb4c20355a5
-",,
+","{
+    ""ok"": true,
+    ""score"": 95,
+    ""reasoning"": ""标题明确说明是CI/Misc改动，描述详细解释了背景、改动内容、为何需要此改动，并且明确无用户影响。测试部分列出了多种验证方式（git diff、shell simulation、real git fetch），同时给出了具体的vLLM版本和commit哈希。整体信息完整，维护者可以直接理解并开始审查。"",
+    ""summary"": ""描述详细、测试方法明确，信息完整充分，符合合规标准。"",
+    ""missing_items"": [],
+    ""suggestions"": []
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审Bot的判断符合实际情况，理由自洽，缺失项列表准确，建议部分合理（无强制表述）。""
+}",true,true,true,评审Bot的判断符合实际情况，理由自洽，缺失项列表准确，建议部分合理（无强制表述）。
 10292,[Feature] add ascendc ops store_kv_block,[Feature],merged,"documentation,module:tests,module:core,ready",2026-06-10T10:33:42Z,"### What this PR does / why we need it?
 add ascendc ops store_kv_block
 Control whether to use the operator by using additional-config '{""enable_sparse_c8"":true,""c8_enable_reshape_optim"":true}'. It is only used on the P node.
@@ -1229,7 +1985,19 @@ By enabling c8_enable_reshape_optim on the P node
 nightly custom op
 - vLLM version: v0.21.0
 - vLLM main: https://github.com/vllm-project/vllm/commit/9090368b650896bf5fc990c921df7eb4c20355a5
-",,
+","{
+    ""ok"": true,
+    ""score"": 70,
+    ""reasoning"": ""标题和描述内容基本说明了添加的算子、控制参数和使用场景，主体信息（变更内容、用户影响、测试方式）均有涉及，但测试部分只提到 nightly custom op，缺少具体的测试步骤、预期结果及实验验证数据，因此信息完整度一般但不至于阻碍理解。"",
+    ""summary"": ""描述大致传达了变更意图和配置方式，但测试细节不足"",
+    ""missing_items"": [""具体的测试步骤和验证结果""],
+    ""suggestions"": [""补充算子验证的详细步骤（如输入输出规格、测试环境、通过标准）"", ""提供性能影响或正确性验证的数据（如果适用）""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理，reasoning 自洽，missing_items 准确，suggestions 具体且无强制表述，整体评审正确。""
+}",true,true,true,评审 Bot 的 ok 判断合理，reasoning 自洽，missing_items 准确，suggestions 具体且无强制表述，整体评审正确。
 10260,[EPLB][Test] Change mooncake port,[EPLB],merged,"module:tests,ready",2026-06-10T02:41:42Z,"### What this PR does / why we need it?
 If mooncake uses port 36000, it is prone to being occupied. Therefore, the port is changed to 30000 to remain consistent with other use cases.
 
@@ -1242,4 +2010,16 @@ The port occupation issue is tracked by issue #8938 .
 
 - vLLM version: v0.21.0
 - vLLM main: https://github.com/vllm-project/vllm/commit/9090368b650896bf5fc990c921df7eb4c20355a5
-",,
+","{
+    ""ok"": true,
+    ""score"": 75,
+    ""reasoning"": ""该 PR 描述了端口变更的原因（36000 易被占用，改为 30000 以保持一致），并关联了 issue。但“测试验证方法”部分为空，未说明如何验证改动或已有测试覆盖，信息不够完整。不过整体意图清晰，基本可理解，因此判定为合规。"",
+    ""summary"": ""解释了动机并关联 issue，但缺少测试验证说明。"",
+    ""missing_items"": [""测试验证方法""],
+    ""suggestions"": [""建议补充测试验证信息，例如如何确保端口变更不会引入问题或是否已有相关测试覆盖""]
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""评审 Bot 的 ok 判断合理，理由自洽，建议有效且无强制表述，缺失项准确。整体审核通过。""
+}",true,true,true,评审 Bot 的 ok 判断合理，理由自洽，建议有效且无强制表述，缺失项准确。整体审核通过。
