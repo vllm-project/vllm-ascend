@@ -13,6 +13,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
 )
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -177,6 +178,38 @@ def test_unset_retention_keeps_sliding_window_dense() -> None:
         )
         is None
     )
+
+
+def test_sliding_window_eagle_hit_uses_post_pop_alignment() -> None:
+    block_size = 128
+    alignment_tokens = block_size * 128
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=block_size,
+    )
+
+    class FakePool:
+        null_block = object()
+
+        def get_cached_block(self, block_hash, kv_cache_group_ids):
+            if block_hash in (127, 128):
+                return [block_hash]
+            return None
+
+    hit_blocks = SlidingWindowManager.find_longest_cache_hit(
+        block_hashes=list(range(129)),
+        max_length=alignment_tokens + block_size,
+        kv_cache_group_ids=[0],
+        block_pool=FakePool(),
+        kv_cache_spec=spec,
+        use_eagle=True,
+        alignment_tokens=alignment_tokens,
+    )[0]
+
+    assert len(hit_blocks) == 128
 
 
 def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
