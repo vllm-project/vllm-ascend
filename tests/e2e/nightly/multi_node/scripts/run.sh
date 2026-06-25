@@ -223,6 +223,8 @@ run_tests_with_log() {
             print_success "All tests passed!"
             touch "${LOG_PREFIX}/aop_done" 2>/dev/null || true
         else
+            echo "Leader: waiting 10s for worker logs..."
+            sleep 10
             if [ "${AOP_MULTI_ENABLED:-}" = "true" ]; then
                 set +e; aop_pipeline; set -e
             fi
