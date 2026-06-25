@@ -6,7 +6,7 @@ The Qwen3-Next model is a sparse MoE (Mixture of Experts) model with high sparsi
 
 This document will present the core verification steps of the model, including supported features, environment preparation, as well as accuracy and performance evaluation. Qwen3 Next is currently using Triton Ascend, which is in the experimental phase. In subsequent versions, its performance related to stability and accuracy may change, and performance will be continuously optimized.
 
-The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1`.
+The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1` and can stably run in v0.16.0 and later version.
 
 ## 2 Supported Features
 
