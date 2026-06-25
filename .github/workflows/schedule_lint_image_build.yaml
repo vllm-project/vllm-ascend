@@ -4,14 +4,9 @@ on:
     # Runs at 00:00 UTC+8 every day
     - cron: '0 20 * * *' 
   workflow_dispatch:
-    inputs:
-      vllm_hash:
-        description: 'vLLM base hash'
-        default: main
-        required: true
-        type: string
   push:
     paths:
+      - '.github/vllm-main-verified.commit'
       - '.github/workflows/dockerfiles/Dockerfile.lint'
       - 'requirements-lint.txt'
       - 'requirements-dev.txt'
@@ -28,7 +23,7 @@ jobs:
     name: vllm-ascend lint image build
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -46,8 +41,15 @@ jobs:
         flavor:
           latest=false
 
+    - name: Read verified vLLM commit
+      id: vllm
+      run: |
+        vllm_commit="$(cat .github/vllm-main-verified.commit)"
+        [ -n "$vllm_commit" ] || { echo "::error::vLLM commit is empty"; exit 1; }
+        echo "main_commit=$vllm_commit" >> "$GITHUB_OUTPUT"
+
     - name: Build - Set up QEMU
-      uses: docker/setup-qemu-action@v3
+      uses: docker/setup-qemu-action@v4
 
     - name: Build - Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
@@ -71,6 +73,8 @@ jobs:
         push: true
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
+        build-args: |
+          VLLM_COMMIT=${{ steps.vllm.outputs.main_commit }}
         provenance: false
 
     - name: Build and push
@@ -84,6 +88,6 @@ jobs:
         push: true
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
-        provenance: false
         build-args: |
-          VLLM_HASH=${{ inputs.vllm_hash }}
+          VLLM_COMMIT=${{ steps.vllm.outputs.main_commit }}
+        provenance: false

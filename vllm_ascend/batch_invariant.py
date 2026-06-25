@@ -74,15 +74,18 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
 
 
 def override_envs_for_invariance():
-    # enabling NZ mode introduces NZ format input to the triton operator,
-    # resulting in accuracy anomalies.
-    os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
-    # fused operator can't ensure batch invariant, so we disable it.
-    os.environ["VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE"] = "0"
+    from vllm_ascend.ascend_config import get_ascend_config
 
-    # communication determinism settings
+    ascend_config = get_ascend_config()
+    ascend_config.weight_nz_mode = 0
+    ascend_config.enable_matmul_allreduce = False
+
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"
+    logger.debug(
+        "Batch-invariant env override: weight_nz_mode=0, enable_matmul_allreduce=False, "
+        "HCCL_DETERMINISTIC=strict, LCCL_DETERMINISTIC=1",
+    )
 
 
 _batch_invariant_LIB = None
@@ -91,6 +94,11 @@ _batch_invariant_LIB = None
 def enable_batch_invariant_mode():
     global _batch_invariant_LIB
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
+    logger.debug(
+        "Batch-invariant op registration: Triton=%s, AscendC=%s",
+        HAS_TRITON,
+        HAS_ASCENDC_BATCH_INVARIANT,
+    )
 
     # Register operators only implemented in triton.
     if HAS_TRITON:

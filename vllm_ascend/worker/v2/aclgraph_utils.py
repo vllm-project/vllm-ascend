@@ -68,7 +68,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
-        logger.info_once(f"run_fullgraph with num_tokens={num_tokens}")
+        logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         ret = super().run_fullgraph(desc)
 
         positions = self.model_runner.input_buffers.positions[:num_tokens]
@@ -87,7 +87,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             forward_context = get_forward_context()
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
-                list(self.model_runner.attn_backends.values())[0],
+                self.model_runner.attn_groups[0][0].backend,
                 self.model_runner.update_stream,
                 forward_context,
                 num_tokens,
@@ -113,7 +113,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
         with communicator_switch():
-            super().capture(
+            return super().capture(
                 model,
                 model_state,
                 input_buffers,

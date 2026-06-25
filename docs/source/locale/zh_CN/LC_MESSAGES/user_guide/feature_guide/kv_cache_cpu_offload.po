@@ -1,0 +1,207 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-22 04:30+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:1
+msgid "KV Cache CPU Offload Guide"
+msgstr "KV缓存CPU卸载指南"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:5
+msgid ""
+"KV Cache CPU Offload enables offloading inactive KV cache blocks from NPU"
+" memory to CPU memory, allowing vLLM to handle longer contexts or more "
+"concurrent requests when NPU memory is limited. When a prefix cache miss "
+"occurs on the NPU but the data exists in CPU memory, the KV cache is "
+"asynchronously loaded back to the NPU, reducing recomputation latency."
+msgstr ""
+"KV缓存CPU卸载功能可将非活跃的KV缓存块从NPU内存卸载到CPU内存，使vLLM在NPU内存受限时能够处理更长的上下文或更多并发请求。当NPU上发生前缀缓存未命中但数据存在于CPU内存时，KV缓存会被异步加载回NPU，从而减少重计算延迟。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:7
+msgid ""
+"This feature is built on vLLM's `OffloadingConnector` framework and "
+"provides an Ascend NPU-specific implementation (`NPUOffloadingSpec`) that"
+" uses dedicated NPU streams for efficient asynchronous data transfers "
+"between NPU and CPU."
+msgstr ""
+"该功能基于vLLM的`OffloadingConnector`框架构建，并提供了Ascend NPU专用实现（`NPUOffloadingSpec`），使用专用NPU流在NPU和CPU之间进行高效的异步数据传输。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:9
+msgid "Key Concepts"
+msgstr "关键概念"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:11
+msgid ""
+"**CPU Block Pool**: A pre-allocated pool of CPU memory blocks (optionally"
+" pinned) used to store offloaded KV cache data."
+msgstr ""
+"**CPU块池**：预分配的CPU内存块池（可选锁定），用于存储卸载的KV缓存数据。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:12
+msgid ""
+"**Asynchronous Transfer**: NPU-to-CPU (D2H) and CPU-to-NPU (H2D) "
+"transfers are performed on separate NPU streams, overlapping with "
+"computation to minimize latency impact."
+msgstr ""
+"**异步传输**：NPU到CPU（D2H）和CPU到NPU（H2D）传输在独立的NPU流上执行，与计算重叠以最小化延迟影响。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:13
+msgid ""
+"**LRU Eviction**: The CPU-side block pool uses an LRU (Least Recently "
+"Used) eviction policy to manage limited CPU memory efficiently."
+msgstr ""
+"**LRU淘汰**：CPU端块池使用LRU（最近最少使用）淘汰策略来高效管理有限的CPU内存。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:15
+msgid "Usage"
+msgstr "使用方法"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:17
+msgid "Python API"
+msgstr "Python API"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:47
+msgid "Online Serving"
+msgstr "在线服务"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:64
+msgid "Configuration Parameters"
+msgstr "配置参数"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:66
+msgid "`kv_connector`: Must be set to `\"OffloadingConnector\"`."
+msgstr "`kv_connector`：必须设置为`\"OffloadingConnector\"`。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:67
+msgid ""
+"`kv_role`: Set to `\"kv_both\"` to enable both storing and loading of KV "
+"cache."
+msgstr ""
+"`kv_role`：设置为`\"kv_both\"`以同时启用KV缓存的存储和加载。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:68
+msgid ""
+"`num_cpu_blocks`: Number of blocks to allocate in CPU memory. Increase "
+"this value for longer context scenarios. Each block consumes memory "
+"proportional to `block_size × num_layers × (key_size + value_size)`."
+msgstr ""
+"`num_cpu_blocks`：在CPU内存中分配的块数。对于更长上下文场景，请增加此值。每个块消耗的内存与`block_size × num_layers × (key_size + value_size)`成正比。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:69
+msgid ""
+"`block_size`: The CPU-side block size. Should be a multiple of the NPU-"
+"side block size. Typical value: `128`."
+msgstr ""
+"`block_size`：CPU端块大小。应为NPU端块大小的倍数。典型值：`128`。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:70
+msgid "`spec_name`: Must be `\"NPUOffloadingSpec\"` for Ascend NPU."
+msgstr "`spec_name`：对于Ascend NPU，必须为`\"NPUOffloadingSpec\"`。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:71
+msgid "`spec_module_path`: Must be `\"vllm_ascend.kv_offload.npu\"`."
+msgstr "`spec_module_path`：必须为`\"vllm_ascend.kv_offload.npu\"`。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:73
+msgid "How It Works"
+msgstr "工作原理"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:75
+msgid ""
+"**Normal inference**: KV cache blocks are computed and stored on the NPU "
+"as usual."
+msgstr ""
+"**正常推理**：KV缓存块照常在NPU上计算和存储。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:76
+msgid ""
+"**Eviction to CPU**: When NPU memory is full and new blocks are needed, "
+"inactive KV cache blocks are asynchronously copied to CPU memory via a "
+"dedicated D2H NPU stream."
+msgstr ""
+"**卸载到CPU**：当NPU内存已满且需要新块时，非活跃的KV缓存块通过专用D2H NPU流异步复制到CPU内存。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:77
+msgid ""
+"**Prefix cache hit (CPU)**: When a request shares a prefix with "
+"previously computed data, and the prefix cache is not found on NPU but "
+"exists in CPU memory, the KV cache blocks are asynchronously loaded back "
+"from CPU to NPU via a dedicated H2D NPU stream."
+msgstr ""
+"**前缀缓存命中（CPU）**：当请求与先前计算的数据共享前缀，且NPU上未找到前缀缓存但CPU内存中存在时，KV缓存块通过专用H2D NPU流从CPU异步加载回NPU。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:78
+msgid ""
+"**LRU management**: The CPU block pool uses LRU eviction to discard the "
+"least recently used blocks when CPU memory is full."
+msgstr ""
+"**LRU管理**：当CPU内存已满时，CPU块池使用LRU淘汰策略丢弃最近最少使用的块。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:80
+msgid "Optional: KV Cache Events"
+msgstr "可选：KV缓存事件"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:82
+msgid ""
+"You can enable KV cache event publishing for monitoring or debugging "
+"purposes:"
+msgstr ""
+"您可以启用KV缓存事件发布以进行监控或调试："
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:102
+msgid "Notes"
+msgstr "注意事项"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:104
+msgid "This feature requires vLLM v1 engine."
+msgstr "此功能需要vLLM v1引擎。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:105
+msgid ""
+"Adjust `num_cpu_blocks` based on available CPU memory. Using too many "
+"blocks may cause out-of-memory errors on the host."
+msgstr ""
+"根据可用CPU内存调整`num_cpu_blocks`。使用过多块可能导致主机内存不足错误。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:106
+msgid ""
+"Pinned (page-locked) memory is used when available for optimal transfer "
+"performance."
+msgstr ""
+"在可用时使用锁定（页锁定）内存以获得最佳传输性能。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:107
+msgid ""
+"The `gpu_memory_utilization` parameter controls how much NPU memory is "
+"reserved for KV cache. Lower values leave less NPU memory for KV cache, "
+"making offloading more active."
+msgstr ""
+"`gpu_memory_utilization`参数控制为KV缓存保留的NPU内存量。较低的值会为KV缓存留下较少的NPU内存，使卸载更加活跃。"
+
+#: ../../source/user_guide/feature_guide/kv_cache_cpu_offload.md:108
+msgid ""
+"For production workloads, benchmark with realistic request patterns to "
+"find the optimal `num_cpu_blocks` and `block_size` settings."
+msgstr ""
+"对于生产工作负载，请使用真实请求模式进行基准测试，以找到最佳的`num_cpu_blocks`和`block_size`设置。"

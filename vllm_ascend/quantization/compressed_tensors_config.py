@@ -149,6 +149,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
+        tid2eid: dict[int, int] | None = None,
     ) -> Optional["QuantizeMethodBase"]:
         from .method_adapters import AscendFusedMoEMethod, AscendLinearMethod
 
@@ -182,7 +183,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             # Store scheme on layer for reference (optional, for debugging)
             layer.scheme = moe_scheme
             logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
-            return AscendFusedMoEMethod(moe_scheme, layer.moe_config)
+            return AscendFusedMoEMethod(moe_scheme, layer.moe_config, tid2eid)
 
         return None
 
@@ -352,7 +353,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 return "W8A8"
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-                return "W8A8_DYNAMIC"
+                if weight_quant.type == QuantizationType.FLOAT and input_quant.type == QuantizationType.FLOAT:
+                    return "W8A8FP8_DYNAMIC"
+                else:
+                    return "W8A8_DYNAMIC"
 
             if self._is_dynamic_token_w4a8(weight_quant, input_quant):
                 return "W4A8_DYNAMIC"

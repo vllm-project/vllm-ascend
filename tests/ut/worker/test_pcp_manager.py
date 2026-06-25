@@ -11,12 +11,14 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import math
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.worker.pcp_utils import PCPManager
 
 
@@ -105,9 +107,117 @@ def test_generate_pcp_metadata_basic(
                 assert hasattr(result, "kv_with_q_head_mask_idx_tensor")
                 assert hasattr(result, "kv_with_q_tail_nomask_idx_tensor")
                 assert hasattr(result, "kv_with_q_tail_mask_idx_tensor")
+                assert hasattr(result, "kv_tail_proj_idx_tensor")
+                assert hasattr(result, "kv_with_q_head_attn_idx_in_tail_tensor")
+                assert hasattr(result, "kv_with_q_tail_attn_idx_in_tail_tensor")
                 assert hasattr(result, "attn_mask_seqlens")
                 assert hasattr(result, "head_attn_nomask_seqlens")
                 assert hasattr(result, "tail_attn_nomask_seqlens")
+                assert hasattr(result, "head_actual_seq_lengths_kv")
+                assert hasattr(result, "tail_actual_seq_lengths_kv")
+
+
+@pytest.mark.parametrize(
+    "pcp_size, pcp_rank, query_lens",
+    [
+        (2, 0, [8]),
+        (2, 1, [8]),
+        (4, 0, [8, 12]),
+        (4, 3, [8, 12]),
+    ],
+)
+def test_generate_pcp_metadata_mla_tail_projection_indices(pcp_size, pcp_rank, query_lens):
+    vllm_config = MagicMock()
+    vllm_config.model_config = MagicMock()
+    vllm_config.model_config.use_mla = True
+    vllm_config.model_config.hf_config.model_type = "deepseek_v2"
+    vllm_config.parallel_config.cp_kv_cache_interleave_size = 64
+    vllm_config.scheduler_config.max_num_batched_tokens = 10000
+    vllm_config.scheduler_config.max_num_seqs = 1000
+    vllm_config.speculative_config.num_speculative_tokens = 0
+
+    pcp_manager = PCPManager(
+        pcp_world_size=pcp_size,
+        pcp_rank=pcp_rank,
+        dcp_world_size=1,
+        dcp_rank=0,
+        max_buffer_num_tokens=10000,
+        max_num_reqs=1000,
+        device="cpu",
+        vllm_config=vllm_config,
+        use_async_scheduling=False,
+        pin_memory=False,
+    )
+
+    num_reqs = len(query_lens)
+    num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
+    num_computed_tokens = np.zeros(num_reqs, dtype=np.int32)
+    num_prompt_tokens = np.array(query_lens, dtype=np.int32)
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs,
+        num_computed_tokens,
+        num_prompt_tokens,
+    )
+
+    input_batch = MagicMock()
+    input_batch.num_reqs = num_reqs
+    input_batch.num_computed_tokens_cpu = np.zeros(num_reqs, dtype=np.int32)
+    input_batch.num_prompt_tokens = torch.tensor(query_lens)
+    input_batch.num_tokens = torch.tensor(query_lens)
+
+    result, _ = pcp_manager.generate_pcp_metadata(
+        int(num_scheduled_tokens.sum()),
+        torch.tensor(query_lens, dtype=torch.int32),
+        input_batch,
+        num_scheduled_tokens,
+        torch.zeros((num_reqs, 1), dtype=torch.int32),
+        num_reqs_padded=num_reqs,
+        num_reqs=num_reqs,
+    )
+
+    assert result is not None
+    tail_idx = result.kv_tail_proj_idx_tensor
+    full_kv_len = int(num_scheduled_tokens.sum()) * pcp_size
+    assert tail_idx.numel() <= full_kv_len
+    assert tail_idx.numel() > 0
+    assert tail_idx.min().item() >= 0
+    assert tail_idx.max().item() < full_kv_len
+
+    expected_tail_idx: list[int] = []
+    expected_head_attn_idx_in_tail = []
+    expected_tail_attn_idx_in_tail = []
+    expected_head_actual_seq_lengths_kv = []
+    expected_tail_actual_seq_lengths_kv = []
+    kv_req_offset = 0
+    q_head_chunk_id = pcp_rank
+    q_tail_chunk_id = pcp_size * 2 - 1 - pcp_rank
+    for seq_len in query_lens:
+        chunk_len = seq_len // 2
+        tail_proj_offset = len(expected_tail_idx)
+        tail_proj_len = chunk_len * (q_tail_chunk_id + 1)
+        expected_tail_idx.extend(list(range(kv_req_offset, kv_req_offset + tail_proj_len)))
+        expected_head_attn_idx_in_tail.extend(
+            list(range(tail_proj_offset, tail_proj_offset + chunk_len * (q_head_chunk_id + 1)))
+        )
+        expected_tail_attn_idx_in_tail.extend(list(range(tail_proj_offset, tail_proj_offset + tail_proj_len)))
+        expected_head_actual_seq_lengths_kv.append(len(expected_head_attn_idx_in_tail))
+        expected_tail_actual_seq_lengths_kv.append(len(expected_tail_attn_idx_in_tail))
+        kv_req_offset += seq_len * pcp_size
+
+    assert torch.equal(tail_idx.cpu(), torch.tensor(expected_tail_idx, dtype=tail_idx.dtype))
+    head_attn_idx = result.kv_with_q_head_attn_idx_in_tail_tensor
+    tail_attn_idx = result.kv_with_q_tail_attn_idx_in_tail_tensor
+    assert torch.equal(
+        head_attn_idx.cpu(),
+        torch.tensor(expected_head_attn_idx_in_tail, dtype=head_attn_idx.dtype),
+    )
+    assert torch.equal(
+        tail_attn_idx.cpu(),
+        torch.tensor(expected_tail_attn_idx_in_tail, dtype=tail_attn_idx.dtype),
+    )
+    assert result.head_actual_seq_lengths_kv == expected_head_actual_seq_lengths_kv
+    assert result.tail_actual_seq_lengths_kv == expected_tail_actual_seq_lengths_kv
 
 
 @pytest.mark.parametrize(
@@ -149,7 +259,12 @@ def test_update_tokens_for_pcp_basic(
     input_batch.num_prompt_tokens = np.array(num_prompt_tokens, dtype=np.int32)
     arange_np = np.arange(10000)
     num_scheduled_tokens = np.array(tokens)
-    pcp_manager.init_batch_info(num_scheduled_tokens, num_reqs)
+    pcp_manager.init_batch_info(
+        num_scheduled_tokens,
+        num_reqs,
+        input_batch.num_computed_tokens_cpu,
+        input_batch.num_prompt_tokens,
+    )
     pcp_tokens_result, positions_result = pcp_manager.update_tokens_for_pcp(num_scheduled_tokens, arange_np)
 
     assert np.array_equal(pcp_tokens_result, expected_pcp_tokens), (
@@ -160,6 +275,39 @@ def test_update_tokens_for_pcp_basic(
     assert positions_result.shape == (total_pcp_tokens,), (
         f"Positions shape mismatch. Expected length {total_pcp_tokens}, got {positions_result.shape}"
     )
+
+
+def test_split_decodes_short_extend_with_default_false():
+    """Short extends should be treated as prefills by default."""
+    long_seq_metadata = MagicMock()
+    long_seq_metadata.query_lens_pcp_full_cpu = torch.tensor([3], dtype=torch.int32)
+    long_seq_metadata.max_query_len_pcp_full = 3
+
+    query_start_loc_cpu = torch.tensor([0, 2], dtype=torch.int32)
+    common_attn_metadata = AscendCommonAttentionMetadata(
+        query_start_loc=query_start_loc_cpu,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=torch.tensor([173], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=2,
+        max_query_len=2,
+        max_seq_len=173,
+        block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(2, dtype=torch.int32),
+        is_prefilling=torch.tensor([True]),
+        prefill_context_parallel_metadata=long_seq_metadata,
+    )
+
+    num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
+        common_attn_metadata,
+        decode_threshold=4,
+        treat_short_extends_as_decodes=False,
+    )
+
+    assert num_decodes == 0
+    assert num_prefills == 1
+    assert num_decode_tokens == 0
+    assert num_prefill_tokens == 2
 
 
 # yapf: disable
@@ -315,7 +463,20 @@ def test_generate_pcp_mtp_input(
     for i, token_ids_tensor in enumerate(token_ids_tensor_list):
         token_ids_cpu_tensor[i][:token_ids_tensor.size(0)] = token_ids_tensor
 
-    pcp_manager.init_batch_info(np.array(list(num_scheduled_tokens.values())), num_reqs)
+    num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+    for i, req_id in enumerate(req_ids):
+        if num_computed_tokens[i] > 0:
+            num_prompt_tokens[i] = num_computed_tokens[i]
+        else:
+            num_prompt_tokens[i] = num_scheduled_tokens[req_id]
+    input_batch.num_prompt_tokens = num_prompt_tokens
+
+    pcp_manager.init_batch_info(
+        np.array(list(num_scheduled_tokens.values())),
+        num_reqs,
+        input_batch.num_computed_tokens_cpu,
+        input_batch.num_prompt_tokens,
+    )
     pcp_manager.generate_pcp_mtp_input(total_num_scheduled_tokens, num_scheduled_tokens, False,
                                        input_batch, arange_np)
     assert torch.equal(
@@ -323,3 +484,116 @@ def test_generate_pcp_mtp_input(
         target_input_ids_pcp_full)
     assert torch.equal(pcp_manager.query_start_loc_pcp_full.cpu[:num_reqs + 1],
                        target_query_start_loc_pcp_full)
+
+
+def _realistic_num_pcp_pads(
+    num_scheduled_tokens: list[int],
+    pcp_world_size: int,
+    num_decode_reqs: int,
+) -> list[int]:
+    """Compute num_pcp_pads exactly as PCPManager.update_tokens_for_pcp would.
+
+    Decode reqs duplicate tokens across pcp_world_size ranks, so their pad
+    count is num_tokens * (pcp_world_size - 1). Prefill reqs are padded up
+    to a multiple of 2 * pcp_world_size, so their pad count is the difference
+    between the padded and original length.
+    """
+    pads: list[int] = []
+    pad_multiple = 2 * pcp_world_size
+    for i, n in enumerate(num_scheduled_tokens):
+        if i < num_decode_reqs:
+            pads.append(n * (pcp_world_size - 1))
+        else:
+            padded = math.ceil(n / pad_multiple) * pad_multiple
+            pads.append(padded - n)
+    return pads
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    "pcp_size, num_scheduled_tokens, num_decode_reqs,"
+    " expected_cu_num_scheduled_tokens",
+    [
+        # Case 1: no prefill reqs -> returned unchanged.
+        (2, [1, 1], 2, [1, 2]),
+        # Case 2: prefill only (num_decode_reqs == 0). Exercises the case where
+        # the diff-based per-req length derivation would otherwise drop the
+        # first req's length.
+        #   num_scheduled=[3, 5], realistic pads=[1, 3] -> cumsum=[1, 4]
+        #   cu=[3, 8]; padded prefill_lens=[4, 8]; base=0
+        #   prefill_cu=[4, 12]; final = [4*2-1, 12*2-4] = [7, 20]
+        (2, [3, 5], 0, [7, 20]),
+        # Case 3: mix decode + prefill, pcp_size=2.
+        #   num_scheduled=[1, 1, 3, 5], realistic pads=[1, 1, 1, 3]
+        #   prefill pads cumsum=[1, 4]
+        #   cu=[1, 2, 5, 10]; padded prefill_lens=[4, 8]; base=cu[1]=2
+        #   prefill_cu=[6, 14]; final[2:] = [12, 28] - [1, 4] = [11, 24]
+        (2, [1, 1, 3, 5], 2, [1, 2, 11, 24]),
+        # Case 4: pcp_size=4, mix decode + prefill with uneven prefill tokens.
+        #   num_scheduled=[1, 1, 5, 9], realistic pads=[3, 3, 3, 7]
+        #   prefill pads cumsum=[3, 10]
+        #   cu=[1, 2, 7, 16]; padded prefill_lens=[8, 16]; base=cu[1]=2
+        #   prefill_cu=[10, 26]; final[2:] = [40, 104] - [3, 10] = [37, 94]
+        (4, [1, 1, 5, 9], 2, [1, 2, 37, 94]),
+        # Case 5: single prefill req, pcp_size=2.
+        #   num_scheduled=[7], realistic pads=[1]
+        #   cu=[7]; padded prefill_lens=[8]; base=0
+        #   prefill_cu=[8]; final = [8*2-1] = [15]
+        (2, [7], 0, [15]),
+        # Case 6: prefill req that's already aligned to 2*pcp_size.
+        #   num_scheduled=[8], realistic pads=[0]
+        #   cu=[8]; padded prefill_lens=[8]; base=0
+        #   prefill_cu=[8]; final = [8*2-0] = [16]
+        (2, [8], 0, [16]),
+    ],
+)
+# yapf: enable
+def test_adjust_cu_num_scheduled_tokens_for_pcp(
+    pcp_size,
+    num_scheduled_tokens,
+    num_decode_reqs,
+    expected_cu_num_scheduled_tokens,
+):
+    vllm_config = MagicMock()
+    vllm_config.model_config = MagicMock()
+    vllm_config.speculative_config.num_speculative_tokens = 0
+
+    pcp_manager = PCPManager(
+        pcp_world_size=pcp_size,
+        pcp_rank=0,
+        dcp_world_size=1,
+        dcp_rank=0,
+        max_buffer_num_tokens=10000,
+        max_num_reqs=1000,
+        device="cpu",
+        vllm_config=vllm_config,
+        use_async_scheduling=False,
+        pin_memory=False,
+    )
+
+    num_reqs = len(num_scheduled_tokens)
+    cu_num_scheduled_tokens = np.cumsum(
+        np.array(num_scheduled_tokens, dtype=np.int32)
+    )
+    # Use realistic pads that match what update_tokens_for_pcp would produce
+    # for the given num_scheduled_tokens / pcp_world_size combination.
+    # Tests previously fed zeros for prefill pads, which made the math look
+    # correct but never exercised the real runtime path.
+    num_pcp_pads = np.array(
+        _realistic_num_pcp_pads(num_scheduled_tokens, pcp_size, num_decode_reqs),
+        dtype=np.int32,
+    )
+
+    # Seed the manager state normally populated by init_batch_info.
+    pcp_manager.num_decode_reqs = num_decode_reqs
+    pcp_manager.num_prefill_reqs = num_reqs - num_decode_reqs
+
+    result = pcp_manager.adjust_cu_num_scheduled_tokens_for_pcp(
+        cu_num_scheduled_tokens, num_pcp_pads
+    )
+
+    assert np.array_equal(
+        result, np.array(expected_cu_num_scheduled_tokens, dtype=np.int32)
+    ), (
+        f"Expected {expected_cu_num_scheduled_tokens}, got {result.tolist()}"
+    )

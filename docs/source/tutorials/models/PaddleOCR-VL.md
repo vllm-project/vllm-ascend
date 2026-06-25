@@ -28,7 +28,7 @@ Select an image based on your machine type and start the docker image on your no
 
 ```{code-block} bash
    :substitutions:
-export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0rc1
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \

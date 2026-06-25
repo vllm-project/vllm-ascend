@@ -536,9 +536,9 @@ async def _handle_completions(api: str, request: Request):
                     e,
                     request_id,
                 )
-
-            # After streaming done, release tokens
-            proxy_state.release_decoder(decoder_idx, decoder_score)
+            finally:
+                # After streaming done, release tokens
+                proxy_state.release_decoder(decoder_idx, decoder_score)
 
         if stream_flag:
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
@@ -575,6 +575,28 @@ async def healthcheck():
     }
 
 
+@app.post("/reset_prefix_cache")
+async def reset_prefix_cache(request: Request):
+    params = dict(request.query_params)
+    failures = []
+    for client, base_url in [
+        (s.client, f"http://{s.host}:{s.port}") for s in proxy_state.prefillers + proxy_state.decoders
+    ]:
+        try:
+            resp = await client.post(f"{base_url}/reset_prefix_cache", params=params)
+            resp.raise_for_status()
+        except Exception as e:
+            logger.error("reset_prefix_cache failed for %s: %s", base_url, e)
+            failures.append(base_url)
+    if failures:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=500, content={"failed": failures})
+    from fastapi.responses import Response as FastAPIResponse
+
+    return FastAPIResponse(status_code=200)
+
+
 @app.post("/v1/metaserver")
 async def metaserver(request: Request):
     try:
@@ -602,11 +624,10 @@ async def metaserver(request: Request):
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay,
         )
-        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
     except Exception as e:
         logger.error("Post metaserver failed with: %s", e)
+    finally:
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
         proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
