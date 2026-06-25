@@ -221,6 +221,13 @@ def update_conv1d_graph_params(
                         q_per_seq=q_per_seq,
                         with_num_accepted=True,
                     )
+                elif branch == "spec" and meta.spec_sequence_masks is None:
+                    # The captured graph may contain a spec conv1d task even
+                    # when this DP rank has no runtime spec sequence. Leaving
+                    # cache_indices empty makes the kernel use default
+                    # batch-indexed state writes, which can corrupt conv_state.
+                    # Mark every input row as -1 so the task is a state no-op.
+                    new_cache_indices = (-1,) * cap_x_dim0
                 elif branch == "non_spec_decode":
                     non_sdq_host, non_sd_cidx_host = get_causal_conv1d_update_host_args(meta)
                     new_query_start_loc, new_cache_indices, _ = _pad_conv1d_host_args_to_capture(
