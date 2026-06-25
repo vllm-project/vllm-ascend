@@ -473,8 +473,6 @@ def _reshape_kv_cache_v2(
                 cache_dtype,
             )
 
-            print(100*"^")
-            print(f"{kv_cache_spec=}")
             if not isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
                 k_shape = kv_cache_shape[1:]
                 if hasattr(kv_cache_spec, "head_size_v"):
@@ -482,14 +480,10 @@ def _reshape_kv_cache_v2(
                 else:
                     v_shape = k_shape
             else:
-                print(100*"^")
-                print(f"{kv_cache_shape=}")
                 mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 k_shape = (mla_num_blocks, mla_block_size, num_kv_heads, k_dim)
                 v_shape = (mla_num_blocks, mla_block_size, num_kv_heads, v_dim)
-                print(f"{k_shape=}")
-                print(f"{v_shape=}")
 
             k_cache_dtype = v_cache_dtype = kv_cache_spec.dtype
             if is_kv_consumer and enable_fa_quant(vllm_config):
