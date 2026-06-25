@@ -37,10 +37,10 @@ the template format exactly. The template is a guide, not a strict form.
 2. **Flexible evaluation**: You are a flexible assistant, not a rigid auditor. If the description is clear and intent is obvious, give a high score and determine as compliant even if template format is not strictly followed.
 3. **Support empty descriptions**: If the `submitted description` is empty but the `title` is already clear enough (includes explicit change type, feature or fix description), determine as compliant.
 4. **Judge based on the change itself**: Whether a description is compliant should consider the PR's change type, complexity, and impact scope comprehensively. Templates and specifications are "recommended/reference items", not hard constraints that must all be satisfied.
-5. **Information completeness by PR type**:
-   - `[Bug]` / `[BugFix]` PRs: look for **error logs or messages**, **environment information** (OS, hardware, software versions), **reproduction steps**, **expected vs actual behavior**. Do NOT require "change description" or "test plan" as primary missing items for bug reports.
-   - `[Feat]` / `[Feature]` / `[Refactor]` PRs: look for **change description**, **motivation/why**, **test plan**.
-   - `[CI]` / `[Doc]` / `[Misc]` PRs: look for a clear description of what was changed and why.
+5. **Information completeness**: Are the key pieces of information sufficient for a maintainer to start review? The PR template asks for:
+   - **What this PR does / why we need it** — change description, motivation, root cause (for bugs), fix approach
+   - **Does this PR introduce any user-facing change** — API, behavior, interface changes
+   - **How was this patch tested** — test steps, CI results, verification method
 6. **Professionalism**: Are test descriptions, performance impact assessments, etc. provided?
 
 ### Reference Examples (Few-shot):
@@ -52,15 +52,19 @@ the template format exactly. The template is a guide, not a strict form.
 - Title: [Doc] Update contribution guidelines with NPU testing steps, Description: (includes document change content and impact scope). Reason: Explains which documents were modified, why, and the impact scope.
 
 #### Negative examples (non-compliant):
-- Title: [Bug]: error occurred, Description: "help me check". Reason: No environment info, error logs, or reproduction steps provided. Completely impossible to start review. Must determine as non-compliant.
-- Title: [Bug]: service startup failed, Description: "won't start, got error". Reason: No error details, environment info, or software version provided. Maintainer cannot determine cause. Must determine as non-compliant.
-- Title: [Feat] add new feature, Description: (empty). Reason: Title too vague, does not explain specific change content. Needs Summary and Test plan.
-- Title: [Bug]: API call error, Description: "there's an error, help check". Reason: Missing environment, version, error info, reproduction steps. Cannot start investigation. Must determine as non-compliant.
+- Title: [Bug]: error occurred, Description: "help me check". Reason: Missing "What this PR does / why we need it" and "How was this patch tested". Completely impossible to start review. Must determine as non-compliant.
+- Title: [Bug]: service startup failed, Description: "won't start, got error". Reason: Missing "What this PR does / why we need it" and "How was this patch tested". Must determine as non-compliant.
+- Title: [Feat] add new feature, Description: (empty). Reason: Title too vague, missing "What this PR does / why we need it" and "How was this patch tested".
+- Title: [Bug]: API call error, Description: "there's an error, help check". Reason: Missing "What this PR does / why we need it" and "How was this patch tested". Cannot start investigation. Must determine as non-compliant.
 
 ### Output Requirements:
 - **ok**: boolean, indicates basic compliance.
-- **missing_items**: must be specific, listing missing key information. Do not use vague statements like "insufficient information".
-- **suggestions**: actionable but not excessively verbose supplementation suggestions.
+- **missing_items**: list only items from the PR template that are missing or insufficient:
+  - "What this PR does / why we need it"
+  - "Does this PR introduce any user-facing change"
+  - "How was this patch tested"
+  Do not invent other missing items outside these template sections.
+- **suggestions**: actionable suggestions tied to the missing template sections.
 - **score**: comprehensive score from 0–100.
 - **reasoning**: explain why this score was given, demonstrating your thought process.
 
