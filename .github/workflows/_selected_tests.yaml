@@ -32,6 +32,11 @@ on:
         required: false
         default: ''
         description: 'The vllm-ascend ref to test.'
+      base_ref:
+        type: string
+        required: false
+        default: 'main'
+        description: 'The base branch to rebase onto (e.g. main, v0.8.x).'
       upload_timing:
         type: boolean
         required: false
@@ -112,12 +117,12 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Rebase on latest main
+      - name: Rebase on latest ${{ inputs.base_ref }}
         run: |
           git config user.name "vllm-ascend-ci"
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
-          git fetch origin main
-          git rebase origin/main
+          git fetch origin ${{ inputs.base_ref }}
+          git rebase origin/${{ inputs.base_ref }}
 
       - name: Get csrc hash
         id: get_csrc_hash
