@@ -34,11 +34,17 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-**A3 series**
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
 
 Start the docker image on your each node.
 
-```bash
+```{code-block} bash
+   :substitutions:
+
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
     --name vllm-ascend \
@@ -73,11 +79,15 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-**A2 series**
+::::
+::::{tab-item} A2 series
+:sync: A2
 
 Start the docker image on your each node.
 
-```bash
+```{code-block} bash
+   :substitutions:
+
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend \
@@ -103,6 +113,9 @@ docker run --rm \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
 ```
+
+::::
+:::::
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
