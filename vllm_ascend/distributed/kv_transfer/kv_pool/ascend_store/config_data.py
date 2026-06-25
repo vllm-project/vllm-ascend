@@ -635,7 +635,7 @@ class RequestTracker:
         so, if a speculative block is moved to last position and replaced with null block,
         we also need to update the previous allocated_block_ids to 0.
         """
-        if self.mamba_group_ids and kv_cache_group_id in self.mamba_group_ids and self.num_speculative_blocks > 0:
+        if self.mamba_group_ids and kv_cache_group_id in self.mamba_group_ids:
             assert self.block_sizes is not None and len(self.block_sizes) > kv_cache_group_id
             num_skipped_blocks = (
                 max(num_computed_tokens - self.num_speculative_blocks - 1, 0) // self.block_sizes[kv_cache_group_id]
