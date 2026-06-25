@@ -1195,6 +1195,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         _: torch.Tensor,
     ) -> torch.Tensor:
         # use default sparse_mode 0 in normal scenario, which means no mask works on it
+        # Pad actual_seq_len with 0 when num_tokens > actual_seq_len in TND layout
+        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+        if query.shape[0] > actual_seq_qlen[-1]:
+            actual_seq_qlen = actual_seq_qlen + [0]
         return torch_npu.npu_fusion_attention(
             query=query,
             key=key,
@@ -1202,8 +1206,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             head_num=self.num_heads,
             input_layout="TND",
             scale=self.scale,
-            actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
-            actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+            actual_seq_qlen=actual_seq_qlen,
+            actual_seq_kvlen=actual_seq_qlen,
         )[0]
 
     def do_kv_cache_update(
