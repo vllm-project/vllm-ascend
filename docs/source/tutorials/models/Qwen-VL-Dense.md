@@ -120,6 +120,89 @@ If you query the server successfully, you can see the info shown below (client):
 ```bash
 {"id":"chatcmpl-d3270d4a16cb4b98936f71ee3016451f","object":"chat.completion","created":1764924127,"model":"Qwen/Qwen3-VL-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is: **TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":107,"total_tokens":123,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
 ```
+### 5.2 Multi-Node PD Separation Deployment
+
+Run docker container to start the vLLM server on multi-NPU:
+
+```shell
+#!/bin/sh
+# if os is Ubuntu
+apt update
+apt install libjemalloc2 
+# if os is openEuler
+yum update
+yum install jemalloc
+# Add the LD_PRELOAD environment variable
+if [ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]; then
+    # On Ubuntu, first install with `apt install libjemalloc2`
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+elif [ -f /usr/lib64/libjemalloc.so.2 ]; then
+    # On openEuler, first install with `yum install jemalloc`
+    export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD
+fi
+# Enable the AIVector core to directly schedule ROCE communication
+export HCCL_OP_EXPANSION_MODE="AIV"
+# Set vLLM to Engine V1
+export VLLM_USE_V1=1
+
+vllm serve Qwen/Qwen3-VL-32B-Instruct \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor-parallel-size 2 \
+    --max-model-len 30000 \
+    --max-num-batched-tokens 50000 \
+    --max-num-seqs 30 \
+    --no-enable-prefix-caching \
+    --trust-remote-code \
+    --dtype bfloat16
+
+```
+
+Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-32B-Instruct model's max_model_len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
+
+If your service start successfully, you can see the info shown below:
+
+```bash
+INFO:     Started server process [14431]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
+Once your server is started, you can query the model with input prompts:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+    "model": "Qwen/Qwen3-VL-32B-Instruct",
+    "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
+        {"type": "text", "text": "What is the text in the illustration?"}
+    ]}
+    ]
+    }'
+```
+
+If you query the server successfully, you can see the info shown below (client):
+
+```bash
+{"id":"chatcmpl-c07088bf992a4b77a89d79480122a483","object":"chat.completion","created":1764905884,"model":"Qwen/Qwen3-VL-32B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is:\n\n**TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":null,"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":73,"total_tokens":89,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
+```
+
+Logs of the vllm server:
+
+```bash
+The image processor of type `Qwen2VLImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Note that this behavior will be extended to all models in a future release.
+INFO 12-05 08:50:57 [chat_utils.py:560] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
+Downloading Model from https://www.modelscope.cn to directory: /root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-32B-Instruct
+2025-12-05 08:50:58,913 - modelscope - INFO - Target directory already exists, skipping creation.
+INFO 12-05 08:51:00 [acl_graph.py:187] Replaying aclgraph
+INFO:     127.0.0.1:50720 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO 12-05 08:51:10 [loggers.py:127] Engine 000: Avg prompt throughput: 7.3 tokens/s, Avg generation throughput: 1.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 12-05 08:51:20 [loggers.py:127] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+```
 
 ## 6 Functional Verification
 
@@ -205,5 +288,32 @@ vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --rand
 After about several minutes, you can get the performance evaluation result.
 
 ## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+#### Table 1: Scenario Overview
+
+|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|--------|---------------|-----------|--------------|------------------|
+|High Throughput<br>(16K context)|Single-Node Mixed|2 (A3)|Qwen3-VL-32B-Instruct|Use tp2 for high-resolution text inputs|
+|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-VL-32B-Instruct|tp2 for high-resolution text inputs|
+|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-VL-32B-Instruct|tp2 for high-resolution text inputs|
+|Multimodal<br>(1080P)|Single-Node Mixed|2 (A3)|Qwen/Qwen3-VL-32B-Instruct|tp2 for high-resolution visual inputs|
+
+#### Table 2: Detailed Node Configuration
+
+|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
+|--------|-------------|-----|--|--|-------------------|--------------------|
+|High Throughput / Low Latency (16K)|Server / Single Machine|2|2|1|~16K|3|
+|Long Context (128K, no cache)|Server / Single Machine|2|2|1|128K|3|
+|Long Context (128K, with cache)|Server / Single Machine|2|2|1|128K|3|
+|Multimodal (1080P)|Server / Single Machine|2|2|1|~16K|3|
+
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+
+**Notice:**
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
 
 ## 10 FAQ

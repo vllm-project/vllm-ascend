@@ -74,8 +74,6 @@ To use the tools_call feature, please ensure that your transformers version is 4
 
 ### 5.1 Single-Node Online Deployment
 
-### Inference
-
 Single-node deployment completes both Prefill and Decode within the same node. The model `Qwen3-Next-80B-A3B-Instruct` can be deployed on 1 Atlas 800 A3 (64G × 16).
 
 While a single-node setup supports all input/output scenarios, consider deploying multinodes for optimal performance.
@@ -132,10 +130,36 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 }
 ```
 
-### 5.2 Multi-Node PD Separation Deployment
+### 5.2 Multi-node Deployment
 
+Single-node deployment is recommended.
+
+### 5.3 Prefill-Decode Disaggregation
+
+We don't need to Prefill-Decode disaggregation
 
 ## 6 Functional Verification
+
+If your service start successfully, you can see the info shown below:
+
+```bash
+INFO:     Started server process [87471]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
+Once your server is started, you can query the model with input prompts:
+
+```shell
+curl http://<node0_ip>:<port>/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qwen3_next",
+        "prompt": "The future of AI is",
+        "max_completion_tokens": 50,
+        "temperature": 0
+    }'
+```
 
 ## 7 Accuracy Evaluation
 
@@ -189,6 +213,38 @@ The performance result is:
 **Performance**: 580tps, TPOT 54ms
 
 ## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+#### Table 1: Scenario Overview
+
+|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|--------|---------------|-----------|--------------|------------------|
+|High Throughput<br>(16K context)|Single-Node Mixed|2 (A3)|Qwen3-VL-32B-Instruct|Use tp4 for high-resolution text inputs|
+|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-VL-32B-Instruct|tp4 for high-resolution text inputs|
+|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-VL-32B-Instruct|tp4 for high-resolution text inputs|
+|Multimodal<br>(1080P)|Single-Node Mixed|2 (A3)|Qwen/Qwen3-VL-32B-Instruct|tp4 for high-resolution visual inputs|
+
+#### Table 2: Detailed Node Configuration
+
+|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
+|--------|-------------|-----|--|--|-------------------|--------------------|
+|High Throughput / Low Latency (16K)|Server / Single Machine|4|4|1|~16K|3|
+|Long Context (128K, no cache)|Server / Single Machine|4|4|1|128K|3|
+|Long Context (128K, with cache)|Server / Single Machine|4|4|1|128K|3|
+|Multimodal (1080P)|Server / Single Machine|4|4|1|~16K|3|
+
+
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
 
 ## 10 FAQ
 

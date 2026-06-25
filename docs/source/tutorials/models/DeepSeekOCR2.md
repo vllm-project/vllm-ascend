@@ -1,6 +1,6 @@
 # DeepSeek-OCR-2
 
-## Introduction
+## 1 Introduction
 
 DeepSeekOCR2 is a model to investigate the role of vision encoders from an LLM-centric viewpoint.
 
@@ -8,25 +8,27 @@ The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0` and can s
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, accuracy and performance evaluation.
 
-## Supported Features
+## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
 - `DeepSeek-OCR-2`: [Download model weight](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### Verify Multi-node Communication(Optional)
+### 3.2 Verify Multi-node Communication(Optional)
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-### Installation
+## 4 Installation
+
+### 4.1 Docker Image Installation
 
 You can use our official docker image to run `DeepSeek-OCR-2` directly.
 
@@ -70,9 +72,9 @@ docker run --rm \
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## Deployment
+## 5 Online Service Deployment
 
-### Single-node Deployment
+### 5.1 Single-Node Online Deployment
 
 - `DeepSeek-OCR-2` can be deployed on 1 Atlas 800 A2.
 
@@ -112,15 +114,15 @@ The parameters are explained as follows:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
 
-### Multi-node Deployment
+### 5.2 Multi-node Deployment
 
 Single-node deployment is recommended.
 
-### Prefill-Decode Disaggregation
+### 5.3 Prefill-Decode Disaggregation
 
 We don't need to Prefill-Decode disaggregation
 
-## Functional Verification
+## 6 Functional Verification
 
 If your service start successfully, you can see the info shown below:
 
@@ -143,7 +145,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     }'
 ```
 
-## Accuracy Evaluation
+## 7 Accuracy Evaluation
 
 Here ia an accuracy evaluation methods.
 
@@ -158,7 +160,7 @@ Here ia an accuracy evaluation methods.
 | textvqa | - | accuracy | gen | 50.28 | 1 Atlas 800 A2 |
 | ominidocbench | - | accuracy | gen | 66.86 | 1 Atlas 800 A2 |
 
-## Performance
+## 8 Performance
 
 ### Using AISBench
 
@@ -176,7 +178,30 @@ The performance result is:
 
 In this chapter, we recommend best practices. for details about best practices, see the "Single-node Deployment" section.
 
-## FAQ
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+#### Table 1: Scenario Overview
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+
+|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|--------|---------------|-----------|--------------|------------------|
+|Multimodal<br>(1080P)|Single-Node Mixed|16 (A3)|deepseekocr2|dp1 tp1 for high-resolution visual inputs|
+
+
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+## 10 FAQ
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
