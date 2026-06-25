@@ -17,13 +17,17 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
+import copy
+import math
 from collections.abc import Callable
+from itertools import accumulate
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -45,6 +49,7 @@ class PCPManager:
     num_decode_reqs: int = 0
     num_prefill_reqs: int = 0
     num_decode_tokens: int = 0
+    decode_req_mask: np.ndarray | None = None
 
     def __init__(
         self,
@@ -133,7 +138,6 @@ class PCPManager:
             "qwen3_5",
             "qwen3_5_moe",
         )
-
         self.dcp_mtp_attn_mask = CpuGpuBuffer(
             (max_num_reqs, self.decode_threshold, vllm_config.model_config.max_model_len),
             dtype=torch.bool,
@@ -157,6 +161,19 @@ class PCPManager:
         self.async_rebuild_cu_num_tokens_full = None
         self.async_rebuild_num_tokens_full = 0
 
+        logger.debug(
+            "PCP initialized: pcp_world_size=%s, pcp_rank=%s, "
+            "dcp_world_size=%s, dcp_rank=%s, "
+            "use_sparse=%s, use_async_scheduling=%s, hybrid_attn=%s",
+            self.pcp_world_size,
+            self.pcp_world_rank,
+            self.dcp_world_size,
+            self.dcp_world_rank,
+            self.use_sparse,
+            self.use_async_scheduling,
+            self.pcp_use_hybrid_attn,
+        )
+
     def _get_cumsum_and_arange(
         self,
         num_scheduled_tokens: np.ndarray,
@@ -178,25 +195,82 @@ class PCPManager:
 
         return cu_num_tokens, arange
 
+    @staticmethod
+    def classify_decode_request_mask(
+        num_scheduled_tokens: np.ndarray | torch.Tensor,
+        num_computed_tokens: np.ndarray | torch.Tensor,
+        num_prompt_tokens: np.ndarray | torch.Tensor,
+        decode_threshold: int,
+    ) -> np.ndarray:
+        """Return a per-request mask for true decode requests.
+
+        Matches vLLM ``reorder_batch_to_split_decodes_and_prefills``:
+        decode = has context, scheduled tokens <= threshold, and prompt finished.
+        """
+
+        has_context = num_computed_tokens > 0
+        done_prefilling = num_computed_tokens >= num_prompt_tokens
+        is_below_threshold = num_scheduled_tokens <= decode_threshold
+        return has_context & is_below_threshold & done_prefilling
+
     def init_batch_info(
         self,
         num_scheduled_tokens: np.ndarray,
         num_reqs: int,
+        num_computed_tokens: np.ndarray,
+        num_prompt_tokens: np.ndarray,
     ) -> None:
         self.num_reqs = num_reqs
-        is_prefill = num_scheduled_tokens[:num_reqs] > self.decode_threshold
-        if not any(is_prefill):
-            first_prefill = num_reqs
-        else:
-            first_prefill = is_prefill.argmax()
-        self.num_decode_reqs = first_prefill
+        scheduled = num_scheduled_tokens[:num_reqs]
+        self.decode_req_mask = self.classify_decode_request_mask(
+            scheduled,
+            num_computed_tokens[:num_reqs],
+            num_prompt_tokens[:num_reqs],
+            self.decode_threshold,
+        )
+        self.num_decode_reqs = int(self.decode_req_mask.sum())
         self.num_prefill_reqs = num_reqs - self.num_decode_reqs
-        self.num_decode_tokens = num_scheduled_tokens[: self.num_decode_reqs].sum()
+        self.num_decode_tokens = int(scheduled[: self.num_decode_reqs].sum())
         self.num_scheduled_tokens_padded = num_scheduled_tokens  # for graph compiling in hybrid_attn
 
         self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens)
         self.query_lens_pcp_full.cpu[self.num_reqs :].fill_(0)
         self.query_lens_pcp_full.copy_to_gpu()
+
+    def adjust_cu_num_scheduled_tokens_for_pcp(
+        self,
+        cu_num_scheduled_tokens: np.ndarray,
+        num_pcp_pads: np.ndarray,
+    ) -> np.ndarray:
+        # Re-align cu_num_scheduled_tokens under PCP hybrid attention so the
+        # caller can build correct logits_indices for PCP. Prefill requests
+        # need to be padded up to a multiple of (pcp_world_size * 2) tokens,
+        # while decode requests are simply multiplied by pcp_world_size and
+        # offset by the per-req pcp pads.
+        if self.num_prefill_reqs <= 0:
+            return cu_num_scheduled_tokens
+
+        # Prepend 0 so per-req lengths come out of the diff cleanly. This
+        # also fixes the num_decode_reqs == 0 case, where the raw diff
+        # cu[1:] - cu[:-1] would drop the first req's length and the base
+        # below would index cu[-1] instead of 0.
+        padded_cu = np.concatenate(([0], cu_num_scheduled_tokens))
+        per_req_lens = padded_cu[1:] - padded_cu[:-1]
+
+        prefill_lens = per_req_lens[self.num_decode_reqs :]
+        pad_multiple = self.pcp_world_size * 2
+        prefill_lens = [math.ceil(num / pad_multiple) * pad_multiple for num in prefill_lens]
+        pads = copy.deepcopy(num_pcp_pads)
+        pads[self.num_decode_reqs :] = np.cumsum(pads[self.num_decode_reqs :])
+        base = int(cu_num_scheduled_tokens[self.num_decode_reqs - 1]) if self.num_decode_reqs > 0 else 0
+        prefill_cu = [base + s for s in accumulate(prefill_lens)]
+
+        cu_num_scheduled_tokens = cu_num_scheduled_tokens.copy()
+        cu_num_scheduled_tokens[self.num_decode_reqs :] = prefill_cu
+        cu_num_scheduled_tokens[self.num_decode_reqs :] = (
+            cu_num_scheduled_tokens[self.num_decode_reqs :] * self.pcp_world_size - pads[self.num_decode_reqs :]
+        )
+        return cu_num_scheduled_tokens
 
     def cache_local_schedule_layout(
         self,
@@ -657,7 +731,7 @@ class PCPManager:
             self.total_pcp_padding_tokens_fla = 0
             # have prefills
             if self.num_reqs - self.num_decode_reqs > 0:
-                prefill_tokens_tensor = torch.Tensor(num_scheduled_tokens[self.num_decode_tokens :])
+                prefill_tokens_tensor = torch.Tensor(num_scheduled_tokens[self.num_decode_reqs :])
                 # [num_prefill_reqs, pcp_world_size, 1] [[3,2]] [[2,2,2,1],[2,1,1,1]]
                 num_prefill_tokens_allranks = (
                     self._get_cp_local_seq_lens(prefill_tokens_tensor, self.pcp_world_size, 1, 1).long().numpy()
@@ -676,7 +750,7 @@ class PCPManager:
                 # [0,1,2] [0,1] | [0,1,0,1] [0,1,0] [0,1,0] [0,0]
                 # -> [0,1,2] [3,4] | [0,1,0,1] [2,3,2] [4,5,3] [6,4]
                 _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens, arange_np)
-                positions_linear[self.num_decode_reqs :] = positions_linear[self.num_decode_reqs :] + np.repeat(
+                positions_linear[self.num_decode_tokens :] = positions_linear[self.num_decode_tokens :] + np.repeat(
                     num_prefill_tokens_cu_ranks, num_prefill_scheduled_tokens_linear
                 )
 
@@ -723,12 +797,19 @@ class PCPManager:
             # decode reorder idx
             enter_fa_decode_restore_idx = None
             if self.num_decode_reqs > 0:
-                # [0,1,2], [4,4,4] -> [0,0,0,0,1,1,1,1,2,2,2,2]
-                num_decode_pcp_size = np.ones(self.num_decode_reqs, dtype=np.int64) * self.pcp_world_size
-                decode_reqs_offset = np.repeat(np.arange(self.num_decode_reqs, dtype=np.int64), num_decode_pcp_size)
-                decode_ranks_offset = (
-                    self._get_cumsum_and_arange(num_decode_pcp_size, arange_np)[1] * max_scheduled_tokens
-                )
+                if self.pcp_use_hybrid_attn and self.speculative_config:
+                    # hybrid attn model has different position assignment for decode tokens.
+                    decode_reqs_offset = np.tile(np.arange(self.num_decode_tokens, dtype=np.int64), self.pcp_world_size)
+                    decode_ranks_offset = (
+                        np.repeat(np.arange(self.pcp_world_size, dtype=np.int64), self.num_decode_tokens)
+                        * max_scheduled_tokens
+                    )
+                else:
+                    num_decode_pcp_size = np.ones(self.num_decode_reqs, dtype=np.int64) * self.pcp_world_size
+                    decode_reqs_offset = np.repeat(np.arange(self.num_decode_reqs, dtype=np.int64), num_decode_pcp_size)
+                    decode_ranks_offset = (
+                        self._get_cumsum_and_arange(num_decode_pcp_size, arange_np)[1] * max_scheduled_tokens
+                    )
                 enter_fa_decode_restore_idx = np.add(decode_reqs_offset, decode_ranks_offset)
 
             if enter_fa_decode_restore_idx is not None and enter_fa_prefill_restore_idx is not None:
@@ -753,13 +834,13 @@ class PCPManager:
                 all_positions_prefill_tensor = torch.from_numpy(np.concatenate(all_positions_prefill))
                 all_exit_fa_restore_idx = all_positions_prefill_tensor.float().argsort()
                 unpad_mask_prefill = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length][
-                    self.num_decode_reqs * self.pcp_world_size :
+                    self.num_decode_tokens * self.pcp_world_size :
                 ]
                 # [0] | [0,7]
-                ori_tokens_start_loc = np.roll(np.cumsum(num_scheduled_tokens[self.num_decode_tokens :]), 1)
+                ori_tokens_start_loc = np.roll(np.cumsum(num_scheduled_tokens[self.num_decode_reqs :]), 1)
                 ori_tokens_start_loc[0] = 0
                 # [0,1,2] [3,4] | [0,1,7,8] [2,3,9] [4,5,10] [6,11]
-                exit_fa_scatter_indices = positions_linear[self.num_decode_reqs :] + np.repeat(
+                exit_fa_scatter_indices = positions_linear[self.num_decode_tokens :] + np.repeat(
                     ori_tokens_start_loc, num_prefill_scheduled_tokens_linear
                 )
 
@@ -798,8 +879,8 @@ class PCPManager:
             )
         else:
             tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
-            num_prefill_reqs = (tokens_original_tensor > self.decode_threshold).sum().item()
-            num_decode_reqs = num_reqs - num_prefill_reqs
+            assert self.decode_req_mask is not None
+            num_decode_reqs = int(self.decode_req_mask.sum())
             decode_pads = self.pcp_pads_logits_hybrid_attn[:num_decode_reqs]
             pad_len = tokens_original_tensor.shape[0] - num_decode_reqs
             tokens_logits = tokens_original_tensor + F.pad(decode_pads, (0, pad_len), value=0)
@@ -1221,13 +1302,13 @@ class PCPManager:
                 ]
                 if self.pcp_use_hybrid_attn:
                     long_seq_metadata.pcp_exit_fa_scatter_idx = self.pcp_exit_fa_scatter_idx.gpu[
-                        : num_scheduled_tokens.sum() - self.num_decode_reqs
+                        : num_scheduled_tokens.sum() - self.num_decode_tokens
                     ]
                     long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[
-                        : num_actual_tokens_pcp_padded // self.pcp_world_size - self.num_decode_reqs
+                        : num_actual_tokens_pcp_padded // self.pcp_world_size - self.num_decode_tokens
                     ]
                     long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
-                        : pcp_unpad_mask.sum() + self.num_decode_reqs * (self.pcp_world_size - 1)
+                        : pcp_unpad_mask.sum() + self.num_decode_tokens * (self.pcp_world_size - 1)
                     ]
                     long_seq_metadata.max_num_tokens_across_pcp = self.max_num_tokens_across_pcp
                     long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens
