@@ -709,6 +709,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        # Fix for draft model decode graph capture: the attention metadata
+        # is built with the target model's uniform_decode_query_len
+        # (num_speculative_steps + 1 tokens/request), but the draft model
+        # decode processes only 1 token per request. Correct
+        # actual_seq_lengths_q to match the actual query tensor T dimension.
+        if (_EXTRA_CTX.is_draft_model
+                and not _EXTRA_CTX.is_draft_model_prefill
+                and num_tokens != query.shape[0]):
+            num_tokens = query.shape[0]
+            attn_metadata.actual_seq_lengths_q = list(range(1, num_tokens + 1))
         if _EXTRA_CTX.is_draft_model:
             if _EXTRA_CTX.is_draft_model_prefill:
                 graph_params = get_draft_graph_prefill_params()
