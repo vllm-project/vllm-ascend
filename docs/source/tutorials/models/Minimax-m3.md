@@ -1,4 +1,4 @@
-# Minimax m3
+# Minimax M3
 
 ## Environment Preparation
 
@@ -69,6 +69,10 @@ It is recommended to place the model weight in a shared cache directory.
 Start the online serving service with the following command:
 
 ```
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+export HCCL_OP_EXPANSION_MODE="AIV"
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
 vllm serve ${WEIGHT_PATH} \
   --served-model-name minimax-m3 \
   --trust-remote-code \
@@ -92,14 +96,15 @@ vllm serve ${WEIGHT_PATH} \
   ```
   #!/bin/bash
   # Verify MiniMax M3 vLLM service via OpenAI-compatible chat completions API.
-  # Usage: bash verify_curl.sh
+  # Usage: bash script/verify_curl.sh
   
   set -euo pipefail
   
   BASE_URL="${BASE_URL:-http://127.0.0.1:11223}"
   MODEL="${MODEL:-minimax-m3}"
   PROMPT="Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.\n\nA student regrets that he fell asleep during a lecture in electrochemistry, facing the following incomplete statement in a test:\nThermodynamically, oxygen is a …… oxidant in basic solutions. Kinetically, oxygen reacts …… in acidic solutions.\nWhich combination of weaker/stronger and faster/slower is correct?\n\nA) weaker – faster\nB) stronger – faster\nC) weaker - slower\nD) stronger – slower"
-  MAX_TOKENS="${MAX_TOKENS:-5120}"
+  # PROMPT='On $\\triangle ABC$ points $A,D,E$, and $B$ lie that order on side $\\overline{AB}$ with $AD=4, DE=16$, and $EB=8$. Points $A,F,G$, and $C$ lie in that order on side $\\overline{AC}$ with $AF=13, FG=52$, and $GC=26$. Let $M$ be the reflection of $D$ through $F$, and let $N$ be the reflection of $G$ through $E$. Quadrilateral $DEGF$ has area 288. Find the area of heptagon $AFNBCEM$.\nRemember to put your final answer within \\boxed{}'
+  MAX_TOKENS="${MAX_TOKENS:-8888}"
   TEMPERATURE="${TEMPERATURE:-1.0}"
   
   echo "==> Service: ${BASE_URL}"
@@ -109,6 +114,7 @@ vllm serve ${WEIGHT_PATH} \
   
   echo "==> Sending request..."
   RESPONSE_FILE="$(mktemp)"
+  START_TIME="$(date +%s.%N)"
   HTTP_CODE="$(
     curl -sS -w "%{http_code}" -o "${RESPONSE_FILE}" \
       "${BASE_URL}/v1/chat/completions" \
@@ -131,6 +137,7 @@ vllm serve ${WEIGHT_PATH} \
   EOF
   )"
   )"
+  END_TIME="$(date +%s.%N)"
   
   echo "==> HTTP status: ${HTTP_CODE}"
   echo
@@ -141,6 +148,16 @@ vllm serve ${WEIGHT_PATH} \
     rm -f "${RESPONSE_FILE}"
     exit 1
   fi
+  
+  ELAPSED_SECONDS="$(
+    python - <<'PY' "${START_TIME}" "${END_TIME}"
+  import sys
+  
+  start = float(sys.argv[1])
+  end = float(sys.argv[2])
+  print(f"{end - start:.3f}")
+  PY
+  )"
   
   echo "==> Raw response:"
   if command -v jq >/dev/null 2>&1; then
@@ -175,6 +192,36 @@ vllm serve ${WEIGHT_PATH} \
       print(json.dumps(data, ensure_ascii=False, indent=2))
   PY
   fi
+  
+  echo
+  echo "==> Throughput:"
+  python - <<'PY' "${RESPONSE_FILE}" "${ELAPSED_SECONDS}"
+  import json
+  import sys
+  
+  response_file = sys.argv[1]
+  elapsed_seconds = float(sys.argv[2])
+  
+  with open(response_file, encoding="utf-8") as f:
+      data = json.load(f)
+  
+  usage = data.get("usage") or {}
+  prompt_tokens = usage.get("prompt_tokens")
+  completion_tokens = usage.get("completion_tokens")
+  total_tokens = usage.get("total_tokens")
+  
+  def throughput(tokens):
+      if tokens is None or elapsed_seconds <= 0:
+          return "N/A"
+      return f"{tokens / elapsed_seconds:.2f} tokens/s"
+  
+  print(f"Elapsed: {elapsed_seconds:.3f} s")
+  print(f"Prompt tokens: {prompt_tokens if prompt_tokens is not None else 'N/A'}")
+  print(f"Completion tokens: {completion_tokens if completion_tokens is not None else 'N/A'}")
+  print(f"Total tokens: {total_tokens if total_tokens is not None else 'N/A'}")
+  print(f"Completion throughput: {throughput(completion_tokens)}")
+  print(f"Total throughput: {throughput(total_tokens)}")
+  PY
   
   rm -f "${RESPONSE_FILE}"
   echo
