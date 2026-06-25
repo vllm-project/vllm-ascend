@@ -81,9 +81,9 @@ on:
     secrets:
       KUBECONFIG_B64:
         required: true
-      OBS_ACCESS_KEY:
+      OBS_ACCESS_KEY_ID:
         required: false
-      OBS_SECRET_KEY:
+      OBS_SECRET_ACCESS_KEY:
         required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -96,7 +96,7 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 8 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.soc_version }}-${{ inputs.config_file_path }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.soc_version }}-${{ inputs.config_file_path }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -216,7 +216,7 @@ jobs:
 
           if [ "${{ inputs.soc_version }}" = "a3" ]; then
             npu_per_node=16
-            pvc_name=nv-action-vllm-benchmarks-v2
+            pvc_name=gy005-az5-vllm-ascend
           else
             npu_per_node=8
             pvc_name=vllm-project-hk001
@@ -420,8 +420,8 @@ jobs:
         continue-on-error: true
         uses: ascend-gha-runners/artifact/upload@v0.3
         with:
-          access_key: ${{ secrets.OBS_ACCESS_KEY }}
-          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
           name: ${{ inputs.config_file_path }}-ascend-logs
           path: /tmp/ascend-logs.tar.gz
           retention-days: 7
@@ -445,8 +445,8 @@ jobs:
         continue-on-error: true
         uses: ascend-gha-runners/artifact/upload@v0.3
         with:
-          access_key: ${{ secrets.OBS_ACCESS_KEY }}
-          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
           name: nightly-test-benchmark-results-${{ inputs.name || inputs.config_file_path }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /tmp/benchmark_results/
           if-no-files-found: warn

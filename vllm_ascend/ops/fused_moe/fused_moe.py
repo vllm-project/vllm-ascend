@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
@@ -414,7 +415,12 @@ class AscendFusedMoE(FusedMoE):
         num_experts += num_shared_experts if self.mix_placement else 0
         self.moe_config.num_experts = num_experts
         self.global_expert_map, self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
-            eplb_config, self.moe_instance_id, self.moe_config, self.mix_placement, num_shared_experts
+            eplb_config,
+            self.moe_instance_id,
+            self.moe_config,
+            self.mix_placement,
+            num_shared_experts,
+            tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
         )
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
@@ -489,6 +495,11 @@ class AscendFusedMoE(FusedMoE):
                 return result
 
             self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+
+        # Register this MoE layer with EPLB for PP compatibility.
+        # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
+        # so only real MoE layers on this rank are registered.
+        VllmEplbAdaptor.register_layer(self)
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated

@@ -110,6 +110,7 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
+          submodules: recursive
 
       - name: Rebase on latest main
         run: |
@@ -202,6 +203,22 @@ jobs:
             vllm_ascend/lib
             vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+      - name: Verify required AscendC custom ops are registered (310p)
+        if: ${{ matrix.group.npu_type == '310p' }}
+        run: |
+          python - <<'PY'
+          import sys, torch
+          import vllm_ascend.vllm_ascend_C  # noqa: F401
+          ops = torch.ops._C_ascend
+          missing = [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if not hasattr(ops, n)]
+          if missing:
+              print(f"::error::Missing AscendC ops after install: {missing}. "
+                    f"Cache contents are stale or build skipped registration.", file=sys.stderr)
+              sys.exit(1)
+          print("AscendC chunk-gdr ops registered:",
+                [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if hasattr(ops, n)])
+          PY
 
       - name: Install vllm-project/vllm-ascend no device
         if: ${{ matrix.group.npu_type == 'cpu' }}
