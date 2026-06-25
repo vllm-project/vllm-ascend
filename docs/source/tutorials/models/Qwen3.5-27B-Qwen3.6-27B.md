@@ -1,12 +1,14 @@
-# Qwen3.5-27B
+# Qwen3.5-27B/Qwen3.6-27B
 
 ## 1 Introduction
 
-Qwen3.5-27B is a dense hybrid Mamba-Transformer language model in the Qwen3.5 family, integrating breakthroughs in architectural efficiency, reinforcement learning scale, and global accessibility. It is suitable for general-purpose text generation tasks such as dialogue, content creation, and code generation running on Ascend NPUs.
+Qwen3.5-27B and Qwen3.6-27B are dense hybrid Mamba-Transformer language models in the Qwen3.5/Qwen3.6 family, integrating breakthroughs in architectural efficiency, reinforcement learning scale, and global accessibility. They share the same hybrid attention design (GDN + full attention), so deployment on Ascend NPUs follows the same pattern for both models. They are suitable for general-purpose text generation tasks such as dialogue, content creation, and code generation running on Ascend NPUs.
 
-This document will demonstrate the main validation steps for the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
+This document will demonstrate the main validation steps for the models, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
 
 The `Qwen3.5-27B` model is first supported in `vllm-ascend:v0.17.0rc1`. This document is validated and written based on **vLLM-Ascend v0.17.0rc1**. All **v0.17.0 and later versions** can run stably. To use the latest features (e.g., MTP speculative decoding), it is recommended to use v0.17.0rc1 or a later version.
+
+The `Qwen3.6-27B` model is first supported in `vllm-ascend:v0.18.0rc1`. It is recommended to use v0.18.0rc1 or a later version to access the latest Qwen3.6-27B features and bug fixes.
 
 ## 2 Supported Features
 
@@ -18,8 +20,15 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
+**Qwen3.5-27B**
+
 - `Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.5-27B)
 - `Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)
+
+**Qwen3.6-27B**
+
+- `Qwen3.6-27B` (BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3.6-27B)
+- `Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -32,6 +41,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ### 4.1 Docker Image Installation
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+
+Use `vllm-ascend:v0.17.0rc1` for `Qwen3.5-27B` (or `v0.18.0rc1` for `Qwen3.6-27B`). For `Qwen3.6-27B`, please use the matching `v0.18.0rc1-a3` image on Atlas 800 A3.
 
 **A3 series**
 
@@ -133,7 +144,11 @@ Expected result: The version information of `vllm-ascend` is displayed, confirmi
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios. The `Qwen3.5-27B` and `Qwen3.5-27B-w8a8` models can both be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8). The quantized version needs to start with the `--quantization ascend` parameter.
+Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios. The `Qwen3.5-27B`, `Qwen3.5-27B-w8a8`, `Qwen3.6-27B`, and `Qwen3.6-27B-w8a8` models can all be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8). The quantized versions need to start with the `--quantization ascend` parameter.
+
+Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwen3_5_mtp` speculative decoding method can be used for both.
+
+**Qwen3.5-27B-w8a8**
 
 Startup Command:
 
@@ -168,18 +183,54 @@ vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
 --async-scheduling
 ```
 
+**Qwen3.6-27B-w8a8**
+
+Startup Command (supports up to 262144 context length):
+
+```bash
+#!/bin/sh
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
+# To reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=512
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export TASK_QUEUE_ENABLE=1
+
+vllm serve Eco-Tech/Qwen3.6-27B-w8a8 \
+--host 0.0.0.0 \
+--port 8000 \
+--data-parallel-size 1 \
+--tensor-parallel-size 2 \
+--seed 1024 \
+--quantization ascend \
+--served-model-name qwen3.6 \
+--max-num-seqs 32 \
+--max-model-len 262144 \
+--max-num-batched-tokens 8096 \
+--trust-remote-code \
+--gpu-memory-utilization 0.90 \
+--no-enable-prefix-caching \
+--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--additional-config '{"enable_cpu_binding":true}' \
+--async-scheduling
+```
+
 Key Parameter Descriptions:
 
 - `--data-parallel-size 1` and `--tensor-parallel-size 2` are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
-- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
+- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. The Qwen3.6-27B model supports up to 262144.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
     - (1) If the input length of a request is greater than `--max-num-batched-tokens`, it will be divided into multiple rounds of computation according to `--max-num-batched-tokens`;
     - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
     - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-- `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.5-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+- `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.5-27B / Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
+- `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design.
 - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
     - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
     - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
@@ -212,11 +263,11 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
 - **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication (e.g., enabling FlashComm for Allreduce acceleration).
 - **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling async-scheduling and full-decode aclgraph).
 
-For `Qwen3.5-27B-w8a8`, a typical **1P1D** configuration requires **2 Atlas 800 A3 (64G × 16) nodes** (1 Prefill node + 1 Decode node), with **TP=2** and **DP=8** on each node, which fully utilizes all 16 NPUs of an Atlas A3.
+For `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8`, a typical **1P1D** configuration requires **2 Atlas 800 A3 (64G × 16) nodes** (1 Prefill node + 1 Decode node), with **TP=2** and **DP=8** on each node, which fully utilizes all 16 NPUs of an Atlas A3. The example below uses `Qwen3.5-27B-w8a8`; for `Qwen3.6-27B-w8a8`, replace the model path with `Eco-Tech/Qwen3.6-27B-w8a8` and adjust `--served-model-name` to `qwen3.6` (and `--max-model-len` to 262144 if needed).
 
-> **Why TP=2 + DP=8 (DP-first strategy)?** The `Qwen3.5-27B-w8a8` model is only ~30 GB, which easily fits in a single NPU (each NPU has 64 GB HBM). **TP > 1 is mainly needed for models that do not fit in one NPU.** For a 27 B model, `TP=2` is sufficient to balance operator-dispatch overhead across NPUs, while **maximizing DP** keeps all 16 NPUs of an Atlas A3 busy with independent request batches, fully utilizing the hardware. This **DP-first parallelism strategy** is the standard practice for small dense models (e.g., Qwen3.5-27B, Llama-3-8B) and has been validated by the [Qwen3.5-27B B200 benchmark](https://thenextgentechinsider.com/pulse/qwen-35-27b-delivers-11m-tokenssecond-on-nvidia-b200-cluster), where switching from TP=8 to DP=8 lifted per-node throughput from 9.5k to 95k tokens/s.
+> **Why TP=2 + DP=8 (DP-first strategy)?** The `Qwen3.5-27B-w8a8` (and `Qwen3.6-27B-w8a8`) model is only ~30 GB, which easily fits in a single NPU (each NPU has 64 GB HBM). **TP > 1 is mainly needed for models that do not fit in one NPU.** For a 27 B model, `TP=2` is sufficient to balance operator-dispatch overhead across NPUs, while **maximizing DP** keeps all 16 NPUs of an Atlas A3 busy with independent request batches, fully utilizing the hardware. This **DP-first parallelism strategy** is the standard practice for small dense models (e.g., Qwen3.5-27B, Qwen3.6-27B, Llama-3-8B) and has been validated by the [Qwen3.5-27B B200 benchmark](https://thenextgentechinsider.com/pulse/qwen-35-27b-delivers-11m-tokenssecond-on-nvidia-b200-cluster), where switching from TP=8 to DP=8 lifted per-node throughput from 9.5k to 95k tokens/s.
 >
-> **Note**: Since `Qwen3.5-27B` fits in a single node, multi-node PD separation is only recommended for high-concurrency production deployments. For the Mooncake deployment specifics, please refer to the [Mooncake Multi-Node PD Disaggregation Guide](../features/pd_disaggregation_mooncake_multi_node.md).
+> **Note**: Since `Qwen3.5-27B` and `Qwen3.6-27B` fit in a single node, multi-node PD separation is only recommended for high-concurrency production deployments. For the Mooncake deployment specifics, please refer to the [Mooncake Multi-Node PD Disaggregation Guide](../features/pd_disaggregation_mooncake_multi_node.md).
 
 To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
 
@@ -436,13 +487,15 @@ curl http://<proxy_node0_ip>:1999/v1/chat/completions \
     }'
 ```
 
+> **Note**: For `Qwen3.6-27B-w8a8`, change the `model` field above to `"qwen3.6"` and the `--served-model-name` of the Prefill/Decode nodes to `qwen3.6`.
+
 Expected Result: The proxy returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text, confirming that Prefill nodes have successfully processed the prompt and Decode nodes have generated the response.
 
 Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 ## 6 Functional Verification
 
-After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat.completions`.
+After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat.completions`. Use the `--served-model-name` you configured (`qwen3.5` for `Qwen3.5-27B` or `qwen3.6` for `Qwen3.6-27B`).
 
 **Completions API:**
 
@@ -456,6 +509,8 @@ curl http://localhost:8000/v1/completions \
         "temperature": 0
     }'
 ```
+
+> **Note**: For `Qwen3.6-27B`, set `"model": "qwen3.6"` in the request body.
 
 **Chat Completions API:**
 
@@ -472,6 +527,8 @@ curl http://localhost:8000/v1/chat/completions \
         "top_p": 0.95
     }'
 ```
+
+> **Note**: For `Qwen3.6-27B`, set `"model": "qwen3.6"` in the request body.
 
 Expected Result: The service returns HTTP 200 OK. The JSON response contains the `choices` field with generated text. Example output for the completions API (content truncated for brevity):
 
@@ -505,7 +562,7 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result. Here is the result of `Qwen3.5-27B-w8a8` in `vllm-ascend:v0.17.0rc1` for reference only.
+2. After execution, you can get the result. Here is the result of `Qwen3.5-27B-w8a8` in `vllm-ascend:v0.17.0rc1` for reference only. The accuracy result of `Qwen3.6-27B-w8a8` can be obtained in the same way and is not listed here.
 
 | dataset | version | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- | -----|
@@ -519,7 +576,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-Run performance evaluation of `Qwen3.5-27B-w8a8` as an example.
+Run performance evaluation of `Qwen3.5-27B-w8a8` or `Qwen3.6-27B-w8a8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
@@ -533,7 +590,10 @@ Take the `serve` as an example. Run the code as follows.
 
 ```bash
 export VLLM_USE_MODELSCOPE=True
+# For Qwen3.5-27B-w8a8:
 vllm bench serve --model Eco-Tech/Qwen3.5-27B-w8a8-mtp --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+# For Qwen3.6-27B-w8a8:
+vllm bench serve --model Eco-Tech/Qwen3.6-27B-w8a8 --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
@@ -544,16 +604,16 @@ After about several minutes, you can get the performance evaluation result.
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to [Section 9.2](#92-tuning-guidelines) for tuning based on actual conditions.
 >
-> **Parallelism Strategy**: `Qwen3.5-27B-w8a8` is only ~30 GB and easily fits in a single NPU (64 GB HBM per NPU). Following the **DP-first** principle, **TP=2 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. **TP=8 is only recommended for ultra-long context (256K+) scenarios**, where it shards the KV cache across 8 NPUs to maximize the available context window per rank.
+> **Parallelism Strategy**: `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8` are only ~30 GB and easily fit in a single NPU (64 GB HBM per NPU). Following the **DP-first** principle, **TP=2 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. **TP=8 is only recommended for ultra-long context (256K+) scenarios**, where it shards the KV cache across 8 NPUs to maximize the available context window per rank. For `Qwen3.6-27B-w8a8`, you can also raise `--max-model-len` up to 262144 in the same TP/DP layout.
 
 #### Table 1: Scenario Overview
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|-------------|----------------|---------------------|
-| High Throughput<br>(128K context) | Single-Node (A2) | 8 (A2) | Qwen3.5-27B-w8a8 | TP=2 + DP=4 fully utilizes all 8 NPUs for parallel request batches |
-| High Throughput<br>(128K context) | Single-Node (A3) | 16 (A3) | Qwen3.5-27B-w8a8 | TP=2 + DP=8 fully utilizes all 16 NPUs for parallel request batches |
-| Low Latency<br>(128K context) | Single-Node (A3) | 16 (A3) | Qwen3.5-27B-w8a8 | TP=2 + DP=8 reduces per-layer Allreduce overhead for small interactive batches |
-| Long Context<br>(256K+ context) | Single-Node (A3) | 16 (A3) | Qwen3.5-27B-w8a8 | TP=8 + DP=2 shards the KV cache across 8 NPUs to maximize the available context window |
+| High Throughput<br>(128K context) | Single-Node (A2) | 8 (A2) | Qwen3.5-27B-w8a8 / Qwen3.6-27B-w8a8 | TP=2 + DP=4 fully utilizes all 8 NPUs for parallel request batches |
+| High Throughput<br>(128K context) | Single-Node (A3) | 16 (A3) | Qwen3.5-27B-w8a8 / Qwen3.6-27B-w8a8 | TP=2 + DP=8 fully utilizes all 16 NPUs for parallel request batches |
+| Low Latency<br>(128K context) | Single-Node (A3) | 16 (A3) | Qwen3.5-27B-w8a8 / Qwen3.6-27B-w8a8 | TP=2 + DP=8 reduces per-layer Allreduce overhead for small interactive batches |
+| Long Context<br>(256K+ context) | Single-Node (A3) | 16 (A3) | Qwen3.5-27B-w8a8 / Qwen3.6-27B-w8a8 | TP=8 + DP=2 shards the KV cache across 8 NPUs to maximize the available context window |
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 Atlas 800 A3 node = 16 NPUs, 1 Atlas 800 A2 node = 8 NPUs.
 
