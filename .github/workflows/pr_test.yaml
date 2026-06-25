@@ -29,7 +29,7 @@ on:
       - '*-dev'
       - 'releases/v*'
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "0 18 * * *"
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -233,7 +233,7 @@ jobs:
 # ─── Schedule/Dispatch path: full tests ────────────────────────────────────────
 
   select-full-tests:
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -292,7 +292,6 @@ jobs:
       fail-fast: false
       matrix:
         vllm_version:
-          # - ${{ needs.select-full-tests.outputs.main_commit }}
           - ${{ needs.select-full-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
@@ -300,3 +299,6 @@ jobs:
       ref: ${{ needs.select-full-tests.outputs.vllm_ascend_ref }}
       test_groups: ${{ needs.select-full-tests.outputs.test_groups }}
       enable-coverage: true
+    secrets:
+      OBS_ACCESS_KEY_PRECISION: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      OBS_SECRET_ACCESS_KEY_PRECISION: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}

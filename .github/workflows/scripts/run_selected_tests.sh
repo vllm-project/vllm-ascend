@@ -160,7 +160,7 @@ run_pytest_batch() {
     start_time=$(date +%s%N)
   fi
   if [ "${enable_coverage}" = "true" ]; then
-    echo "DEBUG: 进入【覆盖率分支】"
+    echo "DEBUG: Go to the [Coverage Branch] page."
     setup_coverage "cpu-ut"
     set +e
     python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
