@@ -545,103 +545,99 @@ class KVPoolWorker:
                 layerwise_retriever = self.retrieve_layer(request)
                 next(layerwise_retriever)  # first layer load
                 self.layerwise_retrievers.append(layerwise_retriever)
+            elif self.load_async:
+                self.kv_recv_thread.add_request(  # type: ignore[union-attr]
+                    request,
+                )
             else:
-                if self.load_async:
-                    self.kv_recv_thread.add_request(  # type: ignore[union-attr]
-                        request,
+                addr_list = []
+                size_list = []
+                key_list = []
+                block_id_list: list[int] = []
+                load_masks = self.token_database.load_mask(request.block_hashes, token_len)
+                for group_id in load_group_ids:
+                    block_ids = request.block_ids_by_group[group_id]
+                    group_block_size = self.grouped_block_size[group_id]
+                    mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
+                    skip_null = (
+                        group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
                     )
-                else:
-                    addr_list = []
-                    size_list = []
-                    key_list = []
-                    block_id_list: list[int] = []
-                    load_masks = self.token_database.load_mask(request.block_hashes, token_len)
-                    for group_id in load_group_ids:
-                        block_ids = request.block_ids_by_group[group_id]
-                        group_block_size = self.grouped_block_size[group_id]
-                        mask_num = request.load_spec.vllm_cached_tokens // group_block_size * group_block_size
-                        skip_null = (
-                            group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
-                        )
-                        for start, end, key, _ in self.token_database.process_tokens_with_block_ids(
-                            token_len,
-                            request.block_hashes,
+                    for start, end, key, block_id in self.token_database.process_tokens_with_block_ids(
+                        token_len,
+                        request.block_hashes,
+                        block_ids,
+                        mask_num,
+                        kv_cache_group_id=group_id,
+                        skip_null_blocks=skip_null,
+                    ):
+                        if not self.token_database.mask_allows_chunk(load_masks, group_id, start):
+                            continue
+                        addr, size, block_id = self.token_database.prepare_value(
+                            start,
+                            end,
                             block_ids,
-                            mask_num,
                             kv_cache_group_id=group_id,
-                            skip_null_blocks=skip_null,
-                        ):
-                            if not self.token_database.mask_allows_chunk(load_masks, group_id, start):
-                                continue
-                            addr, size, block_id = self.token_database.prepare_value(
-                                start,
-                                end,
-                                block_ids,
-                                kv_cache_group_id=group_id,
-                            )
-                            key_list.append(key.to_string())
-                            addr_list.append(addr)
-                            size_list.append(size)
-                            block_id_list.append(block_id)
-                    if not key_list:
-                        continue
-                    key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-                    addr_list_c = (
-                        addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-                    )
-                    size_list_c = (
-                        size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-                    )
-                    block_id_list_c = (
-                        block_id_list[self.tp_rank % len(block_id_list) :]
-                        + block_id_list[: self.tp_rank % len(block_id_list)]
-                    )
-                    logger.debug(
-                        "KV pool worker calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
-                        request.req_id,
-                        token_len,
-                        load_group_ids,
-                        len(key_list_c),
-                        key_list_c[:3],
-                    )
-                    ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
-                    if ret is not None and any(r != 0 for r in ret):
-                        missing_block_ids = record_failed_blocks(
-                            block_id_list_c,
-                            ret,
+                            block_id=block_id,
                         )
-                        if len(request.block_ids_by_group) == 1:
-                            self._invalid_block_ids.update(missing_block_ids)
-                        elif missing_block_ids:
-                            logger.error(
-                                "KV load failed for hybrid request %s. "
-                                "Skip invalid-block fallback to avoid scheduler crash. "
-                                "failed_blocks=%s",
-                                request.req_id,
-                                missing_block_ids,
-                            )
-                    elif ret is None:
-                        missing_block_ids = record_failed_blocks(
-                            block_id_list_c,
-                            [1] * len(block_id_list_c),
-                        )
-                        if len(request.block_ids_by_group) == 1:
-                            self._invalid_block_ids.update(missing_block_ids)
-                        elif missing_block_ids:
-                            logger.error(
-                                "KV load failed for hybrid request %s. "
-                                "Skip invalid-block fallback to avoid scheduler crash. "
-                                "failed_blocks=%s",
-                                request.req_id,
-                                missing_block_ids,
-                            )
-                    logger.debug(
-                        "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
-                        request.req_id,
-                        token_len,
-                        load_group_ids,
-                        len(key_list_c),
+                        key_list.append(key.to_string())
+                        addr_list.append(addr)
+                        size_list.append(size)
+                        block_id_list.append(block_id)
+                if not key_list:
+                    continue
+                key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+                addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+                size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
+                block_id_list_c = (
+                    block_id_list[self.tp_rank % len(block_id_list) :]
+                    + block_id_list[: self.tp_rank % len(block_id_list)]
+                )
+                logger.debug(
+                    "KV pool worker calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
+                    request.req_id,
+                    token_len,
+                    load_group_ids,
+                    len(key_list_c),
+                    key_list_c[:3],
+                )
+                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+                if ret is not None and any(r != 0 for r in ret):
+                    missing_block_ids = record_failed_blocks(
+                        block_id_list_c,
+                        ret,
                     )
+                    if len(request.block_ids_by_group) == 1:
+                        self._invalid_block_ids.update(missing_block_ids)
+                    elif missing_block_ids:
+                        logger.error(
+                            "KV load failed for hybrid request %s. "
+                            "Skip invalid-block fallback to avoid scheduler crash. "
+                            "failed_blocks=%s",
+                            request.req_id,
+                            missing_block_ids,
+                        )
+                elif ret is None:
+                    missing_block_ids = record_failed_blocks(
+                        block_id_list_c,
+                        [1] * len(block_id_list_c),
+                    )
+                    if len(request.block_ids_by_group) == 1:
+                        self._invalid_block_ids.update(missing_block_ids)
+                    elif missing_block_ids:
+                        logger.error(
+                            "KV load failed for hybrid request %s. "
+                            "Skip invalid-block fallback to avoid scheduler crash. "
+                            "failed_blocks=%s",
+                            request.req_id,
+                            missing_block_ids,
+                        )
+                logger.debug(
+                    "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
+                    request.req_id,
+                    token_len,
+                    load_group_ids,
+                    len(key_list_c),
+                )
 
     def wait_for_layer_load(self) -> None:
         for layerwise_retriever in self.layerwise_retrievers:
