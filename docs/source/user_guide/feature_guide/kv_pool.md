@@ -991,7 +991,7 @@ On A3 with fabric memory enabled, **each** fabric mem allocation must be an inte
 
 **Fabric mem quota:** Both `global_segment_size` and `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` are separate fabric mem allocations **per rank**. Their sizes add up against the HIXL fabric mem limit configured via `ASCEND_GLOBAL_RESOURCE_CONFIG` (e.g. `"fabric_memory.max_capacity":32`, unit GB per process — see HIXL docs). Rough budget per rank:
 
-```
+```text
 fabric_memory.max_capacity  ≥  global_segment_size + MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES  (+ headroom)
 ```
 
@@ -1042,7 +1042,7 @@ Use **byte literals only** (`10737418240`). `10G` / `10GB` are ignored and fall 
 
 `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` is allocated **per rank**, in addition to `global_segment_size`:
 
-```
+```text
 host_memory_for_mooncake ≈ TP × (global_segment_size + MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES + local_buffer_size)
 ```
 
