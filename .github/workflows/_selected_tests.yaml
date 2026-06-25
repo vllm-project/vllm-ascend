@@ -111,12 +111,12 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
 
-      - name: Rebase on latest main
+      - name: Rebase on latest 0.22.1 release branch
         run: |
           git config user.name "vllm-ascend-ci"
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
-          git fetch origin main
-          git rebase origin/main
+          git fetch origin releases/v0.22.1rc
+          git rebase origin/releases/v0.22.1rc
 
       - name: Get csrc hash
         id: get_csrc_hash
