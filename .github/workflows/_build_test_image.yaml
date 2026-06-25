@@ -119,8 +119,10 @@ jobs:
           NPU_TYPE="${{ matrix.entry.npu_type }}"
           ARCH="${{ matrix.entry.arch }}"
           TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}-${NPU_TYPE}-${ARCH}"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "image=${{ env.QUAY_TEMP_REPO }}:$TAG" >> $GITHUB_OUTPUT
+          {
+            echo "tag=$TAG"
+            echo "image=${{ env.QUAY_TEMP_REPO }}:$TAG"
+          } >> $GITHUB_OUTPUT
 
       - name: Login to Quay Temp
         uses: docker/login-action@v4

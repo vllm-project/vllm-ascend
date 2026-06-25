@@ -74,9 +74,11 @@ jobs:
         run: |
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
-          echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
-          echo "main_commit_short=$(echo "$main_commit" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+            echo "main_commit_short=$(echo "$main_commit" | cut -c1-7)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Compute ascend short hash
         id: ascend_short
