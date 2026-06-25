@@ -93,6 +93,8 @@ RUN echo 'export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:$LD_LIBRARY_PATH
 # Dynamically generate entrypoint.sh for dual mode compatibility
 RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
     echo 'if [ -f "/var/slogd" ]; then' >> /usr/local/bin/entrypoint.sh && \
+    echo '    export LD_LIBRARY_PATH="\${LD_LIBRARY_PATH}:/usr/local/Ascend/driver/lib64:/usr/lib64:/root/aicpu_kernels/0/aicpu_kernels_device/sand_box"' >> /usr/local/bin/entrypoint.sh && \
+    echo '    ' >> /usr/local/bin/entrypoint.sh && \
     echo '    mkdir -p /lib64' >> /usr/local/bin/entrypoint.sh && \
     echo '    ln -sf /lib/ld-linux-aarch64.so.1 /lib64/ld-linux-aarch64.so.1' >> /usr/local/bin/entrypoint.sh && \
     echo '    su - HwHiAiUser -c "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/:/usr/lib64; /lib/ld-linux-aarch64.so.1 /var/slogd -d >/dev/null 2>&1 &"' >> /usr/local/bin/entrypoint.sh && \
