@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"POT-Creation-Date: 2026-06-25 04:27+0000\n"
 "PO-Revision-Date: 2026-01-22 16:18+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -342,7 +342,7 @@ msgid "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
 msgstr "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:37
-#: ../../source/user_guide/support_matrix/supported_models.md:93
+#: ../../source/user_guide/support_matrix/supported_models.md:94
 msgid "Extended Compatible Models"
 msgstr "扩展兼容模型"
 
@@ -569,6 +569,22 @@ msgstr "262144"
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)"
 msgstr "[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "InternVL3.5"
+msgstr "InternVL3.5"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "40960"
+msgstr "40960"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid ""
+"[InternVL3.5(InternVL3_5-38B/241B-"
+"A28B)](../../tutorials/models/InternVL3.5.md)"
+msgstr ""
+"[InternVL3.5(InternVL3_5-38B/241B-"
+"A28B)](../../tutorials/models/InternVL3.5.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen2-VL"
