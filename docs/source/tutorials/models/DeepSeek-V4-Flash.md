@@ -163,7 +163,7 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
-    --max_model_len 133120 \
+    --max-model-len 133120 \
     --max-num-batched-tokens 8192 \
     --served-model-name dsv4 \
     --gpu-memory-utilization 0.9 \
@@ -211,7 +211,7 @@ export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
-    --max_model_len 1048576 \
+    --max-model-len 1048576 \
     --max-num-batched-tokens 10240 \
     --served-model-name dsv4 \
     --gpu-memory-utilization 0.9 \
