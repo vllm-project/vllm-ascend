@@ -240,7 +240,7 @@ jobs:
             os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
           - name: mayi-cases
-            os: linux-aarch64-a3-16
+            os: linux-aarch64-a2b3-8
             tests: tests/e2e/weekly/single_node/engine_func_test_robot
           # YAML-driven tests
           - name: qwen3-vl-32b-instruct-w8a8
