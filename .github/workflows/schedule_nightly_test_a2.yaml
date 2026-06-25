@@ -49,7 +49,7 @@ on:
         type: string
   pull_request:
     branches:
-      - 'main'
+      - 'releases/v0.22.1rc'
     types: [labeled, synchronize]
 
 permissions:
