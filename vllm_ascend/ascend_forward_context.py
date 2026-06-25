@@ -11,6 +11,8 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
+import vllm_ascend.envs as envs_ascend
+
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -310,14 +312,17 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A5}:
+        # The A5 fused dispatch_ffn_combine path currently assumes the caller
+        # provides a compatible quantized MoE layout when the env is enabled.
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1
         num_experts_per_tok = vllm_config.model_config.hf_text_config.num_experts_per_tok
         world_size = vllm_config.parallel_config.world_size_across_dp
         if num_tokens <= mc2_tokens_capacity and world_size > 1:
-            moe_comm_type = MoECommType.MC2
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_mc2_enable else MoECommType.MC2
         elif world_size <= num_experts_per_tok:
-            moe_comm_type = MoECommType.ALLGATHER
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_mc2_enable else MoECommType.ALLGATHER
         else:
-            moe_comm_type = MoECommType.ALLTOALL
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_mc2_enable else MoECommType.ALLTOALL
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     logger.debug(
