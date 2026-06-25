@@ -188,6 +188,31 @@ def test_unset_retention_keeps_sliding_window_dense() -> None:
     )
 
 
+def test_sliding_window_retention_exact_alignment_keeps_current_tail() -> None:
+    block_size = 128
+    alignment_tokens = block_size * 128
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=block_size * 4,
+    )
+
+    mask = _sliding_window_reachable_block_mask(
+        type(None),
+        start_block=0,
+        end_block=128,
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=spec,
+        use_eagle=True,
+        retention_interval=0,
+        num_prompt_tokens=alignment_tokens,
+    )
+
+    assert [idx for idx, keep in enumerate(mask or []) if keep] == [124, 125, 126, 127]
+
+
 def test_sliding_window_eagle_hit_uses_post_pop_alignment() -> None:
     block_size = 128
     alignment_tokens = block_size * 128
