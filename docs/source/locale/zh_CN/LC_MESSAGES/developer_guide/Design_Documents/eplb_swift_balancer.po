@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-06-22 05:29+0000\n"
 "PO-Revision-Date: 2026-04-09 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -39,7 +39,7 @@ msgid ""
 "to place experts of the same group on the same node to reduce inter-node "
 "data traffic, whenever possible."
 msgstr ""
-"当使用专家并行（EP）时，不同的专家被分配到不同的 NPU 上。由于不同专家的负载可能随当前工作负载而变化，因此保持各 NPU "
+"当使用专家并行（EP）时，不同专家被分配到不同 NPU 上。由于不同专家的负载可能随当前工作负载而变化，因此保持各 NPU "
 "之间的负载均衡至关重要。我们采用冗余专家策略，通过复制负载较重的专家来实现。然后，我们通过启发式方法将这些复制的专家打包到 NPU "
 "上，以确保它们之间的负载均衡。此外，借助 MoE "
 "模型中使用的组限制专家路由，我们尽可能尝试将同一组的专家放置在同一个节点上，以减少节点间的数据流量。"
@@ -54,7 +54,7 @@ msgid ""
 " method is to use a moving average of historical statistics."
 msgstr ""
 "为了便于复现和部署，vLLM Ascend 在 `vllm_ascend/eplb/core/policy` 中支持已部署的 EP "
-"负载均衡算法。该算法根据估计的专家负载计算均衡的专家复制和放置方案。注意，预测专家负载的具体方法不在本仓库的范围内。一种常见的方法是使用历史统计数据的移动平均值。"
+"负载均衡算法。该算法根据估计的专家负载计算均衡的专家复制和放置方案。注意，预测专家负载的具体方法不在本仓库范围内。一种常见的方法是使用历史统计数据的移动平均值。"
 
 #: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:9
 msgid "![eplb](../../assets/eplb.png)"
@@ -89,55 +89,53 @@ msgstr "**EPLB 模块架构**"
 msgid ""
 "**1. Adaptor Module**   *Handles registration and adaptation for "
 "different MoE model types*"
-msgstr "**1. 适配器模块**   *处理不同 MoE 模型类型的注册和适配*"
+msgstr "**1.适配器模块**   *处理不同 MoE 模型类型的注册和适配*"
 
 #: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:43
-msgid ""
-"`abstract_adaptor.py`   Abstract base class defining unified registration"
-" interfaces for EPLB adapters"
-msgstr "`abstract_adaptor.py`   定义 EPLB 适配器统一注册接口的抽象基类"
-
-#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:45
 msgid ""
 "`vllm_adaptor.py`   Implementation supporting Qwen3-MoE and DeepSeek "
 "models, standardizing parameter handling for policy algorithms"
 msgstr "`vllm_adaptor.py`   支持 Qwen3-MoE 和 DeepSeek 模型的实现，为策略算法标准化参数处理"
 
-#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:48
+#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:46
 msgid ""
 "**2. Core Module**   *Implements core algorithms, updates, and "
 "asynchronous processing*"
-msgstr "**2. 核心模块**   *实现核心算法、更新和异步处理*"
+msgstr "**2.核心模块**   *实现核心算法、更新和异步处理*"
 
-#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:51
+#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:49
 msgid ""
 "**Policy Submodule**   *Load balancing algorithms with factory pattern "
 "instantiation*"
 msgstr "**策略子模块**   *采用工厂模式实例化的负载均衡算法*"
 
-#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:53
+#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:51
 msgid ""
 "`policy_abstract.py`   Abstract class for load balancing strategy "
 "interfaces"
 msgstr "`policy_abstract.py`   负载均衡策略接口的抽象类"
 
-#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:55
+#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:53
 msgid ""
 "`policy_default_eplb.py`   Default implementation of open-source EPLB "
 "paper algorithm"
 msgstr "`policy_default_eplb.py`   开源 EPLB 论文算法的默认实现"
 
-#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:57
+#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:55
 msgid ""
 "`policy_swift_balancer.py`   Enhanced version optimizing expert swaps for"
 " low-bandwidth devices (e.g., A2)"
 msgstr "`policy_swift_balancer.py`   针对低带宽设备（如 A2）优化专家交换的增强版本"
 
-#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:59
+#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:57
 msgid ""
 "`policy_flashlb.py`   Threshold-based adjustment reducing operational "
 "costs through layer-wise fluctuation detection"
 msgstr "`policy_flashlb.py`   基于阈值的调整策略，通过逐层波动检测降低运行成本"
+
+#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:59
+msgid "`policy_random.py`   Random policy for basic testing"
+msgstr "`policy_random.py`   用于基本测试的随机策略"
 
 #: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:61
 msgid ""
@@ -163,7 +161,7 @@ msgstr "`eplb_worker.py`   异步算法编排和结果处理"
 
 #: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:71
 msgid "**3. System Components**"
-msgstr "**3. 系统组件**"
+msgstr "**3.系统组件**"
 
 #: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:73
 msgid ""
