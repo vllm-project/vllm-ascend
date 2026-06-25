@@ -133,6 +133,8 @@ INFO:     Application startup complete.
 Once your server is started, you can query the model with input prompts:
 
 ```shell
+# Replace <node0_ip> with your primary node IP (e.g., localhost for single-node deployment)
+# Replace <port> with the port used when starting the server (default: 8000)
 curl http://<node0_ip>:<port>/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
