@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
- - `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
+ `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
 
 ## 4 Installation
 
@@ -68,7 +68,6 @@ If you don't want to use the docker image as above, you can also build all from 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
 To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
-
 
 ## 5 Online Service Deployment
 
@@ -244,7 +243,6 @@ The performance result is:
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
-
 
 ## 10 FAQ
 

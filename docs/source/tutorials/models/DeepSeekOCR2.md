@@ -192,7 +192,6 @@ In this chapter, we recommend best practices. for details about best practices, 
 |--------|---------------|-----------|--------------|------------------|
 |Multimodal<br>(1080P)|Single-Node Mixed|16 (A3)|deepseekocr2|dp1 tp1 for high-resolution visual inputs|
 
-
 ### 9.2 Tuning Guidelines
 
 #### 9.2.1 General Tuning Reference
