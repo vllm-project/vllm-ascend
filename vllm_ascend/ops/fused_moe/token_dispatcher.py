@@ -495,7 +495,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         if with_quant:
             dst_type = (
                 torch.float8_e4m3fn
-                if token_dispatch_input.quant.is_fp8 or token_dispatch_input.quant.is_mxfp_quant \
+                if token_dispatch_input.quant.is_fp8 or token_dispatch_input.quant.is_mxfp_quant
                 else torch.int8
             )
             permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(
@@ -660,13 +660,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
             global_input_tokens, reversed_global_input_permutation_mapping, _, dynamic_scale_fp8_copy = (
                 torch_npu.npu_moe_init_routing_v2(
-                    global_input_tokens, experts_indices_2d_copy,
+                    global_input_tokens,
+                    experts_indices_2d_copy,
                     scale=dynamic_scale_fp8_copy,
                     active_num=experts_indices_2d_copy.shape[0],
                     expert_num=self.num_local_experts,
                     expert_tokens_num_type=1,
                     expert_tokens_num_flag=True,
-                    active_expert_range=[0, self.num_local_experts]
+                    active_expert_range=[0, self.num_local_experts],
                 )
             )
             dynamic_scale_after_all2all = dynamic_scale_fp8_copy.view(torch.uint8)
