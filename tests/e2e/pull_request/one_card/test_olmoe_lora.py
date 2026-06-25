@@ -1,7 +1,5 @@
 from collections.abc import Sequence
 
-from safetensors.torch import load_file, save_file
-
 import vllm
 from vllm.lora.request import LoRARequest
 

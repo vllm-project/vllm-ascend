@@ -387,7 +387,7 @@ def unquant_apply_mlp(
     apply_lora = lora_context is not None and expanded_row_idx is not None and topk_ids is not None
     lora_routing = None
     if apply_lora:
-        from vllm_ascend.lora.fused_moe import moe_lora_apply_w13, moe_lora_apply_w2
+        from vllm_ascend.lora.fused_moe import moe_lora_apply_w2, moe_lora_apply_w13
 
     mlp_input_hidden = hidden_states
     gate_up_out = torch_npu.npu_grouped_matmul(

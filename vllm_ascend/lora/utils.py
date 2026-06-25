@@ -10,13 +10,12 @@ from vllm.lora.layers import (
 )
 from vllm.lora.layers.utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
+from vllm_ascend.lora.fused_moe import (
+    AscendFusedMoE3DWithLoRA,
+    AscendFusedMoEWithLoRA,
+)
 from vllm_ascend.ops.linear import (
     AscendQKVParallelLinear,
-)
-
-from vllm_ascend.lora.fused_moe import (
-    AscendFusedMoEWithLoRA,
-    AscendFusedMoE3DWithLoRA,
 )
 
 
