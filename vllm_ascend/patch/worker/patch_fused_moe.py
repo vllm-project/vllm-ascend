@@ -39,8 +39,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner  # noqa: E402
 def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
     if runner_cls is None:
         runner_cls = AscendMoERunner
-    return _original_FusedMoE(*args, runner_cls=runner_cls,
-                               runner_args=runner_args, **kwargs)
+    return _original_FusedMoE(*args, runner_cls=runner_cls, runner_args=runner_args, **kwargs)
 
 
 _fused_moe_layer.FusedMoE = _ascend_FusedMoE
