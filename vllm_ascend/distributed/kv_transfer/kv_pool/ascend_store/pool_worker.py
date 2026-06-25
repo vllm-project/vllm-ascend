@@ -662,10 +662,28 @@ class KVPoolWorker:
             ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
             if ret is not None and any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(block_id_list_c, ret)
-                self._invalid_block_ids.update(missing_block_ids)
+                if len(request.block_ids_by_group) == 1:
+                    self._invalid_block_ids.update(missing_block_ids)
+                elif missing_block_ids:
+                    logger.error(
+                        "KV load failed for hybrid request %s. "
+                        "Skip invalid-block fallback to avoid scheduler crash. "
+                        "failed_blocks=%s",
+                        request.req_id,
+                        missing_block_ids,
+                    )
             elif ret is None:
                 missing_block_ids = record_failed_blocks(block_id_list_c, [1] * len(block_id_list_c))
-                self._invalid_block_ids.update(missing_block_ids)
+                if len(request.block_ids_by_group) == 1:
+                    self._invalid_block_ids.update(missing_block_ids)
+                elif missing_block_ids:
+                    logger.error(
+                        "KV load failed for hybrid request %s. "
+                        "Skip invalid-block fallback to avoid scheduler crash. "
+                        "failed_blocks=%s",
+                        request.req_id,
+                        missing_block_ids,
+                    )
 
     def _process_save_for_layer_batch(
         self,
