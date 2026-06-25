@@ -303,7 +303,7 @@ class FusedMC2CommImpl(MoECommMethod):
         if get_ascend_config().enable_fused_mc2 == 1:
             assert not (
                 fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
-            ), "w1_scale_bias and w2_scale_bias cannot be None for FusedMC2CommImpl."
+            ), "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
 
             out = torch.empty_like(fused_experts_input.hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
