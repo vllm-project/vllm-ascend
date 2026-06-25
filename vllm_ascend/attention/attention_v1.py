@@ -708,7 +708,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.layerIndex, attn_metadata.kvcomp_metadata, query, passed_key, block_table, actual_seq_lengths_kv
             )
 
-        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        num_tokens_before = attn_metadata.actual_seq_lengths_q[-1]
+        is_dm = _EXTRA_CTX.is_draft_model
+        is_dm_pf = _EXTRA_CTX.is_draft_model_prefill
+        print(f"[DEBUG full_graph_fia] BEFORE fix: num_tokens={num_tokens_before}, query.shape[0]={query.shape[0]}, "
+              f"is_dm={is_dm}, is_dm_pf={is_dm_pf}, actual_seq_q[-1]={attn_metadata.actual_seq_lengths_q[-1]}, "
+              f"len(actual_seq_q)={len(attn_metadata.actual_seq_lengths_q)}, "
+              f"seq_lens_list={attn_metadata.seq_lens_list}", flush=True)
+        num_tokens = num_tokens_before
         # Fix for draft model decode graph capture: the attention metadata
         # is built with the target model's uniform_decode_query_len
         # (num_speculative_steps + 1 tokens/request), but the draft model
@@ -719,6 +726,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 and num_tokens != query.shape[0]):
             num_tokens = query.shape[0]
             attn_metadata.actual_seq_lengths_q = list(range(1, num_tokens + 1))
+            print(f"[DEBUG full_graph_fia] FIX APPLIED: num_tokens corrected {num_tokens_before} -> {num_tokens}", flush=True)
+        else:
+            cond1 = bool(_EXTRA_CTX.is_draft_model)
+            cond2 = not _EXTRA_CTX.is_draft_model_prefill
+            cond3 = num_tokens_before != query.shape[0]
+            print(f"[DEBUG full_graph_fia] FIX SKIPPED: conds(is_dm={cond1}, not_is_dm_pf={cond2}, size_mismatch={cond3})", flush=True)
         if _EXTRA_CTX.is_draft_model:
             if _EXTRA_CTX.is_draft_model_prefill:
                 graph_params = get_draft_graph_prefill_params()
@@ -1092,6 +1105,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
+            is_dm = _EXTRA_CTX.is_draft_model
+            is_dm_pf = _EXTRA_CTX.is_draft_model_prefill
+            print(f"[DEBUG full_graph dispatch] capturing=True, is_dm={is_dm}, is_dm_pf={is_dm_pf}, "
+                  f"query.shape={query.shape}, actual_seq_q[-1]={attn_metadata.actual_seq_lengths_q[-1]}, "
+                  f"attn_state={attn_metadata.attn_state}", flush=True)
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -1110,7 +1128,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_table, actual_seq_lengths_kv = get_kvcomp_decode_params(
                 self.layerIndex, attn_metadata.kvcomp_metadata, query, passed_key, block_table, actual_seq_lengths_kv
             )
-        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        num_tokens_before = attn_metadata.actual_seq_lengths_q[-1]
+        is_dm = _EXTRA_CTX.is_draft_model
+        is_dm_pf = _EXTRA_CTX.is_draft_model_prefill
+        print(f"[DEBUG eager_path] BEFORE fix: num_tokens={num_tokens_before}, query.shape[0]={query.shape[0]}, "
+              f"is_dm={is_dm}, is_dm_pf={is_dm_pf}, "
+              f"actual_seq_q[-1]={attn_metadata.actual_seq_lengths_q[-1]}, "
+              f"attn_state={attn_metadata.attn_state}", flush=True)
+        num_tokens = num_tokens_before
         # Fix for draft model decode: attention metadata is built with
         # target model's uniform_decode_query_len (num_speculative_steps + 1
         # tokens/request), but draft model decode processes only 1 token
@@ -1120,6 +1145,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 and num_tokens != query.shape[0]):
             num_tokens = query.shape[0]
             attn_metadata.actual_seq_lengths_q = list(range(1, num_tokens + 1))
+            print(f"[DEBUG eager_path] FIX APPLIED: num_tokens corrected {num_tokens_before} -> {num_tokens}", flush=True)
+        else:
+            print(f"[DEBUG eager_path] FIX SKIPPED: conds(is_dm={bool(is_dm)}, not_is_dm_pf={not is_dm_pf}, "
+                  f"size_mismatch={num_tokens_before != query.shape[0]})", flush=True)
         query = query[:num_tokens]
         if (
             attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
