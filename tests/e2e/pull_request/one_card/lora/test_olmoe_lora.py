@@ -3,7 +3,7 @@ from collections.abc import Sequence
 import vllm
 from vllm.lora.request import LoRARequest
 
-MODEL_PATH = "vllm-ascend/OLMoE-1B-7B-0125-Instruct"
+MODEL_PATH = "allenai/OLMoE-1B-7B-0125-Instruct"
 
 PROMPT_TEMPLATE = """I want you to act as a SQL terminal in front of an example database, you need only to return the sql command to me. Do not return any additional explanation. Below is an instruction that describes a task, Write a response that appropriately completes the request.
 "
@@ -107,7 +107,7 @@ def test_olmoe_lora(olmoe_lora_files):
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
-        enforce_eager=True,
+        enforce_eager=False,
         trust_remote_code=True,
         enable_chunked_prefill=True,
     )
