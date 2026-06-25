@@ -208,7 +208,6 @@ jobs:
         env:
           SOC_VERSION: ascend910b1
           COMPILE_CUSTOM_KERNELS: 0
-          VLLM_VERSION: 0.22.1
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
