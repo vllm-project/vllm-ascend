@@ -1188,6 +1188,8 @@ Common Issues Tip: If you encounter issues with PD separation deployment, please
 
 Once your server is started, you can query the model with input prompts:
 
+In <node0_ip>:<port>, use the IP address and port number of the primary node. If the primary and standby nodes are separated, use the IP address and port number of the proxy node.
+
 ```shell
 curl http://<node0_ip>:<port>/v1/chat/completions \
     -H "Content-Type: application/json" \
@@ -1206,7 +1208,7 @@ curl http://<node0_ip>:<port>/v1/chat/completions \
 
 Expected Result:
 
-In <node0_ip>:<port>, use the IP address and port number of the primary node service. The service returns HTTP 200 OK with a JSON response containing the `choices` field.
+The service returns HTTP 200 OK with a JSON response containing the `choices` field.
 
 ## 7 Accuracy Evaluation
 
