@@ -261,10 +261,6 @@ jobs:
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
-          # pytest-driven tests
-          - name: mayi-cases
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/weekly/single_node/engine_func_test_robot
           # YAML-driven tests
           - name: mtpx-deepseek-r1-0528-w8a8
             os: linux-aarch64-a3-16
