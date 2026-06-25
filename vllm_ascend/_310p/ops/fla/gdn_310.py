@@ -18,7 +18,6 @@
 
 
 import torch
-import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
@@ -27,6 +26,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_310
 from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
+from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params
@@ -111,10 +111,6 @@ def _register_310_conv1d_buffer_replay(
     graph_params.conv1d_events[num_actual_tokens].append(None)
 
 
-def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    return F.normalize(x.to(torch.float32), p=2, dim=-1, eps=eps).to(x.dtype)
-
-
 def _flatten_state_indices(
     ssm_state_indices: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -161,8 +157,8 @@ def npu_recurrent_gated_delta_rule_310(
     use_qk_l2norm_in_kernel: bool = True,
 ) -> torch.Tensor:
     if use_qk_l2norm_in_kernel:
-        q = _l2norm(q)
-        k = _l2norm(k)
+        q = l2norm_310p(q)
+        k = l2norm_310p(k)
 
     total_tokens = v.shape[1]
     flat_state_indices = _flatten_state_indices(ssm_state_indices, cu_seqlens, total_tokens)

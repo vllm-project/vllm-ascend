@@ -70,8 +70,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -180,6 +178,8 @@ else:
 
 
 from vllm.model_executor.layers.attention import Attention, MLAAttention
+
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -2394,13 +2394,15 @@ class NPUModelRunner(GPUModelRunner):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
+        pp = get_pp_group()
+        skip_pp_pd_broadcast = self.is_kv_producer and pp.world_size > 1
 
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
             # receive sampled token ids from the last PP rank when using
             # async scheduling + pipeline parallelism so downstream code
             # (e.g., PCP input preparation) can access them.
-            if self.use_async_scheduling and get_pp_group().world_size > 1:
+            if self.use_async_scheduling and pp.world_size > 1 and not skip_pp_pd_broadcast:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # noqa
@@ -2546,8 +2548,7 @@ class NPUModelRunner(GPUModelRunner):
         # last PP rank so other PP ranks can receive them without going
         # through the scheduler/engine IPC path.
         if self.use_async_scheduling:
-            pp = get_pp_group()
-            if pp.world_size > 1 and pp.is_last_rank:
+            if pp.world_size > 1 and pp.is_last_rank and not skip_pp_pd_broadcast:
                 self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
 
         if not self.use_async_scheduling:
@@ -3523,6 +3524,11 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_runtime_mode, batch_desc.num_reqs
                 )
 
+            # Dummy graph runs do not go through _prepare_inputs(), but GDN/Mamba
+            # metadata reads block_table[:num_reqs_padded] below. Sync padded
+            # rows as well so device-side metadata does not see stale block ids.
+            self.input_batch.block_table.commit_block_table(num_reqs_padded)
+
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             # check how to build dummy
             if self.use_compress:
@@ -3951,7 +3957,7 @@ class NPUModelRunner(GPUModelRunner):
         return layer_kv_cache_spec
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
-        if isinstance(kv_cache_spec, MLAAttentionSpec):
+        if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
             attn_layers = get_layers_from_vllm_config(
                 self.vllm_config,
                 AttentionLayerBase,
@@ -3961,7 +3967,7 @@ class NPUModelRunner(GPUModelRunner):
             if isinstance(attn_layer, MLAAttention):
                 # DeepSeek MLA: K=kv_lora_rank, V=qk_rope_head_dim
                 return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
-            # CacheOnlyAttentionLayer uses MLAAttentionSpec but isn't MLAAttention
+            # CacheOnlyAttentionLayer uses AscendMLAAttentionSpec but isn't MLAAttention
             if isinstance(attn_layer, CacheOnlyAttentionLayer):
                 return kv_cache_spec.head_size, kv_cache_spec.head_size
             raise TypeError(
@@ -4298,7 +4304,8 @@ class NPUModelRunner(GPUModelRunner):
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
-                if self.use_compress and isinstance(current_kv_cache_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+                if self.use_compress and isinstance(current_kv_cache_spec,
+                                                    (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
                     kv_tensor = kv_cache_raw_tensors[layer_name]
                     sum_page_size_bytes = kv_tensor.numel()
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
@@ -4464,7 +4471,7 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                         if self.hybrid_with_attn_and_mamba:
-                            if not isinstance(current_kv_cache_spec, MLAAttentionSpec):
+                            if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                                 attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                     current_kv_cache_spec.dtype
                                 )
@@ -4491,7 +4498,7 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.head_size,
                         )
-                    if not isinstance(current_kv_cache_spec, MLAAttentionSpec):
+                    if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                         k_shape = kv_cache_shape[1:]
                         if hasattr(current_kv_cache_spec, "head_size_v"):
                             v_shape = (*kv_cache_shape[1:-1], current_kv_cache_spec.head_size_v)
@@ -4851,12 +4858,6 @@ class NPUModelRunner(GPUModelRunner):
 
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
-                    # `MLAAttentionSpec` is temporarily patched to `AscendMLAAttentionSpec`.
-                    # Re-importing it at runtime will therefore resolve to the patched class.
-                    # Rename it here to make this behavior explicit.
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
-                    # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
-                    # implement it by creating a new kv_cache_spec class
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=self.block_size,
                         num_kv_heads=1,
@@ -4867,7 +4868,6 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
