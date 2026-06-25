@@ -1,8 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+enable_coverage=false
+if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
+  enable_coverage=true
+fi
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --enable-coverage)
+      enable_coverage=true
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+
 if [ "$#" -lt 4 ]; then
-  echo "Usage: $0 <npu_type> <num_npus> <with-device|without-device> [--timing] <test> [test ...]"
+  echo "Usage: $0 [--enable-coverage] <npu_type> <num_npus> <with-device|without-device> [--timing] <test> [test ...]"
   exit 1
 fi
 
@@ -28,9 +46,22 @@ test_results=()
 failed_logs=()
 timing_entries=()
 test_index=0
+overall_status=0
+
 pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 mkdir -p "${pytest_log_dir}"
+
+setup_coverage() {
+  local target="$1"
+  local test_basename="${target%.py}"
+  test_basename="${test_basename//\//__}"
+  local covdata_dir="${project_root}/tests/outputs/${test_basename}/covdata"
+  mkdir -p "${covdata_dir}"
+  export COVERAGE_FILE="${covdata_dir}/coverage"
+  echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
+}
 
 print_test_info() {
   echo -e "\033[1;34m=== TEST INFO ===\033[0m"
@@ -38,6 +69,7 @@ print_test_info() {
   if [ "${npu_type}" != "cpu" ]; then
     echo -e "  \033[33mNPU count:\033[0m ${num_npus}"
   fi
+  echo -e "  \033[33mCoverage:\033[0m ${enable_coverage}"
   echo -e "  \033[33mTargets:\033[0m"
   for target in "${targets[@]}"; do
     echo -e "    \033[32m-\033[0m ${target}"
@@ -48,16 +80,16 @@ print_test_info() {
 print_summary() {
   echo -e "\033[1;34m=== TEST SUMMARY ===\033[0m"
   for result in "${test_results[@]}"; do
-    IFS='|' read -r target status log_file <<< "${result}"
-    echo -e "  ${status}: ${target}"
-    echo -e "    log: ${log_file}"
+    IFS='|' read -r r_target r_status r_log_file <<< "${result}"
+    echo -e "  ${r_status}: ${r_target}"
+    echo -e "    log: ${r_log_file}"
   done
   if [ "${#failed_logs[@]}" -gt 0 ]; then
     echo -e "\033[1;31m=== FAILED TEST LOGS ===\033[0m"
     for failed in "${failed_logs[@]}"; do
-      IFS='|' read -r target log_file <<< "${failed}"
-      echo "::group::${target} failure log"
-      cat "${log_file}"
+      IFS='|' read -r r_target r_log_file <<< "${failed}"
+      echo "::group::${r_target} failure log"
+      cat "${r_log_file}"
       echo "::endgroup::"
     done
   fi
@@ -73,12 +105,18 @@ run_pytest_target() {
   local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
-  local start_time=0
-  if [ "${record_timing}" = true ]; then
-    start_time=$(date +%s%N)
-  fi
-  set +e
-  pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+  if [ "${enable_coverage}" = "true" ]; then
+    setup_coverage "${target}"
+    set +e
+    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+  else
+      local start_time=0
+      if [ "${record_timing}" = true ]; then
+        start_time=$(date +%s%N)
+      fi
+      set +e
+      pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
+      fi
   local status=${PIPESTATUS[0]}
   set -e
   if [ "${record_timing}" = true ]; then
@@ -108,12 +146,20 @@ run_pytest_batch() {
 
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
-  local start_time=0
-  if [ "${record_timing}" = true ]; then
-    start_time=$(date +%s%N)
+  if [ "${enable_coverage}" = "true" ]; then
+    echo "DEBUG: 进入【覆盖率分支】"
+    setup_coverage "cpu-ut"
+    set +e
+    python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
+  else
+    echo "DEBUG: 进入【普通测试分支】"
+    local start_time=0
+    if [ "${record_timing}" = true ]; then
+      start_time=$(date +%s%N)
+    fi
+    set +e
+    pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   fi
-  set +e
-  pytest -sv --color=yes "${batch_targets[@]}" 2>&1 | tee "${log_file}"
   local status=${PIPESTATUS[0]}
   set -e
   if [ "${record_timing}" = true ]; then
@@ -178,3 +224,4 @@ fi
 
 print_timing_json
 print_summary
+exit "${overall_status}"

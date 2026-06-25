@@ -32,6 +32,11 @@ on:
         required: false
         default: ''
         description: 'The vllm-ascend ref to test.'
+      enable-coverage:
+        type: boolean
+        required: false
+        default: false
+        description: 'Whether to run tests with coverage enabled.'
       upload_timing:
         type: boolean
         required: false
@@ -240,8 +245,12 @@ jobs:
         continue-on-error: ${{ inputs.continue_on_error }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
         run: |
           . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          if [ "${{ inputs.enable-coverage }}" = "true" ]; then
+            export ENABLE_COVERAGE=true
+          fi
           TIMING_FLAG=""
           if [ "${{ inputs.upload_timing }}" = "true" ]; then
             TIMING_FLAG="--timing"
@@ -259,7 +268,11 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
         run: |
+          if [ "${{ inputs.enable-coverage }}" = "true" ]; then
+            export ENABLE_COVERAGE=true
+          fi
           .github/workflows/scripts/run_selected_tests.sh \
             "${{ matrix.group.npu_type }}" \
             "${{ matrix.group.num_npus }}" \
@@ -275,6 +288,17 @@ jobs:
           path: ${{ runner.temp }}/selected-tests-*/test_timing_data.json
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Upload coverage data
+        if: ${{ always() && inputs.enable-coverage }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: selected-test-coverage-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
+          path: tests/outputs/**/covdata/**
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
 
       - name: Upload selected test logs
         if: always()
