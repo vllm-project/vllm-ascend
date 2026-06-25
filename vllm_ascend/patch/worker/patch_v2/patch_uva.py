@@ -22,11 +22,35 @@ from collections.abc import Callable, Sequence
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
+from importlib.metadata import version, PackageNotFoundError
+
+
+def check_triton_ascend_version_valid() -> bool:
+    """
+    Check triton-ascend version and warn about UVA feature disablement in 3.2.1.
+    If version isn't 3.2.1, return True.
+    """
+    # Target version that disables UVA feature
+    DISABLE_UVA_VERSION = "3.2.1"
+    installed_version = version("triton-ascend")
+    # Check if current version is the one with UVA disabled
+    if installed_version == DISABLE_UVA_VERSION:
+        warning_msg = (
+            f"WARNING: triton-ascend {DISABLE_UVA_VERSION} disables the UVA feature.\n"
+            f"Related bug issue: https://github.com/triton-lang/triton-ascend/issues/783"
+        )
+        print(warning_msg, file=sys.stderr)
+        return False
+    return True
+
 
 
 def is_uva_available() -> bool:
     """check if uva feature is supported in this environment"""
-    return "pinned_mem_register:True" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", {})
+    # FIXME(chenboxun): There is an issue with using the UVA feature alongside triton-ascend3.2.1.
+    # Thus UVA feature is disabled when using version 3.2.1
+    # (Related bug issue link: https://github.com/triton-lang/triton-ascend/issues/783)
+    return "pinned_mem_register:True" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", {}) and check_triton_ascend_version_valid()
 
 
 def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int]:

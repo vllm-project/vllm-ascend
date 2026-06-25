@@ -675,6 +675,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/lora/test_qwen3_multi_loras.py: 120
   tests/e2e/pull_request/one_card/lora/test_qwen3_reranker_lora.py: 170
   tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py: 770
+  tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 770
   tests/e2e/pull_request/one_card/pooling/test_classification.py: 220
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 430
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 560
