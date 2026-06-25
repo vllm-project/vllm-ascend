@@ -39,7 +39,7 @@ class YuanrongConfig:
 
 
 class YuanrongHelper:
-    _DS_KEY_MAX_LEN = 255
+    _DS_KEY_MAX_LEN = 1024
     _DS_KEY_ALLOWED_PATTERN = re.compile(r"^[a-zA-Z0-9\-_!@#%\^\*\(\)\+\=\:;]+$")
     _DS_KEY_INVALID_CHAR_PATTERN = re.compile(r"[^a-zA-Z0-9\-_!@#%\^\*\(\)\+\=\:;]")
     _DS_KEY_HASH_SUFFIX_LEN = 16
