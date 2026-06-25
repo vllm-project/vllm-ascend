@@ -533,6 +533,7 @@ class AscendMoERunner(MoERunner):
         if self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
             assert fc3_context is not None
+            assert AscendMoERunner.gate_stream is not None
             AscendMoERunner.gate_stream.wait_stream(torch.npu.current_stream())
             with npu_stream_switch(AscendMoERunner.gate_stream, enabled=self.multistream_overlap_gate):
                 # share_expert
@@ -586,6 +587,7 @@ class AscendMoERunner(MoERunner):
 
         # Make sure the default stream waits for the gate stream to finish.
         if self.multistream_overlap_gate:
+            assert AscendMoERunner.gate_stream is not None
             torch.npu.current_stream().wait_stream(AscendMoERunner.gate_stream)
 
         # Matrix multiply.
