@@ -3524,6 +3524,11 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_runtime_mode, batch_desc.num_reqs
                 )
 
+            # Dummy graph runs do not go through _prepare_inputs(), but GDN/Mamba
+            # metadata reads block_table[:num_reqs_padded] below. Sync padded
+            # rows as well so device-side metadata does not see stale block ids.
+            self.input_batch.block_table.commit_block_table(num_reqs_padded)
+
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             # check how to build dummy
             if self.use_compress:
