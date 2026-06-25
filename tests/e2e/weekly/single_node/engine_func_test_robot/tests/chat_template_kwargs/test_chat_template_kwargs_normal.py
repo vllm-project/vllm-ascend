@@ -1,5 +1,7 @@
 import pytest
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import request_helper as helper
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
 
 
@@ -8,13 +10,10 @@ def test_chat_template_kwargs_null(api_client, request, stream):
     """chat_template_kwargs为null，请求应正常响应"""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "你好"
-        }],
+        "messages": [{"role": "user", "content": "你好"}],
         "chat_template_kwargs": None,
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -39,13 +38,10 @@ def test_chat_template_kwargs_empty_object(api_client, request, stream):
     """chat_template_kwargs为空对象{}，请求应视为可选字段正常处理"""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "你好"
-        }],
+        "messages": [{"role": "user", "content": "你好"}],
         "chat_template_kwargs": {},
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -70,15 +66,10 @@ def test_chat_template_kwargs_with_add_generation_prompt(api_client, request, st
     """chat_template_kwargs设置add_generation_prompt参数，控制是否添加生成提示"""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "你好"
-        }],
-        "chat_template_kwargs": {
-            "add_generation_prompt": True
-        },
+        "messages": [{"role": "user", "content": "你好"}],
+        "chat_template_kwargs": {"add_generation_prompt": True},
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -97,20 +88,12 @@ def test_chat_template_kwargs_with_custom_system_prompt(api_client, request, str
     request_body = {
         "model": "auto",
         "messages": [
-            {
-                "role": "system",
-                "content": "你是AI助手"
-            },
-            {
-                "role": "user",
-                "content": "你好"
-            }
+            {"role": "system", "content": "你是AI助手"},
+            {"role": "user", "content": "你好"},
         ],
-        "chat_template_kwargs": {
-            "enable_system_prompt": True
-        },
+        "chat_template_kwargs": {"enable_system_prompt": True},
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -128,16 +111,10 @@ def test_chat_template_kwargs_date_params(api_client, request, stream):
     """chat_template_kwargs包含日期相关参数（某些模型支持动态日期）"""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天是星期几"
-        }],
-        "chat_template_kwargs": {
-            "date": "2025-04-01",
-            "time": "10:00:00"
-        },
+        "messages": [{"role": "user", "content": "今天是星期几"}],
+        "chat_template_kwargs": {"date": "2025-04-01", "time": "10:00:00"},
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -155,17 +132,14 @@ def test_chat_template_kwargs_multiple_params(api_client, request, stream):
     """chat_template_kwargs包含多个有效参数组合"""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "请简单回答"
-        }],
+        "messages": [{"role": "user", "content": "请简单回答"}],
         "chat_template_kwargs": {
             "add_generation_prompt": True,
             "tools_prompt": "default",
-            "custom_var": "custom_value"
+            "custom_var": "custom_value",
         },
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -183,10 +157,7 @@ def test_chat_template_kwargs_with_tools_prompt(api_client, request, stream):
     """chat_template_kwargs设置tools_prompt参数，控制工具调用提示格式"""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "需要查询天气"
-        }],
+        "messages": [{"role": "user", "content": "需要查询天气"}],
         "tools": [
             {
                 "type": "function",
@@ -195,19 +166,15 @@ def test_chat_template_kwargs_with_tools_prompt(api_client, request, stream):
                     "description": "获取天气信息",
                     "parameters": {
                         "type": "object",
-                        "properties": {
-                            "location": {"type": "string"}
-                        },
-                        "required": ["location"]
-                    }
-                }
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                    },
+                },
             }
         ],
-        "chat_template_kwargs": {
-            "tools_prompt": "tool_instruction"
-        },
+        "chat_template_kwargs": {"tools_prompt": "tool_instruction"},
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -225,15 +192,10 @@ def test_chat_template_kwargs_bos_token(api_client, request, stream):
     """chat_template_kwargs设置add_special_tokens或bos_token相关参数"""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "你好"
-        }],
-        "chat_template_kwargs": {
-            "add_special_tokens": True
-        },
+        "messages": [{"role": "user", "content": "你好"}],
+        "chat_template_kwargs": {"add_special_tokens": True},
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -251,15 +213,10 @@ def test_chat_template_kwargs_skip_special_tokens(api_client, request, stream):
     """chat_template_kwargs设置skip_special_tokens参数"""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "你好"
-        }],
-        "chat_template_kwargs": {
-            "skip_special_tokens": False
-        },
+        "messages": [{"role": "user", "content": "你好"}],
+        "chat_template_kwargs": {"skip_special_tokens": False},
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
