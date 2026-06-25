@@ -390,6 +390,7 @@
   tests:
     - tests/ut/patch
     - tests/ut/test_compressed_prefix_cache.py
+    - tests/ut/core/test_prefix_cache_retention.py
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
 
