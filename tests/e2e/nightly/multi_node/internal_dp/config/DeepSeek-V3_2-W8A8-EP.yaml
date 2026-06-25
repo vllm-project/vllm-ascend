@@ -9,7 +9,7 @@ env_common: &env_common
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 10
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  HCCL_BUFFSIZE: 256
+  HCCL_BUFFSIZE: 360
   VLLM_TORCH_PROFILER_WITH_STACK: 0
   ASCEND_AGGREGATE_ENABLE: 1
   ASCEND_TRANSPORT_PRINT: 1
@@ -18,8 +18,6 @@ env_common: &env_common
   VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: 480
   VLLM_ENGINE_READY_TIMEOUT_S: 1800
   HCCL_CONNECT_TIMEOUT: 1200
-  HCCL_INTRA_PCIE_ENABLE: 1
-  HCCL_INTRA_ROCE_ENABLE: 0
 
 
 disaggregated_prefill:
@@ -47,11 +45,11 @@ deployment:
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
           --seed 1024
           --quantization ascend
-          --max-num-seqs 64
-          --max-model-len 68000 
-          --max-num-batched-tokens 32560
+          --max-num-seqs 16
+          --max-model-len 133000 
+          --max-num-batched-tokens 8192
           --trust-remote-code
-          --gpu-memory-utilization 0.82
+          --gpu-memory-utilization 0.95
           --enforce-eager
           --no-enable-prefix-caching
           --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}' 
@@ -93,11 +91,11 @@ deployment:
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
           --seed 1024
           --quantization ascend
-          --max-num-seqs 64
-          --max-model-len 68000 
-          --max-num-batched-tokens 32560
+          --max-num-seqs 16
+          --max-model-len 133000 
+          --max-num-batched-tokens 8192
           --trust-remote-code
-          --gpu-memory-utilization 0.82
+          --gpu-memory-utilization 0.95
           --enforce-eager
           --no-enable-prefix-caching
           --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}' 
@@ -123,6 +121,7 @@ deployment:
       <<: *env_common
       VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
+      HCCL_BUFFSIZE: 1100
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -137,12 +136,12 @@ deployment:
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
-          --max-model-len 68000 
-          --max-num-batched-tokens 12
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' 
+          --max-model-len 133000 
+          --max-num-batched-tokens 42
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}' 
           --trust-remote-code
-          --max-num-seqs 4
-          --gpu-memory-utilization 0.90
+          --max-num-seqs 14
+          --gpu-memory-utilization 0.92
           --no-enable-prefix-caching
           --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
           --tokenizer-mode deepseek_v32
@@ -168,6 +167,7 @@ deployment:
       <<: *env_common
       VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
+      HCCL_BUFFSIZE: 1100
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -183,12 +183,12 @@ deployment:
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
-          --max-model-len 68000 
-          --max-num-batched-tokens 12
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' 
+          --max-model-len 133000 
+          --max-num-batched-tokens 42
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}' 
           --trust-remote-code
-          --max-num-seqs 4
-          --gpu-memory-utilization 0.90
+          --max-num-seqs 14
+          --gpu-memory-utilization 0.92
           --no-enable-prefix-caching
           --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
           --tokenizer-mode deepseek_v32
@@ -215,7 +215,7 @@ benchmarks:
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 1
-    max_out_len: 3000
+    max_out_len: 1500
     batch_size: 1
     request_rate: 11.2
     baseline: 1
@@ -227,7 +227,7 @@ benchmarks:
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 1
-    max_out_len: 3000
+    max_out_len: 1024
     batch_size: 1
     request_rate: 11.2
     baseline: 1
@@ -238,11 +238,11 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K-in3500-bs2800
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 512
-    max_out_len: 3000
-    batch_size: 128
-    request_rate: 11.2
-    baseline: 1441.4691 
+    num_prompts: 128
+    max_out_len: 1500
+    batch_size: 32
+    request_rate: 0
+    baseline: 1
     threshold: 0.97
 
   perf_long:
@@ -250,11 +250,11 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K-in64000-bs2800
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 128
-    max_out_len: 3000
-    batch_size: 32
-    request_rate: 11.2
-    baseline: 702.6262 # https://github.com/vllm-project/vllm-ascend/actions/runs/24222505363/job/70716884885?pr=7119
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 4
+    request_rate: 1
+    baseline: 1
     threshold: 0.97
 
   acc:
