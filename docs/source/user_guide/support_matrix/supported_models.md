@@ -89,6 +89,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Qwen3.5-27B                    | ✅            |                                                                      |✅| A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-27B](../../tutorials/models/Qwen3.5-27B.md) |
 | Qwen3-Omni-30B-A3B-Thinking    | 🔵            |                                                                      ||A2/A3|||||||✅||✅|||||||[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)|
 | Kimi-K2.5/Kimi-K2.6    | ✅            |                                                                      ||A2/A3||✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144||[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)|
+| InternVL3.5    | ✅            |                                                                      ||A3|✅|✅|✅|||✅|✅||✅|||✅|✅|40960||[InternVL3.5(InternVL3_5-38B/241B-A28B)](../../tutorials/models/InternVL3.5.md)|
 
 #### Extended Compatible Models
 
