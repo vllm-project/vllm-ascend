@@ -2009,9 +2009,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self.method == "mtp":
             if _EXTRA_CTX.flash_comm_v1_enabled and not self.is_multimodal_model:
                 hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
-                positions = positions.unsqueeze(-1)
-                positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
-                positions = positions.squeeze(-1)
+                # `maybe_pad_and_reduce` reduce-scatters tensor-parallel hidden
+                # states. Position ids are metadata, not reducible values: summing
+                # them across TP ranks corrupts MTP positions and collapses draft
+                # acceptance. Keep the same pad-and-split shape behavior without
+                # reducing the integer position values.
+                tp_group = get_tp_group()
+                tp_size = tp_group.world_size
+                tp_rank = tp_group.rank_in_group
+                pad_size = getattr(_EXTRA_CTX, "pad_size", 0)
+                if pad_size > 0:
+                    positions = F.pad(positions, (0, pad_size), mode="constant", value=0)
+                chunk_size = positions.shape[0] // tp_size
+                positions = positions[tp_rank * chunk_size : (tp_rank + 1) * chunk_size]
         else:
             if _EXTRA_CTX.flash_comm_v1_enabled:
                 hidden_states = split_inputs_tp_to_sp(hidden_states, hidden_states)

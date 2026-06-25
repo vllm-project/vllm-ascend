@@ -302,6 +302,13 @@ class CompressAttentionManager(FullAttentionManager):
         req_blocks = self.req_to_blocks[request.request_id]
         if compressed_tokens <= 0 or not req_blocks:
             return
+        # A request resumed from a partial-prefix hit owns private destination
+        # blocks copied from an existing cached source block. Do not publish
+        # those private blocks as new partial-cache sources, otherwise later
+        # requests can form chained copies (dst -> next dst) and observe stale
+        # KV if the copy path is batched/vectorized.
+        if request.request_id in self._copy_src_blocks:
+            return
         # The first block's boundaries are final once it is full; never revisit.
         if request.request_id in self._partial_boundaries_done:
             return
