@@ -63,9 +63,7 @@ def test_chat_template_kwargs_qwen_enable_thinking_true(api_client, request, str
 
     # 校验点3：think标签完整性（enable_thinking=true时）
     if should_check_think_tag(request):
-        assertion.assert_think_tag_present(
-            response.content.decode("utf-8"), "enable_thinking=true"
-        )
+        assertion.assert_think_tag_present(response.content.decode("utf-8"), "enable_thinking=true")
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -94,9 +92,7 @@ def test_chat_template_kwargs_qwen_enable_thinking_false(api_client, request, st
 
     # 校验点3：不存在think标签（enable_thinking=false时）
     if should_check_think_tag(request):
-        assertion.assert_no_think_tag(
-            response.content.decode("utf-8"), "enable_thinking=false"
-        )
+        assertion.assert_no_think_tag(response.content.decode("utf-8"), "enable_thinking=false")
 
 
 # ==================== DeepSeek/DS系列模型测试 - thinking ====================
@@ -128,9 +124,7 @@ def test_chat_template_kwargs_deepseek_thinking_true(api_client, request, stream
 
     # 校验点3：think标签完整性（thinking=true时）
     if should_check_think_tag(request):
-        assertion.assert_think_tag_present(
-            response.content.decode("utf-8"), "thinking=true"
-        )
+        assertion.assert_think_tag_present(response.content.decode("utf-8"), "thinking=true")
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -159,9 +153,7 @@ def test_chat_template_kwargs_deepseek_thinking_false(api_client, request, strea
 
     # 校验点3：不存在think标签（thinking=false时）
     if should_check_think_tag(request):
-        assertion.assert_no_think_tag(
-            response.content.decode("utf-8"), "thinking=false"
-        )
+        assertion.assert_no_think_tag(response.content.decode("utf-8"), "thinking=false")
 
 
 # ==================== 非适用模型测试 - 异常场景 ====================

@@ -1,4 +1,5 @@
 import pytest
+
 from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
 from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
     request_helper as helper,
@@ -68,9 +69,7 @@ def test_content_json_escape_sequences(api_client, request, stream):
     """content包含JSON转义字符，边界测试"""
     request_body = {
         "model": "auto",
-        "messages": [
-            {"role": "user", "content": 'Line1\nLine2\tTabbed"Quoted"\\Backslash'}
-        ],
+        "messages": [{"role": "user", "content": 'Line1\nLine2\tTabbed"Quoted"\\Backslash'}],
         "stream": stream,
         "max_tokens": 512,
     }
@@ -140,9 +139,7 @@ def test_content_rtl_languages(api_client, request, stream):
     """content包含从右到左语言（阿拉伯语、希伯来语等）"""
     request_body = {
         "model": "auto",
-        "messages": [
-            {"role": "user", "content": "مرحبا بالعالم (Arabic) שלום עולם (Hebrew)"}
-        ],
+        "messages": [{"role": "user", "content": "مرحبا بالعالم (Arabic) שלום עולם (Hebrew)"}],
         "stream": stream,
         "max_tokens": 512,
     }
@@ -185,9 +182,7 @@ def test_content_array_type_field_case_sensitive(api_client, request, stream):
     """content数组格式type字段大小写敏感性边界测试"""
     request_body = {
         "model": "auto",
-        "messages": [
-            {"role": "user", "content": [{"type": "TEXT", "text": "你好"}]}  # 大写TEXT
-        ],
+        "messages": [{"role": "user", "content": [{"type": "TEXT", "text": "你好"}]}],  # 大写TEXT
         "stream": stream,
         "max_tokens": 512,
     }
@@ -209,9 +204,7 @@ def test_content_array_extra_fields(api_client, request, stream):
         "messages": [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": "你好", "extra_field": "extra_value"}
-                ],
+                "content": [{"type": "text", "text": "你好", "extra_field": "extra_value"}],
             }
         ],
         "stream": stream,
@@ -232,9 +225,7 @@ def test_content_array_text_whitespace_only(api_client, request, stream):
     """content数组格式text字段仅包含空白字符，边界测试"""
     request_body = {
         "model": "auto",
-        "messages": [
-            {"role": "user", "content": [{"type": "text", "text": "   \t\n  "}]}
-        ],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "   \t\n  "}]}],
         "stream": stream,
         "max_tokens": 512,
     }
@@ -253,9 +244,7 @@ def test_content_array_very_long_text(api_client, request, stream):
     """content数组格式text字段为超长文本，边界测试"""
     request_body = {
         "model": "auto",
-        "messages": [
-            {"role": "user", "content": [{"type": "text", "text": "A" * 5000}]}
-        ],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "A" * 5000}]}],
         "stream": stream,
         "max_tokens": 512,
     }

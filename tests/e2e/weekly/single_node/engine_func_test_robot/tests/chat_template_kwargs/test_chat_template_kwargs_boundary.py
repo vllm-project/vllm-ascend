@@ -205,11 +205,7 @@ def test_chat_template_kwargs_deeply_nested_object(api_client, request, stream):
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "你好"}],
-        "chat_template_kwargs": {
-            "level1": {
-                "level2": {"level3": {"level4": {"level5": {"deep_value": "found"}}}}
-            }
-        },
+        "chat_template_kwargs": {"level1": {"level2": {"level3": {"level4": {"level5": {"deep_value": "found"}}}}}},
         "stream": stream,
         "max_tokens": 512,
     }

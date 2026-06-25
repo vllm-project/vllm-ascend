@@ -1,4 +1,5 @@
 import pytest
+
 from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
 from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
     request_helper as helper,
@@ -151,9 +152,7 @@ def test_content_with_special_chars(api_client, request, stream):
     """content包含特殊字符（标点、符号等），请求正常"""
     request_body = {
         "model": "auto",
-        "messages": [
-            {"role": "user", "content": "Hello! 你好~ @#$%^&*()_+-=[]{}|;':\",./<>?"}
-        ],
+        "messages": [{"role": "user", "content": "Hello! 你好~ @#$%^&*()_+-=[]{}|;':\",./<>?"}],
         "stream": stream,
         "max_tokens": 512,
     }
@@ -193,9 +192,7 @@ def test_content_with_emoji(api_client, request, stream):
     """content包含Emoji表情，请求正常"""
     request_body = {
         "model": "auto",
-        "messages": [
-            {"role": "user", "content": "你好👋 很高兴见到你😊 这是一颗星星⭐"}
-        ],
+        "messages": [{"role": "user", "content": "你好👋 很高兴见到你😊 这是一颗星星⭐"}],
         "stream": stream,
         "max_tokens": 512,
     }
@@ -215,9 +212,7 @@ def test_content_unicode_chinese(api_client, request, stream):
     """content包含中文字符和Unicode字符，请求正常"""
     request_body = {
         "model": "auto",
-        "messages": [
-            {"role": "user", "content": " apples 中文测试 日本語テスト 한국어"}
-        ],
+        "messages": [{"role": "user", "content": " apples 中文测试 日本語テスト 한국어"}],
         "stream": stream,
         "max_tokens": 512,
     }

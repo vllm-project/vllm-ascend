@@ -1,4 +1,3 @@
-import pytest
 from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
 from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
     request_helper as helper,
@@ -208,9 +207,7 @@ def test_content_array_invalid_type_non_stream(api_client, request):
     """非流式：content数组对象type为无效值，应返回400错误"""
     request_body = {
         "model": "auto",
-        "messages": [
-            {"role": "user", "content": [{"type": "invalid_type", "text": "你好"}]}
-        ],
+        "messages": [{"role": "user", "content": [{"type": "invalid_type", "text": "你好"}]}],
         "stream": False,
         "max_tokens": 512,
     }
@@ -226,9 +223,7 @@ def test_content_array_invalid_type_stream(api_client, request):
     """流式：content数组对象type为无效值，应返回400错误"""
     request_body = {
         "model": "auto",
-        "messages": [
-            {"role": "user", "content": [{"type": "unknown", "text": "你好"}]}
-        ],
+        "messages": [{"role": "user", "content": [{"type": "unknown", "text": "你好"}]}],
         "stream": True,
         "max_tokens": 512,
     }
