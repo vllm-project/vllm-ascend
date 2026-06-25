@@ -532,10 +532,10 @@ jobs:
         if: failure()
         continue-on-error: true
         env:
-          VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED: ${{ vars.VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED }}
+          VLLM_ASCEND_CI_AI_DIAGNOSIS_ENABLED: "1"
           VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY }}
           VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL }}
-          VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL: ${{ vars.VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL }}
+          VLLM_ASCEND_CI_AI_DIAGNOSIS_MODEL: "deepseek-v4-pro"
         run: |
           set -euo pipefail
           LEADER_LOG="/tmp/${LEADER_POD}_logs.txt"
