@@ -1,8 +1,9 @@
 import pytest
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
 from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
     request_helper as helper,
 )
-from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])

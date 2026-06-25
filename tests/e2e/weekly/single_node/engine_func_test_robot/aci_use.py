@@ -1,7 +1,7 @@
 import json
 import os
-import sys
 import re
+import sys
 from datetime import datetime
 
 
@@ -60,9 +60,7 @@ def format_log_content(result_json, result_dir, is_fail=True):
         status_details = result_json.get("statusDetails", {})
         message = remove_ansi_codes(status_details.get("message", ""))
         trace = remove_ansi_codes(status_details.get("trace", ""))
-        lines.append(
-            f"### 失败描述\n**message:**\n```\n{message}\n```\n\n**trace:**\n```\n{trace}\n```\n"
-        )
+        lines.append(f"### 失败描述\n**message:**\n```\n{message}\n```\n\n**trace:**\n```\n{trace}\n```\n")
 
     # 4. 每一个step的name & 对应attachments
     steps = result_json.get("steps", [])
@@ -74,9 +72,7 @@ def format_log_content(result_json, result_dir, is_fail=True):
             step_stop = step.get("stop")
             time_info = ""
             if step_start and step_stop:
-                time_info = (
-                    f" ({timestamp_to_str(step_start)} ~ {timestamp_to_str(step_stop)})"
-                )
+                time_info = f" ({timestamp_to_str(step_start)} ~ {timestamp_to_str(step_stop)})"
             lines.append(f"#### {step_name}{time_info}")
             attachments = step.get("attachments", [])
             if attachments:
@@ -187,10 +183,6 @@ if __name__ == "__main__":
         allure_results = sys.argv[2]
         json_data = load_result_files(allure_results)
         json_data["html_log"] = sys.argv[3] if len(sys.argv) > 3 else "未配置"
-        json_data["fail_markdown_directory"] = (
-            sys.argv[4] if len(sys.argv) > 4 else "未配置"
-        )
-        json_data["success_markdown_directory"] = (
-            sys.argv[5] if len(sys.argv) > 5 else "未配置"
-        )
+        json_data["fail_markdown_directory"] = sys.argv[4] if len(sys.argv) > 4 else "未配置"
+        json_data["success_markdown_directory"] = sys.argv[5] if len(sys.argv) > 5 else "未配置"
         print(json.dumps(json_data))
