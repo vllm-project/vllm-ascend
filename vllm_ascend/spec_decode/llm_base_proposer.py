@@ -980,15 +980,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
-        logits = self.model.logits_processor(self.model.lm_head, hidden_states)
-        if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
+        if self.method in ("eagle3", "dflash"):
+            logits = self.model.logits_processor(self.model.lm_head, hidden_states)
+            if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
+                return greedy_sample(logits)
+            logits = logits.contiguous()
+            next_token = greedy_sample(logits)
+            bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
+                next_token.shape
+            )
+            return next_token + bias
+        else:
+            logits = self.model.compute_logits(hidden_states)
             return greedy_sample(logits)
-        logits = logits.contiguous()
-        next_token = greedy_sample(logits)
-        bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
-            next_token.shape
-        )
-        return next_token + bias
 
     def _run_merged_draft(
         self,
@@ -1036,6 +1040,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         num_indices = token_indices_to_sample.shape[0]
+        if lmhead_tp_enable():
+            max_num_reqs_across_dp = (
+                self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
+            )
+            # It is necessary to evaluate the case where num_indices becomes large
+            # in the context of the dummy‑run accompaniment of p‑eagle.
+            if num_indices > max_num_reqs_across_dp:
+                ori_token_indices_to_sample = token_indices_to_sample
+            else:
+                ori_token_indices_to_sample = None
+
         if self.pcp_size > 1:
             # remove graph padding before all_gather
             hidden_states = hidden_states[:num_input_tokens]
@@ -1058,43 +1073,49 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
         if lmhead_tp_enable():
-            max_num_reqs_across_dp = (
-                self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
-            )
             token_indices_to_sample = nn.functional.pad(
                 token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices)
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        if get_ascend_config().enable_reduce_sample and self.method in ("eagle3", "dflash"):
-            draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
-            if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
-                draft_token_ids = draft_token_ids[:num_indices]
-                token_indices_to_sample = token_indices_to_sample[:num_indices]
-        else:
-            if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
-                if not hasattr(self.model.model, "compute_logits"):
-                    draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
-                    if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
-                        draft_token_ids = draft_token_ids[:num_indices]
-                        token_indices_to_sample = token_indices_to_sample[:num_indices]
-                else:
-                    logits = self.model.compute_logits(sample_hidden_states)
-                    if lmhead_tp_enable():
-                        logits = get_lmhead_tp_group().all_to_all(logits)
-                    else:
-                        logits = self.model.model.logits_processor._gather_logits(logits)
-                    if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                        logits = logits[:num_indices]
-                        token_indices_to_sample = token_indices_to_sample[:num_indices]
-                    draft_token_ids = logits.argmax(dim=-1)
+        if get_ascend_config().enable_reduce_sample:
+            if self.method in ("eagle3", "dflash", "mtp"):
+                draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+                if lmhead_tp_enable():
+                    draft_token_ids, token_indices_to_sample = self._align_tensor_and_indices(
+                        draft_token_ids,
+                        num_indices,
+                        token_indices_to_sample,
+                        ori_token_indices_to_sample,
+                        is_logits=False,
+                    )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
-                if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                    logits = logits[:num_indices]
-                    token_indices_to_sample = token_indices_to_sample[:num_indices]
+                if lmhead_tp_enable():
+                    logits = get_lmhead_tp_group().all_to_all(logits)
+                else:
+                    logits = self.model.model.logits_processor._gather_logits(logits)
+                if lmhead_tp_enable():
+                    logits, token_indices_to_sample = self._align_tensor_and_indices(
+                        logits,
+                        num_indices,
+                        token_indices_to_sample,
+                        ori_token_indices_to_sample,
+                        is_logits=True,
+                    )
                 draft_token_ids = logits.argmax(dim=-1)
+        else:
+            logits = self.model.compute_logits(sample_hidden_states)
+            if lmhead_tp_enable():
+                logits, token_indices_to_sample = self._align_tensor_and_indices(
+                    logits,
+                    num_indices,
+                    token_indices_to_sample,
+                    ori_token_indices_to_sample,
+                    is_logits=True,
+                )
+            draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1220,34 +1241,28 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
-            if get_ascend_config().enable_reduce_sample and self.method in ("eagle3", "dflash"):
-                draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
-                if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
-                    draft_token_ids = draft_token_ids[:num_indices]
-                    token_indices_to_sample = token_indices_to_sample[:num_indices]
-            else:
-                if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
-                    if not hasattr(self.model.model, "compute_logits"):
-                        draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
-                        if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
-                            draft_token_ids = draft_token_ids[:num_indices]
-                            token_indices_to_sample = token_indices_to_sample[:num_indices]
-                    else:
-                        logits = self.model.compute_logits(sample_hidden_states)
-                        if lmhead_tp_enable():
-                            logits = get_lmhead_tp_group().all_to_all(logits)
-                        else:
-                            logits = self.model.model.logits_processor._gather_logits(logits)
-                        if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                            logits = logits[:num_indices]
-                            token_indices_to_sample = token_indices_to_sample[:num_indices]
-                        draft_token_ids = logits.argmax(dim=-1)
+            if get_ascend_config().enable_reduce_sample:
+                if self.method in ("eagle3", "dflash", "mtp"):
+                    draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+                    if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
+                        draft_token_ids = draft_token_ids[:num_indices]
+                        token_indices_to_sample = token_indices_to_sample[:num_indices]
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
+                    if lmhead_tp_enable():
+                        logits = get_lmhead_tp_group().all_to_all(logits)
+                    else:
+                        logits = self.model.model.logits_processor._gather_logits(logits)
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
                         logits = logits[:num_indices]
                         token_indices_to_sample = token_indices_to_sample[:num_indices]
                     draft_token_ids = logits.argmax(dim=-1)
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
+                if lmhead_tp_enable() and num_indices < logits.shape[0]:
+                    logits = logits[:num_indices]
+                    token_indices_to_sample = token_indices_to_sample[:num_indices]
+                draft_token_ids = logits.argmax(dim=-1)
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
@@ -2110,3 +2125,49 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if hidden_states is not None:
                     hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), True)
         return last_hidden_states, positions, hidden_states
+
+    # In the context of the dummy‑run accompaniment of p‑eagle, when num_indices becomes large,
+    # enabling the LM head feature causes token_indices_to_sample to switch from padding to trimming.
+    # The trimmed length may not be an integer multiple of the speculative length,
+    # in which case padding is required to restore it to the original length.
+    def _align_tensor_and_indices(
+        self,
+        tensor,
+        num_indices,
+        token_indices_to_sample,
+        ori_token_indices_to_sample,
+        is_logits=False,
+    ):
+        """
+        Align the tensor (either draft_token_ids or logits) and token_indices_to_sample
+        to the length specified by num_indices.
+
+        Args:
+        tensor: The tensor to be aligned (draft_token_ids or logits)
+        num_indices: The target length
+        token_indices_to_sample: The current index tensor
+        ori_token_indices_to_sample: The original index tensor (used for restoration)
+        is_logits: Whether the tensor is logits (affects the padding dimension and padding value)
+
+        Returns:
+        The adjusted tensor and token_indices_to_sample
+        """
+        if tensor.shape[0] == num_indices:
+            return tensor, token_indices_to_sample
+
+        if tensor.shape[0] > num_indices:
+            # Trim to the target length.
+            tensor = tensor[:num_indices]
+            token_indices_to_sample = token_indices_to_sample[:num_indices]
+        else:
+            # Padding to the target length.
+            pad_size = num_indices - tensor.shape[0]
+            if is_logits:
+                # logits: shape [seq_len, vocab_size], Padding at the end of the seq dimension.
+                tensor = nn.functional.pad(tensor, (0, 0, 0, pad_size), value=-1e9)
+            else:
+                # draft_token_ids: shape [seq_len], Padding at the end
+                tensor = nn.functional.pad(tensor, (0, pad_size))
+            token_indices_to_sample = ori_token_indices_to_sample
+
+        return tensor, token_indices_to_sample
