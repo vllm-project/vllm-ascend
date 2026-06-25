@@ -114,11 +114,16 @@ export PYTHONHASHSEED=0
 
 | Hardware | Dependencies | Export Command | Description |
 | :--- | :--- | :--- | :--- |
-| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. |
+| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#122-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
 | 800 I/T A3 series | If any dependency above is not met | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
 | 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
 ### Run Mooncake Master
+
+**Note:** Before proceeding, review the following Mooncake guides:
+
+* [Mooncake Store Deployment Guide](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/mooncake-store-deployment-guide.md)
+* [SSD Offload](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/ssd-offload.md)
 
 #### 1. Configure mooncake.json
 
@@ -434,12 +439,13 @@ This is because HCCL one-sided communication connections are created lazily afte
 Start Mooncake master as described in [Run Mooncake Master](#run-mooncake-master). To enable SSD offload, add `--enable_offload=true` to the same master startup command. For example:
 
 ```shell
-mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000 --enable_offload=true
+mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000 --enable_offload=true --client_ttl=120
 ```
 
 | Field | Description |
 | :--- | :--- |
 | `enable_offload` | Set to `true` to enable SSD offload in Mooncake master. Keep the master port aligned with `master_server_address` in `mooncake.json`. |
+| `client_ttl` | Seconds a client stays alive after the last Ping. CLI default is `10`; see [SEGMENT_NOT_FOUND with SSD offload](#121-segment_not_found-with-ssd-offload). |
 
 #### Configuration
 
@@ -467,16 +473,21 @@ The following environment variables control disk space usage for SSD offload (bu
 
 | Environment Variable | Default | Description |
 | :--- | :--- | :--- |
+| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | `1342177280` (1280 MB) | Per-rank SSD read/write buffer size in bytes. **Not** configurable in `mooncake.json`. If you hit `BUFFER_OVERFLOW`, increase this value — see [Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES](#123-sizing-mooncake_offload_local_buffer_size_bytes). **On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, must be aligned to 1GB and counts toward per-rank fabric mem quota (see [Fabric memory size alignment](#122-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1))**. |
 | `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` | `0` | Eviction threshold in bytes. When set to `0`, the backend uses **90% of the physical disk capacity** as the quota. Set an explicit value to control disk usage precisely. |
 | `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY` | `none` | Eviction policy: `none` (writes fail when full), `fifo`, or `lru`. |
-| `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | `2199023255552` (2 TB) | Global maximum disk usage limit. |
+| `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | `2199023255552` (2 TB) | **Per-rank** maximum disk usage reported to Mooncake master. Master aggregates this across clients (roughly **2 TB × rank count** in the `SSD Storage` total). **Always override** to match real disk capacity — the default often exceeds available space. |
+
+**`MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` risk:** If left at the 2 TB default, master shows a total SSD quota far larger than the physical disk (e.g. 16 ranks → ~32 TB displayed on a 1 TB NVMe). Offload still fails when the disk fills, while monitoring looks healthy. Set this to your actual per-rank budget before production use.
 
 Since each TP rank uses an independent SSD subdirectory (`rank_0/`, `rank_1/`, ...) under `ssd_offload_path`, all ranks share the same physical disk. To prevent a single rank from consuming excessive space, set an explicit per-rank quota. For example, with an 800 GB disk and 8 TP ranks:
 
 ```shell
 # 800 GB total disk, 8 ranks, ~100 GB per rank
+export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((100 * 1024 * 1024 * 1024))
 export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((100 * 1024 * 1024 * 1024))
 export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
+export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
 ```
 
 ## Example of using Memcache as a KV Pool backend
@@ -936,7 +947,9 @@ and the worker process. Each instance must use a unique port value.
 
 ## FAQ
 
-### 1. Mooncake failed to put/get key
+### 1. Mooncake FAQ
+
+#### 1.1 failed to put/get key
 
 When vLLM reports failed `put` or `get` operations, first check whether the error is reported by Mooncake itself.
 
@@ -947,6 +960,100 @@ When vLLM reports failed `put` or `get` operations, first check whether the erro
 
 For common troubleshooting and issue localization guidance for HIXL (ascend_direct), see:
 <https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md>
+
+#### 1.2 SSD FAQ
+
+##### 1.2.1 SEGMENT_NOT_FOUND with SSD offload
+
+If client logs show `OffloadObjectHeartbeat failed, error code is SEGMENT_NOT_FOUND`, Master has unmounted the rank's `LOCAL_DISK` segment (usually after `client_expired` when Ping stops refreshing TTL). SSD offload on that rank stops until the segment is registered again.
+
+**Typical trigger (with `enable_cpu_binding=true`):** Mooncake starts Ping during init, then vLLM-Ascend `bind_cpus()` runs `migratepages`/IRQ binding; the Ping thread is not pinned and can miss beats under the default `client_ttl=10`.
+
+| Mitigation | Notes |
+| :--- | :--- |
+| **Temporary:** raise Master TTL | e.g. `mooncake_master ... --client_ttl=120`. Tune to your init/warmup window (often `60`–`120` is enough). Does not fix the root cause. |
+| **Recovery:** upgrade Mooncake | Versions **> v0.3.11** (main branch) can remount `LOCAL_DISK` and rescan metadata after `SEGMENT_NOT_FOUND`. This **recovers after** cleanup; it does **not** prevent expiry or in-flight request failures while metadata is gone. |
+| **Root fix:** Mooncake Ping CPU affinity | Pin the storage Ping thread to a release/isolated CPU (Mooncake-side change). Optional vLLM-Ascend cooperation to pass the release CPU per rank. |
+
+Also restart Master together with vLLM to avoid stale `segment_already_exists` state when debugging restarts.
+
+##### 1.2.2 Fabric memory size alignment (A3 + `ASCEND_ENABLE_USE_FABRIC_MEM=1`)
+
+On A3 with fabric memory enabled, **each** fabric mem allocation must be an integer multiple of **1 GB** (1073741824 bytes). Mooncake does not round sizes up automatically.
+
+| Parameter | Config source | Alignment |
+| :--- | :--- | :--- |
+| `global_segment_size` | `mooncake.json` or export `MOONCAKE_GLOBAL_SEGMENT_SIZE` | Each rank's segment size must be aligned to 1GB (e.g. `"1GB"`, `"20GB"`). |
+| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | export `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` (only when `enable_ssd_offload=true`) | Must be aligned to 1GB. Default is 1280 MB (1.25 GB), which is **not** aligned and is too small for long-context SSD loads — size with [Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES](#123-sizing-mooncake_offload_local_buffer_size_bytes). |
+
+`local_buffer_size` in `mooncake.json` is **not** used under fabric mem (vLLM-Ascend passes `0` to `setup()`).
+
+**Risk if misaligned:** `adxl MallocMem` / `aclrtMapMem` fails with `Invalid_Argument`. With SSD offload enabled, a failed `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` allocation can segfault during `FileStorage` init and abort vLLM startup. Avoid values such as `"1280MB"`, `"512MB"`, or `"1.5GB"`.
+
+**Fabric mem quota:** Both `global_segment_size` and `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` are separate fabric mem allocations **per rank**. Their sizes add up against the HIXL fabric mem limit configured via `ASCEND_GLOBAL_RESOURCE_CONFIG` (e.g. `"fabric_memory.max_capacity":32`, unit GB per process — see HIXL docs). Rough budget per rank:
+
+```text
+fabric_memory.max_capacity  ≥  global_segment_size + MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES  (+ headroom)
+```
+
+**Risk if quota is too low:** Some ranks fail with `Memory_Allocation_Failure(EL0004)` after `global_segment_size` succeeds but `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` allocation fails. Increase `fabric_memory.max_capacity`, reduce `global_segment_size` or `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`, or ensure the node has enough host memory.
+
+Example (add to your vLLM startup script when SSD offload is on):
+
+```bash
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
+export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB, fabric-mem aligned
+```
+
+**set ASCEND_GLOBAL_RESOURCE_CONFIG only if fabric mem is too low.**
+
+```bash
+# Per-rank fabric mem budget: 20 GB segment + 1 GB MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES → set max_capacity ≥ 22 (GB)
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"fabric_memory.max_capacity":32}'
+```
+
+##### 1.2.3 Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES
+
+When `enable_ssd_offload=true`, Mooncake allocates a **separate per-rank SSD read/write buffer** sized by `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`. This buffer is **independent** of `global_segment_size` in `mooncake.json` — increasing the segment does **not** fix `BUFFER_OVERFLOW` caused by an undersized `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`.
+
+If the buffer is too small, SSD reads fail with `BUFFER_OVERFLOW` (`error_code=-10`) during `FileStorage::AllocateBatch`, and vLLM may fail when `kv_load_failure_policy=fail`.
+
+If you encounter `BUFFER_OVERFLOW` during use, try increasing `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`. Do not set it higher than the **Available KV cache memory** value shown in vLLM worker logs:
+
+```text
+(Worker_TP0_EP0 pid=21240) INFO 06-23 17:41:09 [worker.py:552] Available KV cache memory: XX
+```
+
+Example:
+
+```bash
+export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=10737418240   # 10 GB
+```
+
+Use **byte literals only** (`10737418240`). `10G` / `10GB` are ignored and fall back to the 1280 MB default.
+
+<details>
+<summary>Notes</summary>
+
+* `--max-num-batched-tokens` only chunks prefill compute; it does **not** reduce the memory required by `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`.
+
+</details>
+
+###### Host memory budget (single node)
+
+`MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` is allocated **per rank**, in addition to `global_segment_size`:
+
+```text
+host_memory_for_mooncake ≈ TP × (global_segment_size + MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES + local_buffer_size)
+```
+
+Ensure `free -h` **available** on the host exceeds this sum plus vLLM overhead. `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` does **not** need to fit inside `global_segment_size`.
+
+###### Verify after tuning
+
+1. Startup: each rank logs `AlignedClientBufferAllocator: allocated <N> bytes` with your configured size.
+2. Under load: no `BUFFER_OVERFLOW` / `Failed to get ... keys out of ... error_codes=[-10]`.
+3. If failures persist with a large buffer, check overlapping loads (`load_async`).
 
 ### 2. Memcache FAQ
 
