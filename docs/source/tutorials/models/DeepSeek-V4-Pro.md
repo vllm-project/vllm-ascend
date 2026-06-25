@@ -11,8 +11,6 @@ DeepSeek-V4-Pro, the maximum reasoning effort mode of DeepSeek-V4, significantly
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-This document is validated and written based on **vLLM-Ascend v0.21.0rc1**. The current model (DeepSeek-V4-Pro) is first supported in this version.
-
 > **Note**: Please replace the version placeholder above with your actual validation version.
 
 ## 2 Supported Features
@@ -81,7 +79,6 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
-    -v /mnt/sfs_turbo/.cache:/root/.cache \
     -it $IMAGE bash
 ```
 
@@ -117,7 +114,6 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
-    -v /mnt/sfs_turbo/.cache:/root/.cache \
     -it $IMAGE bash
 ```
 
@@ -998,7 +994,7 @@ Before you start, please:
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name deepseek_v4 \
+            --served-model-name dsv4 \
             --max-model-len 133072 \
             --max-num-batched-tokens 4096 \
             --max-num-seqs 16 \
@@ -1074,7 +1070,7 @@ Before you start, please:
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name deepseek_v4 \
+            --served-model-name dsv4 \
             --max-model-len 133072 \
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
@@ -1196,7 +1192,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://<node0_ip>:<port>/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "deepseek_v4",
+        "model": "dsv4",
         "messages": [
             {
                 "role": "user",
@@ -1210,7 +1206,7 @@ curl http://<node0_ip>:<port>/v1/chat/completions \
 
 Expected Result:
 
-The service returns HTTP 200 OK with a JSON response containing the `choices` field.
+In <node0_ip>:<port>, use the IP address and port number of the primary node service. The service returns HTTP 200 OK with a JSON response containing the `choices` field.
 
 ## 7 Accuracy Evaluation
 
@@ -1227,24 +1223,6 @@ Here are two accuracy evaluation methods.
 | GPQA | - | accuracy | gen | 89.90 | 1 Atlas 800 A3 (128G × 8) |
 | GSM8K | - | accuracy | gen | 96.21 | 1 Atlas 800 A3 (128G × 8) |
 
-### Using Language Model Evaluation Harness
-
-As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-V4` in online mode.
-
-1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
-
-2. Run `lm_eval` to execute the accuracy evaluation.
-
-```shell
-lm_eval \
-  --model local-completions \
-  --model_args model=/root/.cache/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp,base_url=http://127.0.0.1:8006/v1/completions,tokenized_requests=False,trust_remote_code=True \
-  --tasks gsm8k \
-  --output_path ./
-```
-
-3. After execution, you can get the result.
-
 ## 8 Performance Evaluation
 
 ### Using AISBench
@@ -1253,22 +1231,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-Run performance evaluation of `DeepSeek-V4-Pro-w4a8-mtp` as an example.
-
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
-
-There are three `vllm bench` subcommands:
-
-- `latency`: Benchmark the latency of a single batch of requests.
-- `serve`: Benchmark the online serving throughput.
-- `throughput`: Benchmark offline inference throughput.
-
-Take the `serve` as an example. Run the code as follows.
-
-```shell
-export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
-```
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
 ## 9 Performance Tuning
 
