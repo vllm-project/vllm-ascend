@@ -373,11 +373,23 @@ def unquant_apply_mlp(
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
     swiglu_limit: float = 0.0,
+    lora_context=None,
+    expanded_row_idx: torch.Tensor | None = None,
+    topk_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if need_trans:
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
 
+    # MoE LoRA: only attempt injection when an adapter wraps this layer and the
+    # comm method provided AllGather routing metadata (expanded_row_idx). Lazy
+    # import keeps the core MLP free of any LoRA dependency on the common path.
+    apply_lora = lora_context is not None and expanded_row_idx is not None and topk_ids is not None
+    lora_routing = None
+    if apply_lora:
+        from vllm_ascend.lora.fused_moe import moe_lora_apply_w13, moe_lora_apply_w2
+
+    mlp_input_hidden = hidden_states
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],
@@ -387,6 +399,17 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+
+    # LoRA w13 delta: applied to gate_up_out before activation, with the MLP
+    # input as the lora_a input (mirrors the base gate_up GMM above).
+    if apply_lora:
+        lora_routing = moe_lora_apply_w13(
+            lora_context,
+            gate_up_out=gate_up_out,
+            hidden_states=mlp_input_hidden,
+            expanded_row_idx=expanded_row_idx,
+            topk_ids=topk_ids,
+        )
 
     if activation == MoEActivation.SWIGLUOAI:
         num_experts, _, hidden_size = w1.shape
@@ -418,6 +441,16 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+
+    # LoRA w2 delta: applied to the down-proj output, with the activation output
+    # as the lora_a input. Reuses the per-row routing computed for w13.
+    if lora_routing is not None:
+        moe_lora_apply_w2(
+            lora_context,
+            down_out=hidden_states,
+            silu_out=gate_up_out,
+            lora_routing=lora_routing,
+        )
     return hidden_states, None
 
 
@@ -460,6 +493,9 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             topk_scales=topk_scales,
             need_trans=need_trans,
             swiglu_limit=swiglu_limit,
+            lora_context=mlp_compute_input.lora_context,
+            expanded_row_idx=mlp_compute_input.expanded_row_idx,
+            topk_ids=mlp_compute_input.topk_ids,
         )
 
     assert w1_scale is not None and w2_scale is not None

@@ -14,6 +14,11 @@ from vllm_ascend.ops.linear import (
     AscendQKVParallelLinear,
 )
 
+from vllm_ascend.lora.fused_moe import (
+    AscendFusedMoEWithLoRA,
+    AscendFusedMoE3DWithLoRA,
+)
+
 
 class AscendQKVParallelLinearWithLoRA(QKVParallelLinearWithLoRA):
     @classmethod
@@ -73,10 +78,12 @@ def refresh_all_lora_classes():
         AscendMergedQKVParallelLinearWithLoRA,
         AscendMergedQKVParallelLinearWithShardedLoRA,
         AscendQKVParallelLinearWithShardedLoRA,
+        AscendFusedMoEWithLoRA,
+        AscendFusedMoE3DWithLoRA,
     )
     # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
     # Append the Ascend classes in a deterministic order.
     vllm.lora.utils._all_lora_classes = (
-        *vllm.lora.utils._all_lora_classes,
         *ascend_classes,
+        *vllm.lora.utils._all_lora_classes,
     )
