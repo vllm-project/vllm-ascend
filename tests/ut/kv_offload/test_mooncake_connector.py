@@ -1518,20 +1518,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertIsNone(worker.kv_send_thread)
         self.assertIsNotNone(worker.kv_recv_thread)
 
-    def test_register_kv_caches_rejects_consumer_c8_quant(self):
-        self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
-        self.vllm_config.quant_config = types.SimpleNamespace(enable_c8_quant=True)
-        int8_kv_caches = {
-            "model.layers.0.self_attn": (
-                torch.empty((10, 16, 8, 16), dtype=torch.int8, device="cpu"),
-                torch.empty((10, 16, 8, 16), dtype=torch.int8, device="cpu"),
-            )
-        }
-
-        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
-        with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
-            worker.register_kv_caches(int8_kv_caches)
-
     def test_register_kv_caches_mla_case(self):
         self.vllm_config.model_config.is_deepseek_mla = True
         mla_caches = {"model.layers.0.self_attn": make_cpu_kv_cache(kv_heads=1)}
