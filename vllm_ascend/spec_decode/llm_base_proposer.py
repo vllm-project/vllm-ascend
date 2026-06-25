@@ -239,6 +239,38 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
 
+    def _uses_draft_vocab_remapping(self) -> bool:
+        return hasattr(self.model, "draft_id_to_target_id") and self.model.draft_id_to_target_id is not None
+
+    def _can_use_local_argmax_reduction(self) -> bool:
+        return self.use_local_argmax_reduction and not lmhead_tp_enable() and not self._uses_draft_vocab_remapping()
+
+    def _draft_argmax(
+        self,
+        hidden_states: torch.Tensor,
+        num_indices: int,
+        token_indices_to_sample: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self._can_use_local_argmax_reduction():
+            if not hasattr(self.model, "get_top_tokens"):
+                raise ValueError(
+                    "use_local_argmax_reduction is enabled but draft model "
+                    f"{self.model.__class__.__name__} does not implement "
+                    "get_top_tokens()."
+                )
+            return self.model.get_top_tokens(hidden_states), token_indices_to_sample
+
+        logits = self.model.compute_logits(hidden_states)
+        if lmhead_tp_enable():
+            logits = get_lmhead_tp_group().all_to_all(logits)
+        else:
+            logits = self.model.model.logits_processor._gather_logits(logits)
+        if lmhead_tp_enable() and num_indices < logits.shape[0]:
+            logits = logits[:num_indices]
+            if token_indices_to_sample is not None:
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
+        return logits.argmax(dim=-1), token_indices_to_sample
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -483,8 +515,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _freeze_draft_index_attn_metadata(self, attn_metadata):
         decode_metadata = getattr(attn_metadata, "decode", None)
         if decode_metadata is not None:
-            if decode_metadata.sas_metadata is not None:
-                decode_metadata.sas_metadata = decode_metadata.sas_metadata.clone()
+            sas_metadata = getattr(decode_metadata, "sas_metadata", None)
+            if sas_metadata is not None:
+                decode_metadata.sas_metadata = sas_metadata.clone()
         return attn_metadata
 
     @torch.inference_mode()
@@ -1080,15 +1113,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         draft_token_ids = draft_token_ids[:num_indices]
                         token_indices_to_sample = token_indices_to_sample[:num_indices]
                 else:
-                    logits = self.model.compute_logits(sample_hidden_states)
-                    if lmhead_tp_enable():
-                        logits = get_lmhead_tp_group().all_to_all(logits)
-                    else:
-                        logits = self.model.model.logits_processor._gather_logits(logits)
-                    if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                        logits = logits[:num_indices]
-                        token_indices_to_sample = token_indices_to_sample[:num_indices]
-                    draft_token_ids = logits.argmax(dim=-1)
+                    draft_token_ids, token_indices_to_sample = self._draft_argmax(
+                        sample_hidden_states, num_indices, token_indices_to_sample
+                    )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable() and num_indices < logits.shape[0]:
@@ -1233,15 +1260,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                             draft_token_ids = draft_token_ids[:num_indices]
                             token_indices_to_sample = token_indices_to_sample[:num_indices]
                     else:
-                        logits = self.model.compute_logits(sample_hidden_states)
-                        if lmhead_tp_enable():
-                            logits = get_lmhead_tp_group().all_to_all(logits)
-                        else:
-                            logits = self.model.model.logits_processor._gather_logits(logits)
-                        if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                            logits = logits[:num_indices]
-                            token_indices_to_sample = token_indices_to_sample[:num_indices]
-                        draft_token_ids = logits.argmax(dim=-1)
+                        draft_token_ids, token_indices_to_sample = self._draft_argmax(
+                            sample_hidden_states, num_indices, token_indices_to_sample
+                        )
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
@@ -1606,10 +1627,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 block_size = 128
 
             # Compute the slot mapping.
-            if self.uses_mrope:
-                block_numbers = clamped_positions[0] // block_size
-            else:
-                block_numbers = clamped_positions // block_size
+            block_numbers = clamped_positions[0] // block_size if self.uses_mrope else clamped_positions // block_size
             block_ids = old_common_metadata.block_table_tensor.gather(dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
             if self.uses_mrope:

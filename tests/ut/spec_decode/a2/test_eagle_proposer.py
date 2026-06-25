@@ -2574,11 +2574,8 @@ class TestRunMergedDraft(TestBase):
         forward_context.attn_metadata = None
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = True
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
             patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
@@ -2640,11 +2637,8 @@ class TestRunMergedDraft(TestBase):
             }
         )
 
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
                 num_input_tokens=12,
@@ -2695,11 +2689,8 @@ class TestRunMergedDraft(TestBase):
         forward_context.attn_metadata = None
         multi_steps_attn_metadata = [MagicMock(), MagicMock(), MagicMock()]
 
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=True),
-            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
             patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
@@ -2754,8 +2745,6 @@ class TestRunMergedDraft(TestBase):
             (1, False, torch.tensor([1, 3], dtype=torch.int64), (2, 1)),
             (2, True, torch.tensor([0, 1, 2, 3], dtype=torch.int64), (2, 2)),
         ]
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         for num_speculative_tokens, parallel_drafting, token_indices_to_sample, expected_shape in test_cases:
             with self.subTest(num_speculative_tokens=num_speculative_tokens, parallel_drafting=parallel_drafting):
                 self.proposer.method = "eagle3"
@@ -2768,7 +2757,6 @@ class TestRunMergedDraft(TestBase):
 
                 with (
                     patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-                    patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
                 ):
                     draft_token_ids = self.proposer._run_merged_draft(
                         num_input_tokens=4,
