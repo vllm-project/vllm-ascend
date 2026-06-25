@@ -869,7 +869,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if metadata is None:
             max_seqlen_q = max(1, int(seq_lens_q.max().item()))
             max_seqlen_k = max(1, int(seq_lens.max().item()))
-            metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
+            metadata = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=query_start_loc[1:].clone(),
                 actual_seq_lengths_key=seq_lens.clone(),
                 num_heads_q=self.model_config.hf_config.index_n_heads,
@@ -1433,7 +1433,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         assert indexer_kv_scale_metadata.req_metadata is not None
         qli_metadata = indexer_kv_scale_metadata.req_metadata.qli_metadata
         block_table = indexer_kv_scale_metadata.req_metadata.block_table
-        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+        topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
             query=q,
             key=indexer_k_cache,
             weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
