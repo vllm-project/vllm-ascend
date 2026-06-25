@@ -307,7 +307,7 @@ def _sliding_window_reachable_block_mask(
                 mask[i - start_block] = True
 
     if retention_interval is not None and num_prompt_tokens is not None:
-        latest = (num_prompt_tokens - 1) // alignment_tokens * alignment_tokens
+        latest = num_prompt_tokens // alignment_tokens * alignment_tokens
         prompt_end_block = latest // block_size + shift
         for i in range(max(start_block, prompt_end_block - need), min(end_block, prompt_end_block)):
             mask[i - start_block] = True
