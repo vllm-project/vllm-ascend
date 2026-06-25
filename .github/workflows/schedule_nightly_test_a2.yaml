@@ -25,7 +25,7 @@ on:
       vllm_ascend_branch:
         description: 'Branch to test'
         required: true
-        default: 'main'
+        default: 'releases/v0.22.1rc'
         type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
@@ -62,7 +62,7 @@ defaults:
 
 # only cancel in-progress runs of the same workflow
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-a2${{ github.event.inputs.request_id && format('-{0}', github.event.inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.ref }}-a2${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -189,8 +189,8 @@ jobs:
           )
         }}
     secrets:
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
+      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   multi-node-tests:
     name: multi-node
@@ -236,8 +236,8 @@ jobs:
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
+      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   generate-accuracy-matrix:
     name: Generate accuracy test matrix
@@ -254,7 +254,7 @@ jobs:
       pr_only_matrix: ${{ steps.set-matrix.outputs.pr_only_matrix }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Read accuracy group config
         id: set-matrix

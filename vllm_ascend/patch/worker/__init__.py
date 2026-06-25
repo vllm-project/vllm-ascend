@@ -19,13 +19,13 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
 
-# The v2 model runner is intentionally NOT made compatible with the v0.22.1
-# release. vLLM v0.22.1 and the verified main commit are diverged, and the v2
-# worker patches target main-only APIs; rather than maintain a separate v0.22.1
-# compatibility path we keep v2 main-only. With v0.22.1 installed this flag is
+# The v2 model runner is intentionally NOT made compatible with the v0.23.0
+# release. vLLM v0.23.0 and the verified main commit are diverged, and the v2
+# worker patches target main-only APIs; rather than maintain a separate v0.23.0
+# compatibility path we keep v2 main-only. With v0.23.0 installed this flag is
 # False, so none of the patch_v2.* / routed-experts-capture patches below are
 # imported and the v2 worker stays dormant (the release uses the v1 runner).
-_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.22.1")
+_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.23.0")
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -58,6 +58,7 @@ except ImportError:
     pass
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_draft_quarot  # noqa
+import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa

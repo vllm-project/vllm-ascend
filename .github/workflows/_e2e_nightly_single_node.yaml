@@ -59,10 +59,15 @@ on:
         type: string
         default: ''
         description: PR commit SHA for PR-triggered checkout
-    secrets:
-      OBS_ACCESS_KEY:
+      testcase_timeout:
         required: false
-      OBS_SECRET_KEY:
+        default: 120
+        type: string
+        description: test case execution timeout period,default:120 minutes
+    secrets:
+      OBS_ACCESS_KEY_ID:
+        required: false
+      OBS_SECRET_ACCESS_KEY:
         required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -75,7 +80,7 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path || inputs.tests }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path || inputs.tests }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -83,7 +88,7 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     container:
       image: ${{ inputs.image }}
     env:
@@ -114,11 +119,12 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         if: ${{ inputs.request_id != '' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.vllm_ascend_ref }}
           path: ./temp-vllm-ascend
           fetch-depth: 1
+          submodules: recursive
 
       - name: Move code to /vllm-workspace
         if: ${{ inputs.request_id != '' }}
@@ -254,8 +260,8 @@ jobs:
         continue-on-error: true
         uses: ascend-gha-runners/artifact/upload@v0.3
         with:
-          access_key: ${{ secrets.OBS_ACCESS_KEY }}
-          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
           name: nightly-test-benchmark-results-${{ inputs.name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /vllm-workspace/vllm-ascend/benchmark_results/${{ inputs.name }}.json
           if-no-files-found: warn

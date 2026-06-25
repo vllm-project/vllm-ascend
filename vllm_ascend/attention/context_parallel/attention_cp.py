@@ -46,6 +46,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     filter_chunked_req_indices,
+    notify_kv_cache_written,
     split_decodes_and_prefills,
 )
 from vllm_ascend.compilation.acl_graph import (
@@ -59,6 +60,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
@@ -114,7 +116,9 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
-            common_attn_metadata, decode_threshold=self.decode_threshold
+            common_attn_metadata,
+            decode_threshold=self.decode_threshold,
+            treat_short_extends_as_decodes=False,
         )
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_actual_tokens
@@ -250,9 +254,9 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 num_decodes:
             ]
         else:
-            actual_seq_lengths_q = [self.decode_threshold * (i + 1) for i in range(num_decodes)] + query_start_loc_cpu[
-                num_decodes + 1 :
-            ].tolist()
+            actual_seq_lengths_q = (
+                query_start_loc_cpu[1 : num_decodes + 1].tolist() + query_start_loc_cpu[num_decodes + 1 :].tolist()
+            )
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -803,15 +807,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
-        num_tokens = query.shape[0]
         num_decode_tokens = attn_metadata.num_decode_tokens
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         output_padded = output
 
         if len(kv_cache) > 1:
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
@@ -837,8 +838,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                         key, value = all_kv.split([self.head_size, self.head_size], dim=-1)
                     else:
                         query, key, value = self._gather_and_restore_pcp_qkv(query, key, value, attn_metadata)
-                        num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded
-                        output_local_padded_tokens_fa = num_actual_tokens_pcp_padded // self.pcp_size - num_tokens
+                        output_local_padded_tokens_fa = (
+                            attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size - output_padded.shape[0]
+                        )
                         if output_local_padded_tokens_fa > 0:
                             output_padded = F.pad(
                                 output, pad=(0, 0, 0, 0, 0, output_local_padded_tokens_fa), mode="constant", value=0
@@ -856,8 +858,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     value_cache=self.value_cache,
                     slot_mapping=slot_mapping,
                 )
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event.record()
+            notify_kv_cache_written()
         return query, key, value, output_padded
 
     def _gather_and_restore_pcp_qkv(
@@ -879,7 +880,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             [query.reshape(num_tokens, -1), key.reshape(num_tokens, -1), value.reshape(num_tokens, -1)],
             dim=-1,
         )
-        if num_tokens == attn_metadata.prefill.pcp_metadata.total_num_scheduled_tokens and pcp_padded_tokens_fla > 0:
+        # The hybrid linear partitioning may result in different data on two cards, so padding is required here.
+        real_num_tokens = attn_metadata.prefill.pcp_metadata.total_num_scheduled_tokens
+        qkv_fla = qkv_fla[:real_num_tokens]
+        if pcp_padded_tokens_fla > 0:
             qkv_fla = F.pad(qkv_fla, pad=(0, 0, 0, pcp_padded_tokens_fla), mode="constant", value=0)
         all_qkv = get_pcp_group().all_gather(
             qkv_fla[: attn_metadata.prefill.pcp_metadata.max_num_tokens_across_pcp].contiguous(), dim=0
@@ -896,7 +900,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         decode_offset = attn_metadata.num_decode_tokens * self.pcp_size
         qkv_fa_padding_workspace[:decode_offset] = actual_qkv[:decode_offset]
 
-        pcp_unpad_mask = attn_metadata.prefill.pcp_metadata.pcp_unpad_mask[attn_metadata.num_decodes * self.pcp_size :]
+        pcp_unpad_mask = attn_metadata.prefill.pcp_metadata.pcp_unpad_mask[
+            attn_metadata.num_decode_tokens * self.pcp_size :
+        ]
         qkv_fa_padding_workspace[decode_offset:][pcp_unpad_mask] = actual_qkv[decode_offset:]
         qkv_fa_padding_workspace[decode_offset:][~pcp_unpad_mask] = 0
 
@@ -994,6 +1000,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 cp_chunkedprefill_comm_stream().wait_stream(torch.npu.current_stream())
                 with torch_npu.npu.stream(cp_chunkedprefill_comm_stream()):
                     prefill_query_all = self._prefill_query_all_gather(attn_metadata, prefill_query.clone())
+
+            # Record the compute-stream gate once before any attention phase
+            # starts, so the layerwise transfer thread can overlap H2D copies
+            # with the prefill computation.
+            record_attention_compute_start()
 
             if self.pcp_size > 1:
                 # Scenario of Enabling PCP or PCP&DCP
