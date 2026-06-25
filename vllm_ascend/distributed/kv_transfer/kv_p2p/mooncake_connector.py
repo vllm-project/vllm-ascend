@@ -852,7 +852,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         if self.is_hma_required:
             for group_idx, grouped_local_block_ids, num_group_pulls, layer_indices in gqa_reformat_groups:
-                logger.info(f"reformat_kv_cache_hybrid_linear_torch {layer_indices}")
+                logger.info("reformat_kv_cache_hybrid_linear_torch %s", layer_indices)
                 group_kv_caches = self._get_group_kv_caches(group_idx, layer_indices)
                 if not group_kv_caches:
                     continue
@@ -1870,10 +1870,18 @@ class MooncakeConnectorWorker:
         spec = kv_cache_spec
         if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
             spec = {layer_name: kv_cache_spec.kv_cache_specs[layer_name] for layer_name in layer_names}
+        serialized_kv_cache_spec = to_msgpackable(spec)
+        if not isinstance(serialized_kv_cache_spec, dict):
+            serialized_kv_cache_spec = {"repr": serialized_kv_cache_spec}
+        num_key_value_heads = MooncakeConnectorWorker._get_spec_num_key_value_heads(spec)
+        if num_key_value_heads is not None:
+            serialized_kv_cache_spec["num_kv_heads"] = num_key_value_heads
+            serialized_kv_cache_spec["num_key_value_heads"] = num_key_value_heads
+
         serialized = {
             "layer_names": layer_names,
             "kv_cache_spec_type": type(kv_cache_spec).__name__,
-            "kv_cache_spec": to_msgpackable(spec),
+            "kv_cache_spec": serialized_kv_cache_spec,
         }
         if kv_cache_group_id is not None:
             serialized["kv_cache_group_id"] = kv_cache_group_id
@@ -2616,8 +2624,16 @@ class MooncakeConnectorWorker:
         return list(rank_group_pulls), dict(rank_group_pulls)
 
     def _get_attention_group_num_need_pulls(self, group_spec: dict[str, Any], prefill_tp_size: int) -> int:
+        return self._get_attention_group_num_need_pulls_for_decode_tp(group_spec, prefill_tp_size, self.tp_size)
+
+    def _get_attention_group_num_need_pulls_for_decode_tp(
+        self,
+        group_spec: dict[str, Any],
+        prefill_tp_size: int,
+        decode_tp_size: int,
+    ) -> int:
         num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
-        num_d_block_heads = max(1, num_key_value_heads // self.tp_size)
+        num_d_block_heads = max(1, num_key_value_heads // decode_tp_size)
         num_p_block_heads = max(1, num_key_value_heads // prefill_tp_size)
         return num_d_block_heads // num_p_block_heads
 
@@ -2761,9 +2777,35 @@ class MooncakeConnectorWorker:
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
         if self._is_hma_required:
-            chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, self._prefill_tp_size)
-            return chosen_rank_list
+            prefill_ranks: set[int] = set()
+            for group_spec, layer_indices in self.kv_group2layeridx.values():
+                if layer_indices:
+                    prefill_ranks.update(self._get_prefill_ranks_for_group(req_id, group_spec))
+            return sorted(prefill_ranks)
         return sum(self._get_remote_ranks_for_req(req_id), [])
+
+    def _get_prefill_ranks_for_group(self, req_id: str, group_spec: dict[str, Any]) -> set[int]:
+        if group_spec["kv_cache_spec_type"] == "MambaSpec":
+            assert self._prefill_tp_size % self._decode_tp_size == 0, (
+                f"Hybrid Mamba prefill tp size({self._prefill_tp_size}) must be divisible by "
+                f"decode tp size({self._decode_tp_size})."
+            )
+            return set(range(self._prefill_tp_size * self._prefill_pp_size))
+
+        num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
+        num_group_pulls = self._get_attention_group_num_need_pulls_for_decode_tp(
+            group_spec,
+            self._prefill_tp_size,
+            self._decode_tp_size,
+        )
+        remote_ranks_by_decode_rank = self._get_remote_ranks_for_req(
+            req_id,
+            self._prefill_tp_size,
+            num_key_value_heads=num_key_value_heads,
+            tp_num_need_pulls=num_group_pulls,
+            use_mla=num_key_value_heads == 1,
+        )
+        return {rank for remote_ranks in remote_ranks_by_decode_rank for rank in remote_ranks}
 
     def _get_remote_rank(self, req_id: str, prefill_tp_size: int | None = None) -> list[int]:
         return self._get_remote_ranks_for_req(req_id, prefill_tp_size)[self.tp_rank]
