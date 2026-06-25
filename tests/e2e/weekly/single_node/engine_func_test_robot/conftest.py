@@ -14,7 +14,7 @@ server_args = [
     "--served-model-name",
     server_model_name,
     "--max-model-len",
-    "128000",
+    "65536",
     "--tensor-parallel-size",
     "2",
     "--enable-expert-parallel",
@@ -38,15 +38,16 @@ def api_client(request):
     port = 8000
 
     # model = "/mnt/share/weights/deepseekv4-flash-w8a8-mtp"
-    model = "/mnt/share/weight/Qwen3-VL-30B-A3B-Instruct"
+    # model = "/mnt/share/weight/Qwen3-VL-30B-A3B-Instruct"
+    model = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 
-    # with (
-    #     RemoteOpenAIServer(
-    #         model, server_args, server_port=port, env_dict=env_dict, auto_port=False
-    #     ) as server,
-    # ):
-    #     yield HTTPClient(base_url=server.url_root)
-    yield HTTPClient(base_url=f"http://{host}:{port}")
+    with (
+        RemoteOpenAIServer(
+            model, server_args, server_port=port, env_dict=env_dict, auto_port=False
+        ) as server,
+    ):
+        yield HTTPClient(base_url=server.url_root)
+    # yield HTTPClient(base_url=f"http://{host}:{port}")
 
 
 def pytest_addoption(parser):
