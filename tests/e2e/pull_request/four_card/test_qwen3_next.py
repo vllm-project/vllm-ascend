@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
 
+
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_qwen3_next_distributed_mp_full_decode_only_tp4_flash_comm():
