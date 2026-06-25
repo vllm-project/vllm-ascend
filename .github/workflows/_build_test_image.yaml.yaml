@@ -1,0 +1,181 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Reusable workflow that builds CI test images on CPU runners and pushes them
+# to the Quay temp repo.  Each matrix entry produces one single-arch image
+# tagged:  vllm-ascend-<vllm_short>-<ascend_short>-<npu_type>-<arch>
+#
+# The image contains vllm + vllm-ascend fully installed (source baked in at
+# /vllm-workspace/vllm-ascend) so that _selected_tests.yaml only needs to run
+# the tests — no checkout or install steps.
+
+name: Build Test Image
+
+on:
+  workflow_call:
+    inputs:
+      build_matrix:
+        type: string
+        required: true
+        description: >-
+          JSON array of build configs.  Each entry must have:
+          npu_type, cann_tag, soc, arch, mode, runner, vllm_version, vllm_short
+      ascend_ref:
+        type: string
+        required: true
+        description: 'The vllm-ascend commit hash (PR head sha) to build from.'
+      quay_temp_username:
+        type: string
+        required: false
+        default: ''
+        description: 'Quay username for pushing temp images.'
+    secrets:
+      QUAY_TEMP_PASSWORD:
+        description: 'Quay password for pushing temp images.'
+        required: false
+
+env:
+  QUAY_TEMP_REPO: quay.io/atlas-ci/vllm-atlas-temp
+  CACHE_REPO: ghcr.io/vllm-project/vllm-ascend
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  build-push:
+    name: build-${{ matrix.entry.npu_type }}-${{ matrix.entry.arch }}
+    runs-on: ${{ matrix.entry.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJSON(inputs.build_matrix) }}
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ascend_ref }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Rebase on latest main
+        run: |
+          git config user.name "vllm-ascend-ci"
+          git config user.email "vllm-ascend-ci@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Get architecture
+        id: get_arch
+        run: |
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) echo "arch=X64" >> $GITHUB_OUTPUT ;;
+            aarch64) echo "arch=ARM64" >> $GITHUB_OUTPUT ;;
+            *) echo "arch=$ARCH" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Restore vllm-ascend csrc cache
+        id: cache-csrc
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.entry.cann_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+      - name: Compute image tag
+        id: image_tag
+        run: |
+          VLLM_SHORT="${{ matrix.entry.vllm_short }}"
+          ASCEND_SHORT=$(echo "${{ inputs.ascend_ref }}" | cut -c1-7)
+          NPU_TYPE="${{ matrix.entry.npu_type }}"
+          ARCH="${{ matrix.entry.arch }}"
+          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}-${NPU_TYPE}-${ARCH}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "image=${{ env.QUAY_TEMP_REPO }}:$TAG" >> $GITHUB_OUTPUT
+
+      - name: Login to Quay Temp
+        uses: docker/login-action@v4
+        with:
+          registry: quay.io
+          username: ${{ inputs.quay_temp_username }}
+          password: ${{ secrets.QUAY_TEMP_PASSWORD }}
+
+      - name: Check if image already exists
+        id: exists
+        run: |
+          if docker manifest inspect "${{ steps.image_tag.outputs.image }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Image already exists, skipping build: ${{ steps.image_tag.outputs.image }}"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@v4
+        with:
+          install: true
+          driver: docker-container
+          use: true
+
+      - name: Login to GitHub Container Registry (for cache)
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute cache tag
+        if: steps.exists.outputs.exists != 'true'
+        id: cache_tag
+        run: |
+          echo "value=buildcache-ci-${{ matrix.entry.npu_type }}-${{ matrix.entry.arch }}" >> $GITHUB_OUTPUT
+
+      - name: Build and push image
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/build-push-action@v7
+        id: build
+        with:
+          context: .
+          file: .github/workflows/dockerfiles/Dockerfile.ci_test
+          platforms: linux/${{ matrix.entry.arch }}
+          push: true
+          tags: ${{ steps.image_tag.outputs.image }}
+          build-args: |
+            CANN_TAG=${{ matrix.entry.cann_tag }}
+            VLLM_COMMIT=${{ matrix.entry.vllm_version }}
+            SOC_VERSION=${{ matrix.entry.soc }}
+            INSTALL_MODE=${{ matrix.entry.mode }}
+          provenance: false
+          cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }}
+          cache-to: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }},mode=max
