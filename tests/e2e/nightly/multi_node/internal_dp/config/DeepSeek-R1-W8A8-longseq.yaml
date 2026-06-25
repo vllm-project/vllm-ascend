@@ -83,7 +83,6 @@ deployment:
         --compilation_config '{"cudagraph_capture_sizes":[4,8,16,32],"cudagraph_mode": "FULL_DECODE_ONLY"}'
         --enable-chunked-prefill
         --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
-        --additional-config '{"recompute_scheduler_enable":true}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
