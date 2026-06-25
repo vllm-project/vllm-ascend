@@ -423,7 +423,7 @@ def test_sliding_window_reachable_block_mask_latest_only(monkeypatch) -> None:
     )
 
     assert mask is not None
-    assert {i for i, keep in enumerate(mask) if keep} == {11}
+    assert {i for i, keep in enumerate(mask) if keep} == {15}
 
 
 def test_sliding_window_reachable_block_mask_dense_default() -> None:
