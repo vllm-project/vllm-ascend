@@ -24,9 +24,7 @@
 
 import torch
 from vllm.distributed import get_tp_group
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm.logger import logger
 
 try:
     from vllm.model_executor.models.step3p5 import Step3p5DecoderLayer
