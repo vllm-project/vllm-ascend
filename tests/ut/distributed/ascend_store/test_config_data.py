@@ -284,7 +284,9 @@ class TestRequestTracker(unittest.TestCase):
             tracker.update("invalid")  # type: ignore[arg-type]
 
     def test_update_mamba_with_tuple(self):
-        tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids_by_group=[[1], [2], [3], [4]])
+        tracker = RequestTracker(
+            req_id="r1", token_len=16, allocated_block_ids_by_group=[[1], [2], [3], [4]], block_sizes=[16] * 4
+        )
         tracker.update(([5, 6], [0, 7], [0, 8], [0, 9]))
         self.assertEqual(tracker.allocated_block_ids_by_group[0], [1, 5, 6])
         self.assertEqual(tracker.allocated_block_ids_by_group[1], [2, 0, 7])
@@ -303,9 +305,10 @@ class TestRequestTracker(unittest.TestCase):
             ],
             mamba_group_ids=[1, 2, 3],
             num_speculative_blocks=3,
+            block_sizes=[16] * 4,
         )
 
-        tracker.update(([15, 16], [4, 17], [8, 18], [12, 19]))
+        tracker.update(([15, 16], [4, 17], [8, 18], [12, 19]), 32)
         self.assertEqual(tracker.allocated_block_ids_by_group[0], [1, 2, 15, 16])
         self.assertEqual(tracker.allocated_block_ids_by_group[1], [0, 3, 0, 5, 6, 4, 17])
         self.assertEqual(tracker.allocated_block_ids_by_group[2], [0, 7, 0, 9, 10, 8, 18])
@@ -323,6 +326,7 @@ class TestRequestTracker(unittest.TestCase):
             ],
             mamba_group_ids=[1, 2, 3],
             num_speculative_blocks=3,
+            block_sizes=[16] * 4,
         )
 
         tracker.update(
@@ -331,7 +335,8 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 0, 0, 0, 10, 11, 12, 29],
                 [0, 0, 0, 0, 14, 15, 16, 30],
                 [0, 0, 0, 0, 18, 19, 20, 31],
-            )
+            ),
+            128,
         )
         self.assertEqual(
             tracker.allocated_block_ids_by_group[0], [1, 2, 3, 4, 5, 6, 7, 8, 21, 22, 23, 24, 25, 26, 27, 28]
