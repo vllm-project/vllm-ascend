@@ -2026,17 +2026,18 @@ The port occupation issue is tracked by issue #8938 .
 test_bad_desc,[Bug]: Got error,[Bug],open,,2026-06-25T00:00:00Z,Help me check,"{
     ""ok"": false,
     ""score"": 10,
-    ""reasoning"": ""The PR title is generic ('Got error') and the description is only 'Help me check', which provides no specific information about the bug, the changes, or testing. A maintainer cannot understand what this PR does or why it is needed. The description is essentially empty and fails to communicate any useful context."",
-    ""summary"": ""Insufficient information; PR description is vague and lacks details about the bug and the change."",
+    ""reasoning"": ""The title is vague and the submitted description is essentially empty, containing only the phrase 'Help me check'. No details about the bug, reproduction steps, environment, or any test plan are provided. This makes it impossible for a maintainer to understand or review the change."",
+    ""summary"": ""PR description lacks any substantive information; essentially empty."",
     ""missing_items"": [
         ""What this PR does / why we need it"",
         ""Does this PR introduce any user-facing change"",
         ""How was this patch tested""
     ],
     ""suggestions"": [
-        ""Provide a clear description of the bug, including steps to reproduce, expected vs actual behavior, and error messages or logs."",
-        ""Explain the changes made to address the bug and why this approach is taken."",
-        ""Describe how the fix was tested, including test results or verification steps.""
+        ""Describe the error you encountered and what you expected to happen"",
+        ""Provide steps to reproduce the bug, including relevant code, commands, or configuration"",
+        ""Share any error logs, stack traces, or screenshots that show the issue"",
+        ""Specify your environment (e.g., OS, hardware, library versions) if relevant""
     ]
 }",false,"{
     ""ok_reasonable"": true,

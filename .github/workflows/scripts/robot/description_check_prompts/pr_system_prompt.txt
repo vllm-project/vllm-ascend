@@ -45,17 +45,36 @@ the template format exactly. The template is a guide, not a strict form.
 
 ### Reference Examples (Few-shot):
 #### Positive examples (compliant):
-- Title: [Feat][NPU] Add optimised memory allocator for Ascend, Description: (includes Summary, Test plan, performance data). Reason: Provides change description, test coverage, and performance impact. Maintainer can start review directly.
-- Title: [BugFix] resolve memory leak in tensor pool manager, Description: (includes root cause analysis, fix approach, test verification). Reason: Information complete, includes root cause, fix approach, and verification results.
-- Title: [CI] Fix GitHub Actions yaml indentation in release workflow, Description: (empty). Reason: Title is self-explanatory, clearly identifies file, type, and problem. Sufficient for maintainer to understand change.
-- Title: [Refactor][Worker] Improve tensor parallelism layer for NPU models, Description: (includes change motivation, implementation method, and test plan). Reason: Provides refactoring reason, technical approach, and test coverage.
-- Title: [Doc] Update contribution guidelines with NPU testing steps, Description: (includes document change content and impact scope). Reason: Explains which documents were modified, why, and the impact scope.
+- Title: [BugFix]mega moe w4a8 assert bias fix
+  Body: "What this PR does / why we need it? Problem Background: When MC=2 (MegaMoE fused kernel mode 2), the bias argument is passed as None ... Solution: Move the null-bias judgment logic out of the MC=1 branch ... How was this patch tested? Unit test: Added test cases covering MC=1/MC=2 with bias=None..."
+  Result: ok=true, score=95, missing_items=[], suggestions=[]
+  Reason: Change description, root cause, fix approach, and test plan all present.
+
+- Title: [CI]Adjust the dp_size and tp_size in the decode stage to 4 respectively
+  Body: "What this PR does / why we need it? This PR adjusts the dp_size and tp_size in the decode stage to 4 respectively in the Qwen3-235B-A22B-Mooncake-Layerwise configuration file. vLLM version: v0.22.1"
+  Result: ok=true, score=80, missing_items=[], suggestions=["Consider adding test verification"]
+  Reason: Change description is clear. Test plan missing but change is simple enough.
+
+- Title: [BugFix][v0.22.1] Fix Error when GLM5 MTP layer has BF16 weights
+  Body: "Backport of #10842. Root Cause: o_proj_full_pool is a class-level attribute shared across model instances... Fix: Stop passing the shared fixed-dtype pool as all-gather output..."
+  Result: ok=true, score=88, missing_items=[]
+  Reason: Root cause and fix clearly explained. Test info sufficient for backport context.
 
 #### Negative examples (non-compliant):
-- Title: [Bug]: error occurred, Description: "help me check". Reason: Missing "What this PR does / why we need it" and "How was this patch tested". Completely impossible to start review. Must determine as non-compliant.
-- Title: [Bug]: service startup failed, Description: "won't start, got error". Reason: Missing "What this PR does / why we need it" and "How was this patch tested". Must determine as non-compliant.
-- Title: [Feat] add new feature, Description: (empty). Reason: Title too vague, missing "What this PR does / why we need it" and "How was this patch tested".
-- Title: [Bug]: API call error, Description: "there's an error, help check". Reason: Missing "What this PR does / why we need it" and "How was this patch tested". Cannot start investigation. Must determine as non-compliant.
+- Title: [Bug]: Got error
+  Body: "Help me check"
+  Result: ok=false, score=10, missing_items=["What this PR does / why we need it", "Does this PR introduce any user-facing change", "How was this patch tested"]
+  Reason: All three template sections are empty. Completely unusable for review.
+
+- Title: [CI]model-reuse-NEW
+  Body: (only template headings with no content, version placeholders)
+  Result: ok=false, score=15, missing_items=["What this PR does / why we need it", "How was this patch tested"]
+  Reason: Template filled with placeholders only, no actual content.
+
+- Title: [BugFix] Propagate num_cached_tokens in disaggregated prefill
+  Body: "Forward the prefill node's real num_cached_tokens through kv_transfer_params... Companion to vllm-project/vllm#46357. How was this patch tested? (empty)"
+  Result: ok=false, score=68, missing_items=["How was this patch tested", "Does this PR introduce any user-facing change"]
+  Reason: Change description present but test plan and user-facing change sections are empty.
 
 ### Output Requirements:
 - **ok**: boolean, indicates basic compliance.
