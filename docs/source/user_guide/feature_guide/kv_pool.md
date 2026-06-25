@@ -1020,7 +1020,7 @@ If the buffer is too small, SSD reads fail with `BUFFER_OVERFLOW` (`error_code=-
 If you encounter `BUFFER_OVERFLOW` during use, try increasing `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`. Do not set it higher than the **Available KV cache memory** value shown in vLLM worker logs:
 
 ```text
-(Worker_TP0_EP0 pid=21240) INFO 06-23 17:41:09 [worker.py:552] Available KV cache memory: XX GiB
+(Worker_TP0_EP0 pid=21240) INFO 06-23 17:41:09 [worker.py:552] Available KV cache memory: XX
 ```
 
 Example:
