@@ -1846,6 +1846,71 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(seen_group_ids, expected_group_ids)
         self.assertEqual(finish_count_by_group, expected_finishes)
 
+    def test_hybrid_mixed_mla_qga_group_uses_layer_level_pull_plans(self):
+        with patch.object(
+            self.vllm_config.kv_transfer_config,
+            "get_from_extra_config",
+            side_effect=lambda k, d=None: {
+                "prefill": {"tp_size": 8, "dp_size": 1, "pp_size": 1},
+                "decode": {"tp_size": 4, "dp_size": 1, "pp_size": 1},
+            }.get(k, d),
+        ):
+            self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+            self.vllm_config.model_config.is_deepseek_mla = True
+            self.vllm_config.model_config.hf_text_config.num_key_value_heads = 1
+            worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
+        worker._is_hma_required = True
+        worker.use_sparse = False
+        worker.num_key_value_heads = 1
+        worker.tp_size = 4
+        worker.tp_rank = 0
+        worker._decode_tp_size = 4
+        worker._prefill_tp_size = 8
+        worker._prefill_pp_size = 1
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
+                    "layer_names": [
+                        "model.layers.0.self_attn",
+                        "model.layers.32.self_attn",
+                    ],
+                    "kv_cache_spec": {
+                        "model.layers.0.self_attn": {"num_kv_heads": 1},
+                        "model.layers.32.self_attn": {"num_kv_heads": 8},
+                    },
+                },
+                [0, 32],
+            )
+        }
+
+        plans = worker._get_attention_group_pull_plans(8)
+        self.assertEqual(
+            plans,
+            (
+                type(plans[0])(0, 1, 1, (0,)),
+                type(plans[1])(0, 8, 2, (32,)),
+            ),
+        )
+        self.assertIs(plans, worker._get_attention_group_pull_plans(8))
+
+        chosen_ranks, rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls("req_mixed", 8)
+        self.assertEqual(sorted(chosen_ranks), sorted(rank_group_pulls))
+
+        pulls = [pull for remote_rank in chosen_ranks for pull in rank_group_pulls[remote_rank]]
+        mla_pulls = [pull for pull in pulls if pull.layer_indices == (0,)]
+        qga_pulls = [pull for pull in pulls if pull.layer_indices == (32,)]
+
+        self.assertEqual(len(mla_pulls), 1)
+        self.assertEqual(mla_pulls[0].num_group_pulls, 1)
+        self.assertTrue(mla_pulls[0].is_group_transfer_end)
+
+        self.assertEqual(len(qga_pulls), 2)
+        self.assertEqual({pull.remote_tp_offset for pull in qga_pulls}, {0, 1})
+        self.assertTrue(all(pull.num_group_pulls == 2 for pull in qga_pulls))
+        self.assertEqual(sum(pull.is_group_transfer_end for pull in qga_pulls), 1)
+
     def test_pd_disaggregated_split_cross_covers_prefix_tp_cp_pp(self):
         cases: list[dict[str, Any]] = [
             {
