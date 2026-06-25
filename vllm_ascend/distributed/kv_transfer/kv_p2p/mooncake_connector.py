@@ -1916,6 +1916,19 @@ class MooncakeConnectorWorker:
             layer_spec = layer_spec.kv_cache_specs[layer_name]
         return layer_spec
 
+    def _check_kv_cache_quant_transfer_supported(self) -> None:
+        quant_config = getattr(self.vllm_config, "quant_config", None)
+        enable_c8_quant = getattr(quant_config, "enable_c8_quant", False)
+        if enable_c8_quant is not True or self.kv_role not in ("kv_consumer", "kv_both"):
+            return
+
+        raise ValueError(
+            "MooncakeConnector does not support C8 KV cache quantization on KV consumer nodes. "
+            "The producer keeps KV cache in bf16 while the consumer allocates int8 KV cache, so raw "
+            "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
+            "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
+        )
+
     def _get_mamba_conv_padding(self, layer_spec: Any) -> int:
         if not isinstance(layer_spec, MambaSpec):
             return 0
@@ -1989,6 +2002,7 @@ class MooncakeConnectorWorker:
         self.num_blocks = self.kv_cache_config.num_blocks
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
+        self._check_kv_cache_quant_transfer_supported()
         # Maps each KV cache group to its serialized group spec and physical
         # layer indices: {group_id: (group_spec, [layer_idx0, layer_idx1, ...])}.
         self.kv_group2layeridx = self._build_kv_group2layeridx()
