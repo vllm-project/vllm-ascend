@@ -261,6 +261,10 @@ jobs:
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
+          # pytest-driven tests
+          - name: mayi-cases
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/weekly/single_node/engine_func_test_robot
           # YAML-driven tests
           - name: mtpx-deepseek-r1-0528-w8a8
             os: linux-aarch64-a3-16
@@ -308,6 +312,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       should_run: >-
