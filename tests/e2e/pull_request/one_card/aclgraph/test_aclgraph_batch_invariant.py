@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import gc
 import os
 import random
 
@@ -23,7 +24,7 @@ import pytest
 import torch
 from vllm import SamplingParams
 
-from tests.e2e.conftest import ModelName, VllmRunner
+from tests.e2e.conftest import ModelName, VllmRunner, model_cache
 
 DEFAULT_MODEL = ModelName.QWEN3_06B
 
@@ -445,6 +446,11 @@ def test_aclgraph_logprobs_without_batch_invariance_should_fail(monkeypatch: pyt
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
+    model_cache.clear()
+
+    gc.collect()
+    torch.npu.empty_cache()
+
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
