@@ -136,16 +136,16 @@ def set_encoder_forward_context(
 
 
 # ---------------------------------------------------------------------------
-# Shared FIA actual_seq_lengths helpers (eager / capture / replay)
+# FIA actual_seq_lengths (format conversion + alignment)
 # ---------------------------------------------------------------------------
 
 
 def _align_fia_endpoints_to_num_tokens(endpoints: list[int], num_tokens: int) -> list[int]:
-    """Common post-process for both length formats before FIA ``actual_seq_lengths``.
+    """Post-process raw FIA endpoints before ``actual_seq_lengths``.
 
-    CUMULATIVE and PER_SEQUENCE helpers only perform format conversion; this function
-    is the sole place that trims padding, clamps to the token budget, enforces
-    monotonicity, and ensures the terminal endpoint equals ``num_tokens``.
+    Format conversion happens in ``build_fia_actual_seq_lengths``; this function
+    trims padding, clamps to the token budget, enforces monotonicity, and ensures
+    the terminal endpoint equals ``num_tokens``.
     """
     # 1. Trim trailing zeros (prefix-sum budget padding).
     trimmed = list(endpoints)
@@ -173,28 +173,6 @@ def _align_fia_endpoints_to_num_tokens(endpoints: list[int], num_tokens: int) ->
     return filtered
 
 
-def _cumulative_buffer_to_fia_endpoints(buffer: torch.Tensor) -> list[int]:
-    """Convert a cumulative-length buffer to raw FIA endpoint list (format only).
-
-    Input is ``cu_seqlens`` / ``cu_window_seqlens`` style: leading 0 is a format
-    marker, not a sequence boundary. Output may contain trailing padding zeros and
-    need not end at the token budget — callers run ``_align_fia_endpoints_to_num_tokens``.
-    """
-    flat = buffer.detach().cpu().view(-1).tolist()
-    return flat[1:] if flat else flat
-
-
-def _per_sequence_lengths_to_fia_endpoints(buffer: torch.Tensor) -> list[int]:
-    """Convert a per-sequence length buffer to raw cumulative endpoints (format only).
-
-    Zero slots denote unused batch padding and are excluded before cumsum. Output
-    need not end at the token budget — callers run ``_align_fia_endpoints_to_num_tokens``.
-    """
-    valid = buffer.detach().cpu().view(-1)
-    valid = valid[valid != 0]
-    return valid.cumsum(dim=0).to(torch.int64).tolist()
-
-
 class FIALengthFormat(Enum):
     CUMULATIVE = "cumulative"
     PER_SEQUENCE = "per_sequence"
@@ -213,11 +191,22 @@ def build_fia_actual_seq_lengths(
     num_query_tokens: int,
     length_input: FIAActualSeqLengthsInput,
 ) -> tuple[list[int], list[int]]:
-    """Build aligned FIA ``actual_seq_lengths`` for eager, capture, and replay."""
+    """Build aligned FIA ``actual_seq_lengths`` for eager, capture, and replay.
+
+    Format conversion only (alignment via ``_align_fia_endpoints_to_num_tokens``):
+
+    - ``CUMULATIVE``: cu_seqlens / cu_window_seqlens style; leading 0 is a
+      format marker; output may include trailing padding zeros.
+    - ``PER_SEQUENCE``: sequence_lengths style; zero slots are unused batch
+      padding, excluded before cumsum.
+    """
     if length_input.format is FIALengthFormat.PER_SEQUENCE:
-        actual = _per_sequence_lengths_to_fia_endpoints(length_input.buffer)
+        valid = length_input.buffer.detach().cpu().view(-1)
+        valid = valid[valid != 0]
+        actual = valid.cumsum(dim=0).to(torch.int64).tolist()
     else:
-        actual = _cumulative_buffer_to_fia_endpoints(length_input.buffer)
+        flat = length_input.buffer.detach().cpu().view(-1).tolist()
+        actual = flat[1:] if flat else flat
 
     aligned = _align_fia_endpoints_to_num_tokens(actual, num_query_tokens)
     return aligned, aligned
