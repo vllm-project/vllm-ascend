@@ -43,6 +43,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+from vllm import envs
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -176,6 +177,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
+        self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
 
     # ------------------------------------------------------------------
