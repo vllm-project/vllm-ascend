@@ -40,10 +40,25 @@ on:
       is_run:
         required: true
         type: boolean
-    secrets:
-      OBS_ACCESS_KEY:
+      request_id:
         required: false
-      OBS_SECRET_KEY:
+        type: string
+        default: ''
+        description: non-empty when triggered by PR /nightly command
+      vllm_ascend_ref:
+        required: false
+        type: string
+        default: ''
+        description: PR commit SHA for PR-triggered checkout
+      testcase_timeout:
+        required: false
+        default: 120
+        type: string
+        description: test case execution timeout period,default:120 minutes
+    secrets:
+      OBS_ACCESS_KEY_ID:
+        required: false
+      OBS_SECRET_ACCESS_KEY:
         required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -64,6 +79,7 @@ jobs:
     name: ${{inputs.model_list}} accuracy test
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.is_run }}
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     container:
       image: "${{ inputs.image }}"
       env:
@@ -84,20 +100,22 @@ jobs:
           pip install uv
 
       - name: Uninstall vllm and remove code (if pr test)
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ inputs.request_id != '' }}
         run: |
           pip uninstall -y vllm-ascend || true
           rm -rf  /vllm-workspace/vllm-ascend
 
       - name: Checkout vllm-project/vllm-ascend repo
-        if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/checkout@v6
+        if: ${{ inputs.request_id != '' }}
+        uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.vllm_ascend_ref }}
           path: ./temp-vllm-ascend
           fetch-depth: 1
+          submodules: recursive
 
       - name: Move vllm-ascend code to /vllm-workspace
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ inputs.request_id != '' }}
         run: |
           mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
 
@@ -107,7 +125,7 @@ jobs:
           echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
 
       - name: Install vllm-project/vllm-ascend
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ inputs.request_id != '' }}
         working-directory: /vllm-workspace/vllm-ascend
         env:
           MAX_JOBS: ${{ env.MAX_JOBS }}
@@ -261,8 +279,8 @@ jobs:
         continue-on-error: true
         uses: ascend-gha-runners/artifact/upload@v0.3
         with:
-          access_key: ${{ secrets.OBS_ACCESS_KEY }}
-          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
           name: report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}
           path: ./benchmarks/accuracy/
           if-no-files-found: warn

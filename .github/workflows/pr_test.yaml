@@ -37,7 +37,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.action != 'labeled' || github.event.label.name == 'ready' && 'run' || 'noop' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -47,14 +47,22 @@ jobs:
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope.outputs.has_tests }}
-      test_groups: ${{ steps.scope.outputs.test_groups }}
-      matched_modules: ${{ steps.scope.outputs.matched_modules }}
+      has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
+      test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
+      matched_modules: ${{ steps.scope.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+      main_commit: ${{ steps.vllm.outputs.main_commit }}
+      release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
       - name: Validate PR title prefix
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
+          PR_TITLE=$(curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])") || {
+              echo "::error::Failed to fetch PR title from GitHub API"
+              exit 1
+            }
+
           if [ -z "$PR_TITLE" ]; then
             echo "::error::PR title cannot be empty"
             exit 1
@@ -73,9 +81,27 @@ jobs:
           echo "✓ PR title prefix is valid"
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Read verified vLLM refs
+        id: vllm
+        run: |
+          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+            exit 1
+          }
+          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+            exit 1
+          }
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: cp problem matchers
         run: |
@@ -88,11 +114,11 @@ jobs:
       - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
-          ref: 9090368b650896bf5fc990c921df7eb4c20355a5
+          ref: ${{ steps.vllm.outputs.main_commit }}
 
       - uses: dorny/paths-filter@v4
         id: filter
@@ -102,6 +128,17 @@ jobs:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
+            src:
+              - 'vllm_ascend/**'
+              - 'setup.py'
+              - 'csrc/**'
+              - 'requirements.txt'
+              - 'pyproject.toml'
+              - 'cmake/**'
+              - '.github/**'
+              - 'tests/**'
+              - 'tools/**'
+              - 'CMakeLists.txt'
 
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
@@ -145,20 +182,32 @@ jobs:
 
       - name: Select tests based on changed files
         id: scope
+        if: steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }} \
-            --run-all-cpu
+            --diff-base origin/${{ github.base_ref }}
+
+      - name: Set no-tests output when source paths unchanged
+        id: noop
+        if: steps.filter.outputs.src != 'true'
+        run: |
+          {
+            echo "has_tests=false"
+            echo "test_groups=[]"
+            echo "matched_modules="
+          } >> "$GITHUB_OUTPUT"
 
   run-selected-tests:
     needs: lint-and-select-tests
     if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       matrix:
-        vllm_version: [9090368b650896bf5fc990c921df7eb4c20355a5, v0.20.2]
+        vllm_version:
+          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
+          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}

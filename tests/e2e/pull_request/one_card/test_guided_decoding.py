@@ -38,7 +38,7 @@ GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
 @pytest.fixture(params=[False, True], ids=["v1", "v2"])
 def model_runner_env(request):
     use_v2_model_runner = request.param
-    if use_v2_model_runner and vllm_version_is("0.20.1"):
+    if use_v2_model_runner and vllm_version_is("0.23.0"):
         pytest.skip("No need to support v2 model runner for vLLM tag version.")
 
     with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}):
@@ -89,7 +89,7 @@ def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema
         "seed": 0,
         "structured_outputs_config": {"backend": guided_decoding_backend},
     }
-    with VllmRunner(MODEL_NAME, compilation_config={"cudagraph_mode": "PIECEWISE"}, **runner_kwargs) as vllm_model:
+    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
         prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
         inputs = vllm_model.get_inputs(prompts)
         outputs = vllm_model.model.generate(inputs, sampling_params=sampling_params)

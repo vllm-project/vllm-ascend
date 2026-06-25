@@ -6,7 +6,7 @@ comment command, without running the full E2E test suite.
 ## Background
 
 The `E2E-Full` workflow (`pr_test.yaml`) normally runs the complete E2E test suite
-when a PR has both `ready` and `ready-for-test` labels. This is expensive in CI resources
+when a PR has `ready` label. This is expensive in CI resources
 and time.
 
 Authorized users can trigger only the specific test files they care about by posting a
@@ -102,7 +102,7 @@ tests/e2e/pull_request/four_card/_310p/  # 310P four card
 
 | Aspect | Full E2E suite | Per-test comment trigger |
 |---|---|---|
-| Trigger | `ready` + `ready-for-test` labels | `/e2e` comment + `ready` label |
+| Trigger | `ready` labels | `/e2e` comment + `ready` label |
 | Scope | All E2E tests | Only specified test paths |
 | Who can trigger | Anyone who can add labels | PR author or write/admin collaborator |
 | Use case | Pre-merge validation | Iterative debugging of specific tests |

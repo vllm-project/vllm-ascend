@@ -21,13 +21,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 from vllm.logger import logger
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.20.2"):
-    from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
-else:
-    from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
+from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 
 
 def expert_file_to_tensor(expert_map_path, layer_id):
@@ -38,7 +32,7 @@ def expert_file_to_tensor(expert_map_path, layer_id):
     if layer_id > data["moe_layer_count"]:
         raise ValueError("Invalid EPLB Table")
     if layer_id == data["moe_layer_count"]:
-        logger.warning("Init expert map of mtp/eagle when using sample.")
+        logger.warning("[eplb/utils] Init expert map of mtp/eagle when using sample.")
         for device in data["layer_list"][0]["device_list"]:
             physical_count += len(device["device_expert"])
         return None, physical_count
@@ -67,7 +61,7 @@ def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts
     return torch.tensor(groups, dtype=torch.int32)
 
 
-def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num_shared_experts=1):
+def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num_shared_experts=1, tp_size=None):
     expert_map_path = eplb_config.expert_map_path
     n_experts = moe_config.num_experts
     ep_size = moe_config.ep_size
@@ -100,12 +94,20 @@ def init_eplb_config(eplb_config, layer_id, moe_config, mix_placement=False, num
         global_expert_map.append(expert_map)
         if rankid == moe_config.ep_rank:
             local_expert_map = expert_map
-    log2phy = generate_log2phy_map(global_expert_map, moe_config.ep_rank).npu() if eplb_enable else None
+    log2phy = (
+        generate_log2phy_map(
+            global_expert_map,
+            moe_config.ep_rank,
+            tp_size=int(tp_size) if tp_size is not None else None,
+        ).npu()
+        if eplb_enable
+        else None
+    )
 
     return torch.stack(global_expert_map), local_expert_map, log2phy, n_redundant
 
 
-def generate_log2phy_map(global_expert_map, ep_rank):
+def generate_log2phy_map(global_expert_map, ep_rank, tp_size: int | None = None):
     log2phy_map = defaultdict(list)
     valid_count = torch.sum(global_expert_map[0] != -1)
     for rankid, map_per_rank in enumerate(global_expert_map):
@@ -116,7 +118,13 @@ def generate_log2phy_map(global_expert_map, ep_rank):
 
     for key in log2phy_map:
         num_of_duplications = len(log2phy_map[key])
-        log2phy_map[key] = log2phy_map[key][ep_rank % num_of_duplications]
+        if tp_size is not None and tp_size > 1:
+            tp_rank = ep_rank % tp_size
+            dp_like_rank = ep_rank // tp_size
+            replica_index = (tp_rank + dp_like_rank + key) % num_of_duplications
+        else:
+            replica_index = ep_rank % num_of_duplications
+        log2phy_map[key] = log2phy_map[key][replica_index]
 
     log2phy_map = torch.scatter(
         torch.zeros(len(log2phy_map), dtype=torch.int32),

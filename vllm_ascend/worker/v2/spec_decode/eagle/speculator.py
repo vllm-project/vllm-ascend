@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+
 from contextlib import contextmanager
 from copy import copy
 from typing import Any, cast
@@ -25,24 +26,26 @@ import vllm
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.eagle import speculator as vllm_speculator
-from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import PrefillEagleCudaGraphManager
-from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, update_eagle_draft_inputs
+from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found]
+    speculator as vllm_speculator_module,  # type: ignore[import-not-found]
+)
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
+    PrefillSpeculatorCudaGraphManager,
+)
+from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator  # type: ignore[import-not-found]
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import PrefillEagleAclGraphManager
 
-if vllm_version_is("0.20.2"):
-    from vllm.v1.worker.gpu.attn_utils import AttentionBackend
-else:
-    from vllm.v1.attention.backend import AttentionBackend
+_BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
+_PREFILL_CUDAGRAPH_MANAGER_CLS = PrefillSpeculatorCudaGraphManager
 
 
 class AscendEagleSpeculator(EagleSpeculator):
@@ -164,73 +167,39 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         self.attn_backends = attn_backends
 
-    def generate_draft(
+    def _generate_draft(
         self,
         num_reqs: int,
         num_tokens_padded: int,
-        attn_metadata: dict[str, Any],
-        slot_mappings: dict[str, torch.Tensor],
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ):
-        """Override GPU EagleSpeculator.generate_draft for Ascend NPUs, because
-        attn_metadata is created in super propose method, it does not have some
-        attribute that Ascend attention backend needs, so we update it.
-        """
-        self._init_decode_attn_metadata(attn_metadata, num_reqs)
-        self._increment_decode_attn_metadata(attn_metadata)
-        idx_mapping = self.idx_mapping[:num_reqs]
-        positions = self.input_buffers.positions[:num_reqs]
-        # Run the eagle model forward pass.
-        last_hidden_states, hidden_states = self.run_model(
+    ) -> None:
+        """Override AutoRegressiveSpeculator._generate_draft for Ascend NPUs."""
+        self._ascend_prepare_decode_draft(attn_metadata, num_reqs)
+        super()._generate_draft(
+            num_reqs,
             num_tokens_padded,
             attn_metadata,
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
-        last_hidden_states = last_hidden_states[:num_reqs]
-
-        # Sample the draft tokens.
-        logits = self.model.compute_logits(last_hidden_states)
-        draft_tokens = self._sample_draft(
-            logits,
-            idx_mapping,
-            positions,
-            self.current_draft_step,
-            self.draft_logits,
-        )
-
-        # Update the inputs for the next step.
-        update_eagle_draft_inputs(
-            draft_tokens,
-            self.current_draft_step,
-            hidden_states,
-            self.draft_tokens,
-            self.hidden_states,
-            self.input_buffers,
-            num_reqs,
-            self.max_model_len,
-            self.num_speculative_steps,
-        )
-        # npu's own update logic
         self._increment_decode_attn_metadata(attn_metadata)
 
     @torch.inference_mode()
-    def run_model(
+    def _run_model(
         self,
         num_tokens: int,
-        attn_metadata: dict[str, Any],
+        attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Override GPU EagleSpeculator.run_model for Ascend NPUs, because
-        in decode phase, we need to update seq_lens_cpu in attn_metadata after
-        run model.
-        """
-        last_hidden_states, hidden_states = super().run_model(
+        """Override AutoRegressiveSpeculator._run_model for Ascend NPUs."""
+        last_hidden_states, hidden_states = super()._run_model(
             num_tokens,
             attn_metadata,
             slot_mappings,
@@ -238,13 +207,7 @@ class AscendEagleSpeculator(EagleSpeculator):
             cudagraph_runtime_mode,
             mm_inputs,
         )
-
-        # attn_metadata is None in profile_run and dummy_run.
-        if attn_metadata is not None:
-            for attn_meta in attn_metadata.values():
-                # seq_lens in AscendMetadata is a cpu tensor.
-                attn_meta.seq_lens = attn_meta.seq_lens + 1
-                attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
+        self._ascend_update_seq_lens(attn_metadata)
         return last_hidden_states, hidden_states
 
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
@@ -266,7 +229,17 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         return draft_attn_metadatas
 
-    def _init_decode_attn_metadata(self, attn_metadata: dict[str, Any], num_reqs: int):
+    def _ascend_prepare_decode_draft(self, attn_metadata: dict[str, Any] | None, num_reqs: int) -> None:
+        self._init_decode_attn_metadata(attn_metadata, num_reqs)
+        self._increment_decode_attn_metadata(attn_metadata)
+
+    def _ascend_update_seq_lens(self, attn_metadata: dict[str, Any] | None) -> None:
+        if attn_metadata is not None:
+            for attn_meta in attn_metadata.values():
+                attn_meta.seq_lens = attn_meta.seq_lens + 1
+                attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
+
+    def _init_decode_attn_metadata(self, attn_metadata: dict[str, Any] | None, num_reqs: int):
         """Initialize attention metadata for decode phase on Ascend NPUs."""
         if attn_metadata is None:
             return
@@ -280,7 +253,7 @@ class AscendEagleSpeculator(EagleSpeculator):
             metadata.attn_state = attn_state
             metadata.seq_lens_cpu = seq_lens_cpu
 
-    def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any], num_reqs_padded: int):
+    def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
         """Initialize attention metadata for decode phase in graph mode on Ascend NPUs."""
         if attn_metadata is None:
             return
@@ -301,12 +274,14 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         return draft_attn_metadatas
 
-    def _increment_decode_attn_metadata(self, attn_metadata: dict[str, Any]):
+    def _increment_decode_attn_metadata(self, attn_metadata: dict[str, Any] | None):
         """Increment attention metadata for decode phase on Ascend NPUs."""
         # in eager mode, attn_metadata's seq_lens_cpu and input_buffers's seq_lens_cpu shares the memory
         self._update_decode_attn_metadata(attn_metadata, 1)
 
-    def _update_decode_attn_metadata(self, attn_metadata: dict[str, Any], step: int, num_reqs: int | None = None):
+    def _update_decode_attn_metadata(
+        self, attn_metadata: dict[str, Any] | None, step: int, num_reqs: int | None = None
+    ):
         """Update attention metadata for decode phase on Ascend NPUs."""
         if attn_metadata is None:
             return
@@ -345,12 +320,12 @@ class AscendEagleSpeculator(EagleSpeculator):
 @contextmanager
 def build_attn_metadata_wrapper():
     """Context manager to override attention metadata building for Ascend NPUs."""
-    original_func = vllm.v1.worker.gpu.spec_decode.eagle.speculator.build_attn_metadata
+    original_func = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
     try:
-        vllm.v1.worker.gpu.spec_decode.eagle.speculator.build_attn_metadata = build_attn_metadata
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
         yield
     finally:
-        vllm.v1.worker.gpu.spec_decode.eagle.speculator.build_attn_metadata = original_func
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
 
 
 # TODO Remove this patch when cann fix the gather bug.
@@ -381,13 +356,15 @@ def torch_gather_wrapper():
 @contextmanager
 def graph_manager_wrapper(speculator):
     """Context manager to override graph manager."""
-    original_graph_manager = PrefillEagleCudaGraphManager
+    original_graph_manager = _PREFILL_CUDAGRAPH_MANAGER_CLS
 
     def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
         return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
+    manager_attr = "PrefillSpeculatorCudaGraphManager"
+
     try:
-        vllm_speculator.PrefillEagleCudaGraphManager = factory
+        setattr(vllm_speculator_module, manager_attr, factory)
         yield
     finally:
-        vllm_speculator.PrefillEagleCudaGraphManager = original_graph_manager
+        setattr(vllm_speculator_module, manager_attr, original_graph_manager)

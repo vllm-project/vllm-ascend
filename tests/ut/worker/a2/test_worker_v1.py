@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
+from vllm.config import CacheConfig, CUDAGraphMode, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
 
 from tests.ut.base import TestBase
 
@@ -46,6 +46,7 @@ class TestNPUWorker(TestBase):
         self.vllm_config_mock.quant_config = MagicMock()
         self.vllm_config_mock.speculative_config = None
         self.vllm_config_mock.observability_config = None
+        self.vllm_config_mock.weight_transfer_config = None
 
         self.local_rank = 0
         self.rank = 0
@@ -215,6 +216,7 @@ class TestNPUWorker(TestBase):
     def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_extra_cleanup = True
         mock_get_config.return_value = mock_config
         """Test wake_up method when sleep mode is enabled"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -240,10 +242,12 @@ class TestNPUWorker(TestBase):
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
+            worker.sleep_wakeup_manager = MagicMock()
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
+            worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
 
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
@@ -570,6 +574,8 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
@@ -631,6 +637,8 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.9
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.9
             worker.cache_config.kv_cache_memory_bytes = None
@@ -649,8 +657,14 @@ class TestNPUWorker(TestBase):
     @patch("torch.npu.mem_get_info")
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")
+    @patch("torch_npu.npu.memory_stats")
     def test_determine_available_memory_memory_profiling_error(
-        self, mock_torch_empty_cache, mock_torch_reset_peak_memory_stats, mock_torch_mem_get_info, mock_memory_profiling
+        self,
+        mock_torch_memory_stats,
+        mock_torch_empty_cache,
+        mock_torch_reset_peak_memory_stats,
+        mock_torch_mem_get_info,
+        mock_memory_profiling,
     ):
         """Test determine_available_memory throws exception on memory profiling error"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -679,10 +693,15 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
+            worker.model_runner.model_memory_usage = 0
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
             worker.device = torch.device("npu:0")
+
+            mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 0}
 
             # Test should throw assertion error
             with self.assertRaises(AssertionError) as cm:
@@ -733,6 +752,8 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
@@ -956,6 +977,8 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
+            worker.vllm_config.weight_transfer_config = None
+            worker.vllm_config.kv_transfer_config = None
 
             # Setup allocator mock
             mock_allocator = MagicMock()
@@ -984,6 +1007,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = False
+            worker.vllm_config.weight_transfer_config = None
 
             # Test load_model
             worker.load_model()
@@ -1141,12 +1165,17 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
+        ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
+            worker.vllm_config.speculative_config = None
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
+            worker.vllm_config.kv_transfer_config = None
 
             # Setup allocator mock
             mock_allocator = MagicMock()
@@ -1165,18 +1194,75 @@ class TestNPUWorker(TestBase):
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
+    def test_acl_graph_sleep_wakeup_manager_sleep_resets_acl_graph_state(self):
+        from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
+
+        model_runner = MagicMock()
+        model_runner.use_aclgraph = True
+        graph_manager = MagicMock()
+        graph_manager.graphs = MagicMock()
+        graph_manager.pool = None
+        model_runner.cudagraph_manager = graph_manager
+        saver = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+        with (
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.AclGraphSleepWakeupManager"
+                ".clear_all_attention_workspaces"
+            ) as mock_clear,
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.AclGraphSleepWakeupManager.reset_all_graph_params"
+            ) as mock_reset,
+        ):
+            saver.sleep()
+        mock_clear.assert_called_once()
+        mock_reset.assert_called_once()
+        graph_manager.graphs.clear.assert_called_once()
+
+    def test_hccl_sleep_wakeup_manager_sleep_waits_and_destroys(self):
+        from vllm_ascend.device_allocator.sleep_mem_optimized import HcclSleepWakeupManager
+
+        worker = MagicMock()
+        handle = MagicMock()
+        worker._pp_send_work = [handle]
+        saver = HcclSleepWakeupManager(MagicMock(), worker)
+        saver._destroyed = False
+
+        with (
+            patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_available", return_value=True),
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_initialized",
+                return_value=True,
+            ),
+            patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.synchronize") as mock_synchronize,
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.HcclSleepWakeupManager.destroy_hccl",
+                return_value=2,
+            ) as mock_destroy,
+        ):
+            saver.sleep()
+
+        handle.wait.assert_called_once()
+        self.assertEqual(worker._pp_send_work, [])
+        mock_synchronize.assert_called_once()
+        mock_destroy.assert_called_once()
+
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     def test_initialize_from_config_without_sleep_mode(self, mock_ensure_kv_transfer):
         """Test initialize_from_config method - without sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
+        ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
+            worker.vllm_config.speculative_config = None
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = False
+            worker.vllm_config.kv_transfer_config = None
 
             # Create mock kv_cache_config
             mock_kv_cache_config = MagicMock()
@@ -1247,3 +1333,188 @@ class TestNPUWorker(TestBase):
 
             # When both flags are False, return EMPTY_MODEL_RUNNER_OUTPUT directly.
             self.assertEqual(result, mock_empty_output)
+
+
+class TestNPUWorkerWeightUpdate(TestBase):
+    def _make_worker(self, engine=None):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        worker.weight_transfer_engine = engine
+        worker._weight_update_active = False
+        worker._is_checkpoint_format = True
+        worker.device = torch.device("cpu")
+        worker.model_runner = MagicMock()
+        worker.model_runner.model = MagicMock()
+        worker.model_config = MagicMock()
+        return worker
+
+    def test_check_engine_raises_when_unconfigured(self):
+        worker = self._make_worker(engine=None)
+        with self.assertRaises(RuntimeError):
+            worker.init_weight_transfer_engine({})
+        with self.assertRaises(RuntimeError):
+            worker.start_weight_update()
+        with self.assertRaises(RuntimeError):
+            worker.update_weights({})
+        with self.assertRaises(RuntimeError):
+            worker.finish_weight_update()
+
+    def test_init_weight_transfer_engine_dispatches_to_engine(self):
+        engine = MagicMock()
+        engine.parse_init_info.return_value = "typed_init"
+        worker = self._make_worker(engine=engine)
+
+        init_info = {"master_address": "127.0.0.1", "master_port": 12345}
+        worker.init_weight_transfer_engine(init_info)
+
+        engine.parse_init_info.assert_called_once_with(init_info)
+        engine.init_transfer_engine.assert_called_once_with("typed_init")
+
+    @patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload")
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_start_weight_update_checkpoint_format(self, mock_init_reload):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        worker.start_weight_update(is_checkpoint_format=True)
+
+        mock_init_reload.assert_called_once_with(worker.model_runner.model)
+        self.assertTrue(worker._weight_update_active)
+        self.assertTrue(worker._is_checkpoint_format)
+
+    @patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload")
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_start_weight_update_kernel_format(self, mock_init_reload):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        worker.start_weight_update(is_checkpoint_format=False)
+
+        mock_init_reload.assert_not_called()
+        self.assertTrue(worker._weight_update_active)
+        self.assertFalse(worker._is_checkpoint_format)
+
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_start_weight_update_rejects_reentry(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+
+        with self.assertRaises(RuntimeError):
+            worker.start_weight_update()
+
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "1"})
+    def test_start_weight_update_rejects_nz(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        with self.assertRaises(ValueError):
+            worker.start_weight_update()
+
+    def test_update_weights_requires_start(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        with self.assertRaises(RuntimeError):
+            worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
+
+    @patch("torch.npu.synchronize", create=True)
+    @patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload")
+    @patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload")
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_update_weights_checkpoint_format(self, mock_init_reload, mock_finalize_reload, mock_sync):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        engine.parse_update_info.return_value = "typed_update"
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = True
+
+        worker.update_weights({"foo": "bar"})
+
+        engine.parse_update_info.assert_called_once_with({"foo": "bar"})
+        engine.receive_weights.assert_called_once()
+        _, kwargs = engine.receive_weights.call_args
+        self.assertIs(kwargs["load_weights"], worker.model_runner.model.load_weights)
+        mock_sync.assert_called_once()
+
+        # reload lifecycle is split across start_weight_update / finish_weight_update
+        mock_init_reload.assert_not_called()
+        mock_finalize_reload.assert_not_called()
+
+    @patch("torch.npu.synchronize", create=True)
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_update_weights_kernel_format(self, mock_sync):
+        engine = MagicMock()
+
+        def fake_receive(update_info, load_weights):
+            load_weights([("layer.weight", torch.zeros(2))])
+
+        engine.receive_weights.side_effect = fake_receive
+        worker = self._make_worker(engine=engine)
+        param = torch.nn.Parameter(torch.ones(2), requires_grad=True)
+        worker.model_runner.model.get_parameter.return_value = param
+
+        engine.parse_update_info.return_value = "typed_update"
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = False
+
+        worker.update_weights({"foo": "bar"})
+
+        worker.model_runner.model.get_parameter.assert_called_once_with("layer.weight")
+        torch.testing.assert_close(param.detach(), torch.zeros(2))
+        self.assertTrue(param.requires_grad)
+
+    @patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload")
+    def test_finish_weight_update_resets_state(self, mock_finalize_reload):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = True
+
+        worker.finish_weight_update()
+
+        mock_finalize_reload.assert_called_once_with(worker.model_runner.model, worker.model_config)
+        self.assertFalse(worker._weight_update_active)
+        self.assertTrue(worker._is_checkpoint_format)
+
+    def test_finish_without_start_raises(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+
+        with self.assertRaises(RuntimeError):
+            worker.finish_weight_update()
+
+    def test_double_finish_raises(self):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = False
+
+        worker.finish_weight_update()
+
+        with self.assertRaises(RuntimeError):
+            worker.finish_weight_update()
+
+    @patch("torch.npu.synchronize", create=True)
+    def test_update_after_finish_requires_restart(self, _mock_sync):
+        engine = MagicMock()
+        engine.parse_update_info.return_value = "typed"
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = False
+        worker.finish_weight_update()
+
+        with self.assertRaises(RuntimeError):
+            worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
+
+    @patch("vllm.distributed.kv_transfer.ensure_kv_transfer_shutdown", create=True)
+    def test_shutdown_releases_engine(self, _mock_kv_shutdown):
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker.profiler = None
+
+        worker.shutdown()
+
+        engine.shutdown.assert_called_once()

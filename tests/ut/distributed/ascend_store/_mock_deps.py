@@ -23,6 +23,7 @@ Usage at the top of each test file:
     import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 """
 
+import logging
 import os
 import sys
 import types
@@ -68,6 +69,7 @@ _vllm_mock_modules = [
     "vllm.distributed.parallel_state",
     "vllm.envs",
     "vllm.forward_context",
+    "vllm.logger",
     "vllm.model_executor",
     "vllm.model_executor.layers",
     "vllm.model_executor.layers.linear",
@@ -81,6 +83,7 @@ _vllm_mock_modules = [
     "vllm.v1.attention",
     "vllm.v1.attention.backend",
     "vllm.v1.core",
+    "vllm.v1.core.block_pool",
     "vllm.v1.core.kv_cache_manager",
     "vllm.v1.core.kv_cache_utils",
     "vllm.v1.core.sched",
@@ -95,13 +98,16 @@ for _mod_name in _vllm_mock_modules:
         sys.modules[_mod_name] = MagicMock()
 
 sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
+sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
 
 _base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
 _base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]
 _base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})  # type: ignore[attr-defined]
+_base_mod.KVConnectorWorkerMetadata = type("KVConnectorWorkerMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
 _base_mod.KVConnectorRole.WORKER = "WORKER"
+_base_mod.SupportsHMA = type("SupportsHMA", (), {})  # type: ignore[attr-defined]
 
 _events_mod = sys.modules["vllm.distributed.kv_events"]
 _events_mod.KVCacheEvent = type("KVCacheEvent", (), {})  # type: ignore[attr-defined]
@@ -201,8 +207,35 @@ _backend_pkg = _make_pkg(
 )
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] = _backend_pkg
 
+# Mirror the real backend/__init__.py entry points. The scheduler/worker resolve
+# the backend class dynamically via ``importlib.import_module(path)``; tests that
+# exercise those paths patch ``<module>.importlib`` locally (see
+# test_pool_scheduler.py / test_pool_worker.py) so the backend resolves to a
+# MagicMock. Do NOT register the backends in sys.modules or globally wrap
+# import_module here: test_backend.py imports the real backend classes and also
+# relies on ``mock.patch`` (which itself calls importlib.import_module) resolving
+# those real modules.
+_backend_module_paths = {
+    "mooncake": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
+    "memcache": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
+    "yuanrong": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend",
+}
+_backend_pkg.backend_map = {  # type: ignore[attr-defined]
+    "mooncake": {"name": "MooncakeBackend", "path": _backend_module_paths["mooncake"]},
+    "memcache": {"name": "MemcacheBackend", "path": _backend_module_paths["memcache"]},
+    "yuanrong": {"name": "YuanrongBackend", "path": _backend_module_paths["yuanrong"]},
+}
+
 if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascend.utils"], "AscendDeviceType"):
     _ascend_utils = MagicMock()
     _ascend_utils.AscendDeviceType = MagicMock()
     _ascend_utils.get_ascend_device_type = MagicMock()
     sys.modules["vllm_ascend.utils"] = _ascend_utils
+
+# NOTE: vllm_ascend.{ascend_config, memcache_comm_fence} and their helpers
+# (get_ascend_config, AttentionComputeStartGate, ...) are intentionally NOT
+# mocked here. Doing so by mutating these real modules leaks into every other
+# UT in the same pytest session (breaking test_ascend_config / test_platform,
+# which collect after ascend_store and bind the polluted symbols at import).
+# These helpers are mocked per-test, scoped to the ascend_store tests only,
+# via the autouse fixture in tests/ut/conftest.py.

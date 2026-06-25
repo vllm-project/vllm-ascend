@@ -270,7 +270,7 @@ QUANT_MODEL_PREFIX_MAPPINGS = {
 
 QUANT_MODEL_SUBSTR_MAPPINGS = {
     "deepseek_v4": {
-        ".attn.": ".sefl_attn.",
+        ".attn.": ".self_attn.",
         ".w1.": ".gate_proj.",
         ".w2.": ".down_proj.",
         ".w3.": ".up_proj.",
@@ -393,9 +393,13 @@ def create_scheme_for_layer(
     if scheme_cls is not None:
         return scheme_cls()
 
-    err_msg = f"Currently, vLLM Ascend doesn't support quant_type={quant_type} for layer_type={layer_type}."
-    logger.error(err_msg)
-    raise NotImplementedError(err_msg)
+    err_msg = (
+        "Currently, vLLM Ascend doesn't support quant_type=%s for layer_type=%s. "
+        "Please use a supported quantization format "
+        "or load the model with its original float weights."
+    )
+    logger.error(err_msg, quant_type, layer_type)
+    raise NotImplementedError(err_msg % (quant_type, layer_type))
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -493,6 +497,15 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
+        # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
+        # initialize lm_head with prefix="lm_head", while the quant description
+        # key is mapped to "language_model.lm_head.weight".
+        if (
+            prefix == "lm_head"
+            and "lm_head.weight" not in self.quant_description
+            and "language_model.lm_head.weight" in self.quant_description
+        ):
+            prefix = "language_model.lm_head"
         prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
         substr_mapping = QUANT_MODEL_SUBSTR_MAPPINGS.get(model_type)
         if prefix_mapping:
@@ -522,9 +535,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                     parts = parts[: exp_idx + 1]
                     prefix = ".".join(parts)
 
-        # TODO: remove it when vllm fixes the WeightsMapper bug of qwen3-vl.
-        if model_type in ["qwen3_vl"] and prefix == "lm_head":
-            prefix = "language_model.lm_head"
         if model_type in ["bailing_hybrid"]:
             # Adapt to bailing_hybrid architecture: update layer names to MoE convention
             prefix = prefix.replace("linear_attn", "attention")

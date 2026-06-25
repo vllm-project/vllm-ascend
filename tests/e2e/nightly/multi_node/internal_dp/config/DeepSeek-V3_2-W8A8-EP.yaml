@@ -21,8 +21,6 @@ env_common: &env_common
   HCCL_INTRA_PCIE_ENABLE: 1
   HCCL_INTRA_ROCE_ENABLE: 0
 
-special_dependencies:
-  transformers: "5.9.0"
 
 disaggregated_prefill:
   enabled: true
@@ -43,6 +41,7 @@ deployment:
           --data-parallel-start-rank 0
           --data-parallel-size-local 1
           --data-parallel-address $LOCAL_IP
+          --data-parallel-rpc-port 13389
           --tensor-parallel-size 16
           --enable-expert-parallel
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
@@ -62,7 +61,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
-          "engine_id": "0",
           "kv_connector_extra_config": {
                     "prefill": {
                             "dp_size": 2,
@@ -89,6 +87,7 @@ deployment:
           --data-parallel-start-rank 1
           --data-parallel-size-local 1
           --data-parallel-address $MASTER_IP
+          --data-parallel-rpc-port 13389
           --tensor-parallel-size 16
           --enable-expert-parallel
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
@@ -108,7 +107,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
-          "engine_id": "0",
           "kv_connector_extra_config": {
                     "prefill": {
                             "dp_size": 2,
@@ -153,7 +151,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30200",
-          "engine_id": "1",
           "kv_connector_extra_config": {
                       "prefill": {
                               "dp_size": 2,
@@ -200,7 +197,6 @@ deployment:
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30200",
-          "engine_id": "1",
           "kv_connector_extra_config": {
                       "prefill": {
                               "dp_size": 2,

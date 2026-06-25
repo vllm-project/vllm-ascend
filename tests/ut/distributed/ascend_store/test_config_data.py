@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import hashlib
 import unittest
 from unittest.mock import MagicMock
 
@@ -29,7 +30,22 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     PoolKey,
     ReqMeta,
     RequestTracker,
+    get_block_hashes,
 )
+
+_GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
+_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
+
+
+def _expected_grouped_hash(*block_hashes):
+    hasher = hashlib.sha256()
+    hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
+    hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
+    for block_hash in block_hashes:
+        hash_bytes = block_hash.encode("utf-8") if isinstance(block_hash, str) else bytes(block_hash)
+        hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
+        hasher.update(hash_bytes)
+    return hasher.digest()
 
 
 class TestKeyMetadata(unittest.TestCase):
@@ -93,8 +109,9 @@ class TestLayerPoolKey(unittest.TestCase):
         meta = KeyMetadata("model", 0, 0, 0, 0)
         k = LayerPoolKey(meta, "h1", 5)
         s = k.to_string()
-        self.assertIn("@5", s)
+        self.assertIn("@layer_id:5", s)
         self.assertIn("model", s)
+        self.assertTrue(s.endswith("@h1"))
 
 
 class TestChunkedTokenDatabase(unittest.TestCase):
@@ -139,6 +156,34 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         result = list(self.db.process_tokens(32, hashes))
         self.assertEqual(len(result), 2)
 
+    def test_process_tokens_rehashes_grouped_hashes(self):
+        db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None, hash_block_size=8)
+        result = list(db.process_tokens(32, ["a", "b", "c", "d"]))
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())
+        self.assertEqual(len(result[0][2].chunk_hash), 64)
+
+    def test_get_block_hashes_rehashes_grouped_str_hashes(self):
+        result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
+        self.assertEqual(
+            result,
+            [
+                _expected_grouped_hash("a", "b"),
+                _expected_grouped_hash("c", "d"),
+            ],
+        )
+
+    def test_get_block_hashes_rehashes_grouped_bytes_hashes(self):
+        result = get_block_hashes([b"a", b"b", b"c", b"d"], group_block_size=32, hash_block_size=16)
+        self.assertEqual(
+            result,
+            [
+                _expected_grouped_hash(b"a", b"b"),
+                _expected_grouped_hash(b"c", b"d"),
+            ],
+        )
+        self.assertEqual(len(result[0]), 32)
+
     def test_prepare_value(self):
         addr, size, block_id = self.db.prepare_value(0, 16, [5, 6, 7])
         self.assertEqual(block_id, 5)
@@ -157,9 +202,9 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
         self.assertEqual(block_id, 5)
         self.assertEqual(len(addr), 2)
-        # layer_id=0 => kv_caches_base_addr[0*2] and [0*2+... index mod length]
+        # layer_id=0 => kv_caches_base_addr[0*2 + i] per cache i
         self.assertEqual(addr[0], 1000 + 5 * 160)
-        self.assertEqual(addr[1], 1000 + 5 * 320)
+        self.assertEqual(addr[1], 2000 + 5 * 320)
 
     def test_decode_adaptor_prefill_pp_no_partitions(self):
         key, addr, size = self.db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])
@@ -334,7 +379,15 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, original_block_size=8)
+        # Provide block_hashes (2 full blocks for token_len=32 / granularity=16)
+        # so the boundary_without_hash short-circuit does not zero out the save
+        # length and skip; this exercises the original_block_size propagation.
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            original_block_size=8,
+            block_hashes=[b"h0", b"h1"],
+        )
         self.assertIsNotNone(meta)
         self.assertEqual(meta.original_block_size, 8)
 

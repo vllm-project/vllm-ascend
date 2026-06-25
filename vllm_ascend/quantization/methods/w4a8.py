@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_tensor_model_parallel_world_size
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -95,8 +95,6 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 256)
         quant_version = vllm_config.quant_config.quant_description.get("version", "0")
         self.new_quant_version = quant_version == "1.0.0"
-
-        from vllm.distributed import get_tensor_model_parallel_world_size
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -347,7 +345,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.W4A8
 
     def __init__(self):
-        self.ep_group = get_ep_group()
         self.supports_eplb = True
 
         vllm_config = get_current_vllm_config()
@@ -362,7 +359,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             self.weight_strategy = vllm_config.quant_config.quant_description.get("weight_strategy", "group")
 
-        self.tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else self.ep_group.world_size
+        self.tp_size = (
+            1 if vllm_config.parallel_config.enable_expert_parallel else get_tensor_model_parallel_world_size()
+        )
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         if self.new_quant_version and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
@@ -675,12 +674,12 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
 
-        def process_scale_compressed_tensors(scale: torch.Tensor):
+        def process_scale_compressed_tensors(scale: torch.Tensor, squeeze: bool = True):
             scale = scale.transpose(1, 2).to(torch.float32).contiguous()
             scale_np = scale.cpu().numpy()
             scale_np.dtype = np.uint32
             scale_uint64_tensor = torch.from_numpy(scale_np.astype(np.int64)).npu()
-            if self.is_per_channel_weight:
+            if self.is_per_channel_weight and squeeze:
                 return self.maybe_squeeze_per_channel_weight_scale(scale_uint64_tensor)
             return scale_uint64_tensor
 
@@ -709,7 +708,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         w2_bias = update_bias_compressed_tensors(layer.w2_weight.data, layer.w2_weight_scale.data, self.weight_strategy)
 
         layer.w13_weight_scale.data = process_scale_compressed_tensors(layer.w13_weight_scale.data)
-        layer.w2_weight_scale.data = process_scale_compressed_tensors(layer.w2_weight_scale.data)
+        # To use torch_npu.npu_grouped_matmul, keep w2_weigh_scale unsqueezed
+        layer.w2_weight_scale.data = process_scale_compressed_tensors(layer.w2_weight_scale.data, False)
 
         w13_scale_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
         layer.register_parameter("w13_scale_bias", w13_scale_bias)
