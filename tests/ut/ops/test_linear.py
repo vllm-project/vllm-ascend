@@ -196,8 +196,7 @@ class TestVisionModelParallelOpExclusion(unittest.TestCase):
                 return_value=False,
             ),
             patch(
-                "vllm_ascend.ops.linear_op.flashcomm2_oshard_manager"
-                ".flashcomm2_oshard_enable",
+                "vllm_ascend.ops.linear_op.flashcomm2_oshard_manager.flashcomm2_oshard_enable",
                 return_value=False,
             ),
             # FlashComm2 op construction reaches into tp/ascend groups; stub them
