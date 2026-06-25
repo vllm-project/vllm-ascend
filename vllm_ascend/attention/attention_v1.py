@@ -51,6 +51,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
     enable_cp,
+    needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
     using_paged_attention,
@@ -397,29 +398,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
-        # Gemma4 can mix attention layer shapes under the same graph bucket, so
-        # its FIA graph replay needs Gemma4-specific metadata/workspace handling.
-        self._use_gemma4_fia_graph_replay = self._is_gemma4_model(self.vllm_config)
-        self._use_max_workspace_for_fia_graph = self._use_gemma4_fia_graph_replay
+        self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay(self.vllm_config)
+        self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
         self.sinks = sinks
         self.layerIndex = 0
         self.enable_hamming_sparse = is_enable_hamming_sparse()
-        # Gemma4 graph replay cannot always rely on the iteration order of
-        # attn_metadata. Record the captured layer name only for that path.
+        # Some mixed-attention models cannot rely on the iteration order of
+        # attn_metadata during graph replay. Record the captured layer name only
+        # for that path.
         self._layer_name: str | None = None
-
-    @staticmethod
-    def _is_gemma4_model(vllm_config: VllmConfig) -> bool:
-        model_config = vllm_config.model_config
-        hf_config = getattr(model_config, "hf_config", None)
-        hf_text_config = getattr(model_config, "hf_text_config", None)
-        text_config = getattr(hf_config, "text_config", None)
-        model_types = (
-            getattr(hf_config, "model_type", None),
-            getattr(hf_text_config, "model_type", None),
-            getattr(text_config, "model_type", None),
-        )
-        return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -437,7 +424,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        use_gemma4_graph_replay = AscendAttentionBackendImpl._is_gemma4_model(vllm_config)
+        use_layer_aware_replay = needs_layer_aware_fia_graph_replay(vllm_config)
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:
@@ -520,7 +507,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             workspace = graph_params.workspaces.get(num_tokens)
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (graph_param_count // num_layers)
-            elif use_gemma4_graph_replay:
+            elif use_layer_aware_replay:
                 # One graph size can contain captured FIA ops from all layers.
                 # Repeat attn keys to match the captured op count, then use the
                 # stored layer name in each op param to resolve the exact
@@ -534,7 +521,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     handles,
                     events,
                 ):
-                    if use_gemma4_graph_replay and len(param) == 15:
+                    if use_layer_aware_replay:
                         (
                             query,
                             key_cache,
@@ -617,10 +604,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
-                if not use_gemma4_graph_replay:
+                if not use_layer_aware_replay:
                     # Keep the original speculative-decoding ordering for
-                    # non-Gemma4 models so this PR does not change EAGLE/DFlash
-                    # graph replay behavior.
+                    # other models so EAGLE/DFlash graph replay keeps the
+                    # original ordering.
                     attn_keys_length = len(graph_params.attn_params[num_tokens])
                     global _ATTN_KEYS_BUFFER
                     if _ATTN_KEYS_BUFFER is None:
@@ -651,7 +638,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             workspace = graph_params.workspaces.get(num_tokens)
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (graph_param_count // num_layers)
-            elif use_gemma4_graph_replay:
+            elif use_layer_aware_replay:
                 # Keep the replay loop length aligned with captured FIA ops;
                 # layer-specific metadata lookup below prevents global/sliding
                 # window layers from accidentally sharing the same metadata.
@@ -664,7 +651,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     handles,
                     events,
                 ):
-                    if use_gemma4_graph_replay and len(param) == 21:
+                    if use_layer_aware_replay:
                         (
                             query,
                             key_cache,
@@ -837,7 +824,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         workspace = graph_params.workspaces.get(num_tokens)
         should_update_workspace_cache = False
         if use_max_workspace:
-            # Gemma4 mixes attention layer shapes under the same graph size.
+            # Some models mix attention layer shapes under the same graph size.
             # During capture, keep the largest required workspace for that size.
             candidate_workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
@@ -924,7 +911,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )  # type: ignore
         else:
             attn_params = attn_params + (None, None, None, None)  # type: ignore
-        if self._use_gemma4_fia_graph_replay:
+        if self._use_layer_aware_fia_graph_replay:
             attn_params = attn_params + (self._graph_metadata_layer_name(layer),)  # type: ignore
         graph_params.attn_params[num_tokens].append(attn_params)
 
@@ -978,7 +965,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         workspace = graph_params.workspaces.get(num_tokens)
         should_update_workspace_cache = False
         if use_max_workspace:
-            # See full_graph_fia: Gemma4 needs the max workspace across layer
+            # See full_graph_fia: this path needs the max workspace across layer
             # variants sharing the same graph size.
             candidate_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                 query=query,
@@ -1462,7 +1449,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if self.enable_hamming_sparse:
             self.layerIndex = int(layer.layer_name.split(".")[2])
-        if self._use_gemma4_fia_graph_replay:
+        if self._use_layer_aware_fia_graph_replay:
             self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:
@@ -1527,7 +1514,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
-        if self._use_gemma4_fia_graph_replay:
+        if self._use_layer_aware_fia_graph_replay:
             self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:

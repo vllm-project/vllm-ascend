@@ -20,9 +20,9 @@ def cache_graph_workspace(
     *,
     use_max_workspace: bool,
 ) -> torch.Tensor:
-    # Non-Gemma4 keeps the original first-workspace cache behavior. Gemma4
-    # keeps the largest workspace seen for this graph size because its layers
-    # can require different FIA workspace sizes under the same num_tokens.
+    # Most models keep the original first-workspace cache behavior. Models with
+    # mixed attention layer shapes may need the largest workspace for a graph
+    # size because layers can require different FIA workspace sizes.
     current_workspace = graph_params.workspaces.get(num_tokens)
     if use_max_workspace:
         if current_workspace is None or (
@@ -33,6 +33,19 @@ def cache_graph_workspace(
     elif current_workspace is None:
         graph_params.workspaces[num_tokens] = candidate_workspace
     return graph_params.workspaces[num_tokens]
+
+
+def needs_layer_aware_fia_graph_replay(vllm_config: VllmConfig) -> bool:
+    model_config = vllm_config.model_config
+    hf_config = getattr(model_config, "hf_config", None)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    text_config = getattr(hf_config, "text_config", None)
+    model_types = (
+        getattr(hf_config, "model_type", None),
+        getattr(hf_text_config, "model_type", None),
+        getattr(text_config, "model_type", None),
+    )
+    return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
