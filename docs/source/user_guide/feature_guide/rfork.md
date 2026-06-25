@@ -25,7 +25,7 @@ The RFork loading flow in the current implementation is:
 
 - **Scale-out after a first successful load**: The first instance may still load from storage, but later instances with the same deployment identity can reuse it as a seed and shorten startup time.
 - **Elastic serving clusters**: Because RFork asks a planner for available seeds, it fits clusters where instances are created and reclaimed dynamically.
-- **Topology-sensitive deployments**: RFork encodes `kv_role`, `node_rank`, `tp_rank`, and optional `draft` role into the seed key, so only topology-compatible instances are matched together.
+- **Topology-sensitive deployments**: RFork encodes `kv_role`, `node_rank`, optional `pp_rank`, `tp_rank`, optional `ep_rank`, and optional `draft` role into the seed key, so only topology-compatible instances are matched together.
 
 ---
 
@@ -56,10 +56,13 @@ RFork does not match instances by `model_url` alone. The local seed key is compo
 - `model_deploy_strategy_name`
 - disaggregation mode derived from `kv_transfer_config.kv_role` or `kv_both`
 - `node_rank`
+- `pp_rank` when pipeline parallel size is greater than 1
 - `tp_rank`
+- `ep_rank` when expert parallelism is enabled for an MoE model
 - optional `draft` suffix when the worker runs as a draft model
 
 This means two instances must agree on both model identity and deployment topology before the planner will treat them as interchangeable seeds.
+For deployments without pipeline or expert parallelism, the existing seed-key format is unchanged.
 
 ### Quantized Models
 
@@ -149,4 +152,5 @@ vllm serve <model_path> \
 - RFork requires `YuanRong TransferEngine` at runtime. If the package is missing, RFork cannot initialize the transfer backend.
 - If RFORK is used, **each worker process** must bind a listening port. That port is assigned randomly.
 - RFork weight transfer does not support `additional_config.layer_sharding`. If `--load-format rfork` is used together with `layer_sharding`, RFork transfer is bypassed and the model is loaded through the default model loader.
+- RFork weight transfer does not support dynamic EPLB because expert weights and placement can change after the seed service starts. If `eplb_config.dynamic_eplb` or `eplb_config.expert_map_record_path` enables dynamic EPLB, RFork transfer is bypassed and the model is loaded through the default model loader.
 - The example [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol.
