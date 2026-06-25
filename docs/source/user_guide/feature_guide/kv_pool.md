@@ -1034,7 +1034,7 @@ Use **byte literals only** (`10737418240`). `10G` / `10GB` are ignored and fall 
 <details>
 <summary>Notes</summary>
 
-- `--max-num-batched-tokens` only chunks prefill compute; it does **not** reduce the memory required by `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`.
+* `--max-num-batched-tokens` only chunks prefill compute; it does **not** reduce the memory required by `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`.
 
 </details>
 
