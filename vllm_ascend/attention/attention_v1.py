@@ -883,9 +883,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # use default sparse_mode 0 in normal scenario, which means no mask works on it
         # Ensure actual_seq_qlen and actual_seq_kvlen end with 0 for EOD scenario
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
-        if actual_seq_qlen and actual_seq_qlen[-1] != 0:
+        if query.shape[0] > actual_seq_qlen[-1]:
             actual_seq_qlen = actual_seq_qlen + [0]
-        actual_seq_kvlen = actual_seq_qlen
         return torch_npu.npu_fusion_attention(
             query=query,
             key=key,
@@ -894,7 +893,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             input_layout="TND",
             scale=self.scale,
             actual_seq_qlen=actual_seq_qlen,
-            actual_seq_kvlen=actual_seq_kvlen,
+            actual_seq_kvlen=actual_seq_qlen,
         )[0]
 
     def reshape_and_cache(
