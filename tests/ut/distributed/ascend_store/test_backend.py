@@ -297,11 +297,17 @@ class TestYuanrongHelper(unittest.TestCase):
         # Should have hash suffix
         self.assertIn("__", result[0])
 
-    def test_normalize_keys_long_key(self):
-        long_key = "a" * 300
+    def test_normalize_keys_at_max_length(self):
+        max_length_key = "a" * 1024
+        result = self.helper.normalize_keys([max_length_key])
+        self.assertEqual(result, [max_length_key])
+
+    def test_normalize_keys_over_max_length(self):
+        long_key = "a" * 1025
         result = self.helper.normalize_keys([long_key])
         self.assertEqual(len(result), 1)
-        self.assertLessEqual(len(result[0]), 255)
+        self.assertEqual(len(result[0]), 1024)
+        self.assertIn("__", result[0])
 
     def test_make_blob_lists(self):
         self.helper._device_id = 0
