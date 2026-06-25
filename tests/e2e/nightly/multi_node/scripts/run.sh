@@ -310,6 +310,12 @@ aop_pipeline() {
     fi
     echo "  Classify result: env_count=${env_count}"
 
+    if [ "$found_any" -eq 0 ]; then
+        echo "  Decision: no pod logs → SKIP"
+        echo "=== AOP Pipeline (Pod) - END (no logs) ==="
+        return 1
+    fi
+
     if [ "$env_count" -gt 0 ]; then
         echo "  Decision: env_failure → SKIP"
         echo "=== AOP Pipeline (Pod) - END (env skip) ==="
