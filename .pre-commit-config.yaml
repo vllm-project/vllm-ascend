@@ -117,7 +117,7 @@ repos:
   - id: check-long-functions
     name: Check that new functions over 100 lines have comments
     entry: python tools/check_long_functions.py
-    language: system
+    language: python
     types: [python]
   # Keep `suggestion` last
   - id: suggestion
