@@ -1846,7 +1846,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(seen_group_ids, expected_group_ids)
         self.assertEqual(finish_count_by_group, expected_finishes)
 
-    def test_hybrid_mixed_mla_qga_group_uses_layer_level_pull_plans(self):
+    def test_hybrid_mixed_mla_qga_group_reuses_qga_transfer_slots(self):
         with patch.object(
             self.vllm_config.kv_transfer_config,
             "get_from_extra_config",
@@ -1877,8 +1877,21 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                         "model.layers.32.self_attn",
                     ],
                     "kv_cache_spec": {
-                        "model.layers.0.self_attn": {"num_kv_heads": 1},
-                        "model.layers.32.self_attn": {"num_kv_heads": 8},
+                        "model.layers.0.self_attn": {
+                            "block_size": 16,
+                            "num_kv_heads": 1,
+                            "head_size": 576,
+                            "dtype": "torch.bfloat16",
+                            "cache_dtype_str": "fp8_ds_mla",
+                            "compress_ratio": 1,
+                            "model_version": "v32",
+                        },
+                        "model.layers.32.self_attn": {
+                            "block_size": 16,
+                            "num_kv_heads": 2,
+                            "head_size": 128,
+                            "dtype": "torch.bfloat16",
+                        },
                     },
                 },
                 [0, 32],
@@ -1889,14 +1902,15 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(
             plans,
             (
-                type(plans[0])(0, 1, 1, (0,)),
-                type(plans[1])(0, 8, 2, (32,)),
+                type(plans[0])(0, 1, 1, (0,), 8, 2, False),
+                type(plans[1])(0, 8, 2, (32,), 8, 2, True),
             ),
         )
         self.assertIs(plans, worker._get_attention_group_pull_plans(8))
 
         chosen_ranks, rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls("req_mixed", 8)
         self.assertEqual(sorted(chosen_ranks), sorted(rank_group_pulls))
+        self.assertEqual(len(chosen_ranks), 2)
 
         pulls = [pull for remote_rank in chosen_ranks for pull in rank_group_pulls[remote_rank]]
         mla_pulls = [pull for pull in pulls if pull.layer_indices == (0,)]
@@ -1904,12 +1918,26 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         self.assertEqual(len(mla_pulls), 1)
         self.assertEqual(mla_pulls[0].num_group_pulls, 1)
+        self.assertEqual(mla_pulls[0].remote_tp_offset, 0)
         self.assertTrue(mla_pulls[0].is_group_transfer_end)
 
         self.assertEqual(len(qga_pulls), 2)
         self.assertEqual({pull.remote_tp_offset for pull in qga_pulls}, {0, 1})
         self.assertTrue(all(pull.num_group_pulls == 2 for pull in qga_pulls))
         self.assertEqual(sum(pull.is_group_transfer_end for pull in qga_pulls), 1)
+
+        qga_transfer_slots = 0
+        mla_reused_slots = 0
+        for tp_rank in range(4):
+            worker.tp_rank = tp_rank
+            chosen_ranks, rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls("req_mixed", 8)
+            self.assertEqual(len(chosen_ranks), 2)
+            pulls = [pull for remote_rank in chosen_ranks for pull in rank_group_pulls[remote_rank]]
+            qga_transfer_slots += sum(pull.layer_indices == (32,) for pull in pulls)
+            mla_reused_slots += sum(pull.layer_indices == (0,) for pull in pulls)
+
+        self.assertEqual(qga_transfer_slots, 8)
+        self.assertEqual(mla_reused_slots, 4)
 
     def test_pd_disaggregated_split_cross_covers_prefix_tp_cp_pp(self):
         cases: list[dict[str, Any]] = [

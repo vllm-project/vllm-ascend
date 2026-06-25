@@ -139,6 +139,9 @@ class AttentionGroupPullPlan:
     num_key_value_heads: int
     num_group_pulls: int
     layer_indices: tuple[int, ...]
+    transfer_num_key_value_heads: int | None = None
+    transfer_num_group_pulls: int | None = None
+    owns_transfer_slots: bool = True
 
 
 @dataclass
@@ -2538,16 +2541,27 @@ class MooncakeConnectorWorker:
                 continue
 
         for plan in self._get_attention_group_pull_plans(prefill_tp_size):
+            transfer_num_key_value_heads = plan.transfer_num_key_value_heads or plan.num_key_value_heads
+            transfer_num_group_pulls = plan.transfer_num_group_pulls or plan.num_group_pulls
             chosen_rank_list = self._get_remote_rank_for_num_key_value_heads(
-                req_id, prefill_tp_size, plan.num_key_value_heads
+                req_id, prefill_tp_size, transfer_num_key_value_heads
             )
-            assert len(chosen_rank_list) == plan.num_group_pulls * self._prefill_pp_size, (
-                f"chosen_rank_list({chosen_rank_list}) does not match num_group_pulls({plan.num_group_pulls}) "
+            assert len(chosen_rank_list) == transfer_num_group_pulls * self._prefill_pp_size, (
+                f"chosen_rank_list({chosen_rank_list}) does not match "
+                f"transfer_num_group_pulls({transfer_num_group_pulls}) "
                 f"and prefill pp size({self._prefill_pp_size})."
             )
+            assert transfer_num_group_pulls % plan.num_group_pulls == 0, (
+                f"transfer_num_group_pulls({transfer_num_group_pulls}) must be divisible by "
+                f"num_group_pulls({plan.num_group_pulls})."
+            )
+            slot_stride = transfer_num_group_pulls // plan.num_group_pulls
             for rank_idx, remote_rank in enumerate(chosen_rank_list):
-                prefill_pp_rank = rank_idx // plan.num_group_pulls
-                remote_tp_offset = rank_idx % plan.num_group_pulls
+                prefill_pp_rank = rank_idx // transfer_num_group_pulls
+                transfer_tp_offset = rank_idx % transfer_num_group_pulls
+                if not plan.owns_transfer_slots and transfer_tp_offset % slot_stride != 0:
+                    continue
+                remote_tp_offset = transfer_tp_offset // slot_stride
                 add_group_pull(
                     remote_rank,
                     GroupPull(
@@ -2585,17 +2599,30 @@ class MooncakeConnectorWorker:
     ) -> int:
         kv_cache_spec = group_spec.get("kv_cache_spec", {})
 
+        def is_serialized_kv_cache_spec(spec: Any) -> bool:
+            return isinstance(spec, dict) and "block_size" in spec and "head_size" in spec
+
+        def is_mla_spec(spec: Any) -> bool:
+            if isinstance(spec, dict):
+                return any(key in spec for key in ("cache_dtype_str", "compress_ratio", "model_version"))
+            return any(hasattr(spec, key) for key in ("cache_dtype_str", "compress_ratio", "model_version"))
+
+        def to_global_num_key_value_heads(spec: Any, num_key_value_heads: int) -> int:
+            if is_serialized_kv_cache_spec(spec) and not is_mla_spec(spec):
+                return num_key_value_heads * self.tp_size
+            return num_key_value_heads
+
         def get_spec_heads(spec: Any) -> int | None:
             if isinstance(spec, dict):
                 for key in ("num_kv_heads", "num_key_value_heads"):
                     num_key_value_heads = spec.get(key)
                     if isinstance(num_key_value_heads, int):
-                        return num_key_value_heads
+                        return to_global_num_key_value_heads(spec, num_key_value_heads)
             else:
                 for key in ("num_kv_heads", "num_key_value_heads"):
                     num_key_value_heads = getattr(spec, key, None)
                     if isinstance(num_key_value_heads, int):
-                        return num_key_value_heads
+                        return to_global_num_key_value_heads(spec, num_key_value_heads)
             return None
 
         if isinstance(kv_cache_spec, dict):
@@ -2637,15 +2664,31 @@ class MooncakeConnectorWorker:
                     num_group_pulls = self._get_attention_num_need_pulls(num_key_value_heads, prefill_tp_size)
                     grouped_layers.setdefault((num_key_value_heads, num_group_pulls), []).append(layer_idx)
 
+            transfer_num_key_value_heads = max(num_key_value_heads for num_key_value_heads, _ in grouped_layers)
+            transfer_num_group_pulls = self._get_attention_num_need_pulls(
+                transfer_num_key_value_heads, prefill_tp_size
+            )
+            has_mixed_transfer_heads = len({num_key_value_heads for num_key_value_heads, _ in grouped_layers}) > 1
+            owns_transfer_slot_assigned = False
+
             for (num_key_value_heads, num_group_pulls), plan_layer_indices in grouped_layers.items():
+                owns_transfer_slots = (
+                    not has_mixed_transfer_heads or num_key_value_heads == transfer_num_key_value_heads
+                )
+                if owns_transfer_slots:
+                    owns_transfer_slot_assigned = True
                 plans.append(
                     AttentionGroupPullPlan(
                         group_id=group_id,
                         num_key_value_heads=num_key_value_heads,
                         num_group_pulls=num_group_pulls,
                         layer_indices=tuple(plan_layer_indices),
+                        transfer_num_key_value_heads=transfer_num_key_value_heads,
+                        transfer_num_group_pulls=transfer_num_group_pulls,
+                        owns_transfer_slots=owns_transfer_slots,
                     )
                 )
+            assert owns_transfer_slot_assigned, f"No transfer-slot owner found for attention group {group_id}."
 
         cached_plans = tuple(plans)
         self._attention_group_pull_plan_cache[prefill_tp_size] = cached_plans
@@ -2763,6 +2806,9 @@ class MooncakeConnectorWorker:
         return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
+        if self._is_hma_required:
+            chosen_ranks, _ = self._get_hybrid_remote_rank_group_pulls(req_id, self._prefill_tp_size)
+            return chosen_ranks
         return sum(self._get_remote_ranks_for_req(req_id), [])
 
     def _get_remote_rank(self, req_id: str, prefill_tp_size: int | None = None) -> list[int]:
