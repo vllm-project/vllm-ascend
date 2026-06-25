@@ -210,6 +210,7 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
+    mkdir -p "${LOG_PREFIX}"
 
     echo "====> Run pytest entry: $MULTI_NODE_TEST_PATH"
     local log_file="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-?}_pytest.log"
