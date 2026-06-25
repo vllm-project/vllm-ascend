@@ -2040,4 +2040,9 @@ test_bad_desc,[Bug]: Got error,[Bug],open,,2026-06-25T00:00:00Z,Help me check,"{
         ""Specify the environment such as vLLM version, GPU type (e.g., A5), and operating system"",
         ""Explain what you expected to happen versus what actually happened""
     ]
-}",false,,,,,
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""The Review Bot correctly identified the lack of useful information. The ok=false judgment is appropriate given the extremely vague description. The reasoning is consistent with the judgment. The suggestions are specific, actionable, and do not use mandatory language. All listed missing items are genuinely absent from the original content.""
+}",true,true,true,"The Review Bot correctly identified the lack of useful information. The ok=false judgment is appropriate given the extremely vague description. The reasoning is consistent with the judgment. The suggestions are specific, actionable, and do not use mandatory language. All listed missing items are genuinely absent from the original content."
