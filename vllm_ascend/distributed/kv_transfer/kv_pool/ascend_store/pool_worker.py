@@ -528,7 +528,7 @@ class KVPoolWorker:
                         skip_null = (
                             group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
                         )
-                        for start, end, key, _ in self.token_database.process_tokens_with_block_ids(
+                        for start, end, key, block_id in self.token_database.process_tokens_with_block_ids(
                             token_len,
                             request.block_hashes,
                             block_ids,
@@ -543,6 +543,7 @@ class KVPoolWorker:
                                 end,
                                 block_ids,
                                 kv_cache_group_id=group_id,
+                                block_id=block_id,
                             )
                             key_list.append(key.to_string())
                             addr_list.append(addr)
