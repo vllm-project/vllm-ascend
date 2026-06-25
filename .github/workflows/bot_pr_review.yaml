@@ -87,7 +87,8 @@ jobs:
         run: |
           python .github/workflows/scripts/robot/handle_review.py \
             --input description_result.json \
-            --label-output label_actions.json
+            --label-output label_actions.json \
+            --kind pr
 
       # Step 6: Manage labels (add/remove need-detail-desc)
       - name: Manage labels
