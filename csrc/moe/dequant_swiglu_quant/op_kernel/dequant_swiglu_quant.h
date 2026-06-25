@@ -631,11 +631,19 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::SwiGluGate(
     LocalTensor<float> tmpUbF32 = tmpBuf1_.AllocTensor<float>();
     LocalTensor<float> tmpUbF32Act = tmpUbF32;
     LocalTensor<float> tmpUbF32Gate = tmpUbF32[calEleNum];
-    // 前一半作为 tmpUbF32Act，后一半作为 tmpUbF32Gate
-    CopyLocalContiguousFloat(tmpUbF32Act, xLocalF32, calEleNum);
-    CopyLocalContiguousFloat(tmpUbF32Gate, xLocalF32[calEleNum], calEleNum);
+    SetMaskCount();
+    SetVectorMask<float, MaskMode::COUNTER>(tl_->UbFactorDimy);
+    Copy<float, false>(
+    tmpUbF32Act, xLocalF32[actOffset_], AscendC::MASK_PLACEHOLDER, proDimsx,
+    {1, 1, static_cast<uint16_t>(tl_->UbFactorDimy / BLOCK_ELEM),
+        static_cast<uint16_t>(tl_->UbFactorDimy / BLOCK_ELEM * SWI_FACTOR)});
+    Copy<float, false>(
+    tmpUbF32Gate, xLocalF32[gateOffset_], AscendC::MASK_PLACEHOLDER, proDimsx,
+    {1, 1, static_cast<uint16_t>(tl_->UbFactorDimy / BLOCK_ELEM),
+        static_cast<uint16_t>(tl_->UbFactorDimy / BLOCK_ELEM * SWI_FACTOR)});
+    SetMaskNorm();
+    ResetMask();
     PipeBarrier<PIPE_V>();
-
     if (tl_->clampLimit > 0.0f) {
         // tmpUbF32Gate
         Mins(tmpUbF32Gate, tmpUbF32Gate, tl_->clampLimit, calEleNum);
@@ -643,11 +651,10 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::SwiGluGate(
         Maxs(tmpUbF32Gate, tmpUbF32Gate, -(tl_->clampLimit), calEleNum);
         PipeBarrier<PIPE_V>();
     }
-    Adds(tmpUbF32Gate, tmpUbF32Gate, tl_->gluBias, calEleNum);
-    PipeBarrier<PIPE_V>();
-
+        Adds(tmpUbF32Gate, tmpUbF32Gate, tl_->gluBias, calEleNum);
+        PipeBarrier<PIPE_V>();
     if (tl_->clampLimit > 0.0f) {
-        // tmpUbF32Act
+    // tmpUbF32Act
         Mins(tmpUbF32Act, tmpUbF32Act, tl_->clampLimit, calEleNum);
         PipeBarrier<PIPE_V>();
     }
@@ -655,7 +662,7 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::SwiGluGate(
     PipeBarrier<PIPE_V>();
     Exp(xLocalF32, xLocalF32, calEleNum);
     PipeBarrier<PIPE_V>();
-    Adds(xLocalF32, xLocalF32, (float)1.0, calEleNum);
+    Adds(xLocalF32, xLocalF32,  static_cast<float>(1.0), calEleNum);
     PipeBarrier<PIPE_V>();
     Div(tmpUbF32Act, tmpUbF32Act, xLocalF32, calEleNum);
     PipeBarrier<PIPE_V>();

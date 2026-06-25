@@ -161,7 +161,7 @@ class AisbenchRunner:
             content = re.sub(r"ignore_eos.*", "ignore_eos=True,", content)
         if self.task_type == "accuracy":
             content = re.sub(r"temperature.*", "temperature=0.6,", content)
-        if self.temperature:
+        if self.temperature is not None:
             content = re.sub(r"temperature.*", f"temperature={self.temperature},", content)
         if self.no_pred:
             content = re.sub(r"pred_postprocessor.*", "#pred_postprocessor", content)

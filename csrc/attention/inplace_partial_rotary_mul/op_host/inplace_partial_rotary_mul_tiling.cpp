@@ -62,6 +62,20 @@ ge::graphStatus Tiling4RotaryPositionEmbedding(gert::TilingContext *context)
                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     auto socVersion = ascendcPlatform.GetSocVersion();
+    auto xDesc = context->GetInputDesc(0);
+    auto cosDesc = context->GetInputDesc(1);
+    auto sinDesc = context->GetInputDesc(2);
+    OPS_ERR_IF(xDesc == nullptr || cosDesc == nullptr || sinDesc == nullptr,
+               OPS_REPORT_VECTOR_INNER_ERR("Tiling4RotaryPositionEmbedding", "input desc is null"),
+               return ge::GRAPH_FAILED);
+    bool useFp32Rope = xDesc->GetDataType() != ge::DT_FLOAT &&
+                       cosDesc->GetDataType() == ge::DT_FLOAT &&
+                       sinDesc->GetDataType() == ge::DT_FLOAT;
+    bool supportFp32Rope = socVersion == platform_ascendc::SocVersion::ASCEND910B ||
+                           socVersion == platform_ascendc::SocVersion::ASCEND910_93;
+    if (useFp32Rope && supportFp32Rope) {
+        return Tiling4InplacePartialRotaryMul(context);
+    }
     if (socVersion == platform_ascendc::SocVersion::ASCEND950)
     {
         std::vector<std::unique_ptr<RopeRegBaseTilingClass>> regBaseTilingCases;

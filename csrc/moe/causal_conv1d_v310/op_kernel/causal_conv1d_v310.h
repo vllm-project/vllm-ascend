@@ -64,6 +64,9 @@ private:
     TEventID outVToMte3Event_[2];
     TEventID stateWritebackMte3ToVEvent_;
     TEventID stateWritebackMte3ToMte2Event_;
+    TEventID stateShiftMte2ToMte3Event_;
+    TEventID stateShiftMte3ToMte2Event_;
+    TEventID stateShiftVToMte3Event_;
     TEventID specWritebackMte2ToMte3Event_[2];
     TEventID specWritebackMte3ToMte2Event_[2];
 
@@ -137,6 +140,9 @@ __aicore__ inline void CausalConv1dV310<T>::AllocEvents()
     outVToMte3Event_[1] = GetTPipePtr()->AllocEventID<HardEvent::V_MTE3>();
     stateWritebackMte3ToVEvent_ = GetTPipePtr()->AllocEventID<HardEvent::MTE3_V>();
     stateWritebackMte3ToMte2Event_ = GetTPipePtr()->AllocEventID<HardEvent::MTE3_MTE2>();
+    stateShiftMte2ToMte3Event_ = GetTPipePtr()->AllocEventID<HardEvent::MTE2_MTE3>();
+    stateShiftMte3ToMte2Event_ = GetTPipePtr()->AllocEventID<HardEvent::MTE3_MTE2>();
+    stateShiftVToMte3Event_ = GetTPipePtr()->AllocEventID<HardEvent::V_MTE3>();
     specWritebackMte2ToMte3Event_[0] = GetTPipePtr()->AllocEventID<HardEvent::MTE2_MTE3>();
     specWritebackMte2ToMte3Event_[1] = GetTPipePtr()->AllocEventID<HardEvent::MTE2_MTE3>();
     specWritebackMte3ToMte2Event_[0] = GetTPipePtr()->AllocEventID<HardEvent::MTE3_MTE2>();
@@ -158,6 +164,9 @@ __aicore__ inline void CausalConv1dV310<T>::ReleaseEvents()
     GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE3>(outVToMte3Event_[1]);
     GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_V>(stateWritebackMte3ToVEvent_);
     GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_MTE2>(stateWritebackMte3ToMte2Event_);
+    GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_MTE3>(stateShiftMte2ToMte3Event_);
+    GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
+    GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE3>(stateShiftVToMte3Event_);
     GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_MTE3>(specWritebackMte2ToMte3Event_[0]);
     GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_MTE3>(specWritebackMte2ToMte3Event_[1]);
     GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_MTE2>(specWritebackMte3ToMte2Event_[0]);
@@ -224,6 +233,13 @@ __aicore__ inline void CausalConv1dV310<T>::InitRing(int32_t cacheIdx, bool hasI
     const int32_t ringStart = MAX_WIDTH - width;
     LocalTensor<T> ring = inBuf.Get<T>();
 
+    for (int32_t i = 0; i < ringStart; ++i) {
+        Duplicate(ring[i * MAX_BLOCK_DIM], static_cast<T>(0), dimTileSize);
+    }
+    if (ringStart > 0) {
+        PipeBarrier<PIPE_V>();
+    }
+
     if (hasInit) {
         for (int32_t i = 0; i < (width - 1); ++i) {
             const int32_t pos = stateTokenOffset + i;
@@ -286,7 +302,7 @@ __aicore__ inline void CausalConv1dV310<T>::RunSeq(int32_t start, int32_t len, i
             const int32_t tap = (MAX_WIDTH - 1) - j;
             const int32_t slot = (tap == 0) ? slotCurr : SlotHist(t, tap);
             Cast(tmpF, ring[slot * MAX_BLOCK_DIM], RoundMode::CAST_NONE, dimTileSize);
-            //            PipeBarrier<PIPE_V>();
+            PipeBarrier<PIPE_V>();
             MulAddDst(accF, tmpF, weightF[j * MAX_BLOCK_DIM], dimTileSize);
         }
 
@@ -346,12 +362,13 @@ __aicore__ inline void CausalConv1dV310<T>::WriteBackState(int32_t cacheIdx, int
 
     const int32_t lastT = len - 1;
     LocalTensor<T> ring = inBuf.Get<T>();
+    const int32_t lastSlot = SlotCurr(lastT);
+    const int64_t stateBaseOffset = static_cast<int64_t>(cacheIdx) * stateLen * dim + c0;
 
     for (int32_t pos = 0; pos < (width - 1); ++pos) {
         const int32_t tap = (width - 2) - pos;
-        const int32_t slot = (tap == 0) ? SlotCurr(lastT) : SlotHist(lastT, tap);
-        const int64_t stateOffset =
-            static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(pos) * dim + c0;
+        const int32_t slot = RetreatRingSlot(lastSlot, tap);
+        const int64_t stateOffset = stateBaseOffset + static_cast<int64_t>(pos) * dim;
         DataCopy(convStatesGm[stateOffset], ring[slot * MAX_BLOCK_DIM], dimTileSize);
     }
 }
@@ -392,20 +409,24 @@ __aicore__ inline void CausalConv1dV310<T>::WriteBackStateSpec(int32_t cacheIdx,
             static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(srcPos1) * dim + c0;
         DataCopy(buf0, convStatesGm[srcOffset0], dimTileSize);
         DataCopy(buf1, convStatesGm[srcOffset1], dimTileSize);
-        PipeBarrier<PIPE_MTE2>();
+        SetFlag<HardEvent::MTE2_MTE3>(stateShiftMte2ToMte3Event_);
+        WaitFlag<HardEvent::MTE2_MTE3>(stateShiftMte2ToMte3Event_);
         const int64_t dstOffset0 = static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(0) * dim + c0;
         const int64_t dstOffset1 = static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(1) * dim + c0;
         DataCopy(convStatesGm[dstOffset0], buf0, dimTileSize);
         DataCopy(convStatesGm[dstOffset1], buf1, dimTileSize);
-        PipeBarrier<PIPE_MTE3>();
+        SetFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
+        WaitFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
     } else {
         Duplicate(buf0, static_cast<T>(0), dimTileSize);
-        PipeBarrier<PIPE_V>();
+        SetFlag<HardEvent::V_MTE3>(stateShiftVToMte3Event_);
+        WaitFlag<HardEvent::V_MTE3>(stateShiftVToMte3Event_);
         const int64_t dstOffset0 = static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(0) * dim + c0;
         const int64_t dstOffset1 = static_cast<int64_t>(cacheIdx) * stateLen * dim + static_cast<int64_t>(1) * dim + c0;
         DataCopy(convStatesGm[dstOffset0], buf0, dimTileSize);
         DataCopy(convStatesGm[dstOffset1], buf0, dimTileSize);
-        PipeBarrier<PIPE_MTE3>();
+        SetFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
+        WaitFlag<HardEvent::MTE3_MTE2>(stateShiftMte3ToMte2Event_);
     }
 
     const int64_t xOffset0 = static_cast<int64_t>(start) * dim + c0;
@@ -500,7 +521,9 @@ __aicore__ inline void CausalConv1dV310<T>::Process()
             cacheIdx = static_cast<int32_t>(cacheIdx64);
         }
 
-        const bool hasInit = (tilingData_->hasInitialStateMode != 0) ? (initialStateModeGm.GetValue(seq) != 0) : true;
+        const bool hasInit = (tilingData_->hasInitialStateMode != 0)
+                                 ? (initialStateModeGm.GetValue(seq) != 0)
+                                 : (tilingData_->runMode == 1);
         int32_t stateTokenOffset = 0;
         if (isSpecDecodingGlobal) {
             int32_t accepted = static_cast<int32_t>(numAcceptedTokensGm.GetValue(seq));
@@ -534,6 +557,11 @@ __aicore__ inline void CausalConv1dV310<T>::Process()
         } else {
             WriteBackState(cacheIdx, len, c0, dimTileSizeActual, dim);
         }
+
+        SetFlag<HardEvent::MTE3_V>(stateWritebackMte3ToVEvent_);
+        WaitFlag<HardEvent::MTE3_V>(stateWritebackMte3ToVEvent_);
+        SetFlag<HardEvent::MTE3_MTE2>(stateWritebackMte3ToMte2Event_);
+        WaitFlag<HardEvent::MTE3_MTE2>(stateWritebackMte3ToMte2Event_);
 
         PipeBarrier<PIPE_V>();
         PipeBarrier<PIPE_MTE2>();

@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
+import numpy as np
 import torch
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, BlockHashListWithBlockSize
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.core.sched.output import NewRequestData
+
+from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
+
+_GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
+_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
 
 
 # Parameters related to the key
@@ -109,7 +116,8 @@ class LayerPoolKey(PoolKey):
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
-            f"@{self.chunk_hash}@{self.layer_id}"
+            f"@layer_id:{self.layer_id}"
+            f"@{self.chunk_hash}"
         )
 
 
@@ -197,17 +205,14 @@ def infer_group_cache_families(
 class ChunkedTokenDatabase:
     def __init__(
         self,
-        metadata: KeyMetadata,
-        block_size: int | list[int],
+        metadata: list[KeyMetadata],
+        block_size: list[int],
         partitions: list[int] | None,
         use_hybrid: bool = False,
         hash_block_size: int | None = None,
     ):
         self.metadata = metadata
-        self.block_size = block_size if isinstance(block_size, list) else [block_size]
-        self.kv_caches_base_addr: list[int] = []
-        self.block_len: list[int] = []
-        self.block_stride: list[int] = []
+        self.block_size = block_size
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
@@ -234,28 +239,20 @@ class ChunkedTokenDatabase:
         assert self.metadata is not None
         if cache_family is None:
             cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
+        group_metadata = self.metadata[kv_cache_group_id]
         return PoolKey(
             KeyMetadata(
-                model_name=self.metadata.model_name,
-                head_or_tp_rank=self.metadata.head_or_tp_rank,
-                pcp_rank=self.metadata.pcp_rank,
-                dcp_rank=self.metadata.dcp_rank,
-                pp_rank=self.metadata.pp_rank,
+                model_name=group_metadata.model_name,
+                head_or_tp_rank=group_metadata.head_or_tp_rank,
+                pcp_rank=group_metadata.pcp_rank,
+                dcp_rank=group_metadata.dcp_rank,
+                pp_rank=group_metadata.pp_rank,
                 kv_cache_group_id=kv_cache_group_id,
                 cache_role=cache_role,
                 cache_family=cache_family,
             ),
             chunk_hash,
         )
-
-    def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
-        self.kv_caches_base_addr = kv_caches_base_addr
-
-    def set_block_len(self, block_len: list[int]):
-        self.block_len = block_len
-
-    def set_block_stride(self, block_stride: list[int]):
-        self.block_stride = block_stride
 
     def get_block_size(self, kv_cache_group_id: int) -> int:
         if kv_cache_group_id >= len(self.block_size):
@@ -284,13 +281,15 @@ class ChunkedTokenDatabase:
         if group_num_layers is not None:
             self.group_num_layers[cache_role] = group_num_layers.copy()
 
-    def _get_group_buffers(self, kv_cache_group_id: int, cache_role: str) -> tuple[list[int], list[int], list[int]]:
+    def _get_group_buffers(
+        self, kv_cache_group_id: int, cache_role: str = "kv"
+    ) -> tuple[list[int], list[int], list[int] | None]:
         if cache_role == "state":
             return [], [], []
         return (
-            self.group_kv_caches_base_addr.get(kv_cache_group_id, self.kv_caches_base_addr),
-            self.group_block_len.get(kv_cache_group_id, self.block_len),
-            self.group_block_stride.get(kv_cache_group_id, self.block_stride),
+            self.group_kv_caches_base_addr[kv_cache_group_id],
+            self.group_block_len[kv_cache_group_id],
+            self.group_block_stride.get(kv_cache_group_id),
         )
 
     def prepare_value(
@@ -318,19 +317,30 @@ class ChunkedTokenDatabase:
             size_list.append(size)
         return addr_list, size_list, block_id
 
+    def prepare_block_info(self, start: int, end: int, block_ids: list[int]) -> tuple[int, list[int]]:
+        block_size = self.block_size[0]
+        block_id = block_ids[start // block_size]
+        block_len = self.group_block_len.get(0, [])
+        size_list = []
+        for i in range(len(block_len)):
+            size = int(block_len[i] / block_size * (end - start))
+            size_list.append(size)
+        return block_id, size_list
+
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         group_block_size = self.get_block_size(0)
         block_id = block_ids[start // group_block_size]
         addr_list: list[int] = []
         size_list: list[int] = []
-        length = len(self.block_len)
+        group_addrs, group_block_len, group_block_stride = self._get_group_buffers(0)
+        length = len(group_block_len)
         for i in range(length):
-            block_stride = self.block_stride[i] if self.block_stride else self.block_len[i]
-            addr = self.kv_caches_base_addr[layer_id * length] + block_id * block_stride
-            size = int(self.block_len[i] / group_block_size * (end - start))
+            block_stride = group_block_stride[i] if group_block_stride else group_block_len[i]
+            addr = group_addrs[layer_id * length + i] + block_id * block_stride
+            size = int(group_block_len[i] / group_block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
-        return addr_list, size_list
+        return addr_list, size_list, block_id
 
     def process_tokens(
         self,
@@ -345,6 +355,10 @@ class ChunkedTokenDatabase:
         if not block_hashes:
             return
         group_block_size = self.get_block_size(kv_cache_group_id)
+        if cache_family is None:
+            cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
+        cache_family_ratio = max(infer_cache_family_ratio(cache_family), 1)
+        group_block_size *= cache_family_ratio
         block_hashes = get_block_hashes(
             block_hashes,
             group_block_size,
@@ -354,7 +368,7 @@ class ChunkedTokenDatabase:
             return
         if not isinstance(block_hashes[0], str):
             block_hashes = [
-                h.hex()  # type: ignore[union-attr]
+                h.hex() if not isinstance(h, str) else h  # type: ignore[union-attr]
                 for h in block_hashes
             ]
         start_idx = 0
@@ -366,6 +380,10 @@ class ChunkedTokenDatabase:
             if start_idx < mask_num:
                 continue
             else:
+                start_idx //= cache_family_ratio
+                end_idx //= cache_family_ratio
+                if end_idx <= start_idx:
+                    continue
                 yield (
                     start_idx,
                     end_idx,
@@ -451,13 +469,33 @@ def get_block_hashes(
     if group_block_size == hash_block_size:
         return block_hashes
     assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
-    if isinstance(block_hashes[0], str):
-        scale_factor = group_block_size // hash_block_size
-        return [
-            "".join(block_hashes[idx : idx + scale_factor])
-            for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
-        ]
-    return BlockHashListWithBlockSize(block_hashes, hash_block_size, group_block_size)
+    scale_factor = group_block_size // hash_block_size
+    return [
+        _rehash_block_hash_group(block_hashes[idx : idx + scale_factor])
+        for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
+    ]
+
+
+def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
+    hasher = hashlib.sha256()
+    hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
+    hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
+    for block_hash in block_hashes:
+        hash_bytes = _block_hash_to_bytes(block_hash)
+        hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
+        hasher.update(hash_bytes)
+    return BlockHash(hasher.digest())
+
+
+def _block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
+    if isinstance(block_hash, str):
+        if len(block_hash) == 64:
+            try:
+                return bytes.fromhex(block_hash)
+            except ValueError:
+                return block_hash.encode("utf-8")
+        return block_hash.encode("utf-8")
+    return bytes(block_hash)
 
 
 # Parameters related to the connector metadata
@@ -491,6 +529,19 @@ class RequestTracker:
     # NOTE: This field will only be used when you enable kv-event
     token_ids: list[int] | None = None
 
+    block_gvas: list[int] = field(default_factory=list)
+    gva_block_offset: int = 0
+    last_block_gva: int | None = None
+
+    block_keys: list[str] = field(default_factory=list)
+
+    starts: list[int] | None = None
+    ends: list[int] | None = None
+
+    sizes_per_chunk: list[list[int]] | None = None
+
+    last_block_key: str | None = None
+
     def __init__(
         self,
         req_id: str,
@@ -499,6 +550,14 @@ class RequestTracker:
         allocated_block_ids: list[int] | list[list[int]] | None = None,
         num_saved_tokens: int = 0,
         token_ids: list[int] | None = None,
+        block_gvas: list[int] | None = None,
+        gva_block_offset: int = 0,
+        last_block_gva: int | None = None,
+        block_keys: list[str] | None = None,
+        starts: list[int] | None = None,
+        ends: list[int] | None = None,
+        sizes_per_chunk: list[list[int]] | None = None,
+        last_block_key: str | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -508,6 +567,14 @@ class RequestTracker:
         self.allocated_block_ids_by_group = block_ids
         self.num_saved_tokens = num_saved_tokens
         self.token_ids = token_ids
+        self.block_gvas = [] if block_gvas is None else block_gvas
+        self.gva_block_offset = gva_block_offset
+        self.last_block_gva = last_block_gva
+        self.block_keys = [] if block_keys is None else block_keys
+        self.starts = starts
+        self.ends = ends
+        self.sizes_per_chunk = sizes_per_chunk
+        self.last_block_key = last_block_key
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -549,12 +616,17 @@ class RequestTracker:
 class ReqMeta:
     # Request id
     req_id: str
-    # Number of tokens in this chunk
-    token_len_chunk: int
+    # End token for full-block KV save.
+    save_end_token: int
+    # Token length after this scheduled step finishes.
+    target_token_len: int
 
     block_ids_by_group: list[list[int]]
 
     block_hashes: list[BlockHash]
+
+    # First token that has not been saved before this metadata was built.
+    save_start_token: int = 0
 
     can_save: bool | None = None
     # load_spec
@@ -573,10 +645,12 @@ class ReqMeta:
     token_ids: list[int] | None = None
     original_block_size: list[int] | int | None = None
 
+    event_id: int | None = None
+
     def __init__(
         self,
         req_id: str,
-        token_len_chunk: int,
+        token_len_chunk: int | None = None,
         block_ids_by_group: list[list[int]] | None = None,
         block_hashes: list[BlockHash] | None = None,
         can_save: bool | None = None,
@@ -590,9 +664,26 @@ class ReqMeta:
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
+        event_id: int | None = None,
+        save_end_token: int | None = None,
+        target_token_len: int | None = None,
+        save_start_token: int = 0,
+        last_block_gva: int | None = None,
+        partial_block_index: int | None = None,
+        starts: list[int] | None = None,
+        ends: list[int] | None = None,
+        sizes_per_chunk: list[list[int]] | None = None,
+        block_ids_np: np.ndarray | None = None,
+        block_gvas_np: np.ndarray | None = None,
+        gva_block_offset: int = 0,
     ) -> None:
+        if token_len_chunk is None:
+            token_len_chunk = 0 if save_end_token is None else save_end_token
         self.req_id = req_id
         self.token_len_chunk = token_len_chunk
+        self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
+        self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
+        self.save_start_token = save_start_token
         if block_ids_by_group is None:
             block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
         self.block_ids_by_group = block_ids_by_group
@@ -607,6 +698,15 @@ class ReqMeta:
         self.disable_tp_key_sharding = disable_tp_key_sharding
         self.token_ids = token_ids
         self.original_block_size = original_block_size
+        self.event_id = event_id
+        self.last_block_gva = last_block_gva
+        self.partial_block_index = partial_block_index
+        self.starts = starts
+        self.ends = ends
+        self.sizes_per_chunk = sizes_per_chunk
+        self.block_ids_np = block_ids_np
+        self.block_gvas_np = block_gvas_np
+        self.gva_block_offset = gva_block_offset
 
     @property
     def block_ids(self) -> list[int]:
@@ -616,10 +716,22 @@ class ReqMeta:
     def block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.block_ids_by_group = normalize_block_ids_by_group(block_ids)
 
+    last_block_gva: int | None = None
+    partial_block_index: int | None = None
+
+    starts: list[int] | None = None
+    ends: list[int] | None = None
+
+    sizes_per_chunk: list[list[int]] | None = None
+
+    block_ids_np: np.ndarray | None = None
+    block_gvas_np: np.ndarray | None = None
+    gva_block_offset: int = 0
+
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
-        block_size: int,
+        cache_transfer_granularity: int,
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
@@ -631,20 +743,48 @@ class ReqMeta:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
             block_hashes = []
-        input_token_len = tracker.token_len
+        target_token_len = tracker.token_len
+        previous_saved_tokens = tracker.num_saved_tokens
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
-        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size if discard_partial_chunks else 0
-        num_tokens_to_save = (input_token_len // block_size * block_size) if discard_partial_chunks else input_token_len
+        chunk_boundary = (
+            cdiv(tracker.num_saved_tokens + 1, cache_transfer_granularity) * cache_transfer_granularity
+            if discard_partial_chunks
+            else 0
+        )
+        num_tokens_to_save = (
+            (target_token_len // cache_transfer_granularity * cache_transfer_granularity)
+            if discard_partial_chunks
+            else target_token_len
+        )
+        full_block_count = target_token_len // cache_transfer_granularity
+        boundary_without_hash = (
+            target_token_len > 0
+            and target_token_len % cache_transfer_granularity == 0
+            and full_block_count > len(block_hashes)
+        )
+        if boundary_without_hash:
+            num_tokens_to_save = len(block_hashes) * cache_transfer_granularity
+        if tracker.last_block_gva is not None and (
+            target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
+        ):
+            partial_block_index = (
+                full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
+            )
+        else:
+            partial_block_index = None
 
-        skip_save = skip_save or num_tokens_to_save < chunk_boundary
+        skip_save = skip_save or (num_tokens_to_save < chunk_boundary and partial_block_index is None)
         if skip_save and load_spec is None:
             return None
 
         if not skip_save:
-            tracker.num_saved_tokens = num_tokens_to_save
+            tracker.num_saved_tokens = max(
+                tracker.num_saved_tokens,
+                num_tokens_to_save,
+            )
 
         token_ids = None
         if tracker.token_ids:
@@ -662,6 +802,9 @@ class ReqMeta:
         return ReqMeta(
             req_id=tracker.req_id,
             token_len_chunk=num_tokens_to_save,
+            save_end_token=num_tokens_to_save,
+            target_token_len=target_token_len,
+            save_start_token=previous_saved_tokens,
             block_ids_by_group=tracker.allocated_block_ids_by_group,
             can_save=not skip_save,
             load_spec=load_spec,
@@ -669,20 +812,79 @@ class ReqMeta:
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
             original_block_size=original_block_size,
+            last_block_gva=tracker.last_block_gva,
+            partial_block_index=partial_block_index,
+            block_ids_np=np.asarray(tracker.allocated_block_ids, dtype=np.int64),
+            block_gvas_np=np.asarray(tracker.block_gvas, dtype=np.int64),
+            gva_block_offset=tracker.gva_block_offset,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
             kv_cache_families_by_group=kv_cache_group_families,
         )
 
 
 class AscendConnectorMetadata(KVConnectorMetadata):
-    def __init__(self, unfinished_request_ids, preempted_req_ids):
-        self.requests = []
+    def __init__(
+        self,
+        unfinished_request_ids,
+        preempted_req_ids,
+        loading_req_ids: set[str] | None = None,
+        delayed_free_req_ids: set[str] | None = None,
+    ):
+        self.requests: list[ReqMeta] = []
         self.unfinished_request_ids = unfinished_request_ids
         self.preempted_req_ids = preempted_req_ids
+        self.loading_req_ids = loading_req_ids or set()
+        self.delayed_free_req_ids = delayed_free_req_ids or set()
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""
         self.requests.append(req_meta)
+
+
+@dataclass
+class LayerBatchReqMeta:
+    req_ids: list[str]
+    layer_id: int
+    is_last_chunks: list[bool | None] = field(default_factory=list)
+    addr_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    size_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    gvas_array: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+
+
+@dataclass
+class LayerBlockRange:
+    request: ReqMeta
+    start_block: int
+    end_block: int
+    partial_block_index: int | None = None
+
+
+@dataclass
+class SharedBlockData:
+    """Pre-computed block data shared across all layers for the same request."""
+
+    block_ids_arr: np.ndarray
+    block_gvas_arr: np.ndarray
+    req_ids: list[str]
+    is_last_chunks: list[bool | None]
+
+
+@dataclass
+class LayerTransferTask:
+    layer_id: int
+    block_ranges: list[LayerBlockRange]
+    shared_block_data: SharedBlockData | None = None
+    # Cache for KVCacheStoreKeyLayerSendingThread:
+    # maps block_range index -> list of (start, end, key_all_layers)
+    cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
+
+
+@dataclass
+class LayerLoadTask:
+    wait_for_save_layer: int | None
+    transfer_tasks: list[LayerTransferTask]
+    layer_id: int
+    attention_start_gate: AttentionComputeStartGate | None = None
 
 
 @dataclass(init=False)
@@ -693,8 +895,12 @@ class LayerMultiBlockReqMeta:
     ends: list[int]
     block_ids_by_group: list[list[int]]
     layer_id: int
+    block_hashes: list[Any] = field(default_factory=list)
     is_last_chunk: bool | None = True
     current_event: torch.npu.Event | None = None
+    token_ids: list[int] | None = None
+    original_block_size: list[int] | int | None = None
+    kv_cache_group_id: int = 0
 
     def __init__(
         self,
@@ -707,6 +913,10 @@ class LayerMultiBlockReqMeta:
         is_last_chunk: bool | None = True,
         current_event: torch.npu.Event | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
+        token_ids: list[int] | None = None,
+        original_block_size: list[int] | int | None = None,
+        block_hashes: list[Any] | None = None,
+        kv_cache_group_id: int = 0,
     ) -> None:
         self.req_id = req_id
         self.keys = keys
@@ -718,6 +928,10 @@ class LayerMultiBlockReqMeta:
         self.layer_id = layer_id
         self.is_last_chunk = is_last_chunk
         self.current_event = current_event
+        self.token_ids = token_ids
+        self.original_block_size = original_block_size
+        self.block_hashes = [] if block_hashes is None else block_hashes
+        self.kv_cache_group_id = kv_cache_group_id
 
     @property
     def block_ids(self) -> list[int]:
@@ -726,3 +940,26 @@ class LayerMultiBlockReqMeta:
     @block_ids.setter
     def block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
         self.block_ids_by_group = normalize_block_ids_by_group(block_ids)
+
+
+@dataclass
+class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
+    completed_events: dict[int, int] = field(default_factory=dict)
+    """key: event_id, value: completed worker count"""
+
+    def mark_completed_events(self, event_id: int | None) -> None:
+        if event_id is not None:
+            self.completed_events[event_id] = 1
+
+    def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
+        assert isinstance(other, AscendStoreKVConnectorWorkerMetadata), (
+            "aggregate worker metadata must be type of AscendStoreKVConnectorWorkerMetadata"
+        )
+
+        merged: dict[int, int] = dict(self.completed_events)
+        for event_id in other.completed_events:
+            if event_id not in merged:
+                merged[event_id] = other.completed_events[event_id]
+            else:
+                merged[event_id] = merged[event_id] + other.completed_events[event_id]
+        return AscendStoreKVConnectorWorkerMetadata(merged)

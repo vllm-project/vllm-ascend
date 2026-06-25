@@ -16,7 +16,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -33,16 +32,20 @@ class AscendBlockTables(BlockTables):
         max_num_batched_tokens: int,
         max_num_blocks_per_group: list[int],
         device: torch.device,
+        kernel_block_sizes: list[int] | None = None,
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
     ):
+        if kernel_block_sizes is None:
+            kernel_block_sizes = block_sizes
         super().__init__(
             block_sizes,
             max_num_reqs,
             max_num_batched_tokens,
             max_num_blocks_per_group,
             device,
+            kernel_block_sizes,
             cp_size,
             cp_rank,
             cp_interleave,

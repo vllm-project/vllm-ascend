@@ -56,7 +56,7 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
-from tests.e2e.nightly.multi_node.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
+from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from vllm_ascend.ascend_config import clear_ascend_config
 
 # TODO: remove this part after the patch merged into vllm, if
@@ -426,6 +426,14 @@ class RemoteOpenAIServer:
             return
 
         children = parent.children(recursive=True)
+
+        try:
+            parent.terminate()
+            parent.wait(timeout=60)
+        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+            with contextlib.suppress(psutil.NoSuchProcess):
+                parent.kill()
+
         for child in children:
             with contextlib.suppress(psutil.NoSuchProcess):
                 child.terminate()
@@ -435,13 +443,6 @@ class RemoteOpenAIServer:
         for child in still_alive:
             with contextlib.suppress(psutil.NoSuchProcess):
                 child.kill()
-
-        try:
-            parent.terminate()
-            parent.wait(timeout=10)
-        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-            with contextlib.suppress(psutil.NoSuchProcess):
-                parent.kill()
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)

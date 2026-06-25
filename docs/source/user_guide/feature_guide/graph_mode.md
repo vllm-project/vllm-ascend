@@ -32,13 +32,15 @@ vLLM Ascend provides two graph paths:
 
 The default graph path on Ascend involves two stages: **compile-time optimization** and **runtime capture/replay**. ACLGraph handles the runtime capture/replay. The compile-time stage differs by `cudagraph_mode`:
 
-- **FULL / FULL_DECODE_ONLY**: Npugraph_ex optimizes the FX graph via torchair (`run_eagerly=True`, compile-time only, no capture). The optimized callable is then captured and replayed by ACLGraph at runtime.
+- **FULL_AND_PIECEWISE**: Default mode, same as the upstream vLLM strategy. The compile-time path follows PIECEWISE compilation, while the runtime may still use full-graph behavior for uniform decode batches.
+- **FULL / FULL_DECODE_ONLY**: Npugraph_ex optimizes the FX graph via npugraph_ex (`force_eager=True`, compile-time only, no capture). The optimized callable is then captured and replayed by ACLGraph at runtime.
 - **PIECEWISE**: Npugraph_ex is disabled. Only basic FX fusion passes are applied at compile-time. ACLGraph captures and replays the resulting callable at runtime.
 - **NONE**: No compilation or graph capture. The model runs in eager mode.
 
 | `cudagraph_mode` | Compile-time | Runtime | Npugraph_ex |
 |---|---|---|---|
-| FULL / FULL_DECODE_ONLY | Npugraph_ex FX optimization | ACLGraph capture/replay | Enabled (default) |
+| FULL_AND_PIECEWISE | Piecewise compilation path | Mixed: PIECEWISE for mixed batches, FULL-capable for uniform decode batches | Disabled |
+| FULL / FULL_DECODE_ONLY | Npugraph_ex FX optimization | ACLGraph capture/replay | Enabled |
 | PIECEWISE | Fusion pass only | ACLGraph capture/replay | Disabled |
 | NONE | None | Eager execution | Disabled |
 
@@ -105,6 +107,17 @@ On Ascend, the current attention backend support levels are:
 | `context_parallel/sfa_cp` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
 
 This is why the effective graph mode on Ascend may differ from the mode requested in configuration.
+
+### Troubleshooting capture resource exhaustion
+
+If ACLGraph capture fails because the configured graph sizes exceed the runtime resources available on the current stack, vLLM Ascend now raises a dedicated error with mitigation guidance. In practice, the most useful actions are:
+
+- upgrade to a newer HDK/CANN stack if one is available;
+- reduce `cudagraph_capture_sizes` or `max_cudagraph_capture_size`;
+- prefer `FULL` or `FULL_DECODE_ONLY` when the workload is mostly uniform decode;
+- temporarily disable graph mode to confirm the issue is capture-related.
+
+This is most likely to appear in `PIECEWISE` or `FULL_AND_PIECEWISE` configurations because those paths tend to capture more graphs than uniform full-graph decode.
 
 ## Using Npugraph_ex
 
@@ -206,7 +219,7 @@ Starting static kernel compilation, the build directory is <path>
 
 This confirms that compilation has been triggered. The absence of this message means static kernel was not enabled or the cached result was reused directly.
 
-For more details about Npugraph_ex, see the [torchair guide](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html).
+For more details about Npugraph_ex, see the [npugraph_ex guide](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md).
 
 ## Using XliteGraph
 
@@ -252,10 +265,13 @@ For more details about Xlite, see the [Xlite README](https://atomgit.com/openeul
 
 - XliteGraph should be treated as an alternative graph path, not as a drop-in replacement for ACLGraph in all scenarios.
 - Model and backend coverage is still evolving, so a configuration that works for one model family may not yet be recommended for another.
+- Encoder-decoder models currently do not keep `FULL_AND_PIECEWISE`; on Ascend they fall back to `PIECEWISE` or `NONE` depending on compilation support.
 
 ## Fallback to Eager Mode
 
 If you encounter issues with graph mode, you can temporarily fall back to eager mode by setting `enforce_eager=True`.
+
+If ACL graph capture fails with the confirmed stream-resource signature in the error text, such as `207008` together with `Stream resources are insufficient` or `Insufficient_Stream_Resources`, vLLM Ascend will re-raise that capture failure with targeted mitigation guidance. In practice, the main levers are: upgrading to a newer HDK/CANN stack, reducing `cudagraph_capture_sizes`, lowering `max_cudagraph_capture_size`, or preferring `FULL` / `FULL_DECODE_ONLY` when the workload is mostly uniform decode.
 
 **Offline example:**
 
@@ -277,6 +293,6 @@ vllm serve path/to/your/model --enforce-eager
 - [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/)
 - [torch.compile](https://docs.vllm.ai/en/latest/design/torch_compile/)
 - [Xlite README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)
-- [Npugraph_ex torchair guide](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)
+- [Npugraph_ex guide](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md)
 - [Npugraph_ex RFC](https://github.com/vllm-project/vllm-ascend/issues/4715)
 - [ACL Graph Developer Guide](../../developer_guide/Design_Documents/ACL_Graph.md)

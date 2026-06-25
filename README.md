@@ -72,7 +72,7 @@ Please use the following recommended versions to get started quickly:
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-| v0.19.1rc1 | Latest release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) for more details |
+| v0.21.0rc1 | Latest release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) for more details |
 | v0.18.0 | Latest stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.18.0/installation.html) for more details |
 
 ## Branch
@@ -86,13 +86,14 @@ Below are the maintained branches:
 
 | Branch           | Status       | Note                                 |
 |------------------|--------------|--------------------------------------|
-| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.18.0 tag |
+| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.23.0 tag |
 | v0.7.1-dev       | Unmaintained | Outdated, no longer maintained. |
 | v0.7.3-dev       | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |
 | v0.9.1-dev       | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |
 | v0.11.0-dev      | Unmaintained | Only bug fixes are allowed, and no new release tags anymore. |
 | releases/v0.13.0 | Maintained   | CI commitment for vLLM 0.13.0 version |
 | releases/v0.18.0 | Maintained   | CI commitment for vLLM 0.18.0 version |
+| releases/v0.20.2rc | Maintained | CI commitment for vLLM 0.20.2 version |
 | rfc/feature-name | Maintained   | [Feature branches](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#feature-branches) for collaboration |
   
 Please refer to [Versioning policy](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html) for more details.
