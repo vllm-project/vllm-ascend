@@ -184,7 +184,7 @@ export VLLM_RPC_TIMEOUT=1800000
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
   --host 0.0.0.0 \
   --port 10010 \
-  --max_model_len 135000 \
+  --max-model-len 135000 \
   --max-num-batched-tokens 4096 \
   --served-model-name dsv4 \
   --gpu-memory-utilization 0.9 \
@@ -261,7 +261,7 @@ export VLLM_RPC_TIMEOUT=1800000
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
   --host 0.0.0.0 \
   --port 10010 \
-  --max_model_len 135000 \
+  --max-model-len 135000 \
   --max-num-batched-tokens 4096 \
   --served-model-name dsv4 \
   --gpu-memory-utilization 0.9 \
@@ -335,7 +335,7 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
   --safetensors-load-strategy 'prefetch' \
-  --max_model_len 135000  \
+  --max-model-len 135000  \
   --max-num-batched-tokens 4096 \
   --served-model-name dsv4 \
   --gpu-memory-utilization 0.9 \
@@ -393,7 +393,7 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
   --safetensors-load-strategy 'prefetch' \
-  --max_model_len 135000  \
+  --max-model-len 135000  \
   --max-num-batched-tokens 4096 \
   --served-model-name dsv4 \
   --gpu-memory-utilization 0.9 \
