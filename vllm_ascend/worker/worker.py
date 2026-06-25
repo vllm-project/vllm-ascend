@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import os
 from types import NoneType
 
 import torch
@@ -185,7 +186,6 @@ class NPUWorker(WorkerBase):
 
     def uninstall_static_kernel(self):
         import fcntl
-        import os
         import subprocess
 
         ascend_home_path = os.environ["ASCEND_HOME_PATH"]
@@ -397,6 +397,11 @@ class NPUWorker(WorkerBase):
     def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
+        if int(torch.npu.current_device()) != self.local_rank:
+            raise RuntimeError(
+                f"Failed to bind NPU device: requested npu:{self.local_rank} "
+                f"but current_device={torch.npu.current_device()}"
+            )
 
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
@@ -444,6 +449,14 @@ class NPUWorker(WorkerBase):
 
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
+        # HCCL process-group creation can reset the current NPU device to 0.
+        # Re-bind before model load / profiling so tensors stay on `device`.
+        torch.npu.set_device(device)
+        if int(torch.npu.current_device()) != device.index:
+            raise RuntimeError(
+                f"NPU device drift after distributed init: "
+                f"expected npu:{device.index}, current={torch.npu.current_device()}"
+            )
         # Set random seed.
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
@@ -481,6 +494,7 @@ class NPUWorker(WorkerBase):
         Then, it calculates the free memory that can be used for KV cache in
         bytes.
         """
+        torch.npu.set_device(self.device)
         GiB = lambda b: b / GiB_bytes
 
         # Fast path: user has explicitly specified KV cache size via

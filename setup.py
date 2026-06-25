@@ -40,7 +40,7 @@ def load_module_from_path(module_name, path):
     return module
 
 
-ROOT_DIR = os.path.dirname(__file__)
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
 
 
@@ -317,6 +317,9 @@ class cmake_build_ext(build_ext):
             "910b": "ascend910b1",
             "910c": "ascend910_9392",
             "310p": "ascend310p1",
+            # Some build scripts/exported envs use ascend910_93 for ASCEND910C (A3).
+            # Root CMake in CANN 9 expects ascend910_9391/ascend910_9392 instead.
+            "ascend910_93": "ascend910_9392",
         }
         CANN_SOC_VERSION = soc_version_map.get(envs.SOC_VERSION, envs.SOC_VERSION)
         cmake_args += [f"-DSOC_VERSION={CANN_SOC_VERSION}"]
@@ -448,7 +451,7 @@ class custom_install(install):
         install.run(self)
 
 
-ROOT_DIR = os.path.dirname(__file__)
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
     VERSION = get_version(write_to="vllm_ascend/_version.py")
 except LookupError:

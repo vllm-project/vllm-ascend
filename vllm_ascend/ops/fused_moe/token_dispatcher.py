@@ -28,6 +28,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -36,6 +37,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
     MoEMC2CombineMetadata,
+    MoEQuantParams,
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
     TMoECombineMetadata,
@@ -43,6 +45,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
+    enable_custom_op,
     get_ascend_device_type,
     is_hierarchical_communication_enabled,
     should_skip_allreduce_across_dp_group,
@@ -99,7 +102,7 @@ class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
 
 
 class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
-    def __init__(self, **kwargs):
+    def __init__(self, moe_config=None, **kwargs):
         super().__init__(**kwargs)
         device_group = get_mc2_group().device_group
         # TODO: Try local_rank = ep_group.rank_in_group
@@ -108,6 +111,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
+        vllm_config = get_current_vllm_config()
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
         self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
@@ -119,7 +123,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
-        vllm_config = get_current_vllm_config()
         scheduler_config = vllm_config.scheduler_config
         compilation_config = vllm_config.compilation_config
         speculative_config = vllm_config.speculative_config
@@ -134,6 +137,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
+        # Per-EP-rank token cap used to size the SHMEM zero-buffer pool.
+        self._zb_max_tokens_per_rank = num_tokens_per_tp_rank
+
         # When allreduce across DP is not skipped, tokens are uniform across ranks:
         # use global_bs=0 (uniform mode) and pass mc2_mask.
         # When allreduce is skipped, tokens may differ per rank:
@@ -147,6 +153,208 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             raise RuntimeError(
                 "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
             )
+
+        self._zb_enabled = bool(envs_ascend.VLLM_ASCEND_ENABLE_ZB)
+        self._moe_config = moe_config
+        if self._zb_enabled:
+            self._validate_zb_compat()
+            self._ensure_zb_runtime_init()
+        # SHMEM process runtime is process-wide; per-dispatcher tensor/aux buffers
+        # are populated lazily on first token_dispatch.
+        self._zb_runtime = None
+        self._zb_early_local_mem_size: int | None = None
+        self._zb_bundle = None
+        self._zb_aux = None
+        self._zb_hidden = None
+        self._zb_max_recv_tokens = None
+        self._zb_moe_expert_num = None
+        self._zb_use_quant = None
+        self._zb_dispatch_quant_mode = None
+        self.moe_expert_num = 0
+
+    def _validate_zb_compat(self) -> None:
+        if not self.need_extra_args:
+            raise RuntimeError(
+                "VLLM_ASCEND_ENABLE_ZB=1 requires A3/A5 hardware; current "
+                f"device type does not match (need_extra_args={self.need_extra_args})."
+            )
+        if self.need_comm_alg:
+            raise RuntimeError(
+                "VLLM_ASCEND_ENABLE_ZB=1 is incompatible with enable_mc2_hierarchy_comm; disable one of them."
+            )
+        enable_custom_op()
+        ascend_ops = getattr(torch.ops, "_C_ascend", None)
+        if ascend_ops is None or not hasattr(ascend_ops, "zb_moe_distribute_dispatch_zero_buffer"):
+            raise RuntimeError(
+                "VLLM_ASCEND_ENABLE_ZB=1 but zero-buffer ops are not registered. "
+                "Install Ascend SHMEM at /usr/local/Ascend/shmem/latest and rebuild vllm_ascend."
+            )
+
+    def _resolve_zb_moe_expert_num(self) -> int:
+        moe_expert_num = 0
+        if self._moe_config is not None:
+            moe_expert_num = int(getattr(self._moe_config, "num_experts", 0) or 0)
+        if moe_expert_num <= 0:
+            vllm_config = get_current_vllm_config()
+            hf_config = getattr(vllm_config.model_config, "hf_config", None)
+            if hf_config is not None:
+                moe_expert_num = int(getattr(hf_config, "num_experts", 0) or 0)
+        return moe_expert_num
+
+    def _ensure_zb_runtime_init(self) -> None:
+        """Early init: aclshmemx_init_attr once per process (aligned with MC2 HCCL init)."""
+        from vllm_ascend.ops.fused_moe.zb_runtime import (
+            ensure_zb_process_initialized,
+            estimate_zb_early_local_mem_size,
+            get_zb_process_runtime,
+        )
+
+        existing = get_zb_process_runtime()
+        if existing is not None:
+            self._zb_runtime = existing
+            self._zb_early_local_mem_size = existing.local_mem_size
+            return
+
+        vllm_config = get_current_vllm_config()
+        hidden_size = int(vllm_config.model_config.get_hidden_size())
+        moe_expert_num = self._resolve_zb_moe_expert_num()
+        if moe_expert_num <= 0:
+            raise RuntimeError(
+                "VLLM_ASCEND_ENABLE_ZB=1 but moe_expert_num is unknown at "
+                "dispatcher init; pass moe_config with num_experts to "
+                "TokenDispatcherWithMC2."
+            )
+
+        # Non-quant sizing is larger (separate combine_x + expand_x_out buffers).
+        local_mem_size, _ = estimate_zb_early_local_mem_size(
+            max_tokens_per_rank=self._zb_max_tokens_per_rank,
+            ep_world_size=self.ep_world_size,
+            hidden_size=hidden_size,
+            moe_expert_num=moe_expert_num,
+            use_quant=False,
+        )
+        uri = envs_ascend.VLLM_ASCEND_ZB_SHMEM_URI
+        runtime = ensure_zb_process_initialized(
+            rank=self.ep_rank_id,
+            world_size=self.ep_world_size,
+            local_mem_size=local_mem_size,
+            server_ip_port=uri,
+        )
+        self._zb_runtime = runtime
+        self._zb_early_local_mem_size = local_mem_size
+
+    def _ensure_zb_buffers(
+        self,
+        hidden: int,
+        moe_expert_num: int,
+        use_quant: bool,
+        device: torch.device,
+    ) -> None:
+        """Late init: ext_info, SHMEM tensors, and aux buffers on first dispatch."""
+        if self._zb_bundle is not None:
+            if (
+                self._zb_hidden != hidden
+                or self._zb_moe_expert_num != moe_expert_num
+                or self._zb_use_quant != use_quant
+            ):
+                raise RuntimeError(
+                    "ZB SHMEM dispatcher cannot change layout after first dispatch; "
+                    f"expected hidden={self._zb_hidden} moe_expert_num={self._zb_moe_expert_num} "
+                    f"use_quant={self._zb_use_quant} but got hidden={hidden} "
+                    f"moe_expert_num={moe_expert_num} use_quant={use_quant}."
+                )
+            return
+
+        from vllm_ascend.ops.fused_moe.zb_runtime import (
+            compute_low_latency_max_recv_tokens,
+            estimate_local_mem_size,
+            get_zb_process_runtime,
+        )
+
+        if moe_expert_num % self.ep_world_size != 0:
+            raise RuntimeError(
+                "ZB SHMEM dispatcher requires moe_expert_num divisible "
+                f"by ep_world_size, got moe_expert_num={moe_expert_num} "
+                f"ep_world_size={self.ep_world_size}."
+            )
+        num_local_experts = moe_expert_num // self.ep_world_size
+
+        max_recv_tokens = compute_low_latency_max_recv_tokens(
+            num_tokens_per_rank=self._zb_max_tokens_per_rank,
+            ep_world_size=self.ep_world_size,
+            num_local_experts=num_local_experts,
+        )
+        local_mem_size = estimate_local_mem_size(
+            max_recv_tokens,
+            hidden,
+            use_quant=use_quant,
+            moe_expert_num=moe_expert_num,
+            ep_world_size=self.ep_world_size,
+        )
+        runtime = self._zb_runtime or get_zb_process_runtime()
+        if runtime is None:
+            raise RuntimeError(
+                "ZB SHMEM buffers requested before process runtime init; call _ensure_zb_runtime_init() first."
+            )
+
+        early_local_mem_size = self._zb_early_local_mem_size
+        if early_local_mem_size is None:
+            early_local_mem_size = runtime.local_mem_size
+        if early_local_mem_size is not None and local_mem_size > early_local_mem_size:
+            raise RuntimeError(
+                "ZB SHMEM early pool is too small for the actual dispatch layout; "
+                f"early_local_mem_size={early_local_mem_size} "
+                f"required_local_mem_size={local_mem_size} hidden={hidden} "
+                f"moe_expert_num={moe_expert_num} use_quant={use_quant}. "
+                "Increase VLLM_ASCEND_ZB_LOCAL_MEM_SIZE or fix early sizing."
+            )
+
+        runtime.alloc_ext_info()
+        bundle = runtime.allocate_low_latency_tensors(
+            max_recv_tokens=max_recv_tokens,
+            hidden_size=hidden,
+            device=device,
+            use_quant=use_quant,
+        )
+
+        # Auxiliary buffers (not SHMEM-backed; sized to upper bounds so we can
+        # reuse them across all iterations).
+        assist_size = max_recv_tokens * 16
+        aux = {
+            "assist_info": torch.empty((assist_size,), dtype=torch.int32, device=device),
+            "expert_token_nums": torch.empty((num_local_experts,), dtype=torch.int64, device=device),
+            "ep_recv_count": torch.empty((moe_expert_num * self.ep_world_size,), dtype=torch.int32, device=device),
+            "tp_recv_count": torch.empty((1,), dtype=torch.int32, device=device),
+            "dynamic_scales": (
+                bundle.dynamic_scales_out
+                if bundle.dynamic_scales_out is not None
+                else torch.empty((max_recv_tokens,), dtype=torch.float32, device=device)
+            ),
+        }
+
+        self._zb_runtime = runtime
+        self._zb_bundle = bundle
+        self._zb_aux = aux
+        self._zb_hidden = hidden
+        self._zb_max_recv_tokens = max_recv_tokens
+        self._zb_moe_expert_num = moe_expert_num
+        self._zb_use_quant = use_quant
+
+    def _ensure_zb_initialized(
+        self,
+        hidden: int,
+        moe_expert_num: int,
+        use_quant: bool,
+        device: torch.device,
+    ) -> None:
+        if self._zb_enabled and self._zb_runtime is None:
+            self._ensure_zb_runtime_init()
+        self._ensure_zb_buffers(
+            hidden=hidden,
+            moe_expert_num=moe_expert_num,
+            use_quant=use_quant,
+            device=device,
+        )
 
     def refresh_hccl_group(self) -> None:
         """Refresh MC2 communicator metadata after HCCL groups are recreated."""
@@ -230,10 +438,108 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
 
+    def _compute_comm_quant_mode(self, quant: MoEQuantParams) -> int:
+        if quant.comm_quant_mode is not None:
+            return quant.comm_quant_mode
+        if quant.dispatch_with_quant:
+            return 4 if self.a5_need_extra_args and quant.is_mxfp else 2
+        return 0
+
+    def _compute_dispatch_quant_mode(self, token_dispatch_input: MoETokenDispatchInput) -> int:
+        return self._compute_comm_quant_mode(token_dispatch_input.quant)
+
+    def _token_dispatch_zb(
+        self, token_dispatch_input: MoETokenDispatchInput
+    ) -> MoETokenDispatchOutput[MoEMC2CombineMetadata]:
+        from vllm_ascend.ops.fused_moe.zb_runtime import (
+            zb_moe_distribute_dispatch_zero_buffer,
+        )
+
+        hidden_states = token_dispatch_input.hidden_states
+        topk_ids = token_dispatch_input.topk_ids
+        routing = token_dispatch_input.routing
+        quant = token_dispatch_input.quant
+        expert_map = routing.expert_map
+        assert expert_map is not None, "expert_map is required for MC2 token dispatch."
+
+        moe_expert_num = len(expert_map) + routing.global_redundant_expert_num
+        self.moe_expert_num = moe_expert_num
+
+        quant_mode = self._compute_dispatch_quant_mode(token_dispatch_input)
+        use_quant = quant_mode != 0
+        expert_token_nums_type = _get_expert_token_nums_type(token_dispatch_input)
+
+        self._ensure_zb_initialized(
+            hidden=hidden_states.shape[-1],
+            moe_expert_num=moe_expert_num,
+            use_quant=use_quant,
+            device=hidden_states.device,
+        )
+        self._zb_dispatch_quant_mode = quant_mode
+
+        assert self._zb_runtime is not None and self._zb_bundle is not None and self._zb_aux is not None, (
+            "token_dispatch_zb failed to initialize SHMEM buffers."
+        )
+        bundle = self._zb_bundle
+        aux = self._zb_aux
+        runtime = self._zb_runtime
+
+        zb_moe_distribute_dispatch_zero_buffer(
+            x=hidden_states,
+            expert_ids=topk_ids,
+            expand_x_out=bundle.expand_x_out,
+            dynamic_scales_out=aux["dynamic_scales"],
+            assist_info_for_combine_out=aux["assist_info"],
+            expert_token_nums_out=aux["expert_token_nums"],
+            ep_recv_count_out=aux["ep_recv_count"],
+            tp_recv_count_out=aux["tp_recv_count"],
+            ep_world_size=self.ep_world_size,
+            ep_rank_id=self.ep_rank_id,
+            moe_expert_num=moe_expert_num,
+            ext_info=runtime.ext_info,
+            scales=None,
+            x_active_mask=routing.mc2_mask if self.global_bs == 0 else None,
+            tp_world_size=1,
+            tp_rank_id=0,
+            quant_mode=quant_mode,
+            global_bs=self.global_bs,
+            expert_token_nums_type=expert_token_nums_type,
+        )
+
+        # GMM calls dispose_tensor() on the dispatch output when dynamic_scale is
+        # set; that must not touch the persistent SHMEM expand_x_out buffer.
+        expand_x_for_gmm = bundle.expand_x_out.detach()
+
+        # Always wire gmm2 into the full combine_x buffer (same shape as expand_x_out).
+        # Valid token count is carried by group_list / expert_token_nums only.
+        # Do not call .item() here: it syncs the NPU stream and breaks ACLGraph capture.
+        gmm2_out = bundle.combine_x
+
+        return MoETokenDispatchOutput(
+            hidden_states=expand_x_for_gmm,
+            dynamic_scale=aux["dynamic_scales"] if use_quant else None,
+            group_list=aux["expert_token_nums"],
+            group_list_type=expert_token_nums_type,
+            gmm2_out=gmm2_out,
+            combine_metadata=MoEMC2CombineMetadata(
+                topk_ids=topk_ids,
+                topk_weights=token_dispatch_input.topk_weights,
+                expert_map=expert_map,
+                ep_recv_counts=aux["ep_recv_count"],
+                tp_recv_counts=aux["tp_recv_count"],
+                assist_info_for_combine=aux["assist_info"],
+                expand_scales=None,
+                quant=quant,
+                mc2_mask=routing.mc2_mask if self.global_bs == 0 else None,
+            ),
+        )
+
     def token_dispatch(
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
+        if self._zb_enabled:
+            return self._token_dispatch_zb(token_dispatch_input)
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
         output = (
             torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
@@ -334,8 +640,71 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
 
+    def _token_combine_zb(
+        self,
+        hidden_states: torch.Tensor,
+        combine_metadata: MoEMC2CombineMetadata,
+    ) -> torch.Tensor:
+        from vllm_ascend.ops.fused_moe.zb_runtime import (
+            zb_moe_distribute_combine_zero_buffer,
+        )
+
+        assert self._zb_runtime is not None and self._zb_bundle is not None, (
+            "token_combine_zb called before token_dispatch_zb initialized the SHMEM runtime."
+        )
+        bundle = self._zb_bundle
+        runtime = self._zb_runtime
+
+        quant = combine_metadata.quant
+        comm_quant_mode = self._compute_comm_quant_mode(quant)
+
+        # GMM2 writes directly into SHMEM ``combine_x`` via ``zb_moe_grouped_matmul_gmm2_out``.
+        num_expert_rows = hidden_states.size(0)
+        expand_x = bundle.combine_x
+        if num_expert_rows > expand_x.size(0):
+            raise RuntimeError(
+                f"ZB SHMEM combine: GMM output rows {num_expert_rows} exceed combine_x capacity {expand_x.size(0)}."
+            )
+        ori_x = None
+
+        expand_scales = None
+        if comm_quant_mode == 2 and self._zb_aux is not None:
+            expand_scales = self._zb_aux.get("dynamic_scales")
+
+        num_combined_tokens = combine_metadata.topk_ids.shape[0]
+        combined_x = torch.empty(
+            (num_combined_tokens, hidden_states.shape[-1]),
+            dtype=torch.bfloat16,
+            device=hidden_states.device,
+        )
+
+        zb_moe_distribute_combine_zero_buffer(
+            expand_x=expand_x,
+            expert_ids=combine_metadata.topk_ids,
+            assist_info_for_combine=combine_metadata.assist_info_for_combine,
+            ep_send_count=combine_metadata.ep_recv_counts,
+            expert_scales=combine_metadata.topk_weights.to(torch.float32),
+            combined_x=combined_x,
+            tp_send_count=combine_metadata.tp_recv_counts,
+            ori_x=ori_x,
+            expand_scales=expand_scales,
+            x_active_mask=combine_metadata.mc2_mask if self.global_bs == 0 else None,
+            ep_world_size=self.ep_world_size,
+            ep_rank_id=self.ep_rank_id,
+            moe_expert_num=self.moe_expert_num,
+            ext_info=runtime.ext_info,
+            tp_world_size=1,
+            tp_rank_id=0,
+            global_bs=self.global_bs,
+            comm_quant_mode=comm_quant_mode,
+        )
+        return combined_x
+
     def token_combine(self, hidden_states, combine_metadata, bias=None):
         assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
+
+        if self._zb_enabled:
+            return self._token_combine_zb(hidden_states, combine_metadata)
 
         kwargs_mc2 = self.get_combine_mc_kwargs(hidden_states, combine_metadata)
         combined_output = (
