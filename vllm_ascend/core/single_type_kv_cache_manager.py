@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -18,14 +19,16 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 
+if TYPE_CHECKING:
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
 
 class CompressAttentionManager(FullAttentionManager):
-    def __init__(self, kv_cache_spec: MLAAttentionSpec, block_pool: BlockPool, **kwargs) -> None:
+    def __init__(self, kv_cache_spec: "AscendMLAAttentionSpec", block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.compress_ratio = kv_cache_spec.compress_ratio
         self._null_block = block_pool.null_block
@@ -262,9 +265,11 @@ def get_manager_for_kv_cache_spec(
     """
     from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
 
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
     manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
     assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
-    if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
+    if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
         if max_model_len is not None:
             # Compressed-MLA peak in blocks: ceil(max_model_len/compress/block).
