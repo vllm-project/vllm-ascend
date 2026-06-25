@@ -1296,7 +1296,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
 
-        topk_num_tokens = num_input_tokens or hidden_states.shape[0]
+        topk_num_tokens = hidden_states.shape[0] or num_input_tokens
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
         else:
