@@ -9,6 +9,7 @@ import vllm.envs as envs_vllm
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
@@ -252,7 +253,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
-        is_draft_model (bool): Whether the model runs in MTP mode (disables fused MC2).
+        is_draft_model (bool): Whether the model runs in MTP mode.
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -287,7 +288,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
         fused_mc2_enable = get_ascend_config().enable_fused_mc2
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if fused_mc2_enable == 1:
@@ -319,6 +320,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             moe_comm_type = MoECommType.ALLTOALL
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
+    logger.debug(
+        "MoE comm method selected: soc=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
+        soc_version,
+        moe_comm_type,
+        num_tokens,
+        mc2_tokens_capacity,
+    )
     return moe_comm_type
 
 

@@ -1,4 +1,5 @@
 # mypy: ignore-errors
+import os
 import signal
 import time
 
@@ -29,8 +30,18 @@ _ORIGINAL_SCHEDULER = Scheduler
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
+    # TODO: Unify this path with AscendConfig once AscendConfig initialization
+    # is moved earlier in the startup flow.
+    try:
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        return bool(get_ascend_config().enable_balance_scheduling)
+    except Exception:
+        pass
     additional_config = getattr(vllm_config, "additional_config", None) or {}
-    return bool(additional_config.get("enable_balance_scheduling", False))
+    if "enable_balance_scheduling" in additional_config:
+        return bool(additional_config["enable_balance_scheduling"])
+    return bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0")))
 
 
 class BalanceScheduler(Scheduler):
