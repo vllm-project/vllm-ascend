@@ -521,42 +521,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     handles,
                     events,
                 ):
-                    if use_layer_aware_replay:
-                        (
-                            query,
-                            key_cache,
-                            value,
-                            block_tables,
-                            attn_mask,
-                            block_size,
-                            seq_lens,
-                            num_kv_heads,
-                            num_heads,
-                            scale,
-                            sliding_window,
-                            sinks,
-                            attn_output,
-                            softmax_lse,
-                            layer_name,
-                        ) = param
-                    else:
-                        (
-                            query,
-                            key_cache,
-                            value,
-                            block_tables,
-                            attn_mask,
-                            block_size,
-                            seq_lens,
-                            num_kv_heads,
-                            num_heads,
-                            scale,
-                            sliding_window,
-                            sinks,
-                            attn_output,
-                            softmax_lse,
-                        ) = param
-                        layer_name = None
+                    (
+                        query,
+                        key_cache,
+                        value,
+                        block_tables,
+                        attn_mask,
+                        block_size,
+                        seq_lens,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
+                        sliding_window,
+                        sinks,
+                        attn_output,
+                        softmax_lse,
+                        layer_name,
+                    ) = param
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -651,54 +632,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     handles,
                     events,
                 ):
-                    if use_layer_aware_replay:
-                        (
-                            query,
-                            key_cache,
-                            value,
-                            block_tables,
-                            attn_mask,
-                            block_size,
-                            seq_lens,
-                            query_start_loc,
-                            num_kv_heads,
-                            num_heads,
-                            scale,
-                            attn_output,
-                            softmax_lse,
-                            sparse_mode,
-                            pre_tokens,
-                            next_tokens,
-                            c8_k_aq_scale,
-                            c8_k_aq_offset,
-                            c8_v_aq_scale,
-                            c8_v_aq_offset,
-                            layer_name,
-                        ) = param
-                    else:
-                        (
-                            query,
-                            key_cache,
-                            value,
-                            block_tables,
-                            attn_mask,
-                            block_size,
-                            seq_lens,
-                            query_start_loc,
-                            num_kv_heads,
-                            num_heads,
-                            scale,
-                            attn_output,
-                            softmax_lse,
-                            sparse_mode,
-                            pre_tokens,
-                            next_tokens,
-                            c8_k_aq_scale,
-                            c8_k_aq_offset,
-                            c8_v_aq_scale,
-                            c8_v_aq_offset,
-                        ) = param
-                        layer_name = None
+                    (
+                        query,
+                        key_cache,
+                        value,
+                        block_tables,
+                        attn_mask,
+                        block_size,
+                        seq_lens,
+                        query_start_loc,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
+                        attn_output,
+                        softmax_lse,
+                        sparse_mode,
+                        pre_tokens,
+                        next_tokens,
+                        c8_k_aq_scale,
+                        c8_k_aq_offset,
+                        c8_v_aq_scale,
+                        c8_v_aq_offset,
+                        layer_name,
+                    ) = param
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -911,8 +867,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )  # type: ignore
         else:
             attn_params = attn_params + (None, None, None, None)  # type: ignore
-        if self._use_layer_aware_fia_graph_replay:
-            attn_params = attn_params + (self._graph_metadata_layer_name(layer),)  # type: ignore
+        layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
+        attn_params = attn_params + (layer_name,)  # type: ignore
         graph_params.attn_params[num_tokens].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
@@ -1041,6 +997,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sinks,
                 weak_ref_tensors(output),
                 weak_ref_tensors(softmax_lse),
+                self._graph_metadata_layer_name() if self._use_layer_aware_fia_graph_replay else None,
             )
         )
         torch.npu.graph_task_group_begin(stream)
