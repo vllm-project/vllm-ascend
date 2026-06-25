@@ -30,6 +30,9 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.patch.platform.patch_prefix_cache_retention import (
+    get_prefix_cache_retention_interval,
+)
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -114,9 +117,13 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group}
-        # Conservatively fall back to flag all groups when no group is flagged.
+        # Compressed groups already use coarse chunks; dropping their last chunk can erase the whole hit.
         if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+            self.eagle_group_ids = {
+                i
+                for i, g in enumerate(kv_cache_config.kv_cache_groups)
+                if (getattr(g.kv_cache_spec, "compress_ratio", 1) or 1) <= 1
+            }
 
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
         self.single_type_managers = tuple(
@@ -205,6 +212,17 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # NOTE: use 16k as the alignment tokens for model with compress ratio
         block_sizes = [self._get_effective_block_size(spec) for spec, _, _ in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
+        self.retention_interval = get_prefix_cache_retention_interval(self.kv_cache_config, self.lcm_block_size)
+
+    def cache_blocks(self, request, num_computed_tokens: int) -> None:
+        for manager in self.single_type_managers:
+            manager.cache_blocks(
+                request,
+                num_computed_tokens,
+                retention_interval=self.retention_interval,
+                alignment_tokens=self.lcm_block_size,
+                use_eagle=manager.kv_cache_group_id in self.eagle_group_ids,
+            )
 
     def find_longest_cache_hit(
         self,
