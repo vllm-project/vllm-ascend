@@ -257,5 +257,62 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         self.assertTrue(runner._debugger_started)
 
 
+class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
+    """Regression tests for async spec-decode seq_lens correction.
+
+    The helper must synchronize the device->host copy event *before* reading
+    ``valid_sampled_token_count_cpu``. Reading it early consumes stale counts
+    and corrupts the CPU seq_lens, which surfaced as an accuracy regression on
+    DeepSeek-V4 (its compressed-KV slot mapping is built from these seq_lens).
+    """
+
+    def _build_runner(self, optimistic, prev_positions, prev_drafts, counts_cpu):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.optimistic_seq_lens_cpu = optimistic
+        runner.prev_positions = SimpleNamespace(np=prev_positions)
+        runner.prev_num_draft_tokens = SimpleNamespace(np=prev_drafts)
+        runner.valid_sampled_token_count_cpu = counts_cpu
+        return runner
+
+    def test_synchronizes_before_host_read(self):
+        num_reqs = 3
+        # Optimistic (all drafts assumed accepted):
+        #   prev_computed=[100,200,50], prev_drafts=[2,3,1], sched=[3,4,2]
+        #   optimistic = prev_computed + (prev_drafts + 1) + sched
+        optimistic = torch.tensor([106, 208, 54], dtype=torch.int64)
+        prev_positions = np.array([0, 1, 2], dtype=np.int64)
+        prev_drafts = np.array([2, 3, 1], dtype=np.int32)
+
+        # CPU buffer initially holds STALE counts (== drafts + 1, i.e. "all
+        # accepted"). If the helper reads before synchronizing, the correction
+        # is a no-op and the assertion below fails.
+        counts_cpu = torch.tensor([3, 4, 2], dtype=torch.int32)
+        # The true counts that the async copy delivers on synchronize().
+        true_counts = np.array([2, 1, 2], dtype=np.int32)
+
+        runner = self._build_runner(optimistic, prev_positions, prev_drafts, counts_cpu)
+        event = MagicMock()
+        event.synchronize.side_effect = lambda: counts_cpu.copy_(torch.from_numpy(true_counts))
+        runner.valid_sampled_token_count_event = event
+
+        runner._correct_optimistic_seq_lens_cpu(num_reqs)
+
+        event.synchronize.assert_called_once()
+        # correction = (prev_drafts + 1 - true_counts) = [1, 3, 0]
+        # corrected  = optimistic - correction          = [105, 205, 54]
+        np.testing.assert_array_equal(optimistic.numpy(), np.array([105, 205, 54]))
+
+    def test_asserts_event_present(self):
+        runner = self._build_runner(
+            torch.tensor([10], dtype=torch.int64),
+            np.array([0], dtype=np.int64),
+            np.array([1], dtype=np.int32),
+            torch.tensor([1], dtype=torch.int32),
+        )
+        runner.valid_sampled_token_count_event = None
+        with self.assertRaises(AssertionError):
+            runner._correct_optimistic_seq_lens_cpu(1)
+
+
 if __name__ == "__main__":
     unittest.main()
