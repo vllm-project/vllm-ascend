@@ -2023,3 +2023,21 @@ The port occupation issue is tracked by issue #8938 .
     ""suggestions_valid"": true,
     ""judge_reasoning"": ""评审 Bot 的 ok 判断合理，理由自洽，建议有效且无强制表述，缺失项准确。整体审核通过。""
 }",true,true,true,评审 Bot 的 ok 判断合理，理由自洽，建议有效且无强制表述，缺失项准确。整体审核通过。
+test_bad_desc,[Bug]: Got error,[Bug],open,,2026-06-25T00:00:00Z,Help me check,"{
+    ""ok"": false,
+    ""score"": 10,
+    ""reasoning"": ""The title is vague ('[Bug]: Got error') and the description is only 'Help me check', which provides no specific details about the error, environment, or reproduction steps. This is insufficient for a maintainer to understand or investigate the issue. The description has fewer than 30 meaningful characters and consists entirely of a vague plea for help."",
+    ""summary"": ""Title and description are too vague, no useful information provided."",
+    ""missing_items"": [
+        ""Error details or logs"",
+        ""Environment information (OS, hardware, software versions)"",
+        ""Reproduction steps"",
+        ""Expected vs actual behavior""
+    ],
+    ""suggestions"": [
+        ""Include the actual error message or relevant logs"",
+        ""Describe the steps that lead to the error"",
+        ""Specify the environment such as vLLM version, GPU type (e.g., A5), and operating system"",
+        ""Explain what you expected to happen versus what actually happened""
+    ]
+}",false,,,,,
