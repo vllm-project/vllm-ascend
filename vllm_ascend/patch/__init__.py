@@ -406,6 +406,15 @@
 #       https://github.com/vllm-project/vllm/pull/43935
 #    Future Plan:
 #       Remove this patch if upstream streaming behavior is updated to support mamba external KV connector
+#   2. `vllm.v1.core.sched.scheduler.Scheduler._update_requests_with_invalid_blocks`
+#    Why:
+#       Upstream vLLM assumes one KV cache group when handling invalid blocks from KV load failures.
+#    How:
+#       Scan all KV cache groups and rewind to the earliest invalid token boundary.
+#    Related PR (if no, explain why):
+#       No, Ascend needs hybrid KV load failure recompute support.
+#    Future Plan:
+#       Remove this patch once upstream supports hybrid invalid-block handling.
 # ** 15. File: platform/patch_weight_transfer_engine.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["nccl"]`
