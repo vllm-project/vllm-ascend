@@ -1,6 +1,6 @@
 # Feature × Feature
 
-The tables below show mutually exclusive features and the support on Ascend hardware, extended from [vLLM table](https://docs.vllm.ai/en/latest/features/#feature-x-feature).
+The table below shows mutually exclusive features and the support on Ascend hardware, extended from the [vLLM table](https://docs.vllm.ai/en/latest/features/#feature-x-feature).
 
 The symbols used have the following meanings:
 
