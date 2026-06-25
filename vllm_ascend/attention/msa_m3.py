@@ -1015,18 +1015,36 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v, index_q, index_k = qkv.split(
-            [
-                self.q_size,
-                self.kv_size,
-                self.kv_size,
-                self.index_q_size,
-                self.idx_head_dim,
-            ],
-            dim=-1,
-        )
-        q, k = self._qk_norm(q, k)
-        q, k = self.rotary_emb(positions, q, k)
+        main_qkv_size = self.q_size + 2 * self.kv_size
+        main_qkv = qkv.narrow(-1, 0, main_qkv_size)
+        index_q = qkv.narrow(-1, main_qkv_size, self.index_q_size)
+        index_k = qkv.narrow(-1, main_qkv_size + self.index_q_size, self.idx_head_dim)
+
+        if (
+            main_qkv.device.type != "npu"
+            or main_qkv.dtype != torch.bfloat16
+            or positions.ndim != 1
+            or not getattr(self.rotary_emb, "is_neox_style", True)
+        ):
+            q, k, v = main_qkv.split(
+                [self.q_size, self.kv_size, self.kv_size], dim=-1
+            )
+            q, k = self._qk_norm(q, k)
+            q, k = self.rotary_emb(positions, q, k)
+        else:
+            q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
+                input=main_qkv.contiguous(),
+                q_weight=self.q_norm.weight_plus_one,
+                k_weight=self.k_norm.weight_plus_one,
+                q_hidden_size=self.q_size,
+                kv_hidden_size=self.kv_size,
+                head_dim=self.head_dim,
+                eps=self.q_norm.variance_epsilon,
+                q_bias=None,
+                k_bias=None,
+                cos_sin_cache=self.rotary_emb.cos_sin_cache,
+                positions=positions,
+            )
 
         index_q, index_k = self._index_qk_norm(index_q, index_k)
         index_q, index_k = self.rotary_emb(positions, index_q, index_k)
