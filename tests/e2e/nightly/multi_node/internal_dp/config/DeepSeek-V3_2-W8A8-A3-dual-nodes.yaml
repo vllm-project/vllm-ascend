@@ -103,7 +103,7 @@ benchmarks:
     batch_size: 256
     request_rate: 11.2
     baseline: 305.2903 
-    threshold: 0.96
+    threshold: 0.97
     
   acc:
     case_type: accuracy
