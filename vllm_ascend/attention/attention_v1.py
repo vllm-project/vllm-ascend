@@ -1111,6 +1111,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.layerIndex, attn_metadata.kvcomp_metadata, query, passed_key, block_table, actual_seq_lengths_kv
             )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        # Fix for draft model decode: attention metadata is built with
+        # target model's uniform_decode_query_len (num_speculative_steps + 1
+        # tokens/request), but draft model decode processes only 1 token
+        # per request. Correct num_tokens to match query tensor T dimension.
+        if (_EXTRA_CTX.is_draft_model
+                and not _EXTRA_CTX.is_draft_model_prefill
+                and num_tokens != query.shape[0]):
+            num_tokens = query.shape[0]
+            attn_metadata.actual_seq_lengths_q = list(range(1, num_tokens + 1))
         query = query[:num_tokens]
         if (
             attn_metadata.attn_state == AscendAttentionState.PrefillNoCache

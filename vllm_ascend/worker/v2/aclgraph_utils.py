@@ -143,10 +143,12 @@ class ModelWithContext(nn.Module):
         # when capturing, we need to set capturing=True in forward context.
         if torch.npu.is_current_stream_capturing():
             _EXTRA_CTX.capturing = True
-        if self.is_draft_model:
-            _EXTRA_CTX.is_draft_model = True
-        if self.is_draft_model_prefill:
-            _EXTRA_CTX.is_draft_model_prefill = True
+        # Always set flags explicitly — conditional True-only assignment
+        # would leave stale values from prior forward passes (e.g. prefill
+        # capture sets is_draft_model_prefill=True, then decode capture
+        # never resets it to False, breaking downstream checks).
+        _EXTRA_CTX.is_draft_model = self.is_draft_model
+        _EXTRA_CTX.is_draft_model_prefill = self.is_draft_model_prefill
 
         return self.original_model(*args, **kwargs)
 
