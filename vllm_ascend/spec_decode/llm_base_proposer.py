@@ -318,6 +318,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self._maybe_share_topk_indices(target_language_model)
         self._maybe_share_lm_head(model)
 
+        # Auto-resolve local argmax reduction (vllm PR #43349). When the draft
+        # model exposes `supports_remapped_top_tokens` plus `get_top_tokens()`,
+        # this lets us bypass dense full target-vocab scatter during greedy
+        # draft selection. Skipped when lmhead_tp is on because the upstream
+        # `get_top_tokens` uses the standard TP group, which differs from
+        # vllm-ascend's separate lmhead_tp_group.
+        if lmhead_tp_enable():
+            self.use_local_argmax_reduction = False
+        elif hasattr(self, "_resolve_local_argmax_reduction"):
+            self._resolve_local_argmax_reduction()
+
         if (
             self.parallel_drafting
             and self.pass_hidden_states_to_model
@@ -1072,6 +1083,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                 draft_token_ids = draft_token_ids[:num_indices]
                 token_indices_to_sample = token_indices_to_sample[:num_indices]
+        elif self.use_local_argmax_reduction:
+            # vllm PR #43349: avoid dense full target-vocab scatter by routing
+            # remapped greedy draft selection through model.get_top_tokens().
+            draft_token_ids = self.model.get_top_tokens(sample_hidden_states)
         else:
             if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
                 if not hasattr(self.model.model, "compute_logits"):
@@ -1225,6 +1240,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
                     draft_token_ids = draft_token_ids[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
+            elif self.use_local_argmax_reduction:
+                # vllm PR #43349: bypass dense full target-vocab scatter for
+                # remapped greedy draft selection.
+                draft_token_ids = self.model.get_top_tokens(sample_hidden_states)
             else:
                 if get_ascend_config().enable_reduce_sample and self.method in ("mtp"):
                     if not hasattr(self.model.model, "compute_logits"):
