@@ -243,8 +243,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         key: torch.Tensor,
         value: torch.Tensor,
         *,
-        seq_lens: torch.Tensor,
-        cu_seqlens: torch.Tensor,
+        cu_seqlens: torch.Tensor | None,
+        sequence_lengths: torch.Tensor | None,
         is_reshaped: bool,
         bsz: int,
         q_len: int,
@@ -254,7 +254,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             bsz=bsz,
             q_len=q_len,
             cu_seqlens=cu_seqlens,
-            sequence_lengths=seq_lens,
+            sequence_lengths=sequence_lengths,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
         context_layer = self._run_vit_fia(q, k, v, actual_seq_lengths_q, actual_seq_lengths_kv)
@@ -277,7 +277,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         is_reshaped: bool,
         bsz: int,
         q_len: int,
-        kv_len: int,
     ) -> torch.Tensor:
         context = get_encoder_forward_context()
         token_budget = context.token_budget
@@ -372,7 +371,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         key: torch.Tensor,
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,  # Unused on Ascend (upstream API compat)
+        max_seqlen: torch.Tensor | None = None,
         sequence_lengths: torch.Tensor | None = None,
     ):
         bsz, q_len = query.size()[:2]
@@ -391,9 +390,15 @@ class AscendMMEncoderAttention(MMEncoderAttention):
                 is_reshaped=is_reshaped,
                 bsz=bsz,
                 q_len=q_len,
-                kv_len=kv_len,
             )
 
         return self._forward_eager_fia(
-            q, k, v, seq_lens=sequence_lengths, cu_seqlens=cu_seqlens, is_reshaped=is_reshaped, bsz=bsz, q_len=q_len
+            q,
+            k,
+            v,
+            cu_seqlens=cu_seqlens,
+            sequence_lengths=sequence_lengths,
+            is_reshaped=is_reshaped,
+            bsz=bsz,
+            q_len=q_len,
         )
