@@ -118,7 +118,7 @@ jobs:
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
-          ref: ${{ steps.vllm.outputs.main_commit }}
+          ref: ${{ steps.vllm.outputs.release_tag }}
 
       - uses: dorny/paths-filter@v4
         id: filter
@@ -206,7 +206,6 @@ jobs:
     strategy:
       matrix:
         vllm_version:
-          - ${{ needs.lint-and-select-tests.outputs.main_commit }}
           - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
