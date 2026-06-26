@@ -404,14 +404,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             b_flat = b.view(-1, out_size, rank)
 
             buffer_key = f"_moe_shrink_buf_{rank}"
-            shrink_out = getattr(self, buffer_key, None) # A cached allocated buffer
+            shrink_out = getattr(self, buffer_key, None)  # A cached allocated buffer
             if shrink_out is None or shrink_out.shape[0] < x2d.shape[0]:
                 # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32 (its
                 # X_T), so we allocate the buffer in fp32.
                 shrink_out = torch.zeros((x2d.shape[0], rank), dtype=torch.float32, device=x2d.device)
                 setattr(self, buffer_key, shrink_out)
             else:
-                shrink_out = shrink_out[:x2d.shape[0]].zero_()
+                shrink_out = shrink_out[: x2d.shape[0]].zero_()
             self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
 
             if mul_routed_weight and topk_weights is not None:

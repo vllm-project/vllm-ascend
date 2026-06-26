@@ -396,7 +396,7 @@ def unquant_apply_mlp(
     # comm method provided AllGather routing metadata (expanded_row_idx). Lazy
     # import keeps the core MLP free of any LoRA dependency on the common path.
     lora_routing = None
-    if lora_context is not None: # LoRA applied
+    if lora_context is not None:  # LoRA applied
         if expanded_row_idx is None or topk_ids is None:
             raise AssertionError(
                 "MoE LoRA requires expanded_row_idx and topk_ids metadata, "
