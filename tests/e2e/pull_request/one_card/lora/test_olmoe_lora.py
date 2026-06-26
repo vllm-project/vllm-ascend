@@ -55,19 +55,14 @@ def generate_and_test(
         PROMPT_TEMPLATE.format(
             context="Which poll resource provided the most number of candidate information?"  # noqa: E501
         ),
-        PROMPT_TEMPLATE.format(
-            context="Return the poll resource associated with the most candidates."
-        ),
+        PROMPT_TEMPLATE.format(context="Return the poll resource associated with the most candidates."),
     ]
 
     lora_request = None
     if isinstance(lora_id, int):
         lora_request = LoRARequest(str(lora_id), lora_id, lora_path)
     elif isinstance(lora_id, list):
-        lora_request = [
-            LoRARequest(str(i), i, lora_path) if i is not None else None
-            for i in lora_id
-        ]
+        lora_request = [LoRARequest(str(i), i, lora_path) if i is not None else None for i in lora_id]
 
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
     outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
@@ -82,11 +77,7 @@ def generate_and_test(
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         req_lora_id = lora_id[i] if isinstance(lora_id, list) else lora_id
         generated_text = generated_texts[i]
-        expected_output = (
-            EXPECTED_LORA_OUTPUT[i]
-            if req_lora_id is not None
-            else EXPECTED_BASE_MODEL_OUTPUT[i]
-        )
+        expected_output = EXPECTED_LORA_OUTPUT[i] if req_lora_id is not None else EXPECTED_BASE_MODEL_OUTPUT[i]
 
         if compare_lower:
             generated_text = generated_text.lower()

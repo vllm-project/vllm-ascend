@@ -33,9 +33,7 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         PROMPT_TEMPLATE.format(
             context="Which poll resource provided the most number of candidate information?"  # noqa: E501
         ),
-        PROMPT_TEMPLATE.format(
-            context="Return the poll resource associated with the most candidates."
-        ),
+        PROMPT_TEMPLATE.format(context="Return the poll resource associated with the most candidates."),
     ]
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
     outputs = llm.generate(
