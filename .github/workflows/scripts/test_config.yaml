@@ -236,6 +236,7 @@
   source_file_dependencies:
     - vllm_ascend/distributed/weight_transfer
   tests:
+    - tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py
     - tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py
 
 # KV Offload
@@ -696,6 +697,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_minicpm.py: 220
   tests/e2e/pull_request/one_card/test_multi_instance.py: 140
   tests/e2e/pull_request/one_card/test_multistream_overlap_shared_expert.py: 270
+  tests/e2e/pull_request/one_card/test_npu_ipc_weight_transfer.py: 120
   tests/e2e/pull_request/one_card/test_qwen3_0_6b.py: 190
   tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py: 370
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 280
