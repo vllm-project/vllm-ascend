@@ -659,11 +659,6 @@ python -m vllm.entrypoints.openai.api_server "${CMD_ARGS[@]}" > log_${ROLE}.log 
 echo "vLLM started. Log file: log_${ROLE}.log"
 ```
 
-<<<<<<< HEAD
-#### [2. Start proxy_server](#2-start-proxy_server)
-
-#### [3. run-inference](#3-run-inference)
-=======
 #### 2. Start proxy_server
 
 Refer to [Start proxy_server](#2-start-proxy_server) in the MooncakeStore deployment section.
@@ -671,7 +666,6 @@ Refer to [Start proxy_server](#2-start-proxy_server) in the MooncakeStore deploy
 #### 3. Run Inference
 
 Refer to [Run Inference](#3run-inference) in the MooncakeStore deployment section.
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 
 ### PD-Mixed Scenario
 

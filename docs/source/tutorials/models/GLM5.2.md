@@ -969,11 +969,7 @@ python load_balance_proxy_server_example.py \
       $node_d1_ip \
     --decoder-ports \
       9900 9901 9902 9903 \
-<<<<<<< HEAD
-      9900 9901 9902 9903 \
-=======
       9900 9901 9902 9903
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 ```
 
 #### Deployment on 8 Atlas 800 A2
@@ -1201,11 +1197,7 @@ python load_balance_proxy_server_example.py \
       $node_d3_ip \
     --decoder-ports \
       9900 9901 9900 9901 \
-<<<<<<< HEAD
-      9900 9901 9900 9901 \
-=======
       9900 9901 9900 9901
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 ```
 
 **Notice:**

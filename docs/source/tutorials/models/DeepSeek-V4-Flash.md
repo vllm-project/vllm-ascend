@@ -4,15 +4,10 @@
 
 DeepSeek-V4 introduces several key upgrades over DeepSeek-V3:
 
-<<<<<<< HEAD
-- The Manifold-Constrained Hyper-Connections (mHC) to strengthen conventional residual connections;
-- A hybrid attention architecture, which greatly improves long-context efficiency through Compress-4-Attention and Compress-128-Attention. For the Mixture-of Experts (MoE) components, it still adopts the DeepSeekMoE architecture, with only minor adjustments.
-=======
 - The Manifold-Constrained Hyper-Connections (mHC) to strengthen conventional residual connections.
 - A hybrid attention architecture, which greatly improves long-context efficiency through Compress-4-Attention and Compress-128-Attention. For the Mixture-of-Experts (MoE) components, it still adopts the DeepSeekMoE architecture, with only minor adjustments.
 
 DeepSeek-V4-Flash is the lightweight variant of the DeepSeek-V4 family, suitable for high-throughput and low-latency serving scenarios.
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -38,13 +33,9 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 ## 4 Installation
 
-<<<<<<< HEAD
-You can use our official docker image to run `DeepSeek-V4` directly.
-=======
 ### 4.1 Docker Image Installation
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 
 :::::{tab-set}
 :sync-group: install
@@ -95,12 +86,6 @@ docker run --rm \
 ::::{tab-item} A2 series
 :sync: A2
 
-<<<<<<< HEAD
-::::{tab-item} A3 series
-:sync: A3
-
-=======
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 Start the docker image on each node.
 
 ```{code-block} bash
@@ -582,19 +567,6 @@ Before you start, please:
         python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
-<<<<<<< HEAD
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
-
-2. Decode node 0
-
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
-=======
     2. Decode node
 
         ```shell
@@ -603,15 +575,10 @@ Before you start, please:
         ```
 
 4. Deploy the P-D disaggregation proxy.
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 
     Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
-<<<<<<< HEAD
-For Atlas 800 A2 series machines, we can configure the deployment(4\*1P 1\*4D) as follows:
-=======
 #### 5.2.2 A2 Series PD Separation Deployment
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 
 This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A2 (64G × 8) multi-node environment with 4\*1P 1\*4D for better performance.
 
@@ -718,93 +685,6 @@ Before you start, please:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
 
-<<<<<<< HEAD
-        ```shell
-        unset ftp_proxy
-        unset https_proxy
-        unset http_proxy
-        rm -rf ~/ascend/log
-
-        nic_name="xxxxxx" #eg."enp67s0f0np0"
-        local_ip=`hostname -I|awk -F " " '{print$1}'`
-
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export TASK_QUEUE_ENABLE=1
-        export VLLM_RPC_TIMEOUT=3600000
-        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=1200
-
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=1024
-
-        export ASCEND_RT_VISIBLE_DEVICES=$1
-        export TASK_QUEUE_ENABLE=1
-
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
-            --host 0.0.0.0 \
-            --port $2 \
-            --data-parallel-size $3 \
-            --data-parallel-rank $4 \
-            --data-parallel-address $5 \
-            --data-parallel-rpc-port $6 \
-            --tensor-parallel-size $7 \
-            --enable-expert-parallel \
-            --seed 1024 \
-            --served-model-name deepseek_v4 \
-            --max-model-len 135000 \
-            --max-num-batched-tokens 4096 \
-            --max-num-seqs 16 \
-            --block-size 128 \
-            --enforce-eager \
-            --async-scheduling \
-            --no-disable-hybrid-kv-cache-manager \
-            --enable-prefix-caching \
-            --trust-remote-code \
-            --gpu-memory-utilization 0.9 \
-            --quantization ascend \
-            --safetensors-load-strategy 'prefetch' \
-            --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
-            --tokenizer-mode deepseek_v4 \
-            --tool-call-parser deepseek_v4 \
-            --enable-auto-tool-choice \
-            --reasoning-parser deepseek_v4 \
-            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true}' \
-            --speculative-config '{"num_speculative_tokens": 1, "method": "mtp","enforce_eager": true}' \
-            --kv-transfer-config \
-            '{"kv_connector": "MooncakeHybridConnector",
-            "kv_role": "kv_producer",
-            "kv_port": "30000",
-            "engine_id": "0",
-            "kv_connector_extra_config": {
-                        "prefill": {
-                                "dp_size": 8,
-                                "tp_size": 1
-                        },
-                        "decode": {
-                                "dp_size": 32,
-                                "tp_size": 1
-                        }
-                }
-            }'
-                    
-        ```
-
-        For each P instance, only these two configuration values need to be modified: “kv_port” and “engine_id”. The “engine_id” should start from 0 and increment sequentially, while the “kv_port” (e.g., “30100”) must be unique for each P instance, such as 30000, 30100, etc.
-
-    2. Decode node(Same as another D node)
-
-        ```shell
-        unset ftp_proxy
-        unset ftp_proxy
-=======
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export TASK_QUEUE_ENABLE=1
 
@@ -860,7 +740,6 @@ Before you start, please:
 
         ```shell
         unset ftp_proxy
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
         unset https_proxy
         unset http_proxy
         rm -rf ~/ascend/log
@@ -897,11 +776,7 @@ Before you start, please:
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-<<<<<<< HEAD
-            --served-model-name deepseek_v4 \
-=======
             --served-model-name dsv4 \
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
             --max-model-len 135000 \
             --max-num-batched-tokens 60 \
             --max-num-seqs 30 \
@@ -927,41 +802,23 @@ Before you start, please:
             "engine_id": "4",
             "kv_connector_extra_config": {
                         "prefill": {
-<<<<<<< HEAD
-                                "dp_size": 8,
-                                "tp_size": 1
-                        },
-                        "decode": {
-                                "dp_size": 32,
-                                "tp_size": 1
-=======
                             "dp_size": 8,
                             "tp_size": 1
                         },
                         "decode": {
                             "dp_size": 32,
                             "tp_size": 1
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
                         }
                 }
             }' \
             --additional-config '{
                 "ascend_compilation_config":{
-<<<<<<< HEAD
-                        "enable_npugraph_ex":true,
-                        "enable_static_kernel":false
-                },
-                "enable_cpu_binding":true,
-                "multistream_overlap_shared_expert":true,
-                "recompute_scheduler_enable":true
-=======
                       "enable_npugraph_ex":true,
                       "enable_static_kernel":false
                 },
                "enable_cpu_binding":true,
                "multistream_overlap_shared_expert":true,
                "recompute_scheduler_enable":true
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
             }'
         ```
 
@@ -969,32 +826,15 @@ Before you start, please:
 
     1. Prefill node
 
-<<<<<<< HEAD
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address x.x.x.x --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
-
-    For each P instance, only the --dp-address parameter differs and must be configured as the IP address of the service within the same subnet as the other instances.
-=======
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 8 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address x.x.x.x --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
         For each P instance, only the `--dp-address` parameter differs and must be configured as the IP address of the service within the same subnet as the other instances.
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 
     2. Decode node
 
-<<<<<<< HEAD
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start x --dp-address x.x.x.x --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
-
-For each D instance, only the --dp-rank-start parameter differs, which should be configured as 0, 8, 16, and 24 respectively. Each instance’s --dp-address must be set to the IP address of the main D node, which is the IP of the Decode instance with --dp-rank-start set to 0.
-=======
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start x --dp-address x.x.x.x --dp-rpc-port 12321 --vllm-start-port 7100
@@ -1012,7 +852,6 @@ Key Parameter Descriptions:
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on decode nodes.
 - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
 - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 
 Deployment Verification:
 
@@ -1071,17 +910,7 @@ Here are two accuracy evaluation methods.
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-<<<<<<< HEAD
-    ```shell
-    lm_eval \
-    --model local-completions \
-    --model_args model=/root/.cache/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp,base_url=http://127.0.0.1:8006/v1/completions,tokenized_requests=False,trust_remote_code=True \
-    --tasks gsm8k \
-    --output_path ./
-    ```
-=======
 ### Using vLLM Benchmark
->>>>>>> 74684ef88ed7acaabba0fb7dd3c6f8f6e22d056c
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
