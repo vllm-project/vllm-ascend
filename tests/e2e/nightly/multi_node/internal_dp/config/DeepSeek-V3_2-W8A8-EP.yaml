@@ -49,7 +49,7 @@ deployment:
           --max-model-len 133000 
           --max-num-batched-tokens 8192
           --trust-remote-code
-          --gpu-memory-utilization 0.95
+          --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
           --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}' 
@@ -95,7 +95,7 @@ deployment:
           --max-model-len 133000 
           --max-num-batched-tokens 8192
           --trust-remote-code
-          --gpu-memory-utilization 0.95
+          --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
           --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}' 
@@ -141,7 +141,7 @@ deployment:
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}' 
           --trust-remote-code
           --max-num-seqs 14
-          --gpu-memory-utilization 0.92
+          --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
           --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
           --tokenizer-mode deepseek_v32
@@ -188,7 +188,7 @@ deployment:
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}' 
           --trust-remote-code
           --max-num-seqs 14
-          --gpu-memory-utilization 0.92
+          --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
           --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
           --tokenizer-mode deepseek_v32
