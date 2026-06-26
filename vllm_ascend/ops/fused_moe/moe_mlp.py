@@ -385,6 +385,12 @@ def unquant_apply_mlp(
     elif act_name == "swiglustep":
         limit = swiglu_limit if swiglu_limit > 0 else 7.0
         gate_up_out = swiglustep_and_mul(gate_up_out, limit=limit)
+    elif act_name == "gelu":
+        gate, up = gate_up_out.chunk(2, dim=-1)
+        gate_up_out = torch.nn.functional.gelu(gate) * up
+    elif act_name == "gelu_tanh":
+        gate, up = gate_up_out.chunk(2, dim=-1)
+        gate_up_out = torch.nn.functional.gelu(gate, approximate="tanh") * up
     else:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
