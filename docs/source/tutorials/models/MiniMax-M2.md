@@ -589,7 +589,6 @@ For details, please refer to [Using AISBench](../../developer_guide/evaluation/u
 
 Using the `gsm8k` dataset as an example test dataset, run the accuracy evaluation for `MiniMax-M2.7-W8A8` in online mode.
 
-
 1. For `lm_eval` installation, please refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md).
 2. Run `lm_eval` to execute the accuracy evaluation:
 
@@ -626,7 +625,6 @@ vllm bench serve \
   --save-result \
   --result-dir ./
 ```
-
 
 ## 9 Performance Tuning
 
