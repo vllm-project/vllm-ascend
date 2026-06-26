@@ -173,7 +173,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-m
   --port 10010 \
   --max_model_len 133072 \
   --max-num-batched-tokens 4096 \
-  --served-model-name ds-v4 \
+  --served-model-name dsv4 \
   --gpu-memory-utilization 0.9 \
   --max-num-seqs 4 \
   --data-parallel-size 4 \
@@ -240,7 +240,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-m
   --headless \
   --max_model_len 133072 \
   --max-num-batched-tokens 4096 \
-  --served-model-name ds-v4 \
+  --served-model-name dsv4 \
   --gpu-memory-utilization 0.9 \
   --max-num-seqs 4 \
   --data-parallel-size 4 \
@@ -555,7 +555,7 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name auto \
+            --served-model-name dsv4 \
             --max-model-len 131072 \
             --max-num-batched-tokens 8192 \
             --max-num-seqs 16 \
@@ -632,7 +632,7 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name auto \
+            --served-model-name dsv4 \
             --max-model-len 131072 \
             --max-num-batched-tokens 8192 \
             --max-num-seqs 16 \
@@ -707,7 +707,7 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name auto \
+            --served-model-name dsv4 \
             --max-model-len 131072 \
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
@@ -938,7 +938,7 @@ Before you start, please
           --tensor-parallel-size $7 \
           --enable-expert-parallel \
           --seed 1024 \
-          --served-model-name deepseek_v4 \
+          --served-model-name dsv4 \
           --max_model_len 133072 \
           --max-num-batched-tokens 8192 \
           --max-num-seqs 16 \
@@ -1016,7 +1016,7 @@ Before you start, please
           --tensor-parallel-size $7 \
           --enable-expert-parallel \
           --seed 1024 \
-          --served-model-name deepseek_v4 \
+          --served-model-name dsv4 \
           --max-model-len 133072 \
           --max-num-batched-tokens 120 \
           --max-num-seqs 60 \
@@ -1121,7 +1121,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://<node0_ip>:<port>/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "deepseek_v4",
+        "model": "dsv4",
         "messages": [
             {
                 "role": "user",

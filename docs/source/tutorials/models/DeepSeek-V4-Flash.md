@@ -60,7 +60,6 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
-    -v /mnt/sfs_turbo/.cache:/root/.cache \
     -it $IMAGE bash
 ```
 
@@ -106,7 +105,6 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
-    -v /mnt/sfs_turbo/.cache:/root/.cache \
     -it $IMAGE bash
 ```
 
@@ -159,7 +157,7 @@ vllm serve /mnt/nfs_hw/weight/DeepSeek-V4-Flash-w8a8-mtp \
   --safetensors-load-strategy 'prefetch' \
   --max-model-len 135168 \
   --max-num-batched-tokens 4096 \
-  --served-model-name ds \
+  --served-model-name dsv4 \
   --gpu-memory-utilization 0.92 \
   --max-num-seqs 16 \
   --data-parallel-size 1 \
@@ -386,7 +384,7 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name auto \
+            --served-model-name dsv4 \
             --max-model-len 135000 \
             --max-num-batched-tokens 8192 \
             --max-num-seqs 4 \
@@ -464,7 +462,7 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name auto \
+            --served-model-name dsv4 \
             --max-model-len 135000 \
             --max-num-batched-tokens 8192 \
             --max-num-seqs 4 \
@@ -540,7 +538,7 @@ Before you start, please
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name auto \
+            --served-model-name dsv4 \
             --max-model-len 135000 \
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
@@ -747,7 +745,7 @@ Before you start, please
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
-        --served-model-name deepseek_v4 \
+        --served-model-name dsv4 \
         --max-model-len 137216 \
         --max-num-batched-tokens 8192 \
         --max-num-seqs 16 \
@@ -837,7 +835,7 @@ For each P instance, only these two configuration values need to be modified: â€
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
-        --served-model-name deepseek_v4 \
+        --served-model-name dsv4 \
         --max-model-len 137216 \
         --max-num-batched-tokens 60 \
         --max-num-seqs 30 \
@@ -925,7 +923,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://<node0_ip>:<port>/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "deepseek_v4",
+        "model": "dsv4",
         "messages": [
             {
                 "role": "user",
