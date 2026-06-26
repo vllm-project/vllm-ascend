@@ -156,7 +156,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 ```{code-block} bash
    :substitutions:
-# The version of transformers need to be upgraded to 5.2.0.
+# The version of transformers needs to be upgraded to 5.2.0.
 # pip install transformers==5.2.0 --upgrade
 
 export HCCL_OP_EXPANSION_MODE="AIV"
