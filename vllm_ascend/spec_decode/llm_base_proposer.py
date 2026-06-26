@@ -1053,13 +1053,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self.pcp_size > 1:
             # remove graph padding before all_gather
             hidden_states = hidden_states[:num_input_tokens]
-            hidden_states = self.runner.pcp_manager.get_restore_hidden_states(hidden_states)
+            if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                hidden_states = self.runner.pcp_manager.get_restore_hidden_states(hidden_states)
+            else:
+                hidden_states = get_pcp_group().all_gather(hidden_states, 0)
+                hidden_states = torch.index_select(
+                    hidden_states,
+                    0,
+                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
+                )
             if self.method == "mtp":
                 last_hidden_states = hidden_states
             else:
                 # eagle and eagle3 need allgather last_hidden_states.
                 last_hidden_states = last_hidden_states[:num_input_tokens]
-                last_hidden_states = self.runner.pcp_manager.get_restore_hidden_states(last_hidden_states)
+                if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                    last_hidden_states = self.runner.pcp_manager.get_restore_hidden_states(last_hidden_states)
+                else:
+                    last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
+                    last_hidden_states = torch.index_select(
+                        last_hidden_states,
+                        0,
+                        self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
+                    )
 
         if lmhead_tp_enable():
             token_indices_to_sample = nn.functional.pad(
