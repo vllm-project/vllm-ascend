@@ -1,35 +1,35 @@
 # Kimi-K2.5
 
-## Introduction
+## 1 Introduction
 
 Kimi K2.5 is an open-source, native multimodal agentic model built through continual pretraining on approximately 15 trillion mixed visual and text tokens atop Kimi-K2-Base. It seamlessly integrates vision and language understanding with advanced agentic capabilities, instant and thinking modes, as well as conversational and agentic paradigms.
 
-The `Kimi-K2.5` model is first supported in `vllm-ascend:v0.17.0rc1`.
-
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-## Supported Features
+This document is validated and written based on **vLLM-Ascend v0.17.0rc1**. The current model (Kimi-K2.5) is first supported in this version, and **v0.17.0rc1 and later versions** can run stably.
+
+## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
-- `Kimi-K2.5-w4a8`(Quantized version for w4a8): [Download model weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).
-- `kimi-k2.5-eagle3`(Eagle3 MTP draft model for accelerating inference of Kimi-K2.5): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.5-eagle3)
+- `Kimi-K2.5-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).
+- `kimi-k2.5-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.5): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.5-eagle3)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### Verify Multi-node Communication(Optional)
+### 3.2 Verify Multi-node Communication (Optional)
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-### Installation
+## 4 Installation
 
-You can use our official docker image to run `Kimi-K2.5` directly.
+### 4.1 Docker Image Installation
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
@@ -116,21 +116,28 @@ docker run --rm \
 ::::
 :::::
 
-In addition, if you don't want to use the docker image as above, you can also build all from source:
+After a successful docker run, you can verify the running container service by executing the `docker ps` command.
+
+### 4.2 Source Code Installation
+
+If you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## Deployment
+## 5 Online Service Deployment
 
-### Single-node Deployment
+### 5.1 Single-Node Online Deployment
 
-- Quantized model `Kimi-K2.5-w4a8` can be deployed on 1 Atlas 800 A3 (64G × 16).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `Kimi-K2.5-w4a8` can be deployed on 1 Atlas 800 A3 (64G × 16).
 
 Run the following script to execute online inference.
 
-```shell
+Startup Command:
+
+```{code-block} bash
+   :substitutions:
 #!/bin/sh
 # [Optional] jemalloc
 # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
@@ -172,25 +179,76 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --mm-encoder-tp-mode data
 ```
 
-**Notice:**
-The parameters are explained as follows:
+Key Parameter Descriptions:
 
 - Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
-- For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
+- For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs,  we recommend using `data`.
+- `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-### Multi-node Deployment
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
-- `Kimi-K2.5-w4a8`: require at least 2 Atlas 800 A2 (64G × 8).
+Service Verification:
+
+```shell
+curl http://<node0_ip>:8088/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "kimi_k25",
+        "messages": [{
+            "role": "user",
+            "content": [
+            {
+                "type": "text",
+                "text": "The future of AI is"
+            }]
+        }],
+        "max_tokens": 1024,
+        "temperature": 1.0,
+        "top_p": 0.95
+    }'
+```
+
+Expected Result:
+
+The service returns HTTP 200 OK with a JSON response containing the `choices` field. Example output:
+
+```json
+{
+    "id": "chatcmpl-xxxxxxxxxxxxx",
+    "object": "chat.completion",
+    "model": "kimi_k25",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "The future of AI is not a destination we are passively approaching...",
+                "finish_reason": "length"
+            }
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 13,
+        "total_tokens": 1037,
+        "completion_tokens": 1024
+    }
+}
+```
+
+### 5.2 Multi-Node Data Parallel Deployment
+
+`Kimi-K2.5-w4a8` can be deployed across multiple nodes using data parallelism. This deployment mode requires at least 2 Atlas 800 A2 (64G × 8) nodes.
 
 Run the following scripts on two nodes respectively.
 
 **Node 0**
 
-```shell
+Startup Command:
+
+```bash
 #!/bin/sh
 
 # this obtained through ifconfig
@@ -253,7 +311,9 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
 
 **Node 1**
 
-```shell
+Startup Command:
+
+```bash
 #!/bin/sh
 
 # this obtained through ifconfig
@@ -316,18 +376,74 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --mm-encoder-tp-mode data
 ```
 
-### Prefill-Decode Disaggregation
+Key Parameter Descriptions:
+
+- `--data-parallel-size`: total number of data parallel ranks across all nodes. In this example, `4` means the model is split across 4 DP ranks total (2 per node).
+- `--data-parallel-size-local`: number of data parallel ranks running on the current node. In this example, each node runs 2 DP ranks.
+- `--data-parallel-start-rank`: starting rank offset for data parallel ranks on this node. Node 0 starts at rank 0 (default), Node 1 starts at rank 2. This ensures each node's DP ranks occupy distinct positions in the overall rank space.
+- `--data-parallel-address`: IP address of the data parallel master node (Node 0). This value must be consistent with `local_ip` set on Node 0.
+- `--data-parallel-rpc-port`: RPC port for data parallel master communication. Must be the same across all nodes.
+- `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.
+- For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
+
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
+Service Verification:
+
+```shell
+curl http://<node0_ip>:8088/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "kimi_k25",
+        "messages": [{
+            "role": "user",
+            "content": [
+            {
+                "type": "text",
+                "text": "The future of AI is"
+            }]
+        }],
+        "max_tokens": 1024,
+        "temperature": 1.0,
+        "top_p": 0.95
+    }'
+```
+
+Expected Result:
+
+The service returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text.
+
+### 5.3 Multi-Node PD Separation Deployment
 
 We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
 
+In the standard single-node deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. PD (Prefill-Decode) separation addresses this by running Prefill and Decode on dedicated node groups, each configured independently:
+
+- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication (e.g., enabling FlashComm for Allreduce acceleration).
+- **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling MLAPO fusion operators).
+
+This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
+
 Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is not enough NPU memory to serve high concurrency in 1P1D case.
 
-- `Kimi-K2.5-w4a8 2P1D` require 4 Atlas 800 A3 (64G × 16).
+- `Kimi-K2.5-w4a8 2P1D`: requires 4 Atlas 800 A3 (64G × 16) nodes.
 
-To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_dp_program.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
+To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
 1. `launch_online_dp.py` to launch external dp vllm servers.
-    [launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+    [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+
+    Parameter descriptions:
+
+    |Parameter|Type|Required|Default|Description|
+    |---------|----|--------|-------|-----------|
+    |`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|
+    |`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|
+    |`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|
+    |`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|
+    |`--dp-address`|str|Yes|-|IP address of the data parallel master node (node 0).|
+    |`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
+    |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
 
 2. Prefill Node 0 `run_dp_template.sh` script
 
@@ -393,6 +509,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_producer",
       "kv_port": "30000",
+      "engine_id": "0",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 2,
@@ -470,6 +587,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_producer",
       "kv_port": "30100",
+      "engine_id": "1",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 2,
@@ -546,6 +664,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_consumer",
       "kv_port": "30200",
+      "engine_id": "2",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 2,
@@ -622,6 +741,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_consumer",
       "kv_port": "30200",
+      "engine_id": "2",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 2,
@@ -635,8 +755,7 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       }'
     ```
 
-**Notice:**
-The parameters are explained as follows:
+Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
@@ -644,7 +763,17 @@ The parameters are explained as follows:
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
 - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
-1. run server for each node:
+The `run_dp_template.sh` scripts use positional parameters (`$1`-`$7`) to receive configuration values from `launch_online_dp.py`:
+
+- `$1` (`ASCEND_RT_VISIBLE_DEVICES`): the NPU devices assigned to this DP instance, e.g., `0,1,2,3` or `4,5,6,7`.
+- `$2` (`--port`): the vLLM server port for this DP instance, auto-assigned starting from `--vllm-start-port` (e.g., `7100`, `7101`).
+- `$3` (`--data-parallel-size`): total number of DP ranks.
+- `$4` (`--data-parallel-rank`): the rank index of this DP instance.
+- `$5` (`--data-parallel-address`): IP address of the DP master node.
+- `$6` (`--data-parallel-rpc-port`): RPC port for DP master communication.
+- `$7` (`--tensor-parallel-size`): TP size within each DP rank.
+
+6. Run server for each node:
 
     ```shell
     # p0
@@ -657,70 +786,70 @@ The parameters are explained as follows:
     python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
-2. Run the `proxy.sh` script on the prefill master node
+7. Run the `proxy.sh` script on the prefill master node
 
-Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+    Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+
+    ```shell
+    python load_balance_proxy_server_example.py \
+      --port 1999 \
+      --host 141.xx.xx.1 \
+      --prefiller-hosts \
+        141.xx.xx.1 \
+        141.xx.xx.1 \
+        141.xx.xx.2 \
+        141.xx.xx.2 \
+      --prefiller-ports \
+        7100 7101 7100 7101 \
+      --decoder-hosts \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.3 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+        141.xx.xx.4 \
+      --decoder-ports \
+        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115 \
+        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115 \
+    ```
+
+    ```shell
+    cd vllm-ascend/examples/disaggregated_prefill_v1/
+    bash proxy.sh
+    ```
+
+Deployment Verification:
+
+After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together:
 
 ```shell
-python load_balance_proxy_server_example.py \
-  --port 1999 \
-  --host 141.xx.xx.1 \
-  --prefiller-hosts \
-    141.xx.xx.1 \
-    141.xx.xx.1 \
-    141.xx.xx.2 \
-    141.xx.xx.2 \
-  --prefiller-ports \
-    7100 7101 7100 7101 \
-  --decoder-hosts \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.3 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-    141.xx.xx.4 \
-  --decoder-ports \
-    7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115 \
-    7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115 \
-```
-
-```shell
-cd vllm-ascend/examples/disaggregated_prefill_v1/
-bash proxy.sh
-```
-
-## Functional Verification
-
-Once your server is started, you can query the model with input prompts:
-
-```shell
-curl http://<node0_ip>:<port>/v1/chat/completions \
+curl http://141.xx.xx.1:1999/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "kimi_k25",
@@ -738,24 +867,103 @@ curl http://<node0_ip>:<port>/v1/chat/completions \
     }'
 ```
 
-## Accuracy Evaluation
+Expected Result:
 
-Here are two accuracy evaluation methods.
+The proxy returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text, confirming that Prefill nodes have successfully processed the prompt and Decode nodes have generated the response:
+
+```json
+{
+    "id": "chatcmpl-xxxxxxxxxxxxx",
+    "object": "chat.completion",
+    "model": "kimi_k25",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "The future of AI is not a destination we are passively approaching...",
+                "finish_reason": "length"
+            }
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 13,
+        "total_tokens": 1037,
+        "completion_tokens": 1024
+    }
+}
+```
+
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+
+## 6 Functional Verification
+
+Once your server is started, you can query the model with input prompts:
+
+```shell
+curl http://<node0_ip>:8088/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "kimi_k25",
+        "messages": [{
+            "role": "user",
+            "content": [
+            {
+                "type": "text",
+                "text": "The future of AI is"
+            }]
+        }],
+        "max_tokens": 1024,
+        "temperature": 1.0,
+        "top_p": 0.95
+    }'
+```
+
+Expected Result:
+
+The service returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text, along with usage statistics:
+
+```json
+{
+    "id": "chatcmpl-xxxxxxxxxxxxx",
+    "object": "chat.completion",
+    "model": "kimi_k25",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "The future of AI is not a destination we are passively approaching...",
+                "finish_reason": "length"
+            }
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 13,
+        "total_tokens": 1037,
+        "completion_tokens": 1024
+    }
+}
+```
+
+## 7 Accuracy Evaluation
+
+Here is one accuracy evaluation method.
 
 ### Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `Kimi-K2.5-w4a8` in `vllm-ascend:v0.17.0rc1` for reference only.
+2. After execution, you can get the result. Here is the result of `Kimi-K2.5-w4a8` in `vllm-ascend:v0.17.0rc1` for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
-|----- | ----- | ----- | ----- | -----| ----- |
+| ----- | ----- | ----- | ----- | ----- | ----- |
 | GSM8K | - | accuracy | gen | 96.07 | 1 Atlas 800 A3 (64G × 16) |
 | AIME2025 | - | accuracy | gen | 90.00 | 1 Atlas 800 A3 (64G × 16) |
 | GPQA | - | accuracy | gen | 84.85 | 1 Atlas 800 A3 (64G × 16) |
 | TextVQA | - | accuracy | gen | 80.29 | 1 Atlas 800 A3 (64G × 16) |
 
-## Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 
@@ -782,23 +990,50 @@ vllm bench serve --model Eco-Tech/Kimi-K2.5-w4a8 --dataset-name random --random-
 
 After about several minutes, you can get the performance evaluation result.
 
-## Best Practices
+## 9 Performance Tuning
 
-In this chapter, we recommend best practices for three scenarios:
+### 9.1 Recommended Configurations
 
-- Long-context: For long sequences with low concurrency (≤ 4): set `dp1 tp16`; For long sequences with high concurrency (> 4): set `dp2 tp8`
-- Low-latency: For short sequences with low latency: we recommend setting `dp2 tp8`
-- High-throughput: For short sequences with high throughput: we also recommend setting `dp4 tp4`
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+#### Table 1: Scenario Overview
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+
+|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
+|--------|---------------|-----------|--------------|------------------|
+|High Throughput / Low Latency<br>(16K context)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|Use dp4 tp4 for optimal throughput and low latency|
+|High Throughput / Low Latency<br>(16K context)|2-Node Data Parallel|16 (A2)|kimi-k2.5-w4a8|dp4 tp4 across 2 nodes; balanced latency and throughput|
+|High Throughput / Low Latency<br>(16K context)|2P2D deployment|64 (A3)|kimi-k2.5-w4a8|Prefill: dp2 tp8; Decode: dp32 tp1 for high concurrency|
+|Long Context<br>(128K, low concurrency ≤4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|
+|Long Context<br>(128K, high concurrency >4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp2 tp8 to optimize memory bandwidth and support higher concurrency|
+
+#### Table 2: Detailed Node Configuration
+
+|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
+|--------|-------------|-----|--|--|-------------|--------------------|
+|High Throughput / Low Latency (16K)|Server / Single Machine|16|4|4|~16K|3|
+|High Throughput / Low Latency (16K)|Server / 2-Node DP|8|4|2|~16K|3|
+|High Throughput / Low Latency (16K)|Server-P Node|16|8|2|~16K|3|
+|High Throughput / Low Latency (16K)|Server-D Node|16|1|32|~16K|3|
+|Long Context (128K, low concurrency ≤4)|Server / Single Machine|16|16|1|128K|3|
+|Long Context (128K, high concurrency >4)|Server / Single Machine|16|8|2|128K|3|
+
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
 **Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
 
-## FAQ
+### 9.2 Tuning Guidelines
 
-- **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-  A: Clean up old processes and restart: `pkill -f vLLM*`.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
-- **Q: How to handle OOM or unstable startup?**
+## 10 FAQ
 
-  A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce concurrency and load-testing pressure (e.g., `max-concurrency` / `num-prompts`).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+
+- **Q: What is the recommended TP/DP configuration for single-node deployment?**
+
+  A: For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.

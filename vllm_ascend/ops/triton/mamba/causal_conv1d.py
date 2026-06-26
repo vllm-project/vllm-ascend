@@ -107,12 +107,12 @@ def causal_conv1d_fn(
     out: (batch, dim, seqlen)
     """
     forward_context = get_forward_context()
-    num_decodes = 0
+    num_prefills = 0
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is not None and isinstance(attn_metadata, dict):
         attn_metadata = next(iter(attn_metadata.values()), None)
     if attn_metadata is not None:
-        num_decodes = attn_metadata.num_decodes
+        num_prefills = attn_metadata.num_prefills
 
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError(f"causal_conv1d_fn: activation must be None, silu, or swish, got {activation}")
@@ -127,13 +127,14 @@ def causal_conv1d_fn(
     splits = torch.split(x, seqlens, dim=-1)
     width = weight.shape[1]
     state_len = width - 1
-    last_width_prefill_x = extract_last_width(x, query_start_loc[num_decodes:], state_len)
+    prefill_seq_offset = max(0, len(seqlens) - num_prefills)
+    last_width_prefill_x = extract_last_width(x, query_start_loc[prefill_seq_offset:], state_len)
 
     if get_pcp_group().world_size > 1:
         all_last_width_prefill_x = get_pcp_group().all_gather(last_width_prefill_x.unsqueeze(0).contiguous(), 0)
         pcp_rank = get_pcp_group().rank_in_group
         if pcp_rank > 0:
-            conv_states[cache_indices[num_decodes:], :, :state_len] = all_last_width_prefill_x[pcp_rank - 1, ...]
+            conv_states[cache_indices[prefill_seq_offset:], :, :state_len] = all_last_width_prefill_x[pcp_rank - 1, ...]
 
     for i in range(len(seqlens)):
         x_s = splits[i]
@@ -152,7 +153,7 @@ def causal_conv1d_fn(
         )
 
     if get_pcp_group().world_size > 1:
-        conv_states[cache_indices[num_decodes:], :, :state_len] = all_last_width_prefill_x[-1, ...]
+        conv_states[cache_indices[prefill_seq_offset:], :, :state_len] = all_last_width_prefill_x[-1, ...]
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
     out_ref_tensor = torch.cat(out_ref, dim=0)
     return out_ref_tensor

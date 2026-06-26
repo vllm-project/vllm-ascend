@@ -1066,7 +1066,7 @@ std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tens
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
 
-std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_npu(
+std::tuple<at::Tensor, at::Tensor> npu_vllm_quant_lightning_indexer_npu(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
     int64_t query_quant_mode, int64_t key_quant_mode,
@@ -1098,7 +1098,7 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_npu(
                     "key_dequant_scale must be contiguous on all axes except axis 0");
     }
 
-    EXEC_NPU_CMD(aclnnQuantLightningIndexer, query,
+    EXEC_NPU_CMD(aclnnVllmQuantLightningIndexer, query,
         key, weights, query_dequant_scale, key_dequant_scale, actual_seq_lengths_query, actual_seq_lengths_key,
         block_table, metadata, query_quant_mode, key_quant_mode, query_layout_ptr, key_layout_ptr, sparse_count, sparse_mode,
         pre_tokens, next_tokens, cmp_ratio, return_value, stride, scale_stride, sparse_indices_out, sparse_values_out);
@@ -1227,7 +1227,7 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_npu(
     return output;
 }
 
-at::Tensor npu_quant_lightning_indexer_metadata_npu(
+at::Tensor npu_vllm_quant_lightning_indexer_metadata_npu(
     int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t query_quant_mode, int64_t key_quant_mode,
     const c10::optional<at::Tensor> &actual_seq_lengths_query, const c10::optional<at::Tensor> &actual_seq_lengths_key, int64_t batch_size,
     int64_t max_seqlen_q, int64_t max_seqlen_k, const c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count,
@@ -1250,7 +1250,7 @@ at::Tensor npu_quant_lightning_indexer_metadata_npu(
     std::string layout_key_str = std::string(layout_key);
     char *layout_key_ptr = const_cast<char *>(layout_key_str.c_str());
 
-    EXEC_NPU_CMD(aclnnQuantLightningIndexerMetadata, actual_seq_lengths_query_val, actual_seq_lengths_key_val,
+    EXEC_NPU_CMD(aclnnVllmQuantLightningIndexerMetadata, actual_seq_lengths_query_val, actual_seq_lengths_key_val,
                     num_heads_q, num_heads_k, head_dim, query_quant_mode, key_quant_mode, batch_size,
                     max_seqlen_q, max_seqlen_k, layout_query_ptr, layout_key_ptr, sparse_count,
                     sparse_mode, pre_tokens, next_tokens, cmp_ratio, output);
@@ -2152,6 +2152,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                   Tensor? num_accepted_tokens, "
         "                                   float scale_value=1.0) -> (Tensor output)");
     ops.impl("npu_recurrent_gated_delta_rule_310", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule_310);
+
+    ops.def(
+        "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
+    );
+    ops.impl("chunk_gated_delta_rule_fwd_h", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_fwd_h);
+
+    ops.def(
+        "chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
+    );
+    ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
 }
 #else
 // Pybind on other platform
@@ -2461,7 +2471,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("compressor", torch::kPrivateUse1, &vllm_ascend::compressor);
 
     ops.def(
-        "npu_quant_lightning_indexer("
+        "npu_vllm_quant_lightning_indexer("
             "Tensor query, Tensor key, Tensor weights, "
             "Tensor query_dequant_scale, Tensor key_dequant_scale, "
             "int query_quant_mode=0, int key_quant_mode=0, "
@@ -2476,7 +2486,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "int cmp_ratio=1, bool return_value=False"
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
         );
-    ops.impl("npu_quant_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_quant_lightning_indexer_npu);
+    ops.impl("npu_vllm_quant_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_vllm_quant_lightning_indexer_npu);
 
     ops.def(
         "npu_sparse_attn_sharedkv("
@@ -2537,7 +2547,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_sparse_attn_sharedkv_metadata", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attn_sharedkv_metadata_npu);
 
     ops.def(
-        "npu_quant_lightning_indexer_metadata("
+        "npu_vllm_quant_lightning_indexer_metadata("
             "int num_heads_q, "
             "int num_heads_k, "
             "int head_dim, "
@@ -2558,7 +2568,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "str device=\"npu\""
         ") -> (Tensor metadata)"
         );
-    ops.impl("npu_quant_lightning_indexer_metadata", torch::kPrivateUse1, &vllm_ascend::npu_quant_lightning_indexer_metadata_npu);
+    ops.impl("npu_vllm_quant_lightning_indexer_metadata", torch::kPrivateUse1, &vllm_ascend::npu_vllm_quant_lightning_indexer_metadata_npu);
 
     ops.def(
           "npu_hc_post("
