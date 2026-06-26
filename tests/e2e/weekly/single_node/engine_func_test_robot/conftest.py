@@ -6,11 +6,11 @@ from tests.e2e.weekly.single_node.engine_func_test_robot.utility.http_client imp
     HTTPClient,
 )
 
-env_dict = {}
+env_dict: dict = {}
 
-server_model_name = "auto"
+server_model_name: str = "auto"
 
-server_args = [
+server_args: list = [
     "--served-model-name",
     server_model_name,
     "--max-model-len",
