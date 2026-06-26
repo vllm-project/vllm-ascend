@@ -542,6 +542,13 @@ class RequestTracker:
 
     last_block_key: str | None = None
 
+    mamba_group_ids: list[int] | None = None
+
+    # spec blocks for mamba cache group
+    num_speculative_blocks: int = 0
+
+    block_sizes: list[int] | None = None
+
     def __init__(
         self,
         req_id: str,
@@ -558,9 +565,14 @@ class RequestTracker:
         ends: list[int] | None = None,
         sizes_per_chunk: list[list[int]] | None = None,
         last_block_key: str | None = None,
+        mamba_group_ids: list[int] | None = None,
+        num_speculative_blocks: int = 0,
+        block_sizes: list[int] | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
+        self.mamba_group_ids = mamba_group_ids
+        self.num_speculative_blocks = num_speculative_blocks
         block_ids = allocated_block_ids_by_group
         if block_ids is None:
             block_ids = normalize_block_ids_by_group(allocated_block_ids or [])
@@ -575,6 +587,7 @@ class RequestTracker:
         self.ends = ends
         self.sizes_per_chunk = sizes_per_chunk
         self.last_block_key = last_block_key
+        self.block_sizes = block_sizes
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -601,6 +614,7 @@ class RequestTracker:
     def update(
         self,
         new_block_ids: tuple[list[int], ...] | list[int],
+        num_computed_tokens: int = 0,
     ) -> None:
         """Update the request tracker when a running request is scheduled again."""
         normalized = normalize_block_ids_by_group(new_block_ids)
@@ -609,7 +623,36 @@ class RequestTracker:
                 [[] for _ in range(len(normalized) - len(self.allocated_block_ids_by_group))]
             )
         for group_id, ids in enumerate(normalized):
+            self.update_mamba_spec_blocks(ids, group_id, num_computed_tokens)
             self.allocated_block_ids_by_group[group_id].extend(ids)
+
+    def update_mamba_spec_blocks(self, block_ids: list[int], kv_cache_group_id: int, num_computed_tokens: int):
+        """
+        for mamba align groups, each step will:
+            - Firstly, remove some previous blocks and append some necessary null blocks
+            - Secondly, move the speculative blocks(maybe all or partially) to the last position for reuse
+            - Finally, allocate a new block
+        so, if a speculative block is moved to last position and replaced with null block,
+        we also need to update the previous allocated_block_ids to 0.
+        """
+        if self.mamba_group_ids and kv_cache_group_id in self.mamba_group_ids:
+            assert self.block_sizes is not None and len(self.block_sizes) > kv_cache_group_id
+            num_skipped_blocks = (
+                max(num_computed_tokens - self.num_speculative_blocks - 1, 0) // self.block_sizes[kv_cache_group_id]
+            )
+            num_skipped_blocks = min(len(self.allocated_block_ids_by_group[kv_cache_group_id]), num_skipped_blocks)
+            if num_skipped_blocks > 0:
+                self.allocated_block_ids_by_group[kv_cache_group_id][:num_skipped_blocks] = [0] * num_skipped_blocks
+            if not block_ids or self.num_speculative_blocks <= 0:
+                return
+            mask_spec_count = min(len(block_ids) - 1, self.num_speculative_blocks)
+            group_block_ids = self.allocated_block_ids_by_group[kv_cache_group_id]
+            if mask_spec_count >= self.num_speculative_blocks:
+                group_block_ids[-self.num_speculative_blocks :] = [0] * self.num_speculative_blocks
+            else:
+                group_block_ids[-self.num_speculative_blocks : mask_spec_count - self.num_speculative_blocks] = [
+                    0
+                ] * mask_spec_count
 
 
 @dataclass(init=False)
