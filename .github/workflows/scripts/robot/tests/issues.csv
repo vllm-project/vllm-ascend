@@ -8238,3 +8238,75 @@ need to decide whether to fix","{
     ""suggestions_valid"": true,
     ""judge_reasoning"": ""评审 Bot 的 ok=false 合理，因为必填环境信息缺失；reasoning 自洽，指出了缺失项和对定位的影响；suggestions 没有强制表述，具体可执行；missing_items 准确反映了缺失信息。整体审核通过。""
 }",true,true,true,评审 Bot 的 ok=false 合理，因为必填环境信息缺失；reasoning 自洽，指出了缺失项和对定位的影响；suggestions 没有强制表述，具体可执行；missing_items 准确反映了缺失信息。整体审核通过。
+test_bad_bug,[Bug]: something is broken,[Bug],open,,2026-06-25T00:00:00Z,it does not work,"{
+    ""ok"": false,
+    ""score"": 10,
+    ""reasoning"": ""The description is extremely minimal ('it does not work') and fails to provide any environment information, error logs, or reproduction steps. The required fields 'Your current environment' and '🐛 Describe the bug' are not meaningfully addressed. The body also falls below the minimum content threshold, as it is vague and contains almost no substantive information for a maintainer to start investigating."",
+    ""summary"": ""Insufficient information – title indicates a bug but description is too vague and provides no environment or error details."",
+    ""missing_items"": [
+        ""Current environment information (e.g., CANN version, hardware model, OS)"",
+        ""Detailed bug description (error message, reproduction steps, etc.)""
+    ],
+    ""suggestions"": [
+        ""Consider providing the output of the collect_env script or at least the CANN version, hardware model (e.g., A3, A5), and operating system."",
+        ""Please describe the problem in more detail: what were you trying to do, what error occurred, and what steps led to the issue."",
+        ""Including relevant error logs or stack traces would help maintainers quickly understand the problem.""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""Review Bot correctly identifies the description as insufficient. The ok=false judgment is reasonable given the minimal content. Missing items are genuinely absent, and suggestions are specific, actionable, and avoid mandatory language. Reasoning is self-consistent.""
+}",true,true,true,"Review Bot correctly identifies the description as insufficient. The ok=false judgment is reasonable given the minimal content. Missing items are genuinely absent, and suggestions are specific, actionable, and avoid mandatory language. Reasoning is self-consistent."
+test_bad_feature,[Feature]: add something,[Feature],open,,2026-06-25T00:00:00Z,please add this feature,"{
+    ""ok"": false,
+    ""score"": 20,
+    ""reasoning"": ""The description is too short (fewer than 20 meaningful characters) and vague ('please add this feature'). It lacks any details about the requested feature, use case, or rationale. According to the minimum content requirement, this is insufficient for a maintainer to start work."",
+    ""summary"": ""Description too brief and vague; does not meet minimum content requirement."",
+    ""missing_items"": [""detailed description of requested feature"", ""use case or scenario""],
+    ""suggestions"": [""Please provide a clear description of what feature you want added, including the specific functionality, expected behavior, and why it is needed.""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""The Review Bot's ok=false is reasonable for the extremely short and vague description. The missing_items accurately identify what is lacking. The suggestion is actionable and avoids 'required'/'must' language. Reasoning is consistent with the score and judgment.""
+}",true,true,true,The Review Bot's ok=false is reasonable for the extremely short and vague description. The missing_items accurately identify what is lacking. The suggestion is actionable and avoids 'required'/'must' language. Reasoning is consistent with the score and judgment.
+test_bad_install,[Install]: install failed,[Install],open,,2026-06-25T00:00:00Z,"install error, help","{
+    ""ok"": false,
+    ""score"": 20,
+    ""reasoning"": ""The description is extremely brief ('install error, help') and provides no substantive information: no operating system, software version, error logs, or installation steps. This falls below the minimum content threshold and is insufficient for a maintainer to begin any investigation."",
+    ""summary"": ""Description lacks all essential details for an installation issue."",
+    ""missing_items"": [""missing OS information"", ""missing software version (e.g., CANN, PyTorch, MindSpore)"", ""missing error logs or details"", ""missing installation steps or commands""],
+    ""suggestions"": [""Please provide your operating system version (e.g., Ubuntu 22.04, CentOS 7.9)"", ""Include the software versions you are trying to install (e.g., CANN 8.0, PyTorch 2.1)"", ""Share any error messages or screenshots from the installation attempt"", ""Describe the steps you followed during installation""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""Review Bot correctly identified the description is insufficient. ok=false is reasonable. Reasoning is consistent. Suggestions are specific and without demanding language. Missing items are genuinely absent.""
+}",true,true,true,Review Bot correctly identified the description is insufficient. ok=false is reasonable. Reasoning is consistent. Suggestions are specific and without demanding language. Missing items are genuinely absent.
+test_bad_doc,[Doc]: docs are wrong,[Doc],open,,2026-06-25T00:00:00Z,the doc is wrong please fix,"{
+    ""ok"": false,
+    ""score"": 40,
+    ""reasoning"": ""The submitted description only states 'the doc is wrong please fix', which is vague and does not identify which specific documentation page or content is incorrect. The required field 'The doc issue' demands a clear and concise description of the problematic content in the docs. The lack of detail makes it impossible for a maintainer to locate or address the issue. The minimum content threshold is effectively unmet because the statement provides no substantive information about the problem."",
+    ""summary"": ""Description too vague to identify the documentation issue."",
+    ""missing_items"": [""specific documentation page or section that is wrong"", ""clear description of what is incorrect in the docs""],
+    ""suggestions"": [""Please provide the exact URL or section of the documentation that contains the error."", ""Explain what you believe is wrong (e.g., outdated command, broken link, incorrect configuration).""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""The Review Bot's judgment is reasonable as the description is too vague. The reasoning is self-consistent and the suggestions are specific, actionable, and avoid commanding language. Missing items are genuinely missing from the description.""
+}",true,true,true,"The Review Bot's judgment is reasonable as the description is too vague. The reasoning is self-consistent and the suggestions are specific, actionable, and avoid commanding language. Missing items are genuinely missing from the description."
+test_bad_misc,[Misc]: something,[Misc],open,,2026-06-25T00:00:00Z,question,"{
+    ""ok"": false,
+    ""score"": 20,
+    ""reasoning"": ""The description contains only the single word 'question', which is far below the minimum content threshold of 20 meaningful characters and provides no substantive information about what the user wants to discuss. For a Misc/Discussion issue, even though formality is relaxed, the description must include at least a clear topic or context so that the community or maintainers can engage meaningfully. The lack of detail makes it impossible to start any investigation or discussion."",
+    ""summary"": ""Description too vague, lacks any substantive content."",
+    ""missing_items"": [""missing detailed discussion content""],
+    ""suggestions"": [""Please provide a more detailed description of what you would like to discuss, for example the specific area of vllm on Ascend that you are inquiring about or any particular issues you have encountered.""]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""The Review Bot's evaluation is correct: the description is just the word 'question', which lacks substantive content for a discussion. The ok=false judgment is reasonable, the reasoning is consistent, the suggestions are specific and do not use 'required'/'must' language, and the missing item accurately identifies the lack of detailed content.""
+}",true,true,true,"The Review Bot's evaluation is correct: the description is just the word 'question', which lacks substantive content for a discussion. The ok=false judgment is reasonable, the reasoning is consistent, the suggestions are specific and do not use 'required'/'must' language, and the missing item accurately identifies the lack of detailed content."
