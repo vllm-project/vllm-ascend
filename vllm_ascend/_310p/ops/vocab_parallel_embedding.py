@@ -57,6 +57,17 @@ class AscendVocabParallelEmbedding310(AscendVocabParallelEmbedding):
         if quant_config is None:
             self.quant_method = AscendUnquantizedEmbeddingMethod310()
 
+    def forward(self, input_):
+        # The base path only masks out-of-range token ids when tp_size > 1.
+        # When tp_size == 1 the raw ids go straight into the embedding gather,
+        # and the NPU GatherV2 kernel hard-faults on out-of-range ids (e.g. the
+        # -1 placeholders produced by speculative decoding, which the rejection
+        # sampler drops afterwards). Clamp into the valid range to keep results
+        # correct while avoiding invalid GM access on device.
+        if self.tp_size == 1:
+            input_ = input_.clamp(0, self.num_embeddings - 1)
+        return super().forward(input_)
+
 
 class AscendParallelLMHead310(AscendParallelLMHead):
     """
