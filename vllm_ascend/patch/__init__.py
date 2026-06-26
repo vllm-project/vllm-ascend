@@ -842,6 +842,30 @@
 #    Future Plan:
 #       The maybe_remap_kv_scale_name function of the community is reconstructed to support
 #       multiple backends.
+# ** 21b. File: worker/patch_process_weights_after_loading.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.model_loader.utils.process_weights_after_loading`
+#      `vllm.model_executor.model_loader.base_loader.process_weights_after_loading`
+#      and imported references in vllm-ascend model loaders
+#    Why:
+#       DSA attention is implemented in vllm-ascend as the plugin layer
+#       `DSAAttention`. Upstream vLLM only runs post-load attention weight
+#       processing for built-in attention classes, so
+#       `DSAAttention.process_weights_after_loading()` is skipped in the
+#       original loader flow. DSV4 DSA-CP o-proj TP initialization must run in
+#       this post-load phase rather than being initialized lazily in forward.
+#    How:
+#       Rebind the upstream `process_weights_after_loading` helper, including
+#       already-imported loader references, so `DSAAttention` participates in
+#       the same post-load traversal while preserving the original quant-method
+#       and torchao reload behavior.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/10694
+#       https://github.com/vllm-project/vllm/pull/46828
+#    Future Plan:
+#       Remove this patch once the supported vLLM version includes PR #46828.
+#       Then register `DSAAttention` through vLLM's post-load weight-processing
+#       registry instead of monkey-patching model-loader helpers.
 # ** 22. File: worker/patch_v2/patch_input_batch.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.input_batch.InputBatch`
