@@ -4,13 +4,8 @@
 
 DeepSeek-V4 introduces several key upgrades over DeepSeek-V3:
 
-<<<<<<< HEAD
 - The Manifold-Constrained Hyper-Connections (mHC) to strengthen conventional residual connections.
 - A hybrid attention architecture, which greatly improves long-context efficiency through Compress-4-Attention and Compress-128-Attention. For the Mixture-of-Experts (MoE) components, it still adopts the DeepSeekMoE architecture, with only minor adjustments.
-=======
-- The Manifold-Constrained Hyper-Connections (mHC) to strengthen conventional residual connections;
-- A hybrid attention architecture, which greatly improves long-context efficiency through Compress-4-Attention and Compress-128-Attention. For the Mixture-of Experts (MoE) components, it still adopts the DeepSeekMoE architecture, with only minor adjustments.
->>>>>>> 8224757e... Low-error modification
 
 DeepSeek-V4-Pro, the maximum reasoning effort mode of DeepSeek-V4, significantly advances the knowledge capabilities of open-source models, firmly establishing itself as the best open-source model available today. It achieves top-tier performance in coding benchmarks and significantly bridges the gap with leading closed-source models on reasoning and agentic tasks.
 
@@ -30,7 +25,6 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `DeepSeek-V4-Pro-w4a8-mtp` (Quantized version): requires 2 Atlas 800 A3 (128G × 8) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp)
 
-<<<<<<< HEAD
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### 3.2 Verify Multi-node Communication (Optional)
@@ -42,9 +36,6 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 ### 4.1 Docker Image Installation
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
-=======
-You can use our official docker image to run `DeepSeek-V4` directly.
->>>>>>> 8224757e... Low-error modification
 
 :::::{tab-set}
 :sync-group: install
@@ -822,49 +813,27 @@ Before you start, please:
 
     1. Prefill node 0
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
     2. Prefill node 1
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
     3. Decode node 0
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address xx.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address xx.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
     4. Decode node 1
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 --dp-address xx.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
@@ -1014,12 +983,6 @@ Before you start, please:
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 8 --dp-address xx.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
@@ -1149,105 +1112,55 @@ Before you start, please:
 
     1. Prefill node 0
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
     2. Prefill node 1
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 1 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 1 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
     3. Prefill node 2
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 2 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 2 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
     4. Prefill node 3
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 3 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 3 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
     5. Decode node 0
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
     6. Decode node 1
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
     7. Decode node 2
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 2 --dp-rank-start 4 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 2 --dp-rank-start 4 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
     8. Decode node 3
 
-<<<<<<< HEAD
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 2 --dp-rank-start 6 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
@@ -1258,12 +1171,6 @@ Before you start, please:
     Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
 Key Parameter Descriptions:
-=======
-    ```shell
-    # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 2 --dp-rank-start 6 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
-    ```
->>>>>>> 8224757e... Low-error modification
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: enables the Fused MC2 fusion operator to accelerate communication on prefill nodes (A3 series).
@@ -1324,17 +1231,7 @@ Here are two accuracy evaluation methods.
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-<<<<<<< HEAD
 ### Using vLLM Benchmark
-=======
-    ```shell
-    lm_eval \
-    --model local-completions \
-    --model_args model=/root/.cache/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp,base_url=http://127.0.0.1:8006/v1/completions,tokenized_requests=False,trust_remote_code=True \
-    --tasks gsm8k \
-    --output_path ./
-    ```
->>>>>>> 8224757e... Low-error modification
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 

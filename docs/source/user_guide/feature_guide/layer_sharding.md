@@ -38,12 +38,7 @@ To enable **Layer Sharding Linear**, specify the target linear layers using the 
 ```
 
 > **Restriction**
-<<<<<<< HEAD
 > Layer Sharding can only be enabled in PD-disaggregated's **P node**.
-=======
-> Layer Sharding can only be enabled in PD disaggregated's **P node**.
-> Layer Sharding is not supported by RFork weight transfer. If `--load-format rfork` is used with `layer_sharding`, RFork transfer is bypassed and the model is loaded through the default model loader.
->>>>>>> 8224757e... Low-error modification
 
 ---
 
