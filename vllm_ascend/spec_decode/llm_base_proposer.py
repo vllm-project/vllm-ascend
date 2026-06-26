@@ -52,6 +52,7 @@ from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 
 
@@ -1075,7 +1076,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable():
-                        logits = get_lmhead_tp_group().all_to_all(logits)
+                        logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                     else:
                         logits = self.model.model.logits_processor._gather_logits(logits)
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
@@ -1228,7 +1229,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     else:
                         logits = self.model.compute_logits(sample_hidden_states)
                         if lmhead_tp_enable():
-                            logits = get_lmhead_tp_group().all_to_all(logits)
+                            logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                         else:
                             logits = self.model.model.logits_processor._gather_logits(logits)
                         if lmhead_tp_enable() and num_indices < logits.shape[0]:

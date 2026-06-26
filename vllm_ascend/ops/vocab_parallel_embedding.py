@@ -17,6 +17,7 @@
 
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.distributed import divide
@@ -37,7 +38,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
+from vllm_ascend.distributed.parallel_state import GroupCoordinator, get_embed_tp_group, get_lmhead_tp_group
 from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable
 
 
@@ -239,6 +240,38 @@ class AscendParallelLMHead(ParallelLMHead):
             self.register_parameter("bias", None)
 
 
+def lmhead_all_to_all(
+    logits: torch.Tensor,
+    comm_group: GroupCoordinator,
+) -> torch.Tensor:
+    """All-to-all for lm-head TP: redistribute `[N, V/P]` (all tokens, partial
+    vocab) into `[N/P, V]` (partial tokens, full vocab).
+
+    Uses ``all_to_all_single`` on the P axis made explicit by a ``view``: the
+    input is reshaped to ``[P, N/P, V/P]`` so that dim 0 carries the per-rank
+    token shard. After the single collective, ``permute(1, 0, 2)`` interleaves
+    the vocab shards of each token, and a final ``view`` flattens back to
+    ``[N/P, V]``. This is mathematically equivalent to the list-based
+    ``tensor_split(dim=0) + all_to_all(list) + cat(dim=-1)`` but keeps a single
+    contiguous buffer for better HCCL fusion, and avoids the Python list of
+    per-rank tensors.
+
+    Equal split is guaranteed because ``pad_vocab_size`` + ``divide`` make the
+    vocab shard ``V/P`` identical on every rank, and dim 0 is split into equal
+    ``N/P`` token shards.
+    """
+    world_size = comm_group.world_size
+    if world_size == 1:
+        return logits
+    vocab_per_partition = logits.shape[-1]
+    # [N, V/P] -> [P, N/P, V/P]
+    input_ = logits.contiguous().view(world_size, -1, vocab_per_partition)
+    output = torch.empty_like(input_)
+    dist.all_to_all_single(output, input_, group=comm_group.device_group)
+    # [P, N/P, V/P] -> [N/P, P, V/P] -> [N/P, V]
+    return output.permute(1, 0, 2).contiguous().view(-1, world_size * vocab_per_partition)
+
+
 class AscendLogitsProcessor(LogitsProcessor):
     """
     Register LogitsProcessor as a custom op for Ascend.
@@ -267,7 +300,7 @@ class AscendLogitsProcessor(LogitsProcessor):
         logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
         # Gather logits for tensor parallel
         if not get_ascend_config().enable_reduce_sample:
-            logits = get_lmhead_tp_group().all_to_all(logits)
+            logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
 
         # Remove paddings in vocab (if any)
         if logits is not None:

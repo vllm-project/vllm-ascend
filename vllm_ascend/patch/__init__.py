@@ -438,18 +438,6 @@
 # * Worker Patch:
 # ===============
 #
-# ** 1. File: worker/patch_distributed.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.parallel_state.GroupCoordinator`
-#    Why:
-#       vllm doesn't support all_to_all for GroupCoordinator.
-#    How：
-#       Add all_to_all implementation for GroupCoordinator.
-#    Related PR (if no, explain why):
-#       No, we should use vlLM all2all manager to support all_to_all for npu.
-#    Future Plan:
-#       Remove this patch when the refactor of all2all manager is done.
-#
 # ** 3. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
