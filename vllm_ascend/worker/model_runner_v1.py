@@ -3506,6 +3506,13 @@ class NPUModelRunner(GPUModelRunner):
                     else max_query_len
                 )  # type: ignore[assignment]
 
+            # NPU FIA tiling constraint (incre_flash_attention_tiling.cpp:977):
+            # kv_seq_len must be >= total_q_tokens or == 1.
+            # During graph capture with small profile_seq_lens, the value may
+            # violate this constraint.
+            if seq_lens < num_tokens and seq_lens != 1:
+                seq_lens = num_tokens
+
             self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
             self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
             self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)

@@ -685,7 +685,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             "inner_precise": 1,
                         }
                         input_layout = "BNSD"
-                        sparse_mode = 0
+                        # actual_seq_lengths_q from attn_metadata is TND cumulative;
+                        # BNSD input needs per-batch values.
+                        max_q_len = int(actual_seq_lengths_q[0])
+                        actual_seq_lengths_q = [max_q_len] * len(seq_lens)
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
                         key=key_cache,
@@ -769,12 +772,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = self._nz_5d_view(self.key_cache, block_size)
             value = self._nz_5d_view(self.value_cache, block_size)
 
-            # TODO: change layerout from BNSD to TND.
+            # BNSD layout: each batch entry is independent; Q_S dimension
+            # carries the per-request query token count (1 for pure decode,
+            # >1 for MTP / spec decode).
             input_layout = "BNSD"
-            query = query.unsqueeze(2)
-            output = output.unsqueeze(2)
-            attn_mask = None
-            sparse_mode = 0
+            num_batches = len(actual_seq_lengths_kv)
+            max_q_len = num_tokens // num_batches
+            # [B*S, N, D] -> [B, N, S, D]
+            query = query.reshape(num_batches, max_q_len, self.num_heads, self.head_size).transpose(1, 2).contiguous()
+            output = output.reshape(num_batches, max_q_len, self.num_heads, self.head_size).transpose(1, 2).contiguous()
+            actual_seq_lengths_q = [max_q_len] * num_batches
+
+            # BNSD with C8: single-token decode (max_q_len==1) can use
+            # sparse_mode=0 (causal handled implicitly when Q_S=1).
+            # Multi-token (MTP) requires sparse_mode=3 with a 2048x2048
+            # causal atten_mask per the NPU FIA documentation.
+            if max_q_len > 1:
+                attn_mask = attn_metadata.attn_mask
+                sparse_mode = 3
+            else:
+                attn_mask = None
+                sparse_mode = 0
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
@@ -857,10 +875,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             **extra_args,
         )
 
-        output = output.view(num_tokens, self.num_heads, self.head_size)
-
         handle = torch.npu.graph_task_group_end(stream)
         graph_params.handles[num_tokens].append(handle)
+
+        # BNSD output [B,N,S,D] must be converted to TND [B*S,N,D].
+        # This runs in a *separate* graph task group so that
+        # graph_task_update_begin/end only touches the FIA group above.
+        if input_layout == "BNSD":
+            torch.npu.graph_task_group_begin(stream)
+            output = output.transpose(1, 2).contiguous().view(num_tokens, self.num_heads, self.head_size)
+            torch.npu.graph_task_group_end(stream)
+        else:
+            output = output.view(num_tokens, self.num_heads, self.head_size)
+
         return output, num_tokens
 
     def full_graph_fia_v2(
@@ -1434,6 +1461,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 return self._forward_c8_decode(query, attn_metadata, output, layer)
             elif attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
                 return self._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
+            elif attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
+                # MTP spec decode uses the same BNSD paged C8 path as regular decode
+                return self._forward_c8_decode(query, attn_metadata, output, layer)
             else:
                 return self._forward_c8_fused_infer_attention(
                     query,
@@ -1604,14 +1634,38 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         key = self._nz_5d_view(self.key_cache, block_size)
         value = self._nz_5d_view(self.value_cache, block_size)
 
+        # Compute per-request query lengths from TND cumulative format,
+        # then pad to uniform max_q layout for BNSD reshape.
+        actual_seq_q = attn_metadata.actual_seq_lengths_q
+        per_req_q = [int(actual_seq_q[0])]
+        for i in range(1, batch_size):
+            per_req_q.append(int(actual_seq_q[i]) - int(actual_seq_q[i - 1]))
+        max_q = max(per_req_q)
+        n_tokens = sum(per_req_q)
+
+        q_lens_t = torch.tensor(per_req_q, dtype=torch.int64, device=query.device)
+        src_pos = torch.arange(n_tokens, dtype=torch.int64, device=query.device)
+        req_ids = torch.repeat_interleave(torch.arange(batch_size, dtype=torch.int64, device=query.device), q_lens_t)
+        cumsum = torch.cumsum(q_lens_t, dim=0)
+        offsets = src_pos - torch.repeat_interleave(cumsum - q_lens_t, q_lens_t)
+        dst_pos = req_ids * max_q + offsets
+
+        padded = torch.zeros(batch_size * max_q, self.num_heads, self.head_size, dtype=query.dtype, device=query.device)
+        padded[dst_pos] = query[:n_tokens]
+        query_bnsd = padded.reshape(batch_size, max_q, self.num_heads, self.head_size).transpose(1, 2).contiguous()
+
+        pre_tokens = self.sliding_window or SWA_INT_MAX
+        next_tokens = 0 if self.sliding_window else SWA_INT_MAX
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-            query[:batch_size].unsqueeze(2),
+            query_bnsd,
             key,
             value,
             key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
             value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
             block_table=attn_metadata.block_tables,
+            actual_seq_lengths=per_req_q,
             actual_seq_lengths_kv=attn_metadata.seq_lens_list,
+            atten_mask=attn_metadata.attn_mask,
             num_heads=self.num_heads,
             num_key_value_heads=self.num_kv_heads,
             input_layout="BNSD",
@@ -1621,10 +1675,14 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             key_antiquant_mode=0,
             value_antiquant_mode=0,
             inner_precise=1,
-            sparse_mode=0,
+            sparse_mode=3,
+            pre_tokens=pre_tokens,
+            next_tokens=next_tokens,
         )
-        attn_output = attn_output.squeeze(2)
-        output[:batch_size] = attn_output
+        # Unpad output: extract valid tokens per request
+        attn_4d = attn_output.transpose(1, 2).contiguous()
+        flat_out = attn_4d.reshape(-1, self.num_heads, self.head_size)
+        output[:n_tokens] = flat_out[dst_pos]
         return output
 
     def _forward_c8_chunked_prefill(
@@ -1652,14 +1710,48 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             kv_k = self._nz_5d_view(self.key_cache, block_size)
             kv_v = self._nz_5d_view(self.value_cache, block_size)
 
+            # Compute per-request decode query lengths from TND cumulative,
+            # then pad to uniform max_q layout for BNSD reshape.
+            per_req_q = [int(actual_seq_qlen[0])]
+            for i in range(1, num_decodes):
+                per_req_q.append(int(actual_seq_qlen[i]) - int(actual_seq_qlen[i - 1]))
+            max_q = max(per_req_q)
+
+            # NPU FIA rejects BNSD/BSND + NZ 5D + paged attention when
+            # per-request query tokens S > 16 (prompt_flash_attention_tiling.cpp:5381).
+            # If any "decode" request exceeds this, it was misclassified; merge into
+            # the prefill path which uses TND layout (no NZ 5D constraint).
+            if max_q > 16:
+                attn_metadata.num_prefills += num_decodes
+                num_decode_tokens = 0
+                num_decodes = 0
+
+        if num_decode_tokens > 0:
+            n_tokens = sum(per_req_q)
+
+            q_lens_t = torch.tensor(per_req_q, dtype=torch.int64, device=query.device)
+            src_pos = torch.arange(n_tokens, dtype=torch.int64, device=query.device)
+            req_ids = torch.repeat_interleave(torch.arange(num_decodes, dtype=torch.int64, device=query.device), q_lens_t)
+            cumsum = torch.cumsum(q_lens_t, dim=0)
+            offsets = src_pos - torch.repeat_interleave(cumsum - q_lens_t, q_lens_t)
+            dst_pos = req_ids * max_q + offsets
+
+            padded = torch.zeros(num_decodes * max_q, self.num_heads, self.head_size, dtype=query.dtype, device=query.device)
+            padded[dst_pos] = query[:n_tokens]
+            query_bnsd = padded.reshape(num_decodes, max_q, self.num_heads, self.head_size).transpose(1, 2).contiguous()
+
+            pre_tokens = self.sliding_window or SWA_INT_MAX
+            next_tokens = 0 if self.sliding_window else SWA_INT_MAX
             attn_out, _ = torch_npu.npu_fused_infer_attention_score(
-                query[:num_decode_tokens].unsqueeze(2),
+                query_bnsd,
                 kv_k,
                 kv_v,
                 key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
                 value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
                 block_table=attn_metadata.block_tables[:num_decodes],
+                actual_seq_lengths=per_req_q,
                 actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
+                atten_mask=attn_metadata.attn_mask,
                 num_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="BNSD",
@@ -1669,9 +1761,15 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 key_antiquant_mode=0,
                 value_antiquant_mode=0,
                 inner_precise=1,
-                sparse_mode=0,
+                sparse_mode=3,
+                pre_tokens=pre_tokens,
+                next_tokens=next_tokens,
             )
-            output[:num_decode_tokens] = attn_out.squeeze(2)
+            # Unpad output: extract valid tokens per request
+            attn_4d = attn_out.transpose(1, 2).contiguous()
+            flat_out = attn_4d.reshape(-1, self.num_heads, self.head_size)
+            attn_out = flat_out[dst_pos]
+            output[:n_tokens] = attn_out
 
         if attn_metadata.num_prefills > 0:
             prefill_q = query[num_decode_tokens:num_tokens]
