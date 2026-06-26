@@ -12,7 +12,6 @@ import torch.nn.functional as F
 import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import (
-    get_pcp_group,
     get_pp_group,
     get_tp_group,
     get_world_group,
