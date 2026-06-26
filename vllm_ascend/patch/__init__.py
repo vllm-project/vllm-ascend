@@ -654,18 +654,6 @@
 #       Remove this patch when vLLM Ascend depends on a vLLM version that includes
 #       PR #45895.
 #
-# ** 4. File: worker/patch_distributed.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.parallel_state.GroupCoordinator`
-#    Why:
-#       vllm doesn't support all_to_all for GroupCoordinator.
-#    How：
-#       Add all_to_all implementation for GroupCoordinator.
-#    Related PR (if no, explain why):
-#       No, we should use vlLM all2all manager to support all_to_all for npu.
-#    Future Plan:
-#       Remove this patch when the refactor of all2all manager is done.
-#
 # ** 5. File: worker/patch_draft_quarot.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM.load_weights`

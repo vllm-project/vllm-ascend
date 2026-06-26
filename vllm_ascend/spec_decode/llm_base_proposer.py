@@ -54,6 +54,7 @@ from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 
@@ -1174,7 +1175,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
-                    logits = get_lmhead_tp_group().all_to_all(logits)
+                    logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                 else:
                     logits = self.model.model.logits_processor._gather_logits(logits)
                 if lmhead_tp_enable():
@@ -1349,7 +1350,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable():
-                        logits = get_lmhead_tp_group().all_to_all(logits)
+                        logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                     else:
                         logits = self.model.model.logits_processor._gather_logits(logits)
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
