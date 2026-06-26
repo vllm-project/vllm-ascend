@@ -327,22 +327,16 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         lora_b_stacked: tuple[torch.Tensor, ...],
-        # NOTE: parameter order matches the base-class override contract
-        # (PunicaWrapperBase.add_lora_fused_moe). Several of them are
-        # Triton-specific and unused by this AscendC bgmv implementation
-        # (sorted_token_ids, num_tokens_post_padded, max_lora_rank,
-        # shrink_config, expand_config, fully_sharded -- ``del``'d below);
-        # they are kept in the signature for interface compatibility but
-        # defaulted so the Ascend call sites need not pass them.
+        *,
         topk_weights: torch.Tensor | None = None,
         sorted_token_ids: torch.Tensor | None = None,
-        expert_ids: torch.Tensor | None = None,
+        expert_ids: torch.Tensor,
         num_tokens_post_padded: torch.Tensor | None = None,
         max_lora_rank: int = 0,
         top_k_num: int = 1,
         shrink_config=None,
         expand_config=None,
-        adapter_enabled: torch.Tensor | None = None,
+        adapter_enabled: torch.Tensor,
         mul_routed_weight: bool = False,
         fully_sharded: bool = False,
         offset: int = 0,
@@ -390,34 +384,29 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             torch.full_like(token_lora_mapping, -1),
         ).contiguous()
 
+        # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32 (its X_T),
+        # so the shrink buffer is fp32.
+        rank = lora_a_stacked[0].shape[-2]
+        shrink_out = torch.zeros((x2d.shape[0], rank), dtype=torch.float32, device=x2d.device)
+
         cur_offset = offset
         for slice_idx in range(len(lora_a_stacked)):
             # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts, rank, *].
             # Flattening the leading two dims turns "gather by (lora, expert)"
-            # into the plain per-row gather bgmv_shrink/bgmv_expand already do
-            # for dense Linear LoRA (gather by lora id alone).
+            # into "the plain per-row gather" to reuse bgmv_shrink/bgmv_expand.
             a = lora_a_stacked[slice_idx]
             b = lora_b_stacked[slice_idx]
-            rank = a.shape[-2]
             out_size = b.shape[-2]
             a_flat = a.view(-1, rank, a.shape[-1])
             b_flat = b.view(-1, out_size, rank)
 
-            buffer_key = f"_moe_shrink_buf_{rank}"
-            shrink_out = getattr(self, buffer_key, None)  # A cached allocated buffer
-            if shrink_out is None or shrink_out.shape[0] < x2d.shape[0]:
-                # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32 (its
-                # X_T), so we allocate the buffer in fp32.
-                shrink_out = torch.zeros((x2d.shape[0], rank), dtype=torch.float32, device=x2d.device)
-                setattr(self, buffer_key, shrink_out)
-            else:
-                shrink_out = shrink_out[: x2d.shape[0]].zero_()
             self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
 
+            delta = shrink_out
             if mul_routed_weight and topk_weights is not None:
-                shrink_out = shrink_out * topk_weights.view(-1, 1)
+                delta = shrink_out * topk_weights.view(-1, 1)
 
-            self.bgmv_expand_slice(shrink_out, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
+            self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
             cur_offset += out_size
 
     def add_lora_logits(
