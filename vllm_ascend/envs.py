@@ -100,6 +100,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
     # with W8A8. And MTP layer must be W8A8.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # Whether to reserve MC2 token capacity for prefill batches.
+    # When enabled, max_num_batched_tokens is used instead of the decode-only
+    # capacity cap.
+    "VLLM_ASCEND_ENABLE_PREFILL_MC2": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFILL_MC2", "0"))),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
