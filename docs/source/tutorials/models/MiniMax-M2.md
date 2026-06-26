@@ -677,21 +677,17 @@ The following optimizations are enabled by default and require no additional con
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
 
-- **Q: What should I do if the output is garbled in EP mode?**
-
-  A: It is recommended to keep `--enable-expert-parallel` and `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`.
-
 - **Q: Why is the `reasoning` field often empty after using `minimax_m2_append_think`?**
 
   A: This is expected. The parser keeps `<think>...</think>` inside `content`. If you mainly rely on the reasoning semantics of `/v1/responses`, use `--reasoning-parser minimax_m2` instead.
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
-  A: Clean up old processes and restart: `pkill -f "vllm serve"`.
+  A: Check whether another process is already occupying the port (e.g., `lsof -i :<port>` or `ss -tlnp | grep <port>`). If a port conflict is found, switch to a different port with `--port`, or terminate the specific process occupying that port.
 
 - **Q: How to handle OOM or unstable startup?**
 
-  A: Reduce `--max-num-seqs` and `--max-num-batched-tokens` first. If needed, reduce concurrency and load-testing pressure. Also consider lowering `--gpu-memory-utilization` (e.g., from 0.9 to 0.85).
+  A: Refer to the upstream vLLM guide on [out-of-memory troubleshooting](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-of-memory). In short: reduce `--max-num-seqs` and `--max-num-batched-tokens` first, lower `--gpu-memory-utilization` (e.g., from 0.9 to 0.85), or decrease the number of concurrent requests.
 
 - **Q: How should I choose `--reasoning-parser`?**
 
