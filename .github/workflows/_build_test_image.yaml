@@ -69,8 +69,8 @@ permissions:
 
 jobs:
   build-push:
-    name: build-${{ matrix.entry.npu_type }}-${{ matrix.entry.vllm_label }}
-    runs-on: ${{ matrix.entry.runner }}
+    name: build-${{ matrix.npu_type }}-${{ matrix.vllm_label }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -184,7 +184,7 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.entry.cann_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.cann_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Login to Quay Temp
         uses: docker/login-action@v4
@@ -210,7 +210,7 @@ jobs:
       - name: Compute cache tag
         id: cache_tag
         run: |
-          echo "value=buildcache-ci-${{ matrix.entry.npu_type }}-${{ matrix.entry.arch }}" >> $GITHUB_OUTPUT
+          echo "value=buildcache-ci-${{ matrix.npu_type }}-${{ matrix.arch }}" >> $GITHUB_OUTPUT
 
       - name: Build and push image
         uses: docker/build-push-action@v7
@@ -218,14 +218,14 @@ jobs:
         with:
           context: .
           file: .github/workflows/dockerfiles/Dockerfile.ci_test
-          platforms: linux/${{ matrix.entry.arch }}
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ${{ env.QUAY_TEMP_REPO }}:vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.entry.vllm_label }}-${{ matrix.entry.npu_type }}-${{ matrix.entry.arch }}
+          tags: ${{ env.QUAY_TEMP_REPO }}:vllm-ascend-pr${{ inputs.pr_number }}-${{ matrix.vllm_label }}-${{ matrix.npu_type }}-${{ matrix.arch }}
           build-args: |
-            CANN_TAG=${{ matrix.entry.cann_tag }}
-            VLLM_COMMIT=${{ matrix.entry.vllm_version }}
-            SOC_VERSION=${{ matrix.entry.soc }}
-            INSTALL_MODE=${{ matrix.entry.mode }}
+            CANN_TAG=${{ matrix.cann_tag }}
+            VLLM_COMMIT=${{ matrix.vllm_version }}
+            SOC_VERSION=${{ matrix.soc }}
+            INSTALL_MODE=${{ matrix.mode }}
           provenance: false
           cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }}
           cache-to: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache_tag.outputs.value }},mode=max
