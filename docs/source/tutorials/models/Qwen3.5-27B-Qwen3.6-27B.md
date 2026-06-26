@@ -48,7 +48,8 @@ Use `vllm-ascend:v0.17.0rc1` for `Qwen3.5-27B` (or `v0.18.0rc1` for `Qwen3.6-27B
 
 Start the docker image on your each node.
 
-```bash
+```{code-block} bash
+  :substitutions:
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
     --name vllm-ascend \
@@ -87,7 +88,8 @@ docker run --rm \
 
 Start the docker image on your each node.
 
-```bash
+```{code-block} bash
+  :substitutions:
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend \
@@ -567,6 +569,34 @@ Here are two accuracy evaluation methods.
 | dataset | version | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- | -----|
 | gsm8k | - | accuracy | gen | 96.74 |
+
+### Using Language Model Evaluation Harness
+
+Using the `gsm8k` dataset as an example test dataset, run the accuracy evaluation for `Qwen3.5-27B-w8a8` in online mode.
+
+1. For `lm_eval` installation, please refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md).
+2. Run `lm_eval` to execute the accuracy evaluation.
+
+```shell
+# For Qwen3.5-27B-w8a8
+export VLLM_USE_MODELSCOPE=True
+vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
+    --served-model-name qwen3.5 \
+    --trust-remote-code \
+    --quantization ascend \
+    --tensor-parallel-size 2 \
+    --max-model-len 133000 \
+    --max-num-seqs 32 \
+    --gpu-memory-utilization 0.90 \
+    --no-enable-prefix-caching
+
+# Run lm_eval in another terminal
+lm_eval \
+  --model local-completions \
+  --model_args model=qwen3.5,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --tasks gsm8k \
+  --output_path ./
+```
 
 ## 8 Performance Evaluation
 
