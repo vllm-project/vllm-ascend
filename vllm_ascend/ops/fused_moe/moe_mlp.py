@@ -381,14 +381,6 @@ def unquant_apply_mlp(
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
 
-    # MoE LoRA: only attempt injection when an adapter wraps this layer and the
-    # comm method provided AllGather routing metadata (expanded_row_idx). Lazy
-    # import keeps the core MLP free of any LoRA dependency on the common path.
-    apply_lora = lora_context is not None and expanded_row_idx is not None and topk_ids is not None
-    lora_routing = None
-    if apply_lora:
-        from vllm_ascend.lora.fused_moe import moe_lora_apply_w2, moe_lora_apply_w13
-
     mlp_input_hidden = hidden_states
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
@@ -400,9 +392,16 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    # LoRA w13 delta: applied to gate_up_out before activation, with the MLP
-    # input as the lora_a input (mirrors the base gate_up GMM above).
+    # MoE LoRA: only attempt injection when an adapter wraps this layer and the
+    # comm method provided AllGather routing metadata (expanded_row_idx). Lazy
+    # import keeps the core MLP free of any LoRA dependency on the common path.
+    lora_routing = None
+    apply_lora = lora_context is not None and expanded_row_idx is not None and topk_ids is not None
     if apply_lora:
+        from vllm_ascend.lora.fused_moe import moe_lora_apply_w2, moe_lora_apply_w13
+
+        # LoRA w13 delta: applied to gate_up_out before activation, with the MLP
+        # input as the lora_a input (mirrors the base gate_up GMM above).
         lora_routing = moe_lora_apply_w13(
             lora_context,
             gate_up_out=gate_up_out,
