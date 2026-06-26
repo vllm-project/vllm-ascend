@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# OpenAI forced tool choice: tolerate None content after reasoning extraction.
+# OpenAI chat completions: omit empty tool_calls in serialized payloads.
 #
 
 from __future__ import annotations
@@ -22,13 +22,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from openai.types.responses import ToolChoiceFunction
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
 )
-from vllm.parser.abstract_parser import DelegatingParser
 
 _original_chat_completion_response_model_dump = ChatCompletionResponse.model_dump
 _original_chat_completion_stream_response_model_dump = ChatCompletionStreamResponse.model_dump
@@ -57,6 +54,20 @@ def _patched_chat_completion_response_model_dump(self, *args, **kwargs):
     return _omit_empty_tool_calls(_original_chat_completion_response_model_dump(self, *args, **kwargs))
 
 
+def _dump_json(payload: Any, indent: int | None, ensure_ascii: bool) -> str:
+    separators = None if indent is not None else (",", ":")
+    return json.dumps(payload, ensure_ascii=ensure_ascii, indent=indent, separators=separators)
+
+
+def _patched_chat_completion_response_model_dump_json(self, *args, **kwargs):
+    dump_kwargs = dict(kwargs)
+    indent = dump_kwargs.pop("indent", None)
+    ensure_ascii = dump_kwargs.pop("ensure_ascii", False)
+    dump_kwargs.setdefault("mode", "json")
+    payload = _patched_chat_completion_response_model_dump(self, *args, **dump_kwargs)
+    return _dump_json(payload, indent, ensure_ascii)
+
+
 def _patched_chat_completion_stream_response_model_dump(self, *args, **kwargs):
     return _omit_empty_tool_calls(_original_chat_completion_stream_response_model_dump(self, *args, **kwargs))
 
@@ -65,42 +76,12 @@ def _patched_chat_completion_stream_response_model_dump_json(self, *args, **kwar
     dump_kwargs = dict(kwargs)
     indent = dump_kwargs.pop("indent", None)
     ensure_ascii = dump_kwargs.pop("ensure_ascii", False)
+    dump_kwargs.setdefault("mode", "json")
     payload = _patched_chat_completion_stream_response_model_dump(self, *args, **dump_kwargs)
-    separators = None if indent is not None else (",", ":")
-    return json.dumps(payload, ensure_ascii=ensure_ascii, indent=indent, separators=separators)
+    return _dump_json(payload, indent, ensure_ascii)
 
 
 ChatCompletionResponse.model_dump = _patched_chat_completion_response_model_dump
+ChatCompletionResponse.model_dump_json = _patched_chat_completion_response_model_dump_json
 ChatCompletionStreamResponse.model_dump = _patched_chat_completion_stream_response_model_dump
 ChatCompletionStreamResponse.model_dump_json = _patched_chat_completion_stream_response_model_dump_json
-
-
-def _is_forced_tool_choice(request) -> bool:
-    tool_choice = getattr(request, "tool_choice", None)
-    return isinstance(
-        tool_choice,
-        (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
-    )
-
-
-_original_delegating_parse_tool_calls = DelegatingParser._parse_tool_calls
-
-
-def _patched_delegating_parse_tool_calls(
-    self,
-    request,
-    content: str | None,
-    enable_auto_tools: bool,
-):
-    if content is None and _is_forced_tool_choice(request):
-        return [], None
-
-    return _original_delegating_parse_tool_calls(
-        self,
-        request,
-        content,
-        enable_auto_tools,
-    )
-
-
-DelegatingParser._parse_tool_calls = _patched_delegating_parse_tool_calls

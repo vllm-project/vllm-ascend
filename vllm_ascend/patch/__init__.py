@@ -289,23 +289,19 @@
 #
 # ** 11. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.entrypoints.openai.engine.serving.OpenAIServing._parse_tool_calls_from_content`
-#      `vllm.parser.abstract_parser.DelegatingParser._parse_tool_calls`
+#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
+#      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
 #    Why:
-#       Forced tool choice can receive `content=None` when reasoning extraction
-#       consumes the whole generated text, for example when generation stops at
-#       `max_tokens`. Upstream vLLM 0.19.1 asserts in that case.
+#       vLLM v0.23.0 can serialize empty `tool_calls: []` fields for content-only
+#       OpenAI chat responses / streaming deltas, while OpenAI-compatible SDKs
+#       expect those empty fields to be omitted so clients see `tool_calls=None`.
 #    How：
-#       Return an empty tool-call list for forced tool choice with `content=None`
-#       and mark the current named chat tool-choice result so the downstream
-#       chat response path does not assert. Preserve normal forced tool-call
-#       behavior when content is present.
+#       Wrap `model_dump` / `model_dump_json` for chat response payloads and drop
+#       empty `tool_calls` lists from `message` / `delta` objects.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/40148
-#       https://github.com/vllm-project/vllm-ascend/pull/8400
+#       https://github.com/vllm-project/vllm/pull/44105
 #    Future Plan:
-#       Remove this patch once the vLLM fix is included in the supported vLLM
-#       version.
+#       Remove this patch once the supported vLLM version contains PR #44105.
 #
 # ** 12. File: platform/patch_deepseek_v4_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
