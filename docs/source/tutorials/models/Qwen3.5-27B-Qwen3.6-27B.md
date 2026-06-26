@@ -44,7 +44,11 @@ Select an image based on your machine type and start the docker image on your no
 
 Use `vllm-ascend:v0.17.0rc1` for `Qwen3.5-27B` (or `v0.18.0rc1` for `Qwen3.6-27B`). For `Qwen3.6-27B`, please use the matching `v0.18.0rc1-a3` image on Atlas 800 A3.
 
-**A3 series**
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
 
 Start the docker image on your each node.
 
@@ -84,7 +88,10 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-**A2 series**
+::::
+
+::::{tab-item} A2 series
+:sync: A2
 
 Start the docker image on your each node.
 
@@ -115,6 +122,9 @@ docker run --rm \
     -v /root/.cache:/root/.cache \
     -it $IMAGE bash
 ```
+
+::::
+:::::
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command. The expected result is that the container `vllm-ascend` is listed with status `Up`, confirming the docker installation is successful.
 
