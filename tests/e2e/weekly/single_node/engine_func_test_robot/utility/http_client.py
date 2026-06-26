@@ -4,7 +4,7 @@ from requests.exceptions import RequestException
 
 class HTTPClient:
     def __init__(self, base_url=None, timeout=36000):
-        self.base_url = base_url.rstrip('/') if base_url else ''
+        self.base_url = base_url.rstrip("/") if base_url else ""
         self.timeout = timeout
 
     def get(self, endpoint, params=None, headers=None):

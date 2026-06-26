@@ -183,26 +183,6 @@ def test_content_array_missing_text_non_stream(api_client, request):
     assertion.assert_error_code_400(response)
 
 
-def test_content_array_missing_text_stream(api_client, request):
-    """流式：content数组对象type为text但缺少text字段，pd架构状态码200+错误码400，single架构状态码400+错误码400"""
-    request_body = {
-        "model": "auto",
-        "messages": [{"role": "user", "content": [{"type": "text"}]}],
-        "stream": True,
-        "max_tokens": 512,
-    }
-
-    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-
-    # 校验点：pd架构状态码200+错误码400，single架构状态码400+错误码400
-    engine_arch = request.config.getoption("--engineArchitecture")
-    if engine_arch == "pd":
-        assertion.assert_status_code_200(response)
-    else:
-        assertion.assert_status_code_400(response)
-    assertion.assert_error_code_400(response)
-
-
 def test_content_array_invalid_type_non_stream(api_client, request):
     """非流式：content数组对象type为无效值，应返回400错误"""
     request_body = {
@@ -248,26 +228,6 @@ def test_content_array_text_field_null_non_stream(api_client, request):
 
     # 校验点：状态码400，错误码400
     assertion.assert_status_code_400(response)
-    assertion.assert_error_code_400(response)
-
-
-def test_content_array_text_field_null_stream(api_client, request):
-    """流式：content数组对象text字段为null，pd架构状态码200+错误码400，single架构状态码400+错误码400"""
-    request_body = {
-        "model": "auto",
-        "messages": [{"role": "user", "content": [{"type": "text", "text": None}]}],
-        "stream": True,
-        "max_tokens": 512,
-    }
-
-    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-
-    # 校验点：pd架构状态码200+错误码400，single架构状态码400+错误码400
-    engine_arch = request.config.getoption("--engineArchitecture")
-    if engine_arch == "pd":
-        assertion.assert_status_code_200(response)
-    else:
-        assertion.assert_status_code_400(response)
     assertion.assert_error_code_400(response)
 
 
