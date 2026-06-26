@@ -126,14 +126,9 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            if enable_custom_op():
-                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                    x, residual, self.weight_plus_one, None, self.variance_epsilon
-                )
-            else:
-                x, _, residual = torch_npu.npu_add_rms_norm(
-                    x, residual, self.weight_plus_one, self.variance_epsilon
-                )
+            x, _, residual = torch_npu.npu_add_rms_norm(
+                x, residual, self.weight_plus_one, self.variance_epsilon
+            )
             return x, residual
 
         x, _ = torch_npu.npu_rms_norm(x, self.weight_plus_one, self.variance_epsilon)

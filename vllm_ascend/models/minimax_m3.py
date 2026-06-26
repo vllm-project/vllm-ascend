@@ -397,29 +397,10 @@ class MiniMaxM3Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        if (
-            qkv.device.type != "npu"
-            or qkv.dtype != torch.bfloat16
-            or positions.ndim != 1
-            or not getattr(self.rotary_emb, "is_neox_style", True)
-        ):
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            q, k = self._qk_norm(q, k)
-            q, k = self.rotary_emb(positions, q, k)
-        else:
-            q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
-                input=qkv.contiguous(),
-                q_weight=self.q_norm.weight_plus_one,
-                k_weight=self.k_norm.weight_plus_one,
-                q_hidden_size=self.q_size,
-                kv_hidden_size=self.kv_size,
-                head_dim=self.head_dim,
-                eps=self.q_norm.variance_epsilon,
-                q_bias=None,
-                k_bias=None,
-                cos_sin_cache=self.rotary_emb.cos_sin_cache,
-                positions=positions,
-            )
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        
+        q, k = self._qk_norm(q, k)
+        q, k = self.rotary_emb(positions, q, k)
         
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -552,6 +533,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self._enable_eagle3_aux_hidden_states = (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.method == "eagle3"
+        )
 
         self.vocab_size = text_config.vocab_size
         self.num_hidden_layers = text_config.num_hidden_layers
@@ -625,6 +610,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
 
         return hidden_states
+
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        if self._enable_eagle3_aux_hidden_states:
+            EagleModelMixin._set_aux_hidden_state_layers(self, layers)
+        else:
+            EagleModelMixin._set_aux_hidden_state_layers(self, ())
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return fused_moe_make_expert_params_mapping(
