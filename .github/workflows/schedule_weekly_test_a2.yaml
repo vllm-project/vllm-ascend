@@ -229,7 +229,6 @@ jobs:
   clear-pre-logs:
     needs: [parse-trigger]
     runs-on: linux-aarch64-a2b3-0
-    if: needs.multi-node-tests.result != 'skipped'
     steps:
       - name: Clear pre-logs on pvc
         run: |
