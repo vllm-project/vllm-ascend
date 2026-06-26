@@ -133,6 +133,7 @@
     - tests/e2e/pull_request/one_card/aclgraph
     - tests/e2e/pull_request/two_card/aclgraph
     - tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py
+    - tests/e2e/pull_request/four_card/test_graph_mode.py
 
 - name: compilation_passes_base
   optional: false
@@ -540,6 +541,7 @@
     - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
     - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
     - tests/e2e/pull_request/four_card/test_qwen3_5.py
+    - tests/e2e/pull_request/four_card/test_graph_mode.py
 
 
 - name: worker_v2
@@ -742,6 +744,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 210
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 1250
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1760
+  tests/e2e/pull_request/four_card/test_graph_mode.py: 190
   tests/ut/attention/a2/test_attention_cp.py: 40
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30
