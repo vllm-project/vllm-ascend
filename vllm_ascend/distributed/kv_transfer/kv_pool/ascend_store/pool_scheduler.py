@@ -397,6 +397,9 @@ class KVPoolScheduler:
                 allocated_block_ids_by_group=normalize_block_ids_by_group(request.block_ids),
                 num_saved_tokens=0,
                 token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
+                mamba_group_ids=self.mamba_group_ids,
+                num_speculative_blocks=self.num_speculative_blocks,
+                block_sizes=self.grouped_block_size,
             )
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
@@ -441,6 +444,9 @@ class KVPoolScheduler:
                         allocated_block_ids_by_group=normalize_block_ids_by_group(new_block_ids),
                         num_saved_tokens=0,
                         token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
+                        mamba_group_ids=self.mamba_group_ids,
+                        num_speculative_blocks=self.num_speculative_blocks,
+                        block_sizes=self.grouped_block_size,
                     )
                     self._request_trackers[req_id] = request_tracker
                     last_chunk_tokens_num = (
@@ -477,7 +483,7 @@ class KVPoolScheduler:
                     num_computed_token = cached_reqs.num_computed_tokens[i]
                     if num_computed_token >= len(request.prompt_token_ids):
                         continue
-                    request_tracker.update(new_block_ids)
+                    request_tracker.update(new_block_ids, request.num_computed_tokens)
 
                     last_chunk_tokens_num = (
                         self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
@@ -515,6 +521,9 @@ class KVPoolScheduler:
                     token_len=num_tokens_to_compute,
                     allocated_block_ids_by_group=block_ids,
                     num_saved_tokens=0,
+                    mamba_group_ids=self.mamba_group_ids,
+                    num_speculative_blocks=self.num_speculative_blocks,
+                    block_sizes=self.grouped_block_size,
                 )
 
                 self._request_trackers[request_id] = request_tracker
