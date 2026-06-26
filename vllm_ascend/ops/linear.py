@@ -46,6 +46,7 @@ from vllm_ascend.utils import (
     enable_sp,
     get_ascend_device_type,
     maybe_trans_nz,
+    maybe_trans_nz_linear_weight,
 )
 
 
@@ -84,7 +85,7 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
         if getattr(layer, "precast_fp32_weight", False):
             layer.weight_fp32 = maybe_trans_nz(layer.weight.data.to(torch.float32))
         if "conv1d" not in layer.prefix:
-            layer.weight.data = maybe_trans_nz(layer.weight.data)
+            layer.weight.data = maybe_trans_nz_linear_weight(layer.weight.data)
 
     def apply(
         self,
