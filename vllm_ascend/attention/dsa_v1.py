@@ -11,13 +11,14 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -357,7 +358,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def __init__(
         self,
-        kv_cache_spec: MLAAttentionSpec,
+        kv_cache_spec: AscendMLAAttentionSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -825,7 +826,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
             sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
         if self.prefill_ratio_to_sas_metadata.get("qli") is None:
-            self.prefill_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
+            self.prefill_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=prefill_query_start_loc[1:].clone(),
                 actual_seq_lengths_key=self.seq_lens[reqs_start:].clone(),
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
@@ -1086,7 +1087,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
         assert self.decode_qli_metadata is not None
         if self.decode_ratio_to_sas_metadata.get("qli") is None:
-            self.decode_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
+            self.decode_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=query_start_loc[1:].clone(),
                 actual_seq_lengths_key=self.seq_lens[: self.num_decodes].clone(),
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
@@ -1963,7 +1964,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kvlens = indexer_scale_prefill_metadata.seq_lens
                 block_table = indexer_scale_prefill_metadata.block_table
                 qli_metadata = indexer_scale_prefill_metadata.qli_metadata
-                compress_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+                compress_topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
                     query=q_quant,
                     key=indexer_k_cache,
                     weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
@@ -2256,7 +2257,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kvlens = indexer_scale_decode_metadata.seq_lens
                 block_table = indexer_scale_decode_metadata.block_table
                 qli_metadata = indexer_scale_decode_metadata.qli_metadata
-                compress_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+                compress_topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
                     query=q_quant,
                     key=indexer_k_cache,
                     weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
@@ -2521,7 +2522,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             block_table = indexer_kv_scale_metadata.decode.block_table
             qli_metadata = indexer_kv_scale_metadata.decode.qli_metadata
 
-        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+        topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
             query=q,
             key=indexer_k_cache,
             weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
