@@ -522,6 +522,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.enable_sfa_kv_quant_sparse_attention
             else 0
         )
+        self.sfa_qsfa_k_nope_clip_alpha: torch.Tensor | None = None
 
         assert self.indexer is not None, "Indexer is required for DSA."
 
@@ -661,15 +662,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             if getattr(self.q_proj, "_chunk_size", 0):
                 reasons.append("SFA mla_prolog_v3 does not support chunked q_proj weights yet.")
             if reasons:
-                if self.enable_sfa_kv_quant_sparse_attention:
-                    raise RuntimeError(
-                        "SFA KV-quant sparse attention requires a valid mla_prolog_v3 path: "
-                        + " ".join(reasons)
-                    )
                 self.enable_sfa_prolog_v3 = False
                 self.enable_sfa_kv_quant_sparse_attention = False
+                self.sfa_qsfa_packed_kv_head_dim = 0
+
                 for msg in reasons:
-                    logger.warning_once(msg)
+                    logger.warning_once(
+                        f"{msg} Disable SFA mla_prolog_v3 / KV-quant sparse attention "
+                        f"for layer {self.layer_name}; fallback to original sparse attention."
+                    )
             else:
                 self._process_weights_for_fused_prolog_v3()
         elif self.enable_mlapo:
@@ -745,7 +746,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.dequant_scale_w_dq = q_a_proj_deq_scl.view(1, -1).to(torch.float)
         self.dequant_scale_w_dkv_kr = kv_a_proj_deq_scl.view(1, -1).to(torch.float)
         self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.view(1, -1).to(torch.float)
-
+        if self.enable_sfa_kv_quant_sparse_attention:
+            self.sfa_qsfa_k_nope_clip_alpha = torch.ones(
+                1,
+                dtype=torch.float32,
+                device=self.weight_dq.device,
+            )
     # Processing the input parameters for MLAPO by reordering and transposing
     # QKV(and part of Q) weight, applying RoPE-related dimension transformations,
     # and handling quantization parameters.
@@ -1216,6 +1222,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     "ckvkr_repo_mode": 1,
                     "quant_scale_repo_mode": 1,
                     "tile_size": self.sfa_qsfa_tile_size,
+                    "k_nope_clip_alpha": self.sfa_qsfa_k_nope_clip_alpha,
                 }
             )
         if cache_mode == "PA_BSND":
