@@ -326,6 +326,8 @@ class AscendMoERunner(MoERunner):
             )
 
         self.quant_type = self._get_quant_type()
+        if self._needs_routed_expert_parameter_aliases():
+            self._register_routed_expert_parameter_aliases()
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -476,6 +478,19 @@ class AscendMoERunner(MoERunner):
             quant_type = getattr(method, "quant_type", QuantType.NONE)
 
         return quant_type
+
+    def _register_routed_expert_parameter_aliases(self) -> None:
+        # test_gpt_oss_distributed_tp2
+        # test_qwen3_moe_routing_replay[Qwen/Qwen3.5-35B-A3B]
+        for name, param in self.routed_experts.named_parameters(recurse=False):
+            self.register_parameter(name, param)
+
+    def _needs_routed_expert_parameter_aliases(self) -> bool:
+        # test_gpt_oss_distributed_tp2
+        # test_qwen3_moe_routing_replay[Qwen/Qwen3.5-35B-A3B]
+        vllm_config = get_current_vllm_config()
+        hf_config = getattr(vllm_config.model_config, "hf_config", None)
+        return getattr(hf_config, "model_type", None) in {"gpt_oss", "qwen3_5_moe"}
 
     @property
     def is_internal_router(self) -> bool:
