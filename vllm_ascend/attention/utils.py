@@ -35,7 +35,9 @@ def cache_graph_workspace(
     return graph_params.workspaces[num_tokens]
 
 
-def needs_layer_aware_fia_graph_replay(vllm_config: VllmConfig) -> bool:
+@lru_cache(maxsize=1)
+def needs_layer_aware_fia_graph_replay() -> bool:
+    vllm_config = get_current_vllm_config()
     model_config = vllm_config.model_config
     hf_config = getattr(model_config, "hf_config", None)
     hf_text_config = getattr(model_config, "hf_text_config", None)

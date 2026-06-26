@@ -398,7 +398,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
-        self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay(self.vllm_config)
+        self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
         self.sinks = sinks
         self.layerIndex = 0
@@ -424,7 +424,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        use_layer_aware_replay = needs_layer_aware_fia_graph_replay(vllm_config)
+        use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:

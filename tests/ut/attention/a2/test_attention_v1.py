@@ -14,6 +14,7 @@ from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
+    needs_layer_aware_fia_graph_replay,
 )
 
 
@@ -186,7 +187,15 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
+        self.utils_config_patcher = patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
+        )
         self.config_patcher.start()
+        self.utils_config_patcher.start()
+        needs_layer_aware_fia_graph_replay.cache_clear()
+        self.addCleanup(needs_layer_aware_fia_graph_replay.cache_clear)
+        self.addCleanup(self.utils_config_patcher.stop)
+        self.addCleanup(self.config_patcher.stop)
 
         self.impl = AscendAttentionBackendImpl(
             num_heads=8,
