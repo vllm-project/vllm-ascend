@@ -542,7 +542,7 @@ class KVCacheRecvingThread(threading.Thread):
             "remote_port_send_num": remote_port_send_num,
             "all_task_done": all_task_done,
         }
-        logger.info("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
+        logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
 
     def get_and_clear_finished_requests(self) -> set[str]:
@@ -852,7 +852,17 @@ class KVCacheRecvingThread(threading.Thread):
 
         if self.is_hma_required:
             for group_idx, grouped_local_block_ids, num_group_pulls, layer_indices in gqa_reformat_groups:
-                logger.info("reformat_kv_cache_hybrid_linear_torch %s", layer_indices)
+                num_reformat_blocks = sum(len(block_ids) for block_ids in grouped_local_block_ids)
+                logger.debug(
+                    "Reformat hybrid linear KV cache for GQA attention group. "
+                    "group_idx=%s, num_group_pulls=%s, num_block_groups=%s, num_reformat_blocks=%s, "
+                    "layer_indices=%s",
+                    group_idx,
+                    num_group_pulls,
+                    len(grouped_local_block_ids),
+                    num_reformat_blocks,
+                    layer_indices,
+                )
                 group_kv_caches = self._get_group_kv_caches(group_idx, layer_indices)
                 if not group_kv_caches:
                     continue
@@ -2519,9 +2529,7 @@ class MooncakeConnectorWorker:
                 return list(rank_group_pulls.get(remote_rank, []))
 
             return [
-                [
-                    get_group_pulls_for_remote_port(remote_handshake_port) for remote_handshake_port in remote_ports
-                ]
+                [get_group_pulls_for_remote_port(remote_handshake_port) for remote_handshake_port in remote_ports]
                 for remote_ports in remote_handshake_port_list
             ]
 
