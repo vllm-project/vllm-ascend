@@ -396,8 +396,14 @@ def unquant_apply_mlp(
     # comm method provided AllGather routing metadata (expanded_row_idx). Lazy
     # import keeps the core MLP free of any LoRA dependency on the common path.
     lora_routing = None
-    apply_lora = lora_context is not None and expanded_row_idx is not None and topk_ids is not None
-    if apply_lora:
+    if lora_context is not None: # LoRA applied
+        if expanded_row_idx is None or topk_ids is None:
+            raise AssertionError(
+                "MoE LoRA requires expanded_row_idx and topk_ids metadata, "
+                "which are only available in AllGather communication mode. "
+                "Please ensure you are running in a supported configuration."
+            )
+
         from vllm_ascend.lora.fused_moe import moe_lora_apply_w2, moe_lora_apply_w13
 
         # LoRA w13 delta: applied to gate_up_out before activation, with the MLP
