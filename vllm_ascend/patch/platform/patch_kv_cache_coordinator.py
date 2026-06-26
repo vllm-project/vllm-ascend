@@ -68,10 +68,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             metrics_collector,
         )
 
-        # KV cache group indices that get the EAGLE last-block drop.
-        self.eagle_group_ids: set[int] = {i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group}
-        # Compressed groups already use coarse chunks; dropping their last chunk can erase the whole hit.
-        if use_eagle and not self.eagle_group_ids:
+        # KV cache group indices that get the EAGLE/MTP last-block drop.
+        # vLLM applies EAGLE globally. For DSV4 we keep that behavior for
+        # uncompressed groups, but exclude c4/c128 because dropping their coarse
+        # chunk can erase the whole aligned hit.
+        self.eagle_group_ids: set[int] = set()
+        if use_eagle:
             self.eagle_group_ids = {
                 i
                 for i, g in enumerate(kv_cache_config.kv_cache_groups)

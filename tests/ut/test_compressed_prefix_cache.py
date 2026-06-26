@@ -387,3 +387,61 @@ def test_mtp_fallback_excludes_compressed_groups_from_eagle_drop() -> None:
 
     assert local_coordinator.eagle_group_ids == {1}
     assert external_coordinator.eagle_group_ids == {1}
+
+
+def test_mtp_explicit_eagle_group_still_drops_c1_not_compressed() -> None:
+    block_size = 128
+    compressed_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+    )
+    sliding_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=block_size,
+    )
+    mtp_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    mtp_group = KVCacheGroupSpec(["mtp"], mtp_spec)
+    mtp_group.is_eagle_group = True
+    groups = [
+        KVCacheGroupSpec(["compressed"], compressed_spec),
+        KVCacheGroupSpec(["sliding"], sliding_spec),
+        mtp_group,
+    ]
+    local_coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=16,
+            kv_cache_tensors=[],
+            kv_cache_groups=groups,
+        ),
+        max_model_len=block_size * 4,
+        use_eagle=True,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=block_size,
+        max_num_batched_tokens=block_size * 4,
+    )
+    external_coordinator = AscendStoreCoordinator(
+        kv_cache_groups=groups,
+        scheduler_block_size=block_size * 4,
+        hash_block_size=block_size,
+        group_block_sizes=[block_size, block_size, block_size],
+        group_cache_families=["c4", "c1", "default"],
+        use_eagle=True,
+    )
+
+    assert local_coordinator.eagle_group_ids == {1, 2}
+    assert external_coordinator.eagle_group_ids == {1, 2}
