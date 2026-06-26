@@ -27,6 +27,13 @@ from vllm_ascend.patch.platform.patch_prefix_cache_retention import (
 USE_MULTI_GROUPS_KV_CACHE = True
 
 
+def _compress_ratio(kv_cache_spec: KVCacheSpec) -> int:
+    kv_cache_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
+    if isinstance(kv_cache_specs, dict):
+        return max((getattr(spec, "compress_ratio", 1) or 1) for spec in kv_cache_specs.values())
+    return getattr(kv_cache_spec, "compress_ratio", 1) or 1
+
+
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     """
     KV cache coordinator for hybrid models with multiple KV cache types, and
@@ -68,15 +75,19 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             metrics_collector,
         )
 
-        # KV cache group indices that get the EAGLE last-block drop.
-        self.eagle_group_ids: set[int] = {i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group}
-        # Compressed groups already use coarse chunks; dropping their last chunk can erase the whole hit.
-        if use_eagle and not self.eagle_group_ids:
+        has_compressed_group = any(
+            _compress_ratio(group.kv_cache_spec) > 1 for group in kv_cache_config.kv_cache_groups
+        )
+        if use_eagle and has_compressed_group:
+            # DSV4 local hits are aligned to compressed chunks (for example 16K).
+            # Dropping one c4/c128 chunk can erase the whole aligned hit.
+            self.eagle_group_ids: set[int] = set()
+        else:
             self.eagle_group_ids = {
-                i
-                for i, g in enumerate(kv_cache_config.kv_cache_groups)
-                if (getattr(g.kv_cache_spec, "compress_ratio", 1) or 1) <= 1
+                i for i, g in enumerate(kv_cache_config.kv_cache_groups) if getattr(g, "is_eagle_group", False)
             }
+            if use_eagle and not self.eagle_group_ids:
+                self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
