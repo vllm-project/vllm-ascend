@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -10,7 +11,30 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
 )
 from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    cache_graph_workspace,
+)
+
+
+class TestAttentionGraphHelpers(TestBase):
+    def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
+        graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
+        candidate_workspace = torch.empty(8)
+
+        result = cache_graph_workspace(graph_params, 1, candidate_workspace, use_max_workspace=False)
+
+        self.assertEqual(result.numel(), 4)
+        self.assertEqual(graph_params.workspaces[1].numel(), 4)
+
+    def test_cache_graph_workspace_updates_to_larger_workspace(self):
+        graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
+        candidate_workspace = torch.empty(8)
+
+        result = cache_graph_workspace(graph_params, 1, candidate_workspace, use_max_workspace=True)
+
+        self.assertEqual(result.numel(), 8)
+        self.assertEqual(graph_params.workspaces[1].numel(), 8)
 
 
 class TestAscendAttentionBackend(TestBase):

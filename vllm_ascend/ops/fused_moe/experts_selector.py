@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import functools
+import inspect
 from collections.abc import Callable
 
 import torch
@@ -25,6 +27,22 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
 from vllm_ascend.utils import get_weight_prefetch_method
+
+
+def _inspect_custom_routing_accepts_num_experts(custom_routing_function: Callable) -> bool:
+    try:
+        signature = inspect.signature(custom_routing_function)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == "num_experts"
+        for parameter in signature.parameters.values()
+    )
+
+
+@functools.cache
+def _custom_routing_accepts_num_experts(custom_routing_function: Callable) -> bool:
+    return _inspect_custom_routing_accepts_num_experts(custom_routing_function)
 
 
 def select_experts(
@@ -374,13 +392,15 @@ def _native_select_experts(
         topk_weights = topk_weights + e_score_correction_bias
 
     if custom_routing_function is not None:
-        topk_weights, topk_ids = custom_routing_function(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=top_k,
-            renormalize=renormalize,
-            num_experts=num_experts,
-        )
+        routing_kwargs = {
+            "hidden_states": hidden_states,
+            "gating_output": router_logits,
+            "topk": top_k,
+            "renormalize": renormalize,
+        }
+        if _custom_routing_accepts_num_experts(custom_routing_function):
+            routing_kwargs["num_experts"] = num_experts
+        topk_weights, topk_ids = custom_routing_function(**routing_kwargs)
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)
         return topk_weights, topk_ids
