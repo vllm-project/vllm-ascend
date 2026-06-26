@@ -8,18 +8,24 @@ We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the
 
 - **Mooncake Connector for DeepSeek V4 / Hybrid KV Cache**: Mooncake connector now supports DeepSeek V4 and hybrid KV cache disaggregated prefill scenarios with correct block stride handling, compressed KV transfer calculation, and hybrid Mamba token alignment. [#10342](https://github.com/vllm-project/vllm-ascend/pull/10342)
 - **HCCL Weight Transfer for RL Workloads**: Added an HCCL-based weight transfer backend for Ascend NPU so trainer and inference workers can synchronize weights in RL pipelines without a CUDA/NCCL dependency. [#9152](https://github.com/vllm-project/vllm-ascend/pull/9152)
-- **Ascend 950 Expansion**: Extended Ascend 950 support with W8A8FP8 dynamic quantization and platform-specific CPU binding support. [#10236](https://github.com/vllm-project/vllm-ascend/pull/10236) [#10483](https://github.com/vllm-project/vllm-ascend/pull/10483)
+- **Ascend 950 Expansion**: Extended Ascend 950 support with W8A8/W4A8 dynamic quantization and platform-specific CPU binding support. [#10236](https://github.com/vllm-project/vllm-ascend/pull/10236) [#10483](https://github.com/vllm-project/vllm-ascend/pull/10483)
 
 ### Features
 
 - Added multimodal input support for DFlash workloads. [#9340](https://github.com/vllm-project/vllm-ascend/pull/9340)
+- Added P-Eagle and PARD as parallel speculative decoding methods after full Q2 validation.
 - Added KV consumer partial-group caching for hybrid Mamba models. [#10009](https://github.com/vllm-project/vllm-ascend/pull/10009)
 - Added MiniMax M2 C8 cache-scale support in GQA `load_weights`. [#10461](https://github.com/vllm-project/vllm-ascend/pull/10461)
+<<<<<<< HEAD
 - Added SSD support for multiple DP ranks on the same machine to avoid local-rank path collisions in Mooncake offload directories. [#10477](https://github.com/vllm-project/vllm-ascend/pull/10477)
+=======
+- [Experimental] Added SSD support for multiple DP ranks on the same machine to avoid local-rank path collisions in Mooncake offload directories. [#10477](https://github.com/vllm-project/vllm-ascend/pull/10477)
+- Added PCP + DP validation interception for unsupported configuration combinations. [#10178](https://github.com/vllm-project/vllm-ascend/pull/10178)
+>>>>>>> 30be589f7 (docs(release): address latest note review)
 
 ### Hardware and Operator Support
 
-- Added W8A8FP8 dynamic quantization support for Ascend 950. [#10236](https://github.com/vllm-project/vllm-ascend/pull/10236)
+- Added W8A8/W4A8 dynamic quantization support for Ascend 950. [#10236](https://github.com/vllm-project/vllm-ascend/pull/10236)
 - Added Ascend 950 CPU binding support for A5 server topology and process layout. [#10483](https://github.com/vllm-project/vllm-ascend/pull/10483)
 
 ### Performance
@@ -38,6 +44,10 @@ We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the
 
 - MiniMax 2.7 dual-node 16-card deployments may hang or crash after 10-20 minutes under load. [#10591](https://github.com/vllm-project/vllm-ascend/issues/10591)
 - Llama LoRA can still hit an einsum tensor-dimension mismatch on Ascend. [#10577](https://github.com/vllm-project/vllm-ascend/issues/10577)
+- Qwen3.x with PD disaggregation plus MTP can still show precision issues because former KVCache blocks may remain dirty. [#10961](https://github.com/vllm-project/vllm-ascend/issues/10961)
+- In A3 four-machine 2P1D deployments, Kimi-K2.6 can trigger `Error in KVCacheTransferThread. error=unhashable type: 'list'` on the D node under concurrent `terminal-bench2` testing. [#10962](https://github.com/vllm-project/vllm-ascend/issues/10962)
+- With CANN 9.0.0, GLM5.1 1P1D four-machine deployments may hang during 140K-context performance tests, and Kimi-K2.5 with MC2 enabled may hit OOM on single-node A3. [#10963](https://github.com/vllm-project/vllm-ascend/issues/10963)
+- Multi-level pooling remains an experimental feature and still has known issues, including DeepSeek-V4-Flash startup failures with Layerwise masks and service hangs in some Mooncake SSD scenarios. [#10964](https://github.com/vllm-project/vllm-ascend/issues/10964)
 
 ## v0.21.0rc1 - 2026.06.16
 
