@@ -1,5 +1,4 @@
 import pytest
-from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.weekly.single_node.engine_func_test_robot.utility.http_client import (
@@ -34,11 +33,9 @@ server_args: list = [
 
 @pytest.fixture(scope="session")
 def api_client(request):
-    port = get_open_port()
-
     model = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 
     with (
-        RemoteOpenAIServer(model, server_args, server_port=port, env_dict=env_dict, auto_port=False) as server,
+        RemoteOpenAIServer(model, server_args, server_port=8000, env_dict=env_dict, auto_port=False) as server,
     ):
         yield HTTPClient(base_url=server.url_root)
