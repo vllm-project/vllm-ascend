@@ -8,10 +8,6 @@ This document describes the main validation steps for the model, including suppo
 
 The `Qwen3.6-35B-A3B` model is first supported in `vllm-ascend:v0.18.0rc1`. Use `v0.18.0rc1` or later for this model. The examples below use the version placeholder configured by the documentation build system.
 
-:::{note}
-Qwen3.6-35B-A3B has a known issue when MTP/speculative decoding is enabled. If the service shuts down with `numAcceptedTokens[0]=4 exceeds varlen segment length=3`, disable speculative decoding and refer to [#9956](https://github.com/vllm-project/vllm-ascend/issues/9956). The default startup commands in this document keep speculative decoding disabled.
-:::
-
 ## 2 Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
@@ -143,10 +139,6 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 - `--additional-config` enables Ascend-specific optimizations. `enable_flashcomm1` enables FlashComm1, `multistream_overlap_shared_expert` overlaps shared expert computation, and `enable_cpu_binding` enables Ascend-native CPU binding.
 - `--async-scheduling` enables asynchronous scheduling, which can improve high-concurrency throughput.
 
-:::{note}
-MTP/speculative decoding is not enabled in the default command because of [#9956](https://github.com/vllm-project/vllm-ascend/issues/9956). If you want to test it, add `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` and compare stability, TTFT, TPOT, and throughput.
-:::
-
 ## 6 Functional Verification
 
 After the server is started, send a request to verify basic model functionality.
@@ -247,8 +239,7 @@ Recommended tuning order:
 3. Tune `--max-num-batched-tokens`. Larger values usually improve prefill throughput but increase activation memory. Decode-heavy workloads usually need smaller values.
 4. Tune `--max-num-seqs` according to service concurrency. Requests above this value wait in the queue and the waiting time is counted in TTFT and TPOT.
 5. Tune `--gpu-memory-utilization`. Increase it to provide more KV cache, but leave headroom for runtime memory fluctuation and expert imbalance.
-6. Keep MTP/speculative decoding disabled by default. Enable it only for controlled validation until [#9956](https://github.com/vllm-project/vllm-ascend/issues/9956) is resolved.
-7. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With FlashComm1, use capture sizes that are multiples of TP size.
+6. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With FlashComm1, use capture sizes that are multiples of TP size.
 
 ### 9.3 Model-Specific Optimizations
 
@@ -260,7 +251,7 @@ Recommended tuning order:
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for throughput scenarios. |
 | Asynchronous scheduling | `--async-scheduling` | Improves high-concurrency throughput by using non-blocking scheduling. | Disable it and compare if the workload is latency-sensitive. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads. |
-| Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | Not enabled by default because of [#9956](https://github.com/vllm-project/vllm-ascend/issues/9956). |
+| Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | Validate stability, TTFT, TPOT, and throughput for your workload. |
 
 ## 10 FAQ
 
@@ -274,15 +265,7 @@ For common environment, installation, and general parameter issues, refer to [FA
 
 **Solution:** Use the W8A8 model with `--quantization ascend` when possible, lower `--max-model-len`, lower `--max-num-seqs`, lower `--max-num-batched-tokens`, or reduce `--gpu-memory-utilization`. Keep `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`.
 
-### Q2: Why does Qwen3.6 shut down after enabling MTP/speculative decoding?
-
-**Phenomenon:** The service may shut down and report `numAcceptedTokens[0]=4 exceeds varlen segment length=3` during shape/dtype processing.
-
-**Cause:** This is a known issue for Qwen3.6-35B-A3B with MTP/speculative decoding, tracked in [#9956](https://github.com/vllm-project/vllm-ascend/issues/9956).
-
-**Solution:** Disable `--speculative-config` for production serving. If you need to test MTP, run it in a controlled validation environment and compare stability, TTFT, TPOT, and throughput.
-
-### Q3: Why does enabling prefix caching not improve performance?
+### Q2: Why does enabling prefix caching not improve performance?
 
 **Phenomenon:** Prefix caching is enabled, but throughput or latency does not improve.
 
@@ -290,7 +273,7 @@ For common environment, installation, and general parameter issues, refer to [FA
 
 **Solution:** Enable prefix caching for repeated-prefix workloads. For random benchmark datasets or memory-constrained long-context workloads, compare with `--no-enable-prefix-caching`.
 
-### Q4: How should I tune async scheduling for Qwen3.6?
+### Q3: How should I tune async scheduling for Qwen3.6?
 
 **Phenomenon:** Throughput improves in high-concurrency scenarios, but some latency-sensitive workloads may not benefit.
 
