@@ -434,26 +434,6 @@ def maybe_save_kv_layer_to_connector(
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
-def notify_kv_cache_written(layer_name: str = ""):
-    """Notify the connector that the paged KV cache for ``layer_name`` has been
-    written for the current step.
-
-    The attention layer calls this unconditionally; each connector decides whether
-    it needs to record a synchronization primitive (e.g. a compute-stream event
-    later waited on by the resharding stream to overlap the outgoing KV copy).
-    Connectors that don't need it -- such as the AscendStore pool connector, which
-    records its own sync event at save time -- simply do not implement
-    ``on_kv_cache_written`` and this becomes a no-op.
-    """
-    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
-        return
-
-    connector = get_kv_transfer_group()
-    on_kv_cache_written = getattr(connector, "on_kv_cache_written", None)
-    if on_kv_cache_written is not None:
-        on_kv_cache_written(layer_name)
-
-
 def round_up(val: int, align: int) -> int:
     if align == 0:
         return 0
