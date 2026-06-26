@@ -39,7 +39,7 @@ import os
 import requests
 import torch
 from openai import OpenAI
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
 
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
     NPUIPCTrainerSendWeightsArgs,
@@ -129,6 +129,18 @@ def main():
     train_model.to(device)
     train_model.eval()
 
+    # Detect multimodal models (e.g., Qwen2-VL, InternVL) that wrap the
+    # language model under a ``language_model`` submodule. vLLM uses bare
+    # parameter names without the prefix, so mapping is required for
+    # weight transfer to succeed.
+    config = AutoConfig.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    is_multimodel = hasattr(config, "vision_config")
+
+    def mapped_params():
+        for name, param in train_model.named_parameters():
+            vllm_name = "language_model." + name if is_multimodel else name
+            yield vllm_name, param
+
     # Create OpenAI client pointing to the vLLM server
     client = OpenAI(
         base_url=f"{BASE_URL}/v1",
@@ -169,7 +181,7 @@ def main():
     print("Broadcasting weights via NPU IPC (HTTP)...")
     trainer_args = NPUIPCTrainerSendWeightsArgs(send_mode="http", url=BASE_URL)
     NPUIPCWeightTransferEngine.trainer_send_weights(
-        iterator=train_model.named_parameters(),
+        iterator=mapped_params(),
         trainer_args=trainer_args,
     )
 
