@@ -361,6 +361,26 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       MiniMax-M2 incremental tool-call streaming fix.
 #
+# ** 12c. File: platform/patch_minimax_m3_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tool_parsers abstract (MiniMax M3 tool parser registration)
+#    Why:
+#       The current vLLM version does not include MiniMax M3 tool-call parser
+#       support. The upstream PR adds a Rust-based implementation. This patch
+#       provides a Python implementation of the MiniMax M3 namespace-delimited
+#       XML-style tool-call parser and registers it with the ToolParserManager.
+#    How:
+#       Implement a full MinimaxM3ToolParser class (extending ToolParser) that
+#       handles the `]<]minimax[>[` namespace prefix format, and register it
+#       via `ToolParserManager.register_lazy_module`. Supports both streaming
+#       and non-streaming extraction with schema-aware recursive parameter
+#       parsing.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/45381
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       MiniMax M3 tool-call parser (Rust implementation).
+#
 # ** 13. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.is_cumem_allocator_available`
