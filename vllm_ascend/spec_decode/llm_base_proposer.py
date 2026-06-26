@@ -54,6 +54,7 @@ from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _disable_flash_comm_v1_context,
@@ -1120,6 +1121,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             max_num_reqs_across_dp = (
                 self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
             )
+            if get_ascend_config().enable_reduce_sample:
+                tp_size = get_lmhead_tp_group().world_size
+                # Round up to a multiple of tp_size so lmhead_all_to_all's
+                # view(world_size, -1, V/P) reshape cannot fail on unequal split.
+                max_num_reqs_across_dp = ((max_num_reqs_across_dp + tp_size - 1) // tp_size) * tp_size
             # It is necessary to evaluate the case where num_indices becomes large
             # in the context of the dummy‑run accompaniment of p‑eagle.
             if num_indices > max_num_reqs_across_dp:
@@ -1148,7 +1154,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
-                    logits = get_lmhead_tp_group().all_to_all(logits)
+                    logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                 else:
                     logits = self.model.model.logits_processor._gather_logits(logits)
                 if lmhead_tp_enable():
@@ -1324,6 +1330,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 max_num_reqs_across_dp = (
                     self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 )
+                if get_ascend_config().enable_reduce_sample:
+                    tp_size = get_lmhead_tp_group().world_size
+                    # Round up to a multiple of tp_size so lmhead_all_to_all's
+                    # view(world_size, -1, V/P) reshape cannot fail on unequal split.
+                    max_num_reqs_across_dp = ((max_num_reqs_across_dp + tp_size - 1) // tp_size) * tp_size
                 token_indices_to_sample = nn.functional.pad(
                     token_indices_to_sample,
                     (0, max_num_reqs_across_dp - num_indices),
@@ -1339,7 +1350,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable():
-                        logits = get_lmhead_tp_group().all_to_all(logits)
+                        logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                     else:
                         logits = self.model.model.logits_processor._gather_logits(logits)
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
