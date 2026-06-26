@@ -297,6 +297,7 @@ class AscendMoERunner(MoERunner):
         )
         self.top_k = moe_config.experts_per_token
         self._gate = gate
+        self.hidden_size = moe_config.hidden_dim
 
         # Routing params — all stored on routed_experts by the factory function.
         self.use_grouped_topk = routed_experts.use_grouped_topk
@@ -405,7 +406,7 @@ class AscendMoERunner(MoERunner):
             # splitting shared expert computation (gate_up projection + activation,
             # then down projection) yields identical results to integrated
             # computation after weight loading.
-            original_process_weights = self.quant_method.process_weights_after_loading
+            original_process_weights = self._quant_method.process_weights_after_loading
 
             @wraps(original_process_weights)
             def wrapped_process_weights(*args, **kwargs):
@@ -413,7 +414,7 @@ class AscendMoERunner(MoERunner):
                 self._validate_shared_expert_consistency()
                 return result
 
-            self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+            self._quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
         # Register this MoE layer with EPLB for PP compatibility.
         # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
@@ -475,6 +476,11 @@ class AscendMoERunner(MoERunner):
             quant_type = getattr(method, "quant_type", QuantType.NONE)
 
         return quant_type
+
+    @property
+    def is_internal_router(self) -> bool:
+        gate = self.gate
+        return gate is not None and hasattr(gate, "weight_fp32")
 
     @property
     def use_dp_chunking(self) -> bool:
