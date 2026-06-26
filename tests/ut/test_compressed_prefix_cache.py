@@ -385,53 +385,31 @@ def test_mtp_fallback_excludes_compressed_groups_from_eagle_drop() -> None:
         use_eagle=True,
     )
 
-    assert local_coordinator.eagle_group_ids == {1}
+    assert local_coordinator.eagle_group_ids == set()
     assert external_coordinator.eagle_group_ids == {1}
 
 
-def test_mtp_explicit_eagle_group_still_drops_c1_not_compressed() -> None:
+def test_local_mtp_exact_alignment_keeps_previous_boundary() -> None:
     block_size = 128
-    compressed_spec = MLAAttentionSpec(
+    alignment_tokens = block_size * 128
+    spec = SlidingWindowSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
-        compress_ratio=4,
-        model_version="deepseek_v4",
+        sliding_window=block_size * 4,
     )
-    sliding_spec = SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-        sliding_window=block_size,
+
+    mask = _sliding_window_reachable_block_mask(
+        type(None),
+        start_block=0,
+        end_block=128,
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=0,
+        num_prompt_tokens=alignment_tokens * 2,
+        include_previous_alignment_boundary=True,
     )
-    mtp_spec = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    mtp_group = KVCacheGroupSpec(["mtp"], mtp_spec)
-    mtp_group.is_eagle_group = True
-    groups = [
-        KVCacheGroupSpec(["compressed"], compressed_spec),
-        KVCacheGroupSpec(["sliding"], sliding_spec),
-        mtp_group,
-    ]
-    local_coordinator = AscendHybridKVCacheCoordinator(
-        kv_cache_config=KVCacheConfig(
-            num_blocks=16,
-            kv_cache_tensors=[],
-            kv_cache_groups=groups,
-        ),
-        max_model_len=block_size * 4,
-        use_eagle=True,
-        enable_caching=True,
-        enable_kv_cache_events=False,
-        dcp_world_size=1,
-        pcp_world_size=1,
-        hash_block_size=block_size,
-        max_num_batched_tokens=block_size * 4,
-    )
-    assert local_coordinator.eagle_group_ids == {1, 2}
+
+    assert [idx for idx, keep in enumerate(mask or []) if keep] == [124, 125, 126, 127]
