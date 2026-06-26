@@ -794,7 +794,12 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
             return
         reshape_cache_event = torch.npu.Event()
         reshape_cache_event.record()
-        attn_metadata.reshape_cache_event = reshape_cache_event
+        if isinstance(attn_metadata, dict):
+            per_layer_metadata = attn_metadata.get(layer_name)
+            if per_layer_metadata is not None:
+                per_layer_metadata.reshape_cache_event = reshape_cache_event
+        else:
+            attn_metadata.reshape_cache_event = reshape_cache_event
 
     def wait_for_save(self):
         """MooncakeLayerwiseConnector does not save explicitly."""
