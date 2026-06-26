@@ -7,11 +7,9 @@ from tests.e2e.weekly.single_node.engine_func_test_robot.utility.http_client imp
 
 env_dict: dict = {}
 
-server_model_name: str = "auto"
-
 server_args: list = [
     "--served-model-name",
-    server_model_name,
+    "auto",
     "--max-model-len",
     "65536",
     "--tensor-parallel-size",
@@ -35,7 +33,28 @@ server_args: list = [
 def api_client(request):
     model = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 
-    with (
-        RemoteOpenAIServer(model, server_args, server_port=8000, env_dict=env_dict, auto_port=False) as server,
-    ):
+    with RemoteOpenAIServer(model, server_args, env_dict=env_dict, auto_port=True) as server:
         yield HTTPClient(base_url=server.url_root)
+
+
+def pytest_addoption(parser):
+    parser.addoption("--thinkTagOutput", action="store", type=str, required=False)
+    parser.addoption(
+        "--engineArchitecture",
+        action="store",
+        default="pd",
+        choices=["pd", "single"],
+    )
+    parser.addoption(
+        "--maxModelLength",
+        action="store",
+        default="128",
+    )
+    parser.addoption(
+        "--model",
+        action="store",
+        default="qwen",
+    )
+    parser.addoption("--imageNum", action="store", type=int, default=1)
+    parser.addoption("--videoNum", action="store", type=int, default=1)
+    parser.addoption("--audioNum", action="store", type=int, default=1)
