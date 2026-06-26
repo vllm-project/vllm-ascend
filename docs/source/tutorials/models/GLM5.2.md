@@ -157,7 +157,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 **Notice:**
 The parameters are explained as follows:
 
-- For single-node deployment, we recommend using `dp2tp8` and turn off expert parallel in low-latency scenarios.
+- For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
 
 ### Multi-node Deployment
 
@@ -324,7 +324,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --max-num-seqs 16 \
 --data-parallel-size 2 \
 --data-parallel-size-local 1 \
---data-parallel-address $local_ip \
+--data-parallel-address $node0_ip \
 --data-parallel-rpc-port 13389 \
 --tensor-parallel-size 8 \
 --enable-expert-parallel \
@@ -377,13 +377,12 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8 \
 --served-model-name glm-52 \
 --seed 1024 \
 --gpu-memory-utilization 0.95 \
---api-server-count 1 \
 --max-num-seqs 16 \
 --headless \
 --data-parallel-size 2 \
 --data-parallel-size-local 1 \
 --data-parallel-start-rank 1 \
---data-parallel-address $local_ip \
+--data-parallel-address $node0_ip \
 --data-parallel-rpc-port 13389 \
 --tensor-parallel-size 8 \
 --enable-expert-parallel \
@@ -921,28 +920,28 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 1 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 2. Prefill node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 2 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
+    python launch_online_dp.py --dp-size 2 --tp-size 16  --dp-size-local 1 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 16591 --vllm-start-port 9081
     ```
 
 3. Decode node 0
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
 
 4. Decode node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_p0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
     ```
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
@@ -955,10 +954,10 @@ python load_balance_proxy_server_example.py \
     --port 8000 \
     --host 0.0.0.0 \
     --prefiller-hosts \
-       $node_p0_ip \
-       $node_p1_ip \
+      $node_p0_ip \
+      $node_p1_ip \
     --prefiller-ports \
-       9081 9081 \
+      9081 9081 \
     --decoder-hosts \
       $node_d0_ip \
       $node_d0_ip \
@@ -970,7 +969,7 @@ python load_balance_proxy_server_example.py \
       $node_d1_ip \
     --decoder-ports \
       9900 9901 9902 9903 \
-      9900 9901 9902 9903 \  
+      9900 9901 9902 9903
 ```
 
 #### Deployment on 8 Atlas 800 A2
@@ -1180,13 +1179,13 @@ python load_balance_proxy_server_example.py \
     --port 8000 \
     --host 0.0.0.0 \
     --prefiller-hosts \
-       $node_p0_ip \
-       $node_p1_ip \
-       $node_p2_ip \
-       $node_p3_ip \
+      $node_p0_ip \
+      $node_p1_ip \
+      $node_p2_ip \
+      $node_p3_ip \
     --prefiller-ports \
-       9081 9081 \
-       9081 9081 \
+      9081 9081 \
+      9081 9081 \
     --decoder-hosts \
       $node_d0_ip \
       $node_d0_ip \
@@ -1198,7 +1197,7 @@ python load_balance_proxy_server_example.py \
       $node_d3_ip \
     --decoder-ports \
       9900 9901 9900 9901 \
-      9900 9901 9900 9901 \  
+      9900 9901 9900 9901
 ```
 
 **Notice:**
