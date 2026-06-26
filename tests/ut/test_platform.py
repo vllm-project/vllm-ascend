@@ -28,16 +28,28 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.device_config = MagicMock()
         mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
+        mock_vllm_config.parallel_config.enable_dbo = False
+        mock_vllm_config.parallel_config.ubatch_size = 0
         mock_vllm_config.parallel_config.data_parallel_size = 1
         mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.parallel_config.tensor_parallel_size = 1
         mock_vllm_config.parallel_config.pipeline_parallel_size = 1
         mock_vllm_config.parallel_config.context_parallel_size = 1
         mock_vllm_config.parallel_config.decode_context_parallel_size = 1
+        mock_vllm_config.parallel_config.ray_workers_use_nsight = False
+        mock_vllm_config.parallel_config.numa_bind = False
+        mock_vllm_config.parallel_config.numa_bind_nodes = None
+        mock_vllm_config.parallel_config.numa_bind_cpus = None
         mock_vllm_config.cache_config = MagicMock()
+        mock_vllm_config.cache_config.cpu_kvcache_space_bytes = None
+        mock_vllm_config.cache_config.calculate_kv_scales = False
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.scheduler_config.max_num_seqs = None
+        mock_vllm_config.scheduler_config.max_num_partial_prefills = 1
         mock_vllm_config.speculative_config = None
+        mock_vllm_config.kv_transfer_config = None
+        mock_vllm_config.attention_config = None
+        mock_vllm_config.observability_config = None
         mock_vllm_config.additional_config = {}
         mock_vllm_config.compilation_config.pass_config.enable_sp = False
         mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -179,6 +191,14 @@ class TestNPUPlatform(TestBase):
         self.platform.apply_config_platform_defaults(vllm_config)
 
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
+
+    def test_fix_incompatible_config_preserves_enable_dbo(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.enable_dbo = True
+
+        self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertTrue(vllm_config.parallel_config.enable_dbo)
 
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)

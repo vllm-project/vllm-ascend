@@ -1218,9 +1218,16 @@ class NPUPlatform(Platform):
 
             if getattr(vllm_config.parallel_config, "enable_dbo", False):
                 logger.warning(
-                    "Parameter is currently ignored on Ascend. parameter=enable_dbo, action: resetting to False. "
+                    "[DBO_DEBUG] config: enable_dbo=True use_ubatching=%s "
+                    "num_ubatches=%s dbo_decode_token_threshold=%s "
+                    "dbo_prefill_token_threshold=%s dp_size=%s ep=%s",
+                    getattr(vllm_config.parallel_config, "use_ubatching", None),
+                    getattr(vllm_config.parallel_config, "num_ubatches", None),
+                    getattr(vllm_config.parallel_config, "dbo_decode_token_threshold", None),
+                    getattr(vllm_config.parallel_config, "dbo_prefill_token_threshold", None),
+                    getattr(vllm_config.parallel_config, "data_parallel_size", None),
+                    getattr(vllm_config.parallel_config, "enable_expert_parallel", None),
                 )
-                vllm_config.parallel_config.enable_dbo = False
 
             ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
             if ubatch_size != 0:

@@ -97,6 +97,7 @@ from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
     get_total_cp_world_size,
 )
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
@@ -187,6 +188,28 @@ torch.npu.config.allow_internal_format = True
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+
+def _format_dbo_tensor(tensor: torch.Tensor | None) -> Any:
+    if tensor is None:
+        return None
+    try:
+        return tensor.detach().cpu().tolist()
+    except Exception:
+        return str(tensor)
+
+
+def _format_dbo_ubatch_slices(ubatch_slices: UBatchSlices | None) -> Any:
+    if ubatch_slices is None:
+        return None
+    return [
+        {
+            "req": (s.request_slice.start, s.request_slice.stop),
+            "tok": (s.token_slice.start, s.token_slice.stop),
+            "num_tokens": s.num_tokens,
+        }
+        for s in ubatch_slices
+    ]
 
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
@@ -2139,6 +2162,19 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded,
                     self.parallel_config.num_ubatches,
                 )
+                if self.parallel_config.enable_dbo or ubatch_slices is not None:
+                    logger.warning(
+                        "[DBO_DEBUG] execute slices: should_ubatch=%s "
+                        "num_scheduled_tokens=%s num_tokens_padded=%s "
+                        "num_reqs_padded=%s ubatch_slices=%s "
+                        "ubatch_slices_padded=%s",
+                        should_ubatch,
+                        num_scheduled_tokens_np.tolist(),
+                        num_tokens_padded,
+                        num_reqs_padded,
+                        _format_dbo_ubatch_slices(ubatch_slices),
+                        _format_dbo_ubatch_slices(ubatch_slices_padded),
+                    )
 
                 if self.dynamic_eplb:
                     self.update_eplb_heat_collection_status(num_tokens_padded)
@@ -2921,7 +2957,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens_np: np.ndarray,
         max_num_scheduled_tokens: int,
         use_cascade_attn: bool,
-        allow_microbatching: bool = False,
+        allow_microbatching: bool = True,
         force_eager: bool = False,
         # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
         # be improved in model runner v2)
@@ -2971,15 +3007,52 @@ class NPUModelRunner(GPUModelRunner):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
                 "Sequence parallelism requires num_tokens to be a multiple of tensor parallel size"
             )
+        if self.parallel_config.enable_dbo:
+            logger.warning(
+                "[DBO_DEBUG] determine: enable_dbo=True use_ubatching=%s "
+                "num_ubatches=%s dp_size=%s num_tokens=%s "
+                "num_tokens_padded=%s num_reqs=%s "
+                "max_num_scheduled_tokens=%s uniform_decode=%s "
+                "allow_microbatching=%s cudagraph_mode=%s batch_desc=%s",
+                self.parallel_config.use_ubatching,
+                self.parallel_config.num_ubatches,
+                self.parallel_config.data_parallel_size,
+                num_tokens,
+                num_tokens_padded,
+                num_reqs,
+                max_num_scheduled_tokens,
+                uniform_decode,
+                allow_microbatching,
+                cudagraph_mode,
+                batch_descriptor,
+            )
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
-                num_tokens=num_tokens_padded,
-                cudagraph_mode=cudagraph_mode,
-                allow_dp_padding=(cudagraph_mode != CUDAGraphMode.NONE) or enable_sp(self.vllm_config),
-            )
+            if allow_microbatching and self.parallel_config.use_ubatching:
+                should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = coordinate_batch_across_dp(
+                    num_tokens_unpadded=num_tokens,
+                    parallel_config=self.parallel_config,
+                    allow_microbatching=allow_microbatching,
+                    num_tokens_padded=num_tokens_padded,
+                    uniform_decode=uniform_decode,
+                    cudagraph_mode=cudagraph_mode.value,
+                )
+            else:
+                _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
+                    num_tokens=num_tokens_padded,
+                    cudagraph_mode=cudagraph_mode,
+                    allow_dp_padding=(cudagraph_mode != CUDAGraphMode.NONE) or enable_sp(self.vllm_config),
+                )
+            if self.parallel_config.enable_dbo:
+                logger.warning(
+                    "[DBO_DEBUG] coordinate: should_ubatch=%s "
+                    "num_tokens_across_dp=%s synced_cudagraph_mode=%s",
+                    should_ubatch,
+                    _format_dbo_tensor(num_tokens_across_dp),
+                    synced_cudagraph_mode,
+                )
 
             # Extract DP padding if there is any
             if num_tokens_across_dp is not None:
@@ -2988,11 +3061,17 @@ class NPUModelRunner(GPUModelRunner):
                 # Re-dispatch with DP padding
                 cudagraph_mode, batch_descriptor = dispatch_cudagraph(
                     num_tokens_padded,
-                    valid_modes={synced_cudagraph_mode},
+                    valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
                 )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
+        elif self.parallel_config.enable_dbo:
+            logger.warning(
+                "[DBO_DEBUG] coordinate skipped: dp_size=%s should_ubatch=%s",
+                self.parallel_config.data_parallel_size,
+                should_ubatch,
+            )
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
             cudagraph_stats = CUDAGraphStat(
@@ -3431,7 +3510,13 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
-        _cudagraph_mode, batch_desc, _, num_tokens_across_dp, _ = self._determine_batch_execution_and_padding(
+        (
+            _cudagraph_mode,
+            batch_desc,
+            should_ubatch,
+            num_tokens_across_dp,
+            _,
+        ) = self._determine_batch_execution_and_padding(
             num_tokens=num_tokens_unpadded,
             num_reqs=num_reqs,
             num_scheduled_tokens_np=num_scheduled_tokens,
@@ -3477,8 +3562,31 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.update_eplb_heat_collection_status(num_tokens_padded)
         
-        # vllm-ascend does not support ubatch now
-        ubatch_slices, ubatch_slices_padded = None, None
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            should_ubatch,
+            num_scheduled_tokens,
+            num_tokens_padded,
+            num_reqs_padded,
+            self.parallel_config.num_ubatches,
+        )
+        logger.debug(
+            "ubatch_slices: %s, ubatch_slices_padded: %s",
+            ubatch_slices,
+            ubatch_slices_padded,
+        )
+        if self.parallel_config.enable_dbo or ubatch_slices is not None:
+            logger.warning(
+                "[DBO_DEBUG] dummy slices: should_ubatch=%s "
+                "num_scheduled_tokens=%s num_tokens_padded=%s "
+                "num_reqs_padded=%s ubatch_slices=%s "
+                "ubatch_slices_padded=%s",
+                should_ubatch,
+                num_scheduled_tokens.tolist(),
+                num_tokens_padded,
+                num_reqs_padded,
+                _format_dbo_ubatch_slices(ubatch_slices),
+                _format_dbo_ubatch_slices(ubatch_slices_padded),
+            )
         attn_metadata: PerLayerAttnMetadata | None = None
         # Build attention metadata for dummy_run
         if self._should_build_dummy_attn_metadata(force_attention, is_profile, cudagraph_runtime_mode):
@@ -3512,7 +3620,8 @@ class NPUModelRunner(GPUModelRunner):
             self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
 
             cum_num_tokens = self._get_cumsum_and_arange(
-            num_scheduled_tokens, self.query_pos.np)
+                num_scheduled_tokens, self.query_pos.np
+            )
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
             if self._has_gdn:

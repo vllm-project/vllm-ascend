@@ -391,3 +391,36 @@ def test_determine_batch_execution_and_padding(
     finally:
         runner.speculative_config = saved_spec_config
         runner.uniform_decode_query_len = saved_query_len
+
+
+def test_determine_batch_execution_uses_dbo_dp_coordination(model_runner):
+    runner = model_runner
+    runner.parallel_config.data_parallel_size = 2
+    runner.parallel_config.enable_dbo = True
+    runner.input_batch.num_computed_tokens_cpu[:4] = [1, 1, 1, 1]
+    num_scheduled_tokens_np = np.array([1, 1, 1, 1], dtype=np.int32)
+
+    with patch(
+        "vllm_ascend.worker.model_runner_v1.coordinate_batch_across_dp",
+        return_value=(True, None, CUDAGraphMode.NONE.value),
+    ) as mock_coordinate:
+        (
+            cudagraph_mode,
+            batch_desc,
+            should_ubatch,
+            num_tokens_across_dp,
+            _,
+        ) = runner._determine_batch_execution_and_padding(
+            num_tokens=4,
+            num_reqs=4,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=1,
+            use_cascade_attn=False,
+            force_eager=True,
+        )
+
+    assert cudagraph_mode == CUDAGraphMode.NONE
+    assert batch_desc.num_tokens == 4
+    assert should_ubatch is True
+    assert num_tokens_across_dp is None
+    mock_coordinate.assert_called_once()
