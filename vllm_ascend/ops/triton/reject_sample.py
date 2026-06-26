@@ -228,8 +228,38 @@ def rejection_random_sample_kernel(
 
                             uniform_prob = tl.load(uniform_probs_ptr + token_idx)
 
+                            if ENTROPY_VERIFY:
+                                loop = (global_vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+                                entropy = 0.0
+                                for loop_i in range(loop):
+                                    vocab_start = loop_i * SUB_BLOCK
+                                    vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                                    vocab_mask = vocab_offset < global_vocab_size
+                                    if NO_ORI_TARGET_PROBS:
+                                        probs = tl.load(
+                                            target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                                            vocab_mask & (vocab_offset < vocab_size),
+                                            other=0,
+                                        )
+                                    else:
+                                        probs = tl.load(
+                                            ori_target_probs_ptr + token_idx * global_vocab_size + vocab_offset,
+                                            vocab_mask,
+                                            other=0,
+                                        )
+                                    log_probs = tl.log(probs + EPSILON)
+                                    entropy_contrib = -probs * log_probs
+                                    entropy += tl.sum(entropy_contrib)
+
+                                exp_neg_entropy = tl.exp(-entropy * POSTERIOR_ALPHA)
+                                threshold_by_entropy = exp_neg_entropy
+                                threshold = tl.minimum(threshold_by_entropy, POSTERIOR_THRESHOLD)
+                                _uniform_prob = threshold * uniform_prob
+                            else:
+                                _uniform_prob = uniform_prob
+
                             # Acceptance condition
-                            if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
+                            if draft_prob > 0 and target_prob / draft_prob >= _uniform_prob:
                                 # Accept
                                 token_id = draft_token_id
                             else:
@@ -605,8 +635,38 @@ def rejection_random_sample_block_verify_kernel(
                         else:
                             draft_prob = tl.load(draft_probs_ptr + token_idx * global_vocab_size + draft_token_id)
 
+                        if ENTROPY_VERIFY:
+                            loop = (global_vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+                            entropy = 0.0
+                            for loop_i in range(loop):
+                                vocab_start = loop_i * SUB_BLOCK
+                                vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                                vocab_mask = vocab_offset < global_vocab_size
+                                if NO_ORI_TARGET_PROBS:
+                                    probs = tl.load(
+                                        target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                                        vocab_mask & (vocab_offset < vocab_size),
+                                        other=0,
+                                    )
+                                else:
+                                    probs = tl.load(
+                                        ori_target_probs_ptr + token_idx * global_vocab_size + vocab_offset,
+                                        vocab_mask,
+                                        other=0,
+                                    )
+                                log_probs = tl.log(probs + EPSILON)
+                                entropy_contrib = -probs * log_probs
+                                entropy += tl.sum(entropy_contrib)
+
+                            exp_neg_entropy = tl.exp(-entropy * POSTERIOR_ALPHA)
+                            threshold_by_entropy = exp_neg_entropy
+                            threshold = tl.minimum(threshold_by_entropy, POSTERIOR_THRESHOLD)
+                            _uniform_prob = threshold * uniform_prob
+                        else:
+                            _uniform_prob = uniform_prob
+
                         pi = min(pi * target_prob / draft_prob, 1.0)
-                        if draft_prob > 0 and pi >= uniform_prob:
+                        if draft_prob > 0 and pi >= _uniform_prob:
                             last_accepted_token_pos = pos
 
                 # Store accepted tokens
