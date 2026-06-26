@@ -83,11 +83,9 @@ class AscendStoreCoordinator:
                 "scheduler_block_size must be a multiple of each group's effective block_size"
             )
 
-        self.eagle_group_ids: set[int] = set()
-        if use_eagle:
-            # vLLM applies EAGLE globally. For DSV4 we keep that behavior for
-            # reachable/uncompressed groups, but exclude c4/c128 because
-            # dropping their coarse chunk can erase the whole aligned hit.
+        self.eagle_group_ids = {i for i, group in enumerate(kv_cache_groups) if getattr(group, "is_eagle_group", False)}
+        if use_eagle and not self.eagle_group_ids:
+            # Compressed groups already use coarse chunks; dropping their last chunk can erase the whole hit.
             self.eagle_group_ids = {i for i, family in enumerate(group_cache_families) if _uses_reachable_mask(family)}
 
         self._verify_and_split_kv_cache_groups()
