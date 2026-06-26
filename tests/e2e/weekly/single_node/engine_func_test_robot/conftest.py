@@ -33,7 +33,7 @@ server_args: list = [
 def api_client(request):
     model = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 
-    with RemoteOpenAIServer(model, server_args, env_dict=env_dict, auto_port=True) as server:
+    with RemoteOpenAIServer(model, server_args, env_dict=env_dict, auto_port=False) as server:
         yield HTTPClient(base_url=server.url_root)
 
 
