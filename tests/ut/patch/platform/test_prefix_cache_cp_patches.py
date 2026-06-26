@@ -6,7 +6,9 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+import vllm.envs as vllm_envs
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -14,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -26,6 +29,10 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.patch.platform.patch_prefix_cache_retention import (
+    ENV_NAME,
+    get_prefix_cache_retention_interval,
+)
 
 
 def _make_hybrid_kv_cache_config(
@@ -53,6 +60,36 @@ def _make_hybrid_kv_cache_config(
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=full_spec),
             KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec),
+        ],
+    )
+
+
+def _make_full_swa_kv_cache_config(
+    full_block_size: int = 32,
+    swa_block_size: int = 8,
+) -> KVCacheConfig:
+    full_spec = FullAttentionSpec(
+        block_size=full_block_size,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    swa_spec = SlidingWindowSpec(
+        block_size=swa_block_size,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=swa_block_size,
+    )
+    return KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[
+            KVCacheTensor(size=full_spec.page_size_bytes * 10, shared_by=["attn"]),
+            KVCacheTensor(size=swa_spec.page_size_bytes * 10, shared_by=["swa"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["swa"], kv_cache_spec=swa_spec),
         ],
     )
 
@@ -343,3 +380,94 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size
+
+
+def test_prefix_cache_retention_env_is_registered(monkeypatch) -> None:
+    monkeypatch.setenv(ENV_NAME, "64")
+
+    assert getattr(vllm_envs, ENV_NAME) == 64
+
+
+def test_prefix_cache_retention_interval_validation(monkeypatch) -> None:
+    kv_cache_config = _make_full_swa_kv_cache_config()
+    monkeypatch.setenv(ENV_NAME, "64")
+    assert get_prefix_cache_retention_interval(kv_cache_config, 32) == 64
+
+    monkeypatch.setenv(ENV_NAME, "33")
+    with pytest.raises(ValueError, match="multiple of scheduler_block_size"):
+        get_prefix_cache_retention_interval(kv_cache_config, 32)
+
+
+def test_sliding_window_reachable_block_mask_latest_only(monkeypatch) -> None:
+    monkeypatch.setenv(ENV_NAME, "0")
+    swa_spec = SlidingWindowSpec(
+        block_size=8,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=8,
+    )
+
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=16,
+        alignment_tokens=32,
+        kv_cache_spec=swa_spec,
+        use_eagle=False,
+        retention_interval=0,
+        num_prompt_tokens=128,
+    )
+
+    assert mask is not None
+    assert {i for i, keep in enumerate(mask) if keep} == {11}
+
+
+def test_sliding_window_reachable_block_mask_dense_default() -> None:
+    swa_spec = SlidingWindowSpec(
+        block_size=8,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=8,
+    )
+
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=16,
+        alignment_tokens=32,
+        kv_cache_spec=swa_spec,
+        use_eagle=False,
+        retention_interval=None,
+        num_prompt_tokens=128,
+    )
+
+    assert mask is not None
+    assert {i for i, keep in enumerate(mask) if keep} == {3, 7, 11, 15}
+
+
+def test_ascend_hybrid_cache_blocks_passes_retention_to_managers() -> None:
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.retention_interval = 64
+    coordinator.lcm_block_size = 32
+    coordinator.eagle_group_ids = {1}
+    manager0 = SimpleNamespace(kv_cache_group_id=0, cache_blocks=MagicMock())
+    manager1 = SimpleNamespace(kv_cache_group_id=1, cache_blocks=MagicMock())
+    coordinator.single_type_managers = (manager0, manager1)
+    request = object()
+
+    AscendHybridKVCacheCoordinator.cache_blocks(coordinator, request, 128)
+
+    manager0.cache_blocks.assert_called_once_with(
+        request,
+        128,
+        retention_interval=64,
+        alignment_tokens=32,
+        use_eagle=False,
+    )
+    manager1.cache_blocks.assert_called_once_with(
+        request,
+        128,
+        retention_interval=64,
+        alignment_tokens=32,
+        use_eagle=True,
+    )
