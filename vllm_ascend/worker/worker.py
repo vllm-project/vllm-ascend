@@ -66,6 +66,7 @@ from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
+    check_ascend_rt_visible_devices,
     enable_sp,
     get_ascend_device_type,
     register_ascend_customop,
@@ -395,6 +396,7 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _init_device(self):
+        check_ascend_rt_visible_devices(self.parallel_config.local_world_size)
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
 
@@ -426,20 +428,6 @@ class NPUWorker(WorkerBase):
                 f"({self.cache_config.gpu_memory_utilization}, "
                 f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                 f"utilization or reduce GPU memory used by other processes."
-            )
-
-        if (
-            self.parallel_config.data_parallel_size > 1
-            and self.parallel_config.data_parallel_size_local > 0
-            and self.parallel_config.distributed_executor_backend not in ["ray", "external_launcher"]
-            and self.vllm_config.parallel_config.data_parallel_backend != "ray"
-            and self.vllm_config.parallel_config.nnodes_within_dp == 1
-        ):
-            visible_device_count = torch.npu.device_count() if torch.npu.is_available() else 0
-            assert self.parallel_config.local_world_size <= visible_device_count, (
-                f"local_world_size ({self.parallel_config.local_world_size}) must "
-                f"be less than or equal to the number of visible devices "
-                f"({visible_device_count})."
             )
 
         # Initialize the distributed environment.
