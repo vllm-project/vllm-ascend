@@ -130,9 +130,9 @@ def causal_conv1d_fn(
     prefill_seq_offset = max(0, len(seqlens) - num_prefills)
     last_width_prefill_x = extract_last_width(x, query_start_loc[prefill_seq_offset:], state_len)
 
+    pcp_rank = get_pcp_group().rank_in_group
     if get_pcp_group().world_size > 1:
         all_last_width_prefill_x = get_pcp_group().all_gather(last_width_prefill_x.unsqueeze(0).contiguous(), 0)
-        pcp_rank = get_pcp_group().rank_in_group
         if pcp_rank > 0:
             conv_states[cache_indices[prefill_seq_offset:], :, :state_len] = all_last_width_prefill_x[pcp_rank - 1, ...]
 
@@ -140,6 +140,10 @@ def causal_conv1d_fn(
         x_s = splits[i]
         if cache_indices[i] == PAD_SLOT_ID:
             continue
+        if pcp_rank == 0 and not bool(has_initial_state[i].item()):
+            initial_states = None
+        else:
+            initial_states = conv_states[cache_indices[i]][..., : (width - 1)]
         out_ref_b.append(
             causal_conv1d_ref(
                 x_s,
@@ -148,7 +152,7 @@ def causal_conv1d_fn(
                 activation=activation,
                 return_final_states=True,
                 final_states_out=conv_states[cache_indices[i]][..., : (width - 1)].unsqueeze(0),
-                initial_states=conv_states[cache_indices[i]][..., : (width - 1)],
+                initial_states=initial_states,
             )
         )
 

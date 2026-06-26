@@ -1054,23 +1054,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self.pcp_size > 1:
             # remove graph padding before all_gather
             hidden_states = hidden_states[:num_input_tokens]
-            hidden_states = get_pcp_group().all_gather(hidden_states, 0)
-            hidden_states = torch.index_select(
-                hidden_states,
-                0,
-                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
-            )
+            if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                hidden_states = self.runner.pcp_manager.get_restore_hidden_states(hidden_states)
+            else:
+                hidden_states = get_pcp_group().all_gather(hidden_states, 0)
+                hidden_states = torch.index_select(
+                    hidden_states,
+                    0,
+                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
+                )
             if self.method == "mtp":
                 last_hidden_states = hidden_states
             else:
                 # eagle and eagle3 need allgather last_hidden_states.
                 last_hidden_states = last_hidden_states[:num_input_tokens]
-                last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
-                last_hidden_states = torch.index_select(
-                    last_hidden_states,
-                    0,
-                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
-                )
+                if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                    last_hidden_states = self.runner.pcp_manager.get_restore_hidden_states(last_hidden_states)
+                else:
+                    last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
+                    last_hidden_states = torch.index_select(
+                        last_hidden_states,
+                        0,
+                        self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
+                    )
 
         if lmhead_tp_enable():
             token_indices_to_sample = nn.functional.pad(
@@ -1323,19 +1329,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 input_ids_p = self.input_ids[num_tokens_d:num_tokens]
                 target_hidden_states_d_padded = target_hidden_states[:num_tokens_d_padded]
                 if num_tokens_d:
-                    # remove padding (from pcp all-gather) in decode part
-                    mask_start_loc = torch.cat(
-                        [
-                            torch.tensor([0], dtype=torch.int32, device=query_lens_d.device),
-                            torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1],
-                        ]
-                    )
-                    mask_len = query_lens_d
-                    mask = []
-                    for req_id in range(num_decode_reqs):
-                        assert None not in (mask_start_loc, mask_len)
-                        mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
-                    target_hidden_states_d = target_hidden_states_d_padded[mask]
+                    if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                        # Hybrid PCP restores decode hidden states rank-major:
+                        # [rank0 all decode tokens, rank1 all decode tokens, ...].
+                        target_hidden_states_d = target_hidden_states_d_padded[:num_tokens_d]
+                    else:
+                        # remove padding (from pcp all-gather) in decode part
+                        mask_start_loc = torch.cat(
+                            [
+                                torch.tensor([0], dtype=torch.int32, device=query_lens_d.device),
+                                torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1],
+                            ]
+                        )
+                        mask_len = query_lens_d
+                        mask = []
+                        for req_id in range(num_decode_reqs):
+                            assert None not in (mask_start_loc, mask_len)
+                            mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
+                        target_hidden_states_d = target_hidden_states_d_padded[mask]
                 else:
                     target_hidden_states_d = target_hidden_states_d_padded
                 target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
@@ -1675,7 +1686,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
-                attn_metadata.decode_meta.dcp_mtp_attn_mask = None
 
         return common_attn_metadata, attn_metadata
 

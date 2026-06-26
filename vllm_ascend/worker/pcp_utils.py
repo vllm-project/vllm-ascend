@@ -18,7 +18,6 @@
 #
 
 import copy
-import math
 from collections.abc import Callable
 from itertools import accumulate
 from typing import TYPE_CHECKING, Any
@@ -152,6 +151,7 @@ class PCPManager:
         self.pcp_padded_tokens_length = 0
         self.num_scheduled_tokens_padded: np.ndarray | None = None
         self.max_num_tokens_across_pcp = 0
+        self.total_pcp_padding_tokens_fla = 0
         self.pcp_tokens_padded = None
         self.total_num_scheduled_tokens = 0
         self._local_num_scheduled_tokens: np.ndarray | None = None
@@ -255,16 +255,7 @@ class PCPManager:
         if self.num_prefill_reqs <= 0:
             return cu_num_scheduled_tokens
 
-        # Prepend 0 so per-req lengths come out of the diff cleanly. This
-        # also fixes the num_decode_reqs == 0 case, where the raw diff
-        # cu[1:] - cu[:-1] would drop the first req's length and the base
-        # below would index cu[-1] instead of 0.
-        padded_cu = np.concatenate(([0], cu_num_scheduled_tokens))
-        per_req_lens = padded_cu[1:] - padded_cu[:-1]
-
-        prefill_lens = per_req_lens[self.num_decode_reqs :]
-        pad_multiple = self.pcp_world_size * 2
-        prefill_lens = [math.ceil(num / pad_multiple) * pad_multiple for num in prefill_lens]
+        prefill_lens = self.pcp_tokens[self.num_decode_reqs : self.num_decode_reqs + self.num_prefill_reqs]
         pads = copy.deepcopy(num_pcp_pads)
         pads[self.num_decode_reqs :] = np.cumsum(pads[self.num_decode_reqs :])
         base = int(cu_num_scheduled_tokens[self.num_decode_reqs - 1]) if self.num_decode_reqs > 0 else 0
@@ -938,9 +929,10 @@ class PCPManager:
                 hidden_states = F.pad(
                     hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode="constant", value=0
                 )
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states[: self.max_num_tokens_across_pcp].contiguous(), dim=0
+            hidden_states = (
+                hidden_states[: self.max_num_tokens_across_pcp] if self.max_num_tokens_across_pcp > 0 else hidden_states
             )
+            hidden_states = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
             restore_idx = self.pcp_enter_fa_restore_idx[: hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
             return torch.index_select(hidden_states, 0, restore_idx)
 
