@@ -9,7 +9,12 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_config,
+    get_ascend_device_type,
+    is_pd_decode_recompute_scheduler_enabled,
+)
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 
@@ -350,6 +355,11 @@ def split_decodes_and_prefills(
 
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
+
+    # PD D + RecomputeScheduler: num_computed may be N-1 after KV recv while
+    # this step is MTP decode (max_query_len <= threshold).
+    if is_pd_decode_recompute_scheduler_enabled():
+        treat_short_extends_as_decodes = True
 
     if (
         max_query_len <= decode_threshold

@@ -31,6 +31,7 @@ from vllm.logger import logger
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.utils import CpuGpuBuffer
 
+from vllm_ascend.utils import is_pd_decode_recompute_scheduler_enabled
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -72,6 +73,7 @@ class PCPManager:
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
         self.vllm_config = vllm_config
+        self.pd_decode_recompute_scheduler_enabled = is_pd_decode_recompute_scheduler_enabled(vllm_config)
         self.max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.vllm_config.scheduler_config.max_num_seqs
         self.device = device
@@ -195,8 +197,8 @@ class PCPManager:
 
         return cu_num_tokens, arange
 
-    @staticmethod
     def classify_decode_request_mask(
+        self,
         num_scheduled_tokens: np.ndarray | torch.Tensor,
         num_computed_tokens: np.ndarray | torch.Tensor,
         num_prompt_tokens: np.ndarray | torch.Tensor,
@@ -209,8 +211,11 @@ class PCPManager:
         """
 
         has_context = num_computed_tokens > 0
-        done_prefilling = num_computed_tokens >= num_prompt_tokens
         is_below_threshold = num_scheduled_tokens <= decode_threshold
+        done_prefilling = num_computed_tokens >= num_prompt_tokens
+        if self.pd_decode_recompute_scheduler_enabled:
+            # PD D + RecomputeScheduler: KV recv leaves num_computed at N-1.
+            done_prefilling = done_prefilling | (num_computed_tokens == num_prompt_tokens - 1)
         return has_context & is_below_threshold & done_prefilling
 
     def init_batch_info(
