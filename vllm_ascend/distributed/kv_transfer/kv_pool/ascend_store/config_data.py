@@ -234,11 +234,13 @@ class ChunkedTokenDatabase:
         self.hash_block_size = self.block_size[0] if hash_block_size is None else hash_block_size
         self.alignment_tokens = alignment_tokens if alignment_tokens is not None else max(self.block_size)
         self.retention_interval = retention_interval
-        self.eagle_group_ids = {
-            idx for idx, group in enumerate(self.kv_cache_groups) if getattr(group, "is_eagle_group", False)
-        }
-        if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(self.kv_cache_groups)))
+        self.eagle_group_ids: set[int] = set()
+        if use_eagle:
+            self.eagle_group_ids = {
+                idx
+                for idx, group in enumerate(self.kv_cache_groups)
+                if (getattr(group.kv_cache_spec, "compress_ratio", 1) or 1) <= 1
+            }
         self.cache_coordinator: Any | None = None
 
     def set_cache_coordinator(self, cache_coordinator: Any | None) -> None:
