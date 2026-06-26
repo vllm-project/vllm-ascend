@@ -2004,11 +2004,6 @@ class NPUModelRunner(GPUModelRunner):
         )):
             scheduler_output = deepcopy(scheduler_output)
         pp_group = get_pp_group()
-        if pp_group.world_size > 1 and not pp_group.is_last_rank:
-            new_token_ids = scheduler_output.scheduled_cached_reqs.new_token_ids
-            if new_token_ids and all(not token_ids for token_ids in new_token_ids):
-                scheduler_output = deepcopy(scheduler_output)
-                scheduler_output.scheduled_cached_reqs.new_token_ids = []
 
         if has_kv_transfer_group():
             kv_connector_metadata = scheduler_output.kv_connector_metadata
@@ -2404,10 +2399,14 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
-            # receive sampled token ids from the last PP rank when using
-            # async scheduling + pipeline parallelism so downstream code
-            # (e.g., PCP input preparation) can access them.
-            if self.use_async_scheduling and pp.world_size > 1 and not skip_pp_pd_broadcast:
+            # Receive prev sampled token ids from the last PP rank so that
+            # downstream code (e.g., PCP input preparation) can access them.
+            # This must run in both sync and async modes: _update_states no
+            # longer persists the previous sampled token for non-last ranks,
+            # so without this receive the input_ids would miss the previous
+            # step's sampled token and cause KV-cache/sequence misalignment
+            # (manifesting as garbled output).
+            if pp.world_size > 1 and not skip_pp_pd_broadcast:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # noqa
@@ -2519,10 +2518,30 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
+        # Surface draft token ids to the scheduler so spec decode actually
+        # takes effect. Use a synchronous copy to avoid async stream/event
+        # sync issues with self._draft_token_ids on NPU.
+        output_spec_token_ids = None
+        if self._draft_token_ids is not None:
+            if torch.is_tensor(self._draft_token_ids):
+                num_reqs = self._draft_token_ids.shape[0]
+                draft_ids_list = self._draft_token_ids[:num_reqs].cpu().tolist()
+                draft_req_ids = self._draft_token_req_ids
+            else:
+                draft_ids_list = self._draft_token_ids
+                draft_req_ids = self.input_batch.req_ids
+            if draft_ids_list and draft_req_ids:
+                draft_by_req_id = dict(zip(draft_req_ids, draft_ids_list))
+                output_spec_token_ids = [
+                    draft_by_req_id.get(req_id, [])
+                    for req_id in req_ids_output_copy
+                ]
+
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=output_spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             kv_connector_output=kv_connector_output,
@@ -2549,12 +2568,33 @@ class NPUModelRunner(GPUModelRunner):
                 global_stream().wait_event(self.sampling_done_event)
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
-        # In async scheduling + PP, broadcast sampled token ids from the
-        # last PP rank so other PP ranks can receive them without going
-        # through the scheduler/engine IPC path.
-        if self.use_async_scheduling:
-            if pp.world_size > 1 and pp.is_last_rank and not skip_pp_pd_broadcast:
-                self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
+        # Broadcast prev sampled token + draft from the last PP rank so
+        # other PP ranks can receive them without going through the
+        # scheduler/engine IPC path. Symmetric for sync and async: since
+        # _update_states no longer persists the previous sampled token for
+        # non-last ranks, sync mode also relies on this broadcast to
+        # recover it.
+        if pp.world_size > 1 and pp.is_last_rank and not skip_pp_pd_broadcast:
+            draft = (self._draft_token_ids
+                     if self._draft_token_ids is not None
+                     and torch.is_tensor(self._draft_token_ids)
+                     else None)
+            if self.use_async_scheduling:
+                self._pp_broadcast_prev_sampled_token_ids(
+                    sampler_output.sampled_token_ids, draft,
+                )
+            else:
+                # Sync path: sampler_output.sampled_token_ids is
+                # List[List[int]]; align to (num_reqs, 1) int64 tensor.
+                if spec_decode_metadata is None:
+                    sampled = sampler_output.sampled_token_ids
+                else:
+                    sampled = torch.tensor(
+                        [[ids[-1]] if ids else [0]
+                         for ids in valid_sampled_token_ids],
+                        device=self.device,
+                    )
+                self._pp_broadcast_prev_sampled_token_ids(sampled, draft)
 
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
@@ -2604,6 +2644,40 @@ class NPUModelRunner(GPUModelRunner):
             async_output.async_copy_ready_event,
         )
         return async_output
+
+    def _pp_receive_prev_sampled_token_ids_to_input_batch(self) -> None:
+        """NPU override: cast ``prev_sampled_token_ids`` to int32 after the
+        upstream receive so it matches ``input_ids.gpu`` dtype.
+
+        The upstream ``recv`` tensor is int64, but NPU ``input_ids.gpu`` is
+        int32 and ``scatter_`` does not do implicit conversion, which would
+        raise ``EZ1001 aclnnInplaceScatter`` without this cast.
+        """
+        super()._pp_receive_prev_sampled_token_ids_to_input_batch()
+        if self.input_batch.prev_sampled_token_ids is not None:
+            self.input_batch.prev_sampled_token_ids = (
+                self.input_batch.prev_sampled_token_ids.to(dtype=torch.int32)
+            )
+
+    def _pp_broadcast_prev_sampled_token_ids(
+        self,
+        sampled_token_ids: torch.Tensor,
+        draft_token_ids: torch.Tensor | None = None,
+    ) -> None:
+        """NPU override: force int64 before broadcasting so sender/receiver
+        dtypes match.
+
+        HCCL is stricter than NCCL and requires all ranks to share the same
+        dataType; the NPU sampler may emit int32 while the receiver's
+        ``recv`` is fixed int64, which would raise ``EI0005 HcomBroadcast``
+        without this cast.
+        """
+        sampled_token_ids = sampled_token_ids.to(dtype=torch.int64)
+        if draft_token_ids is not None:
+            draft_token_ids = draft_token_ids.to(dtype=torch.int64)
+        super()._pp_broadcast_prev_sampled_token_ids(
+            sampled_token_ids, draft_token_ids
+        )
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):

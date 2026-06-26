@@ -1114,6 +1114,21 @@ class RecomputeScheduler(Scheduler):
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
             eco.scheduler_stats = stats
 
+        # Surface draft token ids to the scheduler. update_from_output is
+        # fully overridden and does not call super(), so without this the
+        # spec decode chain would be silently lost.
+        # NOTE: minimal back-fill only — full parity with the upstream
+        # scheduler.update_from_output (prefill-chunk skip, grammar validate,
+        # num_spec_tokens_in_flight reset) is deferred until RCS + spec decode
+        # is actually exercised end-to-end.
+        spec_token_ids = getattr(model_runner_output, "spec_token_ids", None)
+        if spec_token_ids:
+            from vllm.v1.outputs import DraftTokenIds
+            self.update_draft_token_ids(DraftTokenIds(
+                req_ids=list(model_runner_output.req_id_to_index.keys()),
+                draft_token_ids=spec_token_ids,
+            ))
+
         return engine_core_outputs
 
 
