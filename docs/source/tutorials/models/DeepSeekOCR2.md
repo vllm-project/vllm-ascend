@@ -145,7 +145,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 ## Accuracy Evaluation
 
-Here ia an accuracy evaluation methods.
+Here is an accuracy evaluation method.
 
 ### Using AISBench
 

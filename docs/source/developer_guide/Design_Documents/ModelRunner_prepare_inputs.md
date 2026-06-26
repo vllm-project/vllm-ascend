@@ -33,7 +33,7 @@ The workflow of obtaining inputs:
 
 3. Get `Token IDs`: using token indices to retrieve the Token IDs from **token id table**.
 
-At last, these `Token IDs` are required to be fed into a model, and `positions` should also be sent into the model to create `Rope` (Rotary positional embedding). Both of them are the inputs of the model.
+At last, these `Token IDs` are required to be fed into a model, and `positions` should also be sent into the model to create `RoPE` (Rotary positional embedding). Both of them are the inputs of the model.
 
 **Note**: The `Token IDs` are the inputs of a model, so we also call them `Input IDs`.
 

@@ -367,7 +367,7 @@ Prompt: 'The capital of France is', Generated text: ' a city. What is the capita
 Prompt: 'The future of AI is', Generated text: ' a topic that is being discussed in various contexts. In the business world, AI'
 ```
 
-This section shows process exits after offline inference, and is does not affect actual inference:
+This section shows process exits after offline inference, and does not affect actual inference:
 
 ```bash
 (EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1201] Shutdown initiated (timeout=0)

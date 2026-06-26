@@ -184,10 +184,10 @@ All integer input parameters must explicitly specify their maximum and minimum v
             raise TypeError(f"The {iterations} is not int.")
         if iterations <= 0:
             raise ValueError(
-                f"The {iterations} can not less than or equal to 0.")
+                f"The {iterations} can not be less than or equal to 0.")
         if iterations > sys.maxsize:
             raise ValueError(
-                f"The {iterations} can not large than {sys.maxsize}")
+                f"The {iterations} can not be larger than {sys.maxsize}")
 ```
 
 #### File Path
@@ -207,7 +207,7 @@ The file path for EPLB must be checked for legality, such as whether the file pa
         if ext.lower() != ".json":
             raise TypeError("The expert_map is not json.")
         if not os.path.exists(expert_map):
-            raise ValueError("The expert_map is not exist.")
+            raise ValueError("The expert_map does not exist.")
         try:
             with open(expert_map, "w", encoding='utf-8') as f:
                 f.read()

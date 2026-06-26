@@ -157,7 +157,7 @@ Under the mooncake folder:
 mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000
 ```
 
-`eviction_high_watermark_ratio` determines the watermark where Mooncake Store will perform eviction，and `eviction_ratio` determines the portion of stored objects that would be evicted.
+`eviction_high_watermark_ratio` determines the watermark where Mooncake Store will perform eviction, and `eviction_ratio` determines the portion of stored objects that would be evicted.
 `default_kv_lease_ttl` controls the default lease TTL for KV objects (milliseconds); configure it via `--default_kv_lease_ttl` and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 
 ### PD Disaggregation Scenario
@@ -166,7 +166,7 @@ mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_rati
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` serves as the prefix-cache node.
 
-`prefill` Node：
+`prefill` Node:
 
 ```shell
 bash multi_producer.sh
@@ -335,16 +335,16 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
 
 ```shell
 python vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-    --host localhost\
+    --host localhost \
     --prefiller-hosts localhost \
     --prefiller-ports 8100 \
-    --decoder-hosts localhost\
+    --decoder-hosts localhost \
     --decoder-ports 8200 \
 ```
 
 Change localhost to your actual IP address.
 
-#### 3.Run Inference
+#### 3. Run Inference
 
 Configure the localhost, port, and model weight path in the command to your own settings.
 
@@ -494,7 +494,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
 
 ### Installing Memcache
 
-**MemCache depends on MemFabric. Therefore, MemFabric must be installed.Installing the memcache after the memfabric is installed.**
+**MemCache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the memfabric is installed.**
 
 ```shell
 pip install memfabric-hybrid
@@ -665,7 +665,7 @@ Refer to [Start proxy_server](#2-start-proxy_server) in the MooncakeStore deploy
 
 #### 3. Run Inference
 
-Refer to [Run Inference](#3run-inference) in the MooncakeStore deployment section.
+Refer to [Run Inference](#3-run-inference) in the MooncakeStore deployment section.
 
 ### PD-Mixed Scenario
 

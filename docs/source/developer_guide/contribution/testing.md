@@ -210,7 +210,7 @@ pytest -sv tests/ut/test_ascend_config.py
 ### E2E test
 
 Although vllm-ascend CI provides E2E tests on Ascend CI (for example,
-[schedule_nightly_test_a2.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a2.yaml), [schedule_nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml), [pr_test_full.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test_full.yaml)), you can run them locally.
+[schedule_nightly_test_a2.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a2.yaml), [schedule_nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml), [pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)), you can run them locally.
 
 #### PR-triggered E2E test
 

@@ -178,7 +178,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
     --port 8900 \
     --block-size 128 \
     --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'\
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --async-scheduling \
     --additional-config '
     {"ascend_compilation_config":{
@@ -226,7 +226,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
     --port 8900 \
     --block-size 128 \
     --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'\
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --async-scheduling \
     --additional-config '
     {"ascend_compilation_config":{
