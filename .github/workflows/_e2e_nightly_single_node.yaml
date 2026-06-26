@@ -67,7 +67,7 @@ on:
       aop_single_enabled:
         required: false
         type: boolean
-        default: true
+        default: false
         description: enable AOP hooks (capture / classify / skip-or-process)
     secrets:
       OBS_ACCESS_KEY_ID:
@@ -85,7 +85,7 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path || inputs.tests }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-nightly-verify-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path || inputs.tests }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 jobs:
