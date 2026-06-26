@@ -38,7 +38,7 @@ def api_client(request):
 
 
 def pytest_addoption(parser):
-    parser.addoption("--thinkTagOutput", action="store", type=str, required=False)
+    parser.addoption("--thinkTagOutput", action="store", type=str, default="false", required=False)
     parser.addoption("--engineArchitecture", action="store", default="single", choices=["pd", "single"])
     parser.addoption("--maxModelLength", action="store", default="128")
     parser.addoption("--model", action="store", default="qwen")
