@@ -8,6 +8,7 @@ def _mamba_block_aligned_split(
     num_new_tokens: int,
     num_new_local_computed_tokens: int = 0,
     num_external_computed_tokens: int = 0,
+    num_uncached_common_prefix_tokens: int = 0,
 ) -> int:
     num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
     # Perform block-aligned splitting at prefill phase, including:
@@ -39,6 +40,15 @@ def _mamba_block_aligned_split(
         else:
             # prefill the last few tokens
             pass
+
+        # Upstream vLLM PR #37898 added Marconi-style prefix-cache admission for
+        # hybrid Mamba models: the scheduler may pass the uncached common-prefix
+        # length as an extra argument, and the split should stop on that aligned
+        # boundary so the Mamba state is cached consistently with the attention
+        # prefix cache.
+        if num_uncached_common_prefix_tokens >= block_size and num_new_tokens > num_uncached_common_prefix_tokens:
+            num_new_tokens = num_uncached_common_prefix_tokens
+            num_new_tokens = num_new_tokens // block_size * block_size
     return num_new_tokens
 
 

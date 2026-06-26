@@ -63,6 +63,10 @@ import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 
+# vLLM PR #41184 moved FusedMoE expert params under RoutedExperts. GPT-OSS
+# generic/FP8 weight loading needs the name remap patch.
+import vllm_ascend.patch.worker.patch_gpt_oss  # noqa
+
 if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa

@@ -653,7 +653,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, patch_fused_moe_factory
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -757,6 +757,11 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
+
+    # Upstream vLLM PR #41184 made FusedMoE a function, so CustomOp OOT
+    # registration alone cannot replace it. Patch the factory export after
+    # choosing the final device-specific replacement.
+    patch_fused_moe_factory(REGISTERED_ASCEND_OPS["FusedMoE"])
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)

@@ -22,7 +22,7 @@ from typing import Any
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -118,14 +118,14 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
 
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
 
-                logger.debug("Select AscendUnquantizedFusedMoEMethod310 for %s (layer=%s)", prefix, "FusedMoE")
+                logger.debug("Select AscendUnquantizedFusedMoEMethod310 for %s (layer=%s)", prefix, "RoutedExperts")
                 return AscendUnquantizedFusedMoEMethod310(layer.moe_config)
             scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
-            logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
+            logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "RoutedExperts")
             return AscendFusedMoEMethod(scheme, layer.moe_config)
 
         elif isinstance(layer, VocabParallelEmbedding):

@@ -18,9 +18,7 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
-from vllm_ascend._310p.fused_moe.fused_moe import (
-    AscendFusedMoE310,
-)
+from vllm_ascend._310p.fused_moe import fused_moe as fused_moe_310_module
 
 
 class _DummyGate(torch.nn.Module):
@@ -47,63 +45,84 @@ class _DummySharedExperts(torch.nn.Module):
         return out
 
 
-def _build_layer(shared_experts: torch.nn.Module | None) -> AscendFusedMoE310:
-    layer = AscendFusedMoE310.__new__(AscendFusedMoE310)
-    # The test bypasses full layer init with __new__, so we must initialize
-    # nn.Module internals before assigning child modules.
-    torch.nn.Module.__init__(layer)
-    layer._shared_experts = shared_experts
-    return layer
+def _build_routed_experts(shared_experts: torch.nn.Module | None):
+    # vLLM PR #41184 moved the shared-expert owner from the FusedMoE layer to
+    # RoutedExperts. Build only the minimal owner state needed by
+    # these helper tests.
+    routed_experts = torch.nn.Module.__new__(fused_moe_310_module.AscendRoutedExperts310)
+    torch.nn.Module.__init__(routed_experts)
+    routed_experts._shared_experts = shared_experts
+    return routed_experts
 
 
-def test_forward_shared_experts_without_gate_310():
-    layer = _build_layer(_DummySharedExperts(with_gate=False))
+def test_routed_experts_forward_shared_experts_without_gate_310():
+    routed_experts = _build_routed_experts(_DummySharedExperts(with_gate=False))
     hidden_states = torch.randn(4, 8)
-    output = layer._forward_shared_experts(hidden_states)
+    output = routed_experts._forward_shared_experts(hidden_states)
     expected = hidden_states * 2.0 + 1.0
     torch.testing.assert_close(output, expected)
 
 
-def test_forward_shared_experts_with_gate_310():
-    layer = _build_layer(_DummySharedExperts(with_gate=True))
+def test_routed_experts_forward_shared_experts_with_gate_310():
+    routed_experts = _build_routed_experts(_DummySharedExperts(with_gate=True))
     hidden_states = torch.randn(4, 8)
-    output = layer._forward_shared_experts(hidden_states)
+    output = routed_experts._forward_shared_experts(hidden_states)
     expected = 0.5 * (hidden_states * 2.0 + 1.0)
     torch.testing.assert_close(output, expected)
 
 
-def test_forward_impl_with_shared_experts_returns_tuple_310():
-    layer = _build_layer(_DummySharedExperts(with_gate=True))
+def test_routed_experts_shared_forward_uses_separate_shared_input_310():
+    routed_experts = _build_routed_experts(_DummySharedExperts(with_gate=True))
     hidden_states = torch.randn(3, 8)
+    shared_input = torch.randn(3, 8)
     router_logits = torch.randn(3, 8)
     routed_out = torch.randn(3, 8)
 
-    with patch.object(AscendFusedMoE310, "forward_impl", return_value=routed_out):
-        shared_out, routed = layer.shared_forward_impl(hidden_states, router_logits)
+    # vLLM PR #41184 makes MoERunner pass a separate shared_experts_input to
+    # RoutedExperts.shared_forward_impl. 310P should consume that tensor only
+    # for the shared path and keep routed MoE inputs unchanged.
+    with patch.object(
+        fused_moe_310_module.AscendRoutedExperts310,
+        "forward_impl",
+        return_value=routed_out,
+    ) as mock_forward_impl:
+        shared_out, routed = routed_experts.shared_forward_impl(
+            hidden_states,
+            router_logits,
+            shared_input,
+        )
 
-    expected_shared = 0.5 * (hidden_states * 2.0 + 1.0)
+    mock_forward_impl.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+    )
+    expected_shared = 0.5 * (shared_input * 2.0 + 1.0)
     torch.testing.assert_close(shared_out, expected_shared)
     torch.testing.assert_close(routed, routed_out)
 
 
-def test_forward_impl_without_shared_experts_integration_310():
-    layer = _build_layer(None)
+def test_routed_experts_without_shared_experts_integration_310():
+    routed_experts = _build_routed_experts(None)
     hidden_states = torch.randn(3, 8)
-    assert layer._forward_shared_experts(hidden_states) is None
+    assert routed_experts._forward_shared_experts(hidden_states) is None
 
 
-def test_forward_impl_without_shared_experts_returns_routed_only_310():
-    layer = _build_layer(None)
+def test_routed_experts_without_shared_experts_returns_routed_only_310():
+    routed_experts = _build_routed_experts(None)
     hidden_states = torch.randn(3, 8)
     router_logits = torch.randn(3, 8)
     routed_out = torch.randn(3, 8)
 
-    with patch.object(AscendFusedMoE310, "forward_impl", return_value=routed_out):
-        output = layer.shared_forward_impl(hidden_states, router_logits)
+    with patch.object(
+        fused_moe_310_module.AscendRoutedExperts310,
+        "forward_impl",
+        return_value=routed_out,
+    ):
+        output = routed_experts.shared_forward_impl(hidden_states, router_logits)
 
     torch.testing.assert_close(output, routed_out)
 
 
-def test_is_internal_router_is_false_310():
-    layer = _build_layer(_DummySharedExperts(with_gate=True))
-    assert layer.is_internal_router is False
+def test_routed_experts_is_internal_router_is_false_310():
+    routed_experts = _build_routed_experts(_DummySharedExperts(with_gate=True))
+    assert routed_experts.is_internal_router is False

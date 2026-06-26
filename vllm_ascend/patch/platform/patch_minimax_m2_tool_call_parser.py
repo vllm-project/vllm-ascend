@@ -41,10 +41,14 @@ from vllm.tool_parsers.utils import (
     find_tool_properties,
 )
 
-_original_init = MinimaxM2ToolParser.__init__
-# vLLM main moved schema helpers from this parser class into tool_parsers.utils.
-_extract_types_from_schema = getattr(tool_parser_utils, "extract_types_from_schema", None)
-_coerce_to_schema_type = getattr(tool_parser_utils, "coerce_to_schema_type", None)
+# TODO: @QwertyJack please fix this patch.
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.23.0"):
+    _original_init = MinimaxM2ToolParser.__init__
+    # vLLM main moved schema helpers from this parser class into tool_parsers.utils.
+    _extract_types_from_schema = getattr(tool_parser_utils, "extract_types_from_schema", None)
+    _coerce_to_schema_type = getattr(tool_parser_utils, "coerce_to_schema_type", None)
 
 
 def _patched_init(
@@ -507,14 +511,15 @@ def _patched_extract_tool_calls_streaming(
     return None
 
 
-MinimaxM2ToolParser.__init__ = _patched_init
-MinimaxM2ToolParser._parse_single_invoke = _patched_parse_single_invoke
-MinimaxM2ToolParser._reset_streaming_state = _reset_streaming_state
-MinimaxM2ToolParser._ensure_streaming_slots = _ensure_streaming_slots
-MinimaxM2ToolParser._get_param_config = _get_param_config
-MinimaxM2ToolParser._serialize_partial_param_value = _serialize_partial_param_value
-MinimaxM2ToolParser._build_partial_arguments = _build_partial_arguments
-MinimaxM2ToolParser._get_invoke_states = _get_invoke_states
-MinimaxM2ToolParser._finalize_completed_tool_call = _finalize_completed_tool_call
-MinimaxM2ToolParser._extract_delta_tool_call = _extract_delta_tool_call
-MinimaxM2ToolParser.extract_tool_calls_streaming = _patched_extract_tool_calls_streaming
+if vllm_version_is("0.23.0"):
+    MinimaxM2ToolParser.__init__ = _patched_init
+    MinimaxM2ToolParser._parse_single_invoke = _patched_parse_single_invoke
+    MinimaxM2ToolParser._reset_streaming_state = _reset_streaming_state
+    MinimaxM2ToolParser._ensure_streaming_slots = _ensure_streaming_slots
+    MinimaxM2ToolParser._get_param_config = _get_param_config
+    MinimaxM2ToolParser._serialize_partial_param_value = _serialize_partial_param_value
+    MinimaxM2ToolParser._build_partial_arguments = _build_partial_arguments
+    MinimaxM2ToolParser._get_invoke_states = _get_invoke_states
+    MinimaxM2ToolParser._finalize_completed_tool_call = _finalize_completed_tool_call
+    MinimaxM2ToolParser._extract_delta_tool_call = _extract_delta_tool_call
+    MinimaxM2ToolParser.extract_tool_calls_streaming = _patched_extract_tool_calls_streaming

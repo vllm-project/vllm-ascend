@@ -29,6 +29,8 @@ from functools import wraps
 
 from vllm.logger import logger
 
+from vllm_ascend.utils import vllm_version_is
+
 _PATCHED = False
 
 
@@ -73,12 +75,53 @@ def _patch_model_config_validation() -> None:
     ModelConfig.verify_with_parallel_config = _patched_verify_with_parallel_config
 
 
+def _patch_v2_model_runner_supported() -> None:
+    """Patch VllmConfig._is_default_v2_model_runner_model to exclude DeepSeek-V2.
+
+    Upstream vLLM added DeepseekV2ForCausalLM to DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES,
+    but vllm-ascend's v2 model runner does not fully support DeepSeek-V2 in PP scenarios.
+    This ensures DeepSeek-V2 uses the v1 model runner which has proper PP support.
+
+    We patch the _is_default_v2_model_runner_model method which is called by
+    the use_v2_model_runner property.
+    """
+    try:
+        import vllm.config.vllm as vllm_config_module
+
+        original_is_v2_model = vllm_config_module.VllmConfig._is_default_v2_model_runner_model
+        if getattr(original_is_v2_model, "_vllm_ascend_pp_mtp_patched", False):
+            return
+
+        @wraps(original_is_v2_model)
+        def _patched_is_default_v2_model_runner_model(self):
+            # First check if this is DeepSeek-V2
+            model_config = getattr(self, "model_config", None)
+            if model_config is not None:
+                architectures = getattr(model_config, "architectures", [])
+                if any("DeepseekV2" in arch for arch in architectures):
+                    # DeepSeek-V2 should use v1 model runner for PP support
+                    logger.info("[Patch] DeepSeek-V2 detected, using v1 model runner for proper PP support.")
+                    return False
+            # For other models, use the original logic
+            return original_is_v2_model(self)
+
+        _patched_is_default_v2_model_runner_model._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
+        vllm_config_module.VllmConfig._is_default_v2_model_runner_model = _patched_is_default_v2_model_runner_model
+        logger.info("[Patch] Patched VllmConfig._is_default_v2_model_runner_model for DeepSeek-V2.")
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.error("[Patch] Failed to patch VllmConfig._is_default_v2_model_runner_model: %s", e)
+
+
 def _apply_patch() -> None:
     global _PATCHED
     if _PATCHED:
         return
     _PATCHED = True
     _patch_model_config_validation()
+    if vllm_version_is("0.23.0"):
+        _patch_v2_model_runner_supported()
 
 
 _apply_patch()

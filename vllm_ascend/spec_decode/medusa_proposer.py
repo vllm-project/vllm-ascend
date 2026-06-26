@@ -5,6 +5,7 @@ from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendMedusaProposer(MedusaProposer):
@@ -49,6 +50,8 @@ class AscendMedusaProposer(MedusaProposer):
         sampling_metadata: SamplingMetadata,
         spec_decode_metadata: SpecDecodeMetadata,
         sample_hidden_states: torch.Tensor,
+        num_speculative_tokens: int = 0,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     ):
         if sample_hidden_states.shape[0] == len(valid_sampled_token_ids):
             # The input to the target model does not include draft tokens.
@@ -63,8 +66,16 @@ class AscendMedusaProposer(MedusaProposer):
             indices = offsets + num_accepted_tokens - 1
             hidden_states = sample_hidden_states[indices]
 
-        spec_token_ids = super().propose(
-            target_hidden_states=hidden_states,
-            sampling_metadata=sampling_metadata,
-        )
+        if vllm_version_is("0.23.0"):
+            spec_token_ids = super().propose(
+                target_hidden_states=hidden_states,
+                sampling_metadata=sampling_metadata,
+            )
+        else:
+            spec_token_ids = super().propose(
+                num_speculative_tokens=num_speculative_tokens,
+                target_hidden_states=hidden_states,
+                sampling_metadata=sampling_metadata,
+                slot_mappings=slot_mappings,
+            )
         return spec_token_ids

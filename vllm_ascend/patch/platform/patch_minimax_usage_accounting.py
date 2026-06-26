@@ -23,6 +23,8 @@ from collections.abc import Sequence
 
 from vllm.reasoning import minimax_m2_reasoning_parser as minimax_parser
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def _count_minimax_reasoning_tokens(
     token_ids: Sequence[int],
@@ -38,7 +40,15 @@ def _count_minimax_reasoning_tokens(
 
 
 def _patched_count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-    return _count_minimax_reasoning_tokens(token_ids, self.end_token_id)
+    if vllm_version_is("0.23.0"):
+        return _count_minimax_reasoning_tokens(token_ids, self.end_token_id)
+    else:
+        end_token_id = getattr(self, "end_token_id", None)
+        if end_token_id is None:
+            engine = getattr(self, "_parser_engine", None)
+            if engine is not None:
+                end_token_id = getattr(engine, "_reasoning_end_token_id", None)
+        return _count_minimax_reasoning_tokens(token_ids, end_token_id)
 
 
 minimax_parser.MiniMaxM2ReasoningParser.count_reasoning_tokens = _patched_count_reasoning_tokens

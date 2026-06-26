@@ -28,13 +28,17 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 
-_ANTHROPIC_MESSAGE_ROLES = Literal["user", "assistant", "system"]
+# TODO: @QwertyJack please fix this patch.
+from vllm_ascend.utils import vllm_version_is
 
-AnthropicMessage.__annotations__["role"] = _ANTHROPIC_MESSAGE_ROLES
-AnthropicMessage.model_fields["role"].annotation = _ANTHROPIC_MESSAGE_ROLES
-AnthropicMessage.model_rebuild(force=True)
-AnthropicMessagesRequest.model_rebuild(force=True)
-AnthropicCountTokensRequest.model_rebuild(force=True)
+if vllm_version_is("0.23.0"):
+    _ANTHROPIC_MESSAGE_ROLES = Literal["user", "assistant", "system"]
+
+    AnthropicMessage.__annotations__["role"] = _ANTHROPIC_MESSAGE_ROLES
+    AnthropicMessage.model_fields["role"].annotation = _ANTHROPIC_MESSAGE_ROLES
+    AnthropicMessage.model_rebuild(force=True)
+    AnthropicMessagesRequest.model_rebuild(force=True)
+    AnthropicCountTokensRequest.model_rebuild(force=True)
 
 
 def _append_system_text(system_parts: list[str], text: str | None) -> None:
@@ -96,5 +100,6 @@ def _patched_convert_messages(
             openai_messages.append(openai_msg)
 
 
-AnthropicServingMessages._convert_system_message = classmethod(_patched_convert_system_message)
-AnthropicServingMessages._convert_messages = classmethod(_patched_convert_messages)
+if vllm_version_is("0.23.0"):
+    AnthropicServingMessages._convert_system_message = classmethod(_patched_convert_system_message)
+    AnthropicServingMessages._convert_messages = classmethod(_patched_convert_messages)

@@ -3,19 +3,33 @@
 import json
 from unittest.mock import MagicMock
 
+import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 
 # vLLM main removed the ``_WrappedParser`` helper; the base ``Parser``
 # already instantiates from ``reasoning_parser_cls`` / ``tool_parser_cls``
 # class attributes, so a thin ``DelegatingParser`` subclass is equivalent.
-from vllm.parser.abstract_parser import DelegatingParser  # type: ignore[import-not-found]
+try:
+    from vllm.parser.abstract_parser import DelegatingParser  # type: ignore[import-not-found]
+
+    _DELEGATING_PARSER_AVAILABLE = True
+except ImportError:
+    _DELEGATING_PARSER_AVAILABLE = False
+
 from vllm.reasoning.deepseek_v3_reasoning_parser import (
     DeepSeekV3ReasoningWithThinkingParser,
 )
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
 from vllm_ascend.patch.platform import patch_glm47_tool_call_parser  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.23.0"):
+    _LEGACY_PARSER = True
+else:
+    # TODO: @QwertyJack please fix this patch.
+    _LEGACY_PARSER = False  # Always skip: legacy parser no longer supported
 
 
 class _WrappedParser(DelegatingParser):
@@ -64,6 +78,10 @@ def _parse_delta(parser, *args, finished=False, **kwargs):
     return parser.parse_delta(*args, finished=finished, **kwargs)
 
 
+@pytest.mark.skipif(
+    not _LEGACY_PARSER,
+    reason="Legacy parser no longer present; the new state-machine engine handles tool calls natively.",
+)
 def test_glm47_streaming_inline_zero_arg_tool_call_waits_until_complete():
     request = _request()
     parser = Glm47MoeModelToolParser(MOCK_TOKENIZER, request.tools)
@@ -99,6 +117,10 @@ def test_glm47_streaming_inline_zero_arg_tool_call_waits_until_complete():
     assert json.loads(_collect_tool_args(finished.tool_calls)) == {}
 
 
+@pytest.mark.skipif(
+    not _LEGACY_PARSER,
+    reason="Legacy parser no longer present; the new state-machine engine handles tool calls natively.",
+)
 def test_glm45_reasoning_glm47_streaming_inline_zero_arg_tool_call():
     request = _request()
     _WrappedParser.reasoning_parser_cls = DeepSeekV3ReasoningWithThinkingParser

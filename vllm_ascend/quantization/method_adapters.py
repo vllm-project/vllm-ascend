@@ -29,7 +29,12 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_flashcomm2_otp_group, get_mlp_tp_group, get_otp_group
-from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
+from vllm_ascend.utils import (
+    enable_dsa_cp_with_layer_shard,
+    flashcomm2_enable,
+    mlp_tp_enable,
+    oproj_tp_enable,
+)
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
 
@@ -213,6 +218,13 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         self.quant_method = scheme
         self.tid2eid = tid2eid
 
+    @property
+    def is_monolithic(self) -> bool:
+        # vLLM PR #41184's MoERunner checks quant_method.is_monolithic before
+        # dispatching the modular RoutedExperts path. Ascend quant methods keep
+        # routing/communication in their own apply path.
+        return False
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -270,7 +282,14 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
+        topk_weights: torch.Tensor | None = None,
+        topk_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # vLLM PR #41184 may pass topk_weights/topk_ids into
+        # quant_method.apply. Ascend's quantized schemes still select experts
+        # inside their own NPU path, so the adapter accepts the keywords for
+        # interface compatibility but does not forward them.
+        del topk_weights, topk_ids
         return self.quant_method.apply(
             layer=layer,
             x=x,

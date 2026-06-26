@@ -21,10 +21,14 @@ from __future__ import annotations
 
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
-if not hasattr(Glm47MoeModelToolParser, "_ascend_original_extract_tool_call_regions"):
-    Glm47MoeModelToolParser._ascend_original_extract_tool_call_regions = (
-        Glm47MoeModelToolParser._extract_tool_call_regions
-    )
+# TODO: @QwertyJack please fix this patch.
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.23.0"):
+    if not hasattr(Glm47MoeModelToolParser, "_ascend_original_extract_tool_call_regions"):
+        Glm47MoeModelToolParser._ascend_original_extract_tool_call_regions = (
+            Glm47MoeModelToolParser._extract_tool_call_regions
+        )
 
 
 def _patched_extract_tool_call_regions(
@@ -44,4 +48,5 @@ def _patched_extract_tool_call_regions(
     return normalized_regions
 
 
-Glm47MoeModelToolParser._extract_tool_call_regions = _patched_extract_tool_call_regions
+if vllm_version_is("0.23.0"):
+    Glm47MoeModelToolParser._extract_tool_call_regions = _patched_extract_tool_call_regions
