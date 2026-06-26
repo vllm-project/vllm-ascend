@@ -221,9 +221,11 @@ jobs:
             echo "release_tag=${release_tag}"
           } >> "$GITHUB_OUTPUT"
 
+# if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+
   build-test-image:
     needs: prepare-build
-    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready' }}
+    
     uses: ./.github/workflows/_build_test_image.yaml
     with:
       vllm_main_commit: ${{ needs.prepare-build.outputs.vllm_main_commit }}
