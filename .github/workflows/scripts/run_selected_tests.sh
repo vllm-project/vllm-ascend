@@ -126,7 +126,7 @@ run_pytest_batch() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${overall_status}" -eg 0 ]; then
+    if [ "${overall_status}" -eq 0 ]; then
       overall_status="${status}"
     fi
   fi
