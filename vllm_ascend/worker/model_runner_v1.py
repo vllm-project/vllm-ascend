@@ -158,6 +158,9 @@ from vllm_ascend.utils import (
     set_weight_prefetch_method,
     should_skip_allreduce_across_dp_group,
 )
+from vllm_ascend.worker.kv_cache_layout import (
+    view_split_kv_cache_with_stride_order,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
@@ -4542,11 +4545,24 @@ class NPUModelRunner(GPUModelRunner):
                     if self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
                         k_cache_dtype = self.c8_k_cache_dtype
                     
-                    k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
+                    k_cache = view_split_kv_cache_with_stride_order(
+                        raw_k_tensor,
+                        k_cache_dtype,
+                        kv_cache_shape,
+                        k_shape,
+                        attn_backend,
+                    )
+                    
                     if self.use_sparse and current_sparse_c8 and get_ascend_device_type() == AscendDeviceType.A5:
                         v_cache = None
                     else:
-                        v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
+                        v_cache = view_split_kv_cache_with_stride_order(
+                        raw_v_tensor,
+                        v_cache_dtype,
+                        kv_cache_shape,
+                        v_shape,
+                        attn_backend,
+                        )
 
                     if self.use_sparse:
                         dsa_k_cache_shape = (

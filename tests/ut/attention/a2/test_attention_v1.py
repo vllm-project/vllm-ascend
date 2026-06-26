@@ -11,6 +11,7 @@ from vllm_ascend.attention.attention_v1 import (
 )
 from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -38,6 +39,25 @@ class TestAscendAttentionBackend(TestBase):
 
     def test_get_builder_cls(self):
         self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
+
+    @patch("vllm_ascend.worker.kv_cache_layout.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch("vllm_ascend.attention.attention_v1.get_kv_cache_layout", return_value="HND")
+    def test_hnd_kv_cache_stride_order_rejected_on_non_a5(
+        self,
+        _mock_attention_layout,
+        _mock_device_type,
+    ):
+        with self.assertRaisesRegex(RuntimeError, "only supported on Ascend A5"):
+            AscendAttentionBackend.get_kv_cache_stride_order()
+
+    @patch("vllm_ascend.worker.kv_cache_layout.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch("vllm_ascend.attention.attention_v1.get_kv_cache_layout", return_value="HND")
+    def test_hnd_kv_cache_stride_order_allowed_on_a5(
+        self,
+        _mock_attention_layout,
+        _mock_device_type,
+    ):
+        self.assertEqual(AscendAttentionBackend.get_kv_cache_stride_order(), (0, 1, 3, 2, 4))
 
     def test_get_kv_cache_shape_not(self):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)

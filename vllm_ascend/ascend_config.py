@@ -190,9 +190,17 @@ class AscendConfig:
         ):
             prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {"tp_size": 1})["tp_size"]
             decode_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("decode", {"tp_size": 1})["tp_size"]
-            assert prefill_tp_size % decode_tp_size == 0, "Prefill TP size must be divisible by Decode TP size."
-            self.pd_tp_ratio = prefill_tp_size // decode_tp_size
-            if self.pd_tp_ratio > 1:
+            if prefill_tp_size >= decode_tp_size:
+                assert prefill_tp_size % decode_tp_size == 0, (
+                    "Prefill TP size must be divisible by Decode TP size when Prefill TP is larger."
+                )
+                self.pd_tp_ratio = prefill_tp_size // decode_tp_size
+            else:
+                assert decode_tp_size % prefill_tp_size == 0, (
+                    "Decode TP size must be divisible by Prefill TP size when Decode TP is larger."
+                )
+            self.pd_tp_ratio = max(prefill_tp_size, decode_tp_size) // min(prefill_tp_size, decode_tp_size)
+            if prefill_tp_size > decode_tp_size and self.pd_tp_ratio > 1:
                 # Total KV heads from vLLM's resolved architecture (ModelArchConfigConvertor).
                 num_kv_head = vllm_config.model_config.get_total_num_kv_heads()
                 if not num_kv_head or num_kv_head < 1:
@@ -206,8 +214,6 @@ class AscendConfig:
                 decode_tp_size = min(decode_tp_size, num_kv_head)
                 self.pd_head_ratio = prefill_tp_size // decode_tp_size
 
-            if self.pd_tp_ratio == 0:
-                raise AssertionError("Only support P node tp size lagger then D node tp size")
         self.SLO_limits_for_dynamic_batch = additional_config.get("SLO_limits_for_dynamic_batch", -1)
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
 
