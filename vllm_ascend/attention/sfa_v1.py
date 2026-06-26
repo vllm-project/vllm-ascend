@@ -24,6 +24,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
+from vllm_ascend.core.kv_cache_interface import SFA_QSFA_TILE_SIZE, get_sfa_qsfa_packed_head_dim
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -500,6 +501,27 @@ class AscendSFAImpl(MLAAttentionImpl):
         # NOTE: it imposes a limit on the number of input tokens and conflicts with FlashComm
         self.enable_mlapo = ascend_config.enable_mlapo
         self.enable_sfa_prolog_v3 = ascend_config.enable_sfa_prolog_v3
+        enable_sfa_qsfa = getattr(ascend_config, "enable_sfa_kv_quant_sparse_attention", False)
+        enable_sfa_qsfa = enable_sfa_qsfa if isinstance(enable_sfa_qsfa, bool) else False
+        self.enable_sfa_kv_quant_sparse_attention = (
+            enable_sfa_qsfa
+            and self.enable_sfa_prolog_v3
+            and get_ascend_device_type() != AscendDeviceType.A5
+        )
+        if enable_sfa_qsfa and not self.enable_sfa_prolog_v3:
+            logger.warning_once("SFA KV-quant sparse attention requires SFA mla_prolog_v3 and is disabled.")
+        if enable_sfa_qsfa and get_ascend_device_type() == AscendDeviceType.A5:
+            logger.warning_once("SFA KV-quant sparse attention currently targets int8 KV cache and is disabled on A5.")
+        self.sfa_qsfa_tile_size = SFA_QSFA_TILE_SIZE
+        self.sfa_qsfa_packed_kv_head_dim = (
+            get_sfa_qsfa_packed_head_dim(
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                self.sfa_qsfa_tile_size,
+            )
+            if self.enable_sfa_kv_quant_sparse_attention
+            else 0
+        )
 
         assert self.indexer is not None, "Indexer is required for DSA."
 
@@ -639,7 +661,13 @@ class AscendSFAImpl(MLAAttentionImpl):
             if getattr(self.q_proj, "_chunk_size", 0):
                 reasons.append("SFA mla_prolog_v3 does not support chunked q_proj weights yet.")
             if reasons:
+                if self.enable_sfa_kv_quant_sparse_attention:
+                    raise RuntimeError(
+                        "SFA KV-quant sparse attention requires a valid mla_prolog_v3 path: "
+                        + " ".join(reasons)
+                    )
                 self.enable_sfa_prolog_v3 = False
+                self.enable_sfa_kv_quant_sparse_attention = False
                 for msg in reasons:
                     logger.warning_once(msg)
             else:
@@ -1181,6 +1209,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             "qc_qr_scale": 1.0,
             "kc_scale": 1.0,
         }
+        if self.enable_sfa_kv_quant_sparse_attention:
+            prolog_kwargs.update(
+                {
+                    "kv_cache_quant_mode": 3,
+                    "ckvkr_repo_mode": 1,
+                    "quant_scale_repo_mode": 1,
+                    "tile_size": self.sfa_qsfa_tile_size,
+                }
+            )
         if cache_mode == "PA_BSND":
             prolog_kwargs["cache_index"] = slot_mapping.view(-1).to(torch.int64)
 
@@ -1201,16 +1238,28 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        k_nope = torch.empty(
-            (hidden_states.shape[0], self.num_kv_heads, self.kv_lora_rank),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        k_pe = torch.empty(
-            (hidden_states.shape[0], self.num_kv_heads, self.qk_rope_head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+        if self.enable_sfa_kv_quant_sparse_attention:
+            k_nope = torch.empty(
+                (hidden_states.shape[0], self.num_kv_heads, self.sfa_qsfa_packed_kv_head_dim),
+                dtype=torch.int8,
+                device=hidden_states.device,
+            )
+            k_pe = torch.empty(
+                (hidden_states.shape[0], self.num_kv_heads, 0),
+                dtype=torch.bfloat16,
+                device=hidden_states.device,
+            )
+        else:
+            k_nope = torch.empty(
+                (hidden_states.shape[0], self.num_kv_heads, self.kv_lora_rank),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            k_pe = torch.empty(
+                (hidden_states.shape[0], self.num_kv_heads, self.qk_rope_head_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
         hidden_states, ql_nope, q_pe, q_c, k_nope, k_pe = self._sfa_preprocess_with_prolog_v3(
             hidden_states=hidden_states,
             kv_cache=(k_nope, k_pe),
@@ -1235,6 +1284,50 @@ class AscendSFAImpl(MLAAttentionImpl):
         full_gather_o_proj_enabled: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.distributed.Work | None]:
         async_op = self.enable_dsa_cp_with_layer_shard or full_gather_o_proj_enabled
+        if self.enable_sfa_kv_quant_sparse_attention:
+            packed_kv, packed_kv_handle = all_gather_async(
+                k_nope.view(-1, k_nope.shape[-1]),
+                get_tp_group(),
+                async_op=async_op,
+            )
+            k_li, k_li_handle = all_gather_async(
+                k_li,
+                get_tp_group(),
+                async_op=async_op,
+            )
+            k_li_scale_handle = None
+            if self.use_sparse_c8_indexer:
+                assert k_li_scale is not None
+                k_li_scale, k_li_scale_handle = all_gather_async(
+                    k_li_scale,
+                    get_tp_group(),
+                    async_op=async_op,
+                )
+
+            for handle in (packed_kv_handle, k_li_handle, k_li_scale_handle):
+                if handle is not None:
+                    handle.wait()
+
+            o_proj_full_handle = None
+            if self.enable_dsa_cp_with_layer_shard:
+                for layer in self.layer_sharding_kwargs or []:
+                    if is_hidden_layer(layer):
+                        reach_layer_for_shard_weight_series(layer)
+            elif full_gather_o_proj_enabled:
+                _, o_proj_full_handle = all_gather_async(
+                    self.o_proj_tp_weight,
+                    get_tp_group(),
+                    output=AscendSFAImpl.o_proj_full_pool,
+                )
+
+            if kv_cache is not None:
+                torch_npu.npu_scatter_nd_update_(
+                    kv_cache[0].view(-1, packed_kv.shape[-1]),
+                    slot_mapping[: attn_metadata.num_actual_tokens].view(-1, 1),
+                    packed_kv[: attn_metadata.num_actual_tokens].view(-1, packed_kv.shape[-1]),
+                )
+            return k_li, k_li_scale, o_proj_full_handle
+
         if not self.use_sparse_c8_indexer:
             fused_kv_no_split, kv_ag_handle = all_gather_async(
                 torch.cat(
@@ -1442,6 +1535,16 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _execute_sparse_flash_attention_process(
         self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
     ):
+        if self.enable_sfa_kv_quant_sparse_attention:
+            return self._execute_kv_quant_sparse_flash_attention(
+                ql_nope=ql_nope,
+                q_pe=q_pe,
+                kv=kv_cache[0],
+                block_table=attn_metadata.block_table,
+                topk_indices=topk_indices,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+            )
         return DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
@@ -1451,6 +1554,40 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_metadata,
             actual_seq_lengths_query,
             actual_seq_lengths_key,
+        )
+
+    def _execute_kv_quant_sparse_flash_attention(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv: torch.Tensor,
+        block_table: torch.Tensor,
+        topk_indices: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+    ) -> torch.Tensor:
+        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        return torch_npu.npu_kv_quant_sparse_flash_attention(
+            query=query,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=self.scale,
+            key_dequant_scale=None,
+            value_dequant_scale=None,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=self.sfa_qsfa_tile_size,
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=self.qk_rope_head_dim,
         )
 
     def forward(
@@ -1526,16 +1663,24 @@ class AscendSFAImpl(MLAAttentionImpl):
                 )
                 k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
                 wait_for_kv_layer_from_connector(layer_name)
-                kv_c_k_pe = torch.cat([k_nope, k_pe], dim=-1)
-                kv_c_k_pe = self._get_full_kv(kv_c_k_pe, attn_metadata)
-                k_nope, k_pe = kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-                torch_npu._npu_reshape_and_cache(
-                    key=k_nope,
-                    value=k_pe,
-                    key_cache=kv_cache[0],
-                    value_cache=kv_cache[1],
-                    slot_indices=slot_mapping,
-                )
+                if self.enable_sfa_kv_quant_sparse_attention:
+                    packed_kv = self._get_full_kv(k_nope, attn_metadata)
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[0].view(-1, packed_kv.shape[-1]),
+                        slot_mapping.view(-1, 1),
+                        packed_kv.view(-1, packed_kv.shape[-1]),
+                    )
+                else:
+                    kv_c_k_pe = torch.cat([k_nope, k_pe], dim=-1)
+                    kv_c_k_pe = self._get_full_kv(kv_c_k_pe, attn_metadata)
+                    k_nope, k_pe = kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+                    torch_npu._npu_reshape_and_cache(
+                        key=k_nope,
+                        value=k_pe,
+                        key_cache=kv_cache[0],
+                        value_cache=kv_cache[1],
+                        slot_indices=slot_mapping,
+                    )
                 k_li = self._get_full_kv(k_li, attn_metadata)
             else:
                 hidden_states, ql_nope, q_pe, q_c, _, _ = self._sfa_preprocess_with_prolog_v3(

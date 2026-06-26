@@ -87,6 +87,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
     # Whether to enable SFA preprocessing with mla_prolog_v3.
     "VLLM_ASCEND_ENABLE_SFA_PROLOG_V3": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_SFA_PROLOG_V3", "0"))),
+    # Whether to enable SFA attention with MLA-prolog packed int8 KV cache.
+    "VLLM_ASCEND_ENABLE_SFA_KV_QUANT_SPARSE_ATTENTION": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_SFA_KV_QUANT_SPARSE_ATTENTION", "0"))
+    ),
     # Whether to enable weight cast format to FRACTAL_NZ.
     # 0: close nz;
     # 1: only quant case enable nz;

@@ -16,5 +16,6 @@ add_custom_aclnn_op
 context_parallel
 dynamic_chunked_pipeline_parallel
 quantization
+sfa_mla_prolog_v3_kv_quant
 npugraph_ex
 :::

@@ -354,6 +354,16 @@ class AscendSFACPImpl(AscendSFAImpl):
     def _execute_sparse_flash_attention(
         self, ql_nope, q_pe, kv, key_rope, block_table, topk_indices, actual_seq_lengths_query, actual_seq_lengths_key
     ):
+        if self.enable_sfa_kv_quant_sparse_attention:
+            return self._execute_kv_quant_sparse_flash_attention(
+                ql_nope=ql_nope,
+                q_pe=q_pe,
+                kv=kv,
+                block_table=block_table,
+                topk_indices=topk_indices,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+            )
         attn_output, _, _ = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=kv,
