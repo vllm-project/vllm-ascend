@@ -679,6 +679,14 @@ The following optimizations are enabled by default and require no additional con
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
 
+- **Q: Does C8 quantization support EAGLE3 speculative decoding?**
+
+  A: Not yet. C8 quantization with EAGLE3 is currently unsupported.
+
+- **Q: Which `--reasoning-parser` is recommended for tool calling tasks?**
+
+  A: For tool calling tasks, it is recommended to use `--reasoning-parser minimax_m2_append_think`.
+
 - **Q: Why is the `reasoning` field often empty after using `minimax_m2_append_think`?**
 
   A: This is expected. The parser keeps `<think>...</think>` inside `content`. If you mainly rely on the reasoning semantics of `/v1/responses`, use `--reasoning-parser minimax_m2` instead.
