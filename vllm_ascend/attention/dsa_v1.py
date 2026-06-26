@@ -11,13 +11,14 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -357,7 +358,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def __init__(
         self,
-        kv_cache_spec: MLAAttentionSpec,
+        kv_cache_spec: AscendMLAAttentionSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -424,9 +425,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     raise ImportError("Please install scipy") from e
                 log_dim = math.ceil(math.log2(indexer_head_dim))
                 dim_padded = 2**log_dim
-                AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                    hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                ).to(torch.bfloat16)
+                if self.vllm_config.model_config.enable_sleep_mode:
+                    # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
+                    # sleep/wake does not treat it as KV cache.
+                    from vllm_ascend.device_allocator.camem import CaMemAllocator
+
+                    allocator = CaMemAllocator.get_instance()
+                    with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
+                        AscendDSAMetadataBuilder.hadamard = torch.tensor(
+                            hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
+                        ).to(torch.bfloat16)
+                else:
+                    AscendDSAMetadataBuilder.hadamard = torch.tensor(
+                        hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
+                    ).to(torch.bfloat16)
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.start_pos_decode = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.decode_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
@@ -814,7 +826,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
             sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
         if self.prefill_ratio_to_sas_metadata.get("qli") is None:
-            self.prefill_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
+            self.prefill_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=prefill_query_start_loc[1:].clone(),
                 actual_seq_lengths_key=self.seq_lens[reqs_start:].clone(),
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
@@ -1075,7 +1087,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
         assert self.decode_qli_metadata is not None
         if self.decode_ratio_to_sas_metadata.get("qli") is None:
-            self.decode_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
+            self.decode_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=query_start_loc[1:].clone(),
                 actual_seq_lengths_key=self.seq_lens[: self.num_decodes].clone(),
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
@@ -1122,8 +1134,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def build_for_drafting(
         self,
-        draft_step: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        draft_index: int,
         fast_build: bool = False,
         **kwargs,
     ) -> AscendDSADecodeMetadata:
@@ -1136,19 +1148,19 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if num_prefills:
             cos, sin = get_cos_and_sin_dsa(input_positions)
         else:
-            # disable use_cache, otherwise, draft_step>0 will override draft_step=0
+            # disable use_cache, otherwise, draft_index>0 will override draft_index=0
             # take care of this, if full graph is needed then rope cache is inevitable
             cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.spec_slot_mapping[draft_step - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(  # type: ignore[index]
+        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(  # type: ignore[index]
             slot_mapping, self.block_size
         )
 
         prefill_metadata = None
         if num_prefills > 0:
             prefill_metadata = self.build_prefill_metadata_for_drafting(
-                draft_step=draft_step,
+                draft_index=draft_index,
                 common_attn_metadata=common_attn_metadata,
                 reqs_start=num_decodes,
                 tokens_start=num_decode_tokens,
@@ -1158,7 +1170,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         decode_metadata = None
         if num_decodes > 0:
             decode_metadata = self.build_decode_metadata_for_drafting(
-                draft_step=draft_step,
+                draft_index=draft_index,
                 common_attn_metadata=common_attn_metadata,
                 num_decodes=num_decodes,
                 num_decode_tokens=num_decode_tokens,
@@ -1187,7 +1199,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def build_prefill_metadata_for_drafting(
         self,
-        draft_step: int,
+        draft_index: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         **kwargs,
     ) -> AscendDSAPrefillMetadata:
@@ -1207,7 +1219,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         prefill_input_positions = input_positions[tokens_start:]
         cos, sin = get_cos_and_sin_dsa(prefill_input_positions)
 
-        prefill_slot_mapping = self.spec_slot_mapping[draft_step - 1][tokens_start:num_prefill_tokens]  # type: ignore[index]
+        prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][tokens_start:num_prefill_tokens]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
@@ -1259,7 +1271,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def build_decode_metadata_for_drafting(
         self,
-        draft_step: int,
+        draft_index: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         **kwargs,
     ) -> AscendDSADecodeMetadata:
@@ -1284,11 +1296,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_kv = torch.max(_seq_lens_cpu[:num_decodes]).item()
 
         input_positions = common_attn_metadata.positions[:num_decode_tokens_typed].long()
-        # disable use_cache, otherwise, draft_step>0 will override draft_step=0
+        # disable use_cache, otherwise, draft_index>0 will override draft_index=0
         # take care of this, if full graph is needed then rope cache is inevitable
         cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
 
-        slot_mapping = self.spec_slot_mapping[draft_step - 1][:num_decode_tokens_typed]  # type: ignore[index]
+        slot_mapping = self.spec_slot_mapping[draft_index - 1][:num_decode_tokens_typed]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
@@ -1952,7 +1964,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kvlens = indexer_scale_prefill_metadata.seq_lens
                 block_table = indexer_scale_prefill_metadata.block_table
                 qli_metadata = indexer_scale_prefill_metadata.qli_metadata
-                compress_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+                compress_topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
                     query=q_quant,
                     key=indexer_k_cache,
                     weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
@@ -2245,7 +2257,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kvlens = indexer_scale_decode_metadata.seq_lens
                 block_table = indexer_scale_decode_metadata.block_table
                 qli_metadata = indexer_scale_decode_metadata.qli_metadata
-                compress_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+                compress_topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
                     query=q_quant,
                     key=indexer_k_cache,
                     weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
@@ -2510,7 +2522,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             block_table = indexer_kv_scale_metadata.decode.block_table
             qli_metadata = indexer_kv_scale_metadata.decode.qli_metadata
 
-        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+        topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
             query=q,
             key=indexer_k_cache,
             weights=DeviceOperator.prepare_dsa_indexer_weights(weights),

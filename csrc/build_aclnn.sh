@@ -8,6 +8,30 @@ log() {
     echo "[build_aclnn] $*"
 }
 
+setup_catlass_dependency() {
+    local catlass_path="${ROOT_DIR}/csrc/third_party/catlass/include"
+    local catlass_commit
+    local absolute_catlass_path
+
+    git config --global --add safe.directory "$ROOT_DIR"
+    catlass_commit=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
+    if [[ ! -d "${catlass_path}" ]]; then
+        echo "dependency catlass is missing, try to fetch it..."
+        git submodule sync
+        if ! git submodule update --init --recursive; then
+            log "fetch failed"
+            exit 1
+        fi
+        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
+        git fetch origin
+        git checkout "${catlass_commit}" || exit 1
+        cd - || exit 1
+    fi
+    absolute_catlass_path=$(cd "${catlass_path}" && pwd)
+    export CPATH="${absolute_catlass_path}${CPATH:+:${CPATH}}"
+    log "catlass include=${absolute_catlass_path}"
+}
+
 resolve_op_dir() {
     local op_name=$1
     local candidate_dir
@@ -54,6 +78,9 @@ log "env: ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-<unset>} ASCEND_TOOLKIT_HOME=${AS
 if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     log "matched SOC branch: ascend310"
     # ASCEND310P series
+    # dependency: catlass
+    setup_catlass_dependency
+
     CUSTOM_OPS_ARRAY=(
         "causal_conv1d_v310"
         "recurrent_gated_delta_rule_v310"
@@ -66,24 +93,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     log "matched SOC branch: ascend910b"
     # ASCEND910B (A2) series
     # dependency: catlass
-    git config --global --add safe.directory "$ROOT_DIR"
-    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
-    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
-    if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "dependency catlass is missing, try to fetch it..."
-        git submodule sync
-        if ! git submodule update --init --recursive; then
-            echo "fetch failed"
-            exit 1
-        fi
-        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
-        git fetch origin
-        git checkout "${CATLASS_COMMIT}" || exit 1
-        cd - || exit 1
-    fi
-    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH="${ABSOLUTE_CATLASS_PATH}${CPATH:+:${CPATH}}"
-    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
+    setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
         "scatter_nd_update_v2"
@@ -102,8 +112,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "causal_conv1d"
         "lightning_indexer_quant"
         "compressor"
-        "quant_lightning_indexer_custom"
-        "quant_lightning_indexer_metadata"
+        "vllm_quant_lightning_indexer"
+        "vllm_quant_lightning_indexer_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre_sinkhorn"
@@ -131,21 +141,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     log "matched SOC branch: ascend910_93"
     # ASCEND910C (A3) series
     # dependency: catlass
-    git config --global --add safe.directory "$ROOT_DIR"
-    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
-    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
-    if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "dependency catlass is missing, try to fetch it..."
-        git submodule sync
-        if ! git submodule update --init --recursive; then
-            echo "fetch failed"
-            exit 1
-        fi
-        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
-        git fetch origin
-        git checkout "${CATLASS_COMMIT}" || exit 1
-        cd - || exit 1
-    fi
+    setup_catlass_dependency
+
     CUSTOM_OPS_ARRAY=(
         "scatter_nd_update_v2"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
@@ -166,8 +163,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "moe_grouped_matmul"
         "lightning_indexer_quant"
         "compressor"
-        "quant_lightning_indexer_custom"
-        "quant_lightning_indexer_metadata"
+        "vllm_quant_lightning_indexer"
+        "vllm_quant_lightning_indexer_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre_sinkhorn"
@@ -194,24 +191,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     log "matched SOC branch: ascend950"
     # ASCEND950 (A5) series
     # dependency: catlass
-    git config --global --add safe.directory "$ROOT_DIR"
-    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
-    CATLASS_COMMIT=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
-    if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "dependency catlass is missing, try to fetch it..."
-        git submodule sync
-        if ! git submodule update --init --recursive; then
-            echo "fetch failed"
-            exit 1
-        fi
-        cd "${ROOT_DIR}/csrc/third_party/catlass" || exit 1
-        git fetch origin
-        git checkout "${CATLASS_COMMIT}" || exit 1
-        cd - || exit 1
-    fi
-    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH="${ABSOLUTE_CATLASS_PATH}${CPATH:+:${CPATH}}"
-    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
+    setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
         "moe_gating_top_k_hash"
@@ -219,8 +199,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "inplace_partial_rotary_mul"
         "kv_compress_epilog"
         "compressor"
-        "quant_lightning_indexer_custom"
-        "quant_lightning_indexer_metadata"
+        "vllm_quant_lightning_indexer"
+        "vllm_quant_lightning_indexer_metadata"
         "kv_quant_sparse_attn_sharedkv"
         "kv_quant_sparse_attn_sharedkv_metadata"
         "hc_pre_sinkhorn"

@@ -70,8 +70,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -140,7 +138,10 @@ from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
+from vllm_ascend.spec_decode.utils import (
+    correct_optimistic_seq_lens_cpu,
+    update_num_computed_tokens_for_batch_change,
+)
 from vllm_ascend.utils import (
     AscendDeviceType,
     calc_split_factor,
@@ -180,6 +181,8 @@ else:
 
 
 from vllm.model_executor.layers.attention import Attention, MLAAttention
+
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -414,6 +417,8 @@ class NPUModelRunner(GPUModelRunner):
             self.pcp_rank = 0
         if self.pcp_size > 1:
             self.model_config.max_model_len += 2 * self.pcp_size * self.max_num_reqs
+            if not self.vllm_config.cache_config.enable_prefix_caching:
+                self.vllm_config.cache_config.mamba_block_size = self.model_config.max_model_len
         max_buffer_num_tokens = self.max_num_tokens
         if self.pcp_size * self.dcp_size > 1:
             max_buffer_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_size
@@ -461,17 +466,13 @@ class NPUModelRunner(GPUModelRunner):
 
         self._set_up_drafter()
 
-        # Event for async GPU→CPU copy of corrected seq_lens in async
-        # spec decode mode. Recorded in _prepare_inputs, synchronized
-        # in _build_attention_metadata. Created once, reused each iteration.
-        # Only backends that consume CPU seq_lens (AscendAttentionBackend,
-        # AscendMLABackend, and DSV4 compressed attention metadata) need this;
-        # others (SFA, GDN, etc.) do not.
+        # Backends that consume CPU seq_lens (AscendAttentionBackend,
+        # AscendMLABackend, and DSV4 compressed attention metadata) need
+        # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
+        # in async spec decode mode; others (SFA, GDN, etc.) do not.
         self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
             self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
         )
-        self._seq_lens_cpu_event: torch.npu.Event | None = None
-        self._seq_lens_cpu_event_pending = False
 
         # kv role
         self.is_kv_producer = False
@@ -842,6 +843,8 @@ class NPUModelRunner(GPUModelRunner):
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 self.input_batch.num_reqs,
+                self.input_batch.num_computed_tokens_cpu,
+                self.input_batch.num_prompt_tokens,
             )
 
         # for pcp, prefill mtp should use origin scheduleroutput ,
@@ -1219,56 +1222,34 @@ class NPUModelRunner(GPUModelRunner):
                 precomputed_positions_np=positions_full,
             )
 
-        # In async spec decode mode, num_computed_tokens was corrected on GPU
-        # by update_num_computed_tokens_for_batch_change, so seq_lens (GPU) is
-        # correct but optimistic_seq_lens_cpu is stale (it assumed all drafts
-        # were accepted). Sync the corrected values back to CPU so that NPU
-        # attention backends (which use _seq_lens_cpu) get the right values.
-        # Use non_blocking copy to pinned memory and record an event;
-        # _build_attention_metadata will synchronize before reading.
-        if (
-            self._needs_seq_lens_cpu_sync
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
+        # In async spec decode mode, optimistic_seq_lens_cpu assumes all
+        # tokens from the previous speculative step were accepted. Correct it
+        # on CPU using the valid-sampled-token counts that are already copied
+        # asynchronously for scheduler bookkeeping. This avoids an extra
+        # NPU->CPU seq_lens copy and the synchronize() in attention metadata.
+        # Mirrors update_num_computed_tokens_for_batch_change on the GPU side.
+        async_spec_decode_active = (
+            self.use_async_spec_decode
+            and self.valid_sampled_token_count_gpu is not None  # type: ignore[has-type]
             and prev_req_id_to_index
-        ):
-            self.optimistic_seq_lens_cpu[:num_reqs].copy_(
-                self.seq_lens[:num_reqs], non_blocking=True
-            )
-            if self._seq_lens_cpu_event is None:
-                self._seq_lens_cpu_event = torch.npu.Event()
-            self._seq_lens_cpu_event.record()
-            self._seq_lens_cpu_event_pending = True
-        else:
-            self._seq_lens_cpu_event_pending = False
+        )
+
+        if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
+            self._correct_optimistic_seq_lens_cpu(num_reqs)
 
         num_computed_tokens_for_compress = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs]
         )
-        if (
-            self.use_compress
-            and self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None # type: ignore[has-type]
-            and prev_req_id_to_index
-        ):
-            # Async spec decode keeps the CPU counter optimistic until after
-            # target forward is launched. DSV4 compressed KV slot mapping is
-            # CPU-built today, so use the GPU-corrected counter before
-            # computing compressed cache positions.
-            if (
-                self._seq_lens_cpu_event_pending
-                and self._seq_lens_cpu_event is not None
-            ):
-                self._seq_lens_cpu_event.synchronize()
-                self._seq_lens_cpu_event_pending = False
-                num_computed_tokens_for_compress = (
-                    self.optimistic_seq_lens_cpu[:num_reqs].numpy()
-                    - num_scheduled_tokens[:num_reqs]
-                )
-            else:
-                num_computed_tokens_for_compress = (
-                    self.num_computed_tokens[:num_reqs].to("cpu").numpy()
-                )
+        if self.use_compress and async_spec_decode_active:
+            # ``self.use_compress`` implies ``_needs_seq_lens_cpu_sync``, so
+            # ``optimistic_seq_lens_cpu`` was corrected just above. DSV4
+            # compressed KV slot mapping is CPU-built today; derive the
+            # corrected num_computed_tokens from the corrected seq_lens to
+            # avoid another NPU->CPU sync.
+            num_computed_tokens_for_compress = (
+                self.optimistic_seq_lens_cpu[:num_reqs].numpy()
+                - num_scheduled_tokens[:num_reqs]
+            )
 
         (positions_compressed_list, req_indices_compressed_list,
          num_scheduled_tokens_compressed_list) = get_compressed_pos_and_indices(
@@ -1596,10 +1577,21 @@ class NPUModelRunner(GPUModelRunner):
         # while pcp > 1, decode results may contain padding (from pcp all-gather),
         # update logits_indices after getting draft_token_ids from ori logits_indices
         if self.pcp_size > 1:
-            cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
+            assert num_pcp_pads is not None
+            if self.pcp_manager.pcp_use_hybrid_attn:
+                if self.pcp_manager.num_prefill_reqs > 0:
+                    cu_num_scheduled_tokens = (
+                        self.pcp_manager.adjust_cu_num_scheduled_tokens_for_pcp(
+                            cu_num_scheduled_tokens, num_pcp_pads
+                        )
+                    )
+            else:
+                cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.pcp_size - num_pcp_pads
             logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
             logits_indices_pcp += self._arange_scratch[: cu_num_sampled_tokens[-1]]
             logits_indices_pcp = torch.from_numpy(logits_indices_pcp).pin_memory().to(self.device, non_blocking=True)
+
+
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
@@ -1638,6 +1630,34 @@ class NPUModelRunner(GPUModelRunner):
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
+        )
+
+    def _correct_optimistic_seq_lens_cpu(self, num_reqs: int) -> None:
+        """Correct ``optimistic_seq_lens_cpu`` for async spec-decode drift.
+
+        The valid-sampled-token counts that drive the correction are copied
+        device->host on a side stream at the end of the *previous* step (see
+        :meth:`_copy_valid_sampled_token_count`). The host buffer must not be
+        read until that copy has completed, otherwise the correction consumes
+        stale counts and corrupts the CPU seq_lens. DeepSeek-V4 builds its
+        compressed-KV slot mapping from these CPU seq_lens, so the race
+        surfaces as an accuracy regression there.
+
+        Synchronizing on the event before the host read mirrors vLLM's own
+        :meth:`_get_valid_sampled_token_count`. Because the copy was launched a
+        full step earlier, the event is already signalled in steady state and
+        the synchronize is effectively a no-op -- it does not reintroduce the
+        seq_lens device->host copy + synchronize that this optimization removed.
+        """
+        assert self.valid_sampled_token_count_event is not None
+        assert self.valid_sampled_token_count_cpu is not None
+        self.valid_sampled_token_count_event.synchronize()
+        correct_optimistic_seq_lens_cpu(
+            self.optimistic_seq_lens_cpu.numpy(),
+            self.prev_positions.np,
+            self.prev_num_draft_tokens.np,
+            self.valid_sampled_token_count_cpu.numpy(),
+            num_reqs,
         )
 
     def _copy_valid_sampled_token_count(
@@ -2379,13 +2399,15 @@ class NPUModelRunner(GPUModelRunner):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
+        pp = get_pp_group()
+        skip_pp_pd_broadcast = self.is_kv_producer and pp.world_size > 1
 
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
             # receive sampled token ids from the last PP rank when using
             # async scheduling + pipeline parallelism so downstream code
             # (e.g., PCP input preparation) can access them.
-            if self.use_async_scheduling and get_pp_group().world_size > 1:
+            if self.use_async_scheduling and pp.world_size > 1 and not skip_pp_pd_broadcast:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # noqa
@@ -2531,8 +2553,7 @@ class NPUModelRunner(GPUModelRunner):
         # last PP rank so other PP ranks can receive them without going
         # through the scheduler/engine IPC path.
         if self.use_async_scheduling:
-            pp = get_pp_group()
-            if pp.world_size > 1 and pp.is_last_rank:
+            if pp.world_size > 1 and pp.is_last_rank and not skip_pp_pd_broadcast:
                 self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
 
         if not self.use_async_scheduling:
@@ -3022,12 +3043,6 @@ class NPUModelRunner(GPUModelRunner):
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
-        # Ensure the async GPU→CPU copy of corrected seq_lens (launched in
-        # _prepare_inputs) has completed before we read optimistic_seq_lens_cpu.
-        if self._seq_lens_cpu_event_pending and self._seq_lens_cpu_event is not None:
-            self._seq_lens_cpu_event.synchronize()
-            self._seq_lens_cpu_event_pending = False
-
         if for_cudagraph_capture:
             # For some attention backends (e.g. FA) with sliding window models we need
             # to make sure the backend see a max_seq_len that is larger to the sliding
@@ -3438,6 +3453,8 @@ class NPUModelRunner(GPUModelRunner):
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 num_reqs,
+                self.input_batch.num_computed_tokens_cpu,
+                self.input_batch.num_prompt_tokens,
             )
             if self.speculative_config:
                 self.pcp_manager.query_lens_pcp_full.cpu[:num_reqs] = torch.from_numpy(num_scheduled_tokens)
@@ -3505,6 +3522,11 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded = self._pad_query_start_loc_for_fia(
                     num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_runtime_mode, batch_desc.num_reqs
                 )
+
+            # Dummy graph runs do not go through _prepare_inputs(), but GDN/Mamba
+            # metadata reads block_table[:num_reqs_padded] below. Sync padded
+            # rows as well so device-side metadata does not see stale block ids.
+            self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             # check how to build dummy
@@ -3934,7 +3956,7 @@ class NPUModelRunner(GPUModelRunner):
         return layer_kv_cache_spec
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
-        if isinstance(kv_cache_spec, MLAAttentionSpec):
+        if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
             attn_layers = get_layers_from_vllm_config(
                 self.vllm_config,
                 AttentionLayerBase,
@@ -3944,7 +3966,7 @@ class NPUModelRunner(GPUModelRunner):
             if isinstance(attn_layer, MLAAttention):
                 # DeepSeek MLA: K=kv_lora_rank, V=qk_rope_head_dim
                 return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
-            # CacheOnlyAttentionLayer uses MLAAttentionSpec but isn't MLAAttention
+            # CacheOnlyAttentionLayer uses AscendMLAAttentionSpec but isn't MLAAttention
             if isinstance(attn_layer, CacheOnlyAttentionLayer):
                 return kv_cache_spec.head_size, kv_cache_spec.head_size
             raise TypeError(
@@ -4281,7 +4303,8 @@ class NPUModelRunner(GPUModelRunner):
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
-                if self.use_compress and isinstance(current_kv_cache_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+                if self.use_compress and isinstance(current_kv_cache_spec,
+                                                    (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
                     kv_tensor = kv_cache_raw_tensors[layer_name]
                     sum_page_size_bytes = kv_tensor.numel()
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
@@ -4447,7 +4470,7 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                         if self.hybrid_with_attn_and_mamba:
-                            if not isinstance(current_kv_cache_spec, MLAAttentionSpec):
+                            if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                                 attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                     current_kv_cache_spec.dtype
                                 )
@@ -4474,7 +4497,7 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.head_size,
                         )
-                    if not isinstance(current_kv_cache_spec, MLAAttentionSpec):
+                    if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                         k_shape = kv_cache_shape[1:]
                         if hasattr(current_kv_cache_spec, "head_size_v"):
                             v_shape = (*kv_cache_shape[1:-1], current_kv_cache_spec.head_size_v)
@@ -4834,12 +4857,6 @@ class NPUModelRunner(GPUModelRunner):
 
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
-                    # `MLAAttentionSpec` is temporarily patched to `AscendMLAAttentionSpec`.
-                    # Re-importing it at runtime will therefore resolve to the patched class.
-                    # Rename it here to make this behavior explicit.
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
-                    # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
-                    # implement it by creating a new kv_cache_spec class
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=self.block_size,
                         num_kv_heads=1,
@@ -4850,7 +4867,6 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
