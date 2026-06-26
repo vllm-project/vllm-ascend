@@ -39,6 +39,13 @@ from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner  # noqa: E402
 def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
     if runner_cls is None:
         runner_cls = AscendMoERunner
+    # 'hash' is a DeepSeek V4 flag already consumed before FusedMoE is called;
+    # 'tid2eid' is Ascend-specific and must reach AscendMoERunner via runner_args.
+    kwargs.pop("hash", None)
+    tid2eid = kwargs.pop("tid2eid", None)
+    if tid2eid is not None:
+        runner_args = dict(runner_args) if runner_args is not None else {}
+        runner_args["tid2eid"] = tid2eid
     return _original_FusedMoE(*args, runner_cls=runner_cls, runner_args=runner_args, **kwargs)
 
 

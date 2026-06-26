@@ -296,6 +296,7 @@ class AscendMoERunner(MoERunner):
             routed_scaling_factor,
         )
         self.top_k = moe_config.experts_per_token
+        self._gate = gate
 
         # Routing params — all stored on routed_experts by the factory function.
         self.use_grouped_topk = routed_experts.use_grouped_topk
@@ -330,8 +331,6 @@ class AscendMoERunner(MoERunner):
         if self.moe_config.ep_size > 1:
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
-
-        self.moe_config.supports_eplb = self._quant_method.supports_eplb
 
         ascend_config = get_ascend_config()
         self._shared_experts = shared_experts
