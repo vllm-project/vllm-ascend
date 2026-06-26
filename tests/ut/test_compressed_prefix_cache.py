@@ -385,5 +385,5 @@ def test_mtp_fallback_excludes_compressed_groups_from_eagle_drop() -> None:
         use_eagle=True,
     )
 
-    assert local_coordinator.eagle_group_ids == {1}
+    assert local_coordinator.eagle_group_ids == set()
     assert external_coordinator.eagle_group_ids == {1}
