@@ -58,6 +58,13 @@ def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
     return any(_is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
 
 
+def _compress_ratio(kv_cache_spec: KVCacheSpec) -> int:
+    kv_cache_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
+    if isinstance(kv_cache_specs, dict):
+        return max((getattr(spec, "compress_ratio", 1) or 1) for spec in kv_cache_specs.values())
+    return getattr(kv_cache_spec, "compress_ratio", 1) or 1
+
+
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     """
     KV cache coordinator for hybrid models with multiple KV cache types, and
@@ -115,17 +122,21 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             metrics_collector,
         )
 
-        # KV cache group indices that get the EAGLE/MTP last-block drop.
-        # vLLM applies EAGLE globally. For DSV4 we keep that behavior for
-        # uncompressed groups, but exclude c4/c128 because dropping their coarse
-        # chunk can erase the whole aligned hit.
-        self.eagle_group_ids: set[int] = set()
-        if use_eagle:
-            self.eagle_group_ids = {
-                i
-                for i, g in enumerate(kv_cache_config.kv_cache_groups)
-                if (getattr(g.kv_cache_spec, "compress_ratio", 1) or 1) <= 1
+        has_compressed_group = any(
+            _compress_ratio(group.kv_cache_spec) > 1 for group in kv_cache_config.kv_cache_groups
+        )
+        # KV cache group indices that get the EAGLE last-block drop.
+        if use_eagle and has_compressed_group:
+            # DSV4's local hit granularity is the compressed alignment (for
+            # example 16K). Applying EAGLE/drop-last to the C1 group can align
+            # the hit down to 0 even when the retained C1 tail is sufficient.
+            self.eagle_group_ids = set()
+        else:
+            self.eagle_group_ids: set[int] = {
+                i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
             }
+            if use_eagle and not self.eagle_group_ids:
+                self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
         # v0.22.1 managers don't accept `scheduler_block_size`.
         extra_mgr_kwargs: dict = {}
