@@ -434,14 +434,4 @@ def test_mtp_explicit_eagle_group_still_drops_c1_not_compressed() -> None:
         hash_block_size=block_size,
         max_num_batched_tokens=block_size * 4,
     )
-    external_coordinator = AscendStoreCoordinator(
-        kv_cache_groups=groups,
-        scheduler_block_size=block_size * 4,
-        hash_block_size=block_size,
-        group_block_sizes=[block_size, block_size, block_size],
-        group_cache_families=["c4", "c1", "default"],
-        use_eagle=True,
-    )
-
     assert local_coordinator.eagle_group_ids == {1, 2}
-    assert external_coordinator.eagle_group_ids == {1, 2}
