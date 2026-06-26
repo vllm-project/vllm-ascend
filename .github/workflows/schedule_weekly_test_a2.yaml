@@ -227,7 +227,7 @@ jobs:
       upload: false
 
   clear-pre-logs:
-    needs: [parse-trigger, multi-node-tests]
+    needs: [parse-trigger]
     runs-on: linux-aarch64-a2b3-0
     if: needs.multi-node-tests.result != 'skipped'
     steps:
@@ -238,7 +238,7 @@ jobs:
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into nightly-a2.zip
-    needs: [parse-trigger, single-node-tests, multi-node-tests]
+    needs: [parse-trigger]
     if: >-
       always() &&
       github.event_name == 'workflow_dispatch' &&
