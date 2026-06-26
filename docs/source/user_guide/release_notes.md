@@ -13,7 +13,7 @@ We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the
 ### Features
 
 - Added multimodal input support for DFlash workloads. [#9340](https://github.com/vllm-project/vllm-ascend/pull/9340)
-- Added P-Eagle and PARD as parallel speculative decoding methods after full Q2 validation.
+- P-Eagle and PARD are now stable parallel speculative decoding methods and have passed validation testing.
 - Added KV consumer partial-group caching for hybrid Mamba models. [#10009](https://github.com/vllm-project/vllm-ascend/pull/10009)
 - Added MiniMax M2 C8 cache-scale support in GQA `load_weights`. [#10461](https://github.com/vllm-project/vllm-ascend/pull/10461)
 - [Experimental] Added SSD support for multiple DP ranks on the same machine to avoid local-rank path collisions in Mooncake offload directories. [#10477](https://github.com/vllm-project/vllm-ascend/pull/10477)
