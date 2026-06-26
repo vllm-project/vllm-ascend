@@ -39,22 +39,9 @@ def api_client(request):
 
 def pytest_addoption(parser):
     parser.addoption("--thinkTagOutput", action="store", type=str, required=False)
-    parser.addoption(
-        "--engineArchitecture",
-        action="store",
-        default="pd",
-        choices=["pd", "single"],
-    )
-    parser.addoption(
-        "--maxModelLength",
-        action="store",
-        default="128",
-    )
-    parser.addoption(
-        "--model",
-        action="store",
-        default="qwen",
-    )
+    parser.addoption("--engineArchitecture", action="store", default="single", choices=["pd", "single"])
+    parser.addoption("--maxModelLength", action="store", default="128")
+    parser.addoption("--model", action="store", default="qwen")
     parser.addoption("--imageNum", action="store", type=int, default=1)
     parser.addoption("--videoNum", action="store", type=int, default=1)
     parser.addoption("--audioNum", action="store", type=int, default=1)
