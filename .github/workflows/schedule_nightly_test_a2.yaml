@@ -127,7 +127,7 @@ jobs:
               const prNumber = context.payload.pull_request.number;
               core.setOutput('ref', context.payload.pull_request.head.sha);
               core.setOutput('request_id', 'pr-' + prNumber);
-              core.setOutput('vllm_ascend_branch', 'main');
+              core.setOutput('vllm_ascend_branch', 'releases/v0.22.1rc');
               core.setOutput('is_pr_event', 'true');
 
               if (!labels.includes('nightly-test')) {
