@@ -258,7 +258,6 @@ def _default_reachable_block_mask(
     use_eagle: bool,
     retention_interval: int | None = None,
     num_prompt_tokens: int | None = None,
-    include_previous_alignment_boundary: bool = False,
 ) -> list[bool] | None:
     return None
 
@@ -279,7 +278,6 @@ def _sliding_window_reachable_block_mask(
     use_eagle: bool,
     retention_interval: int | None = None,
     num_prompt_tokens: int | None = None,
-    include_previous_alignment_boundary: bool = False,
 ) -> list[bool] | None:
     assert _is_sliding_window_spec(kv_cache_spec)
     if retention_interval is None:
@@ -308,18 +306,11 @@ def _sliding_window_reachable_block_mask(
             if i >= shift and (i - shift) % per_segment >= per_segment - need:
                 mask[i - start_block] = True
 
-    def keep_boundary(boundary_tokens: int) -> None:
-        prompt_end_block = boundary_tokens // block_size + shift
-        for i in range(max(start_block, prompt_end_block - need), min(end_block, prompt_end_block)):
-            mask[i - start_block] = True
-
     if retention_interval is not None and num_prompt_tokens is not None:
         latest = num_prompt_tokens // alignment_tokens * alignment_tokens
-        keep_boundary(latest)
-        if include_previous_alignment_boundary and num_prompt_tokens > alignment_tokens:
-            previous = (num_prompt_tokens - 1) // alignment_tokens * alignment_tokens
-            if previous != latest:
-                keep_boundary(previous)
+        prompt_end_block = latest // block_size + shift
+        for i in range(max(start_block, prompt_end_block - need), min(end_block, prompt_end_block)):
+            mask[i - start_block] = True
 
     return mask
 
@@ -352,7 +343,6 @@ def _patch_single_type_cache_blocks() -> None:
                 use_eagle=use_eagle,
                 retention_interval=retention_interval,
                 num_prompt_tokens=request.num_prompt_tokens,
-                include_previous_alignment_boundary=True,
             )
             self.block_pool.cache_full_blocks(
                 request=request,
