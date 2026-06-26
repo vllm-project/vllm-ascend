@@ -665,7 +665,7 @@ Refer to [Start proxy_server](#2-start-proxy_server) in the MooncakeStore deploy
 
 #### 3. Run Inference
 
-Refer to [Run Inference](#3run-inference) in the MooncakeStore deployment section.
+Refer to [Run Inference](#3-run-inference) in the MooncakeStore deployment section.
 
 ### PD-Mixed Scenario
 
