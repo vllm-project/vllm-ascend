@@ -247,7 +247,7 @@ Provide recommended configurations for three typical scenarios (long context, lo
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in Chapter 5.
 
-### 9.2 Tuning Guidelines 
+### 9.2 Tuning Guidelines
 
 #### 9.2.1 General Tuning Reference
 
