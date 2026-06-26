@@ -67,7 +67,7 @@ on:
       aop_single_enabled:
         required: false
         type: boolean
-        default: false
+        default: true
         description: enable AOP hooks (capture / classify / skip-or-process)
     secrets:
       OBS_ACCESS_KEY_ID:
@@ -144,17 +144,17 @@ jobs:
           CARDS=$(echo "${{ inputs.runner }}" | grep -oE '[0-9]+$')
           echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
 
-      # - name: Install vllm-project/vllm-ascend
-      #   if: ${{ inputs.request_id != '' }}
-      #   working-directory: /vllm-workspace/vllm-ascend
-      #   env:
-      #     MAX_JOBS: ${{ env.MAX_JOBS }}
-      #     PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
-      #   run: |
-      #     git config --global --add safe.directory /vllm-workspace/vllm-ascend
-      #     pip install uc-manager
-      #     uv pip install -r requirements-dev.txt
-      #     uv pip install -e .
+      - name: Install vllm-project/vllm-ascend
+        if: ${{ inputs.request_id != '' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          MAX_JOBS: ${{ env.MAX_JOBS }}
+          PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://triton-ascend.osinfra.cn/pypi/simple https://download.pytorch.org/whl/cpu/"
+        run: |
+          git config --global --add safe.directory /vllm-workspace/vllm-ascend
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -e .
 
       - name: Install aisbench
         if: ${{ inputs.request_id != '' }}
@@ -332,18 +332,18 @@ jobs:
           steps.commit-age.outputs.is_old == 'false' }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
-          # bash tests/e2e/nightly/scripts/aop_process.sh \
-          #   "${{ steps.classify.outputs.failure_type }}" \
-          #   "${{ steps.commit-age.outputs.commit_age_days }}" \
-          #   "${{ inputs.runner }}" \
-          #   "${{ inputs.tests }}" \
-          #   "${{ inputs.config_file_path }}" \
-          #   "${{ steps.test-result.outputs.pytest_summary }}" \
-          #   "${{ steps.test-result.outputs.yaml_summary }}" \
-          #   "single_node" \
-          #   "HEAD" \
-          #   "" \
-          #   ""
+          bash tests/e2e/nightly/scripts/aop_process.sh \
+            "${{ steps.classify.outputs.failure_type }}" \
+            "${{ steps.commit-age.outputs.commit_age_days }}" \
+            "${{ inputs.runner }}" \
+            "${{ inputs.tests }}" \
+            "${{ inputs.config_file_path }}" \
+            "${{ steps.test-result.outputs.pytest_summary }}" \
+            "${{ steps.test-result.outputs.yaml_summary }}" \
+            "single_node" \
+            "HEAD" \
+            "" \
+            ""
 
       - name: On success
         if: ${{ always() && inputs.aop_single_enabled && steps.test-result.outputs.result == 'success' }}
