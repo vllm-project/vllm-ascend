@@ -26,7 +26,7 @@ on:
       vllm_ascend_branch:
         description: 'Branch to test'
         required: true
-        default: 'main'
+        default: 'releases/v0.22.1rc'
         type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
@@ -62,7 +62,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-a3${{ github.event.inputs.request_id && format('-{0}', github.event.inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.ref }}-a3${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -177,8 +177,8 @@ jobs:
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
+      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   double-node-tests:
     name: double-node
@@ -245,8 +245,8 @@ jobs:
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
+      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   single-node-tests:
     name: single-node
@@ -372,8 +372,8 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
     secrets:
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
+      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0
