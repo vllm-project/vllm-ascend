@@ -1096,17 +1096,22 @@ def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = No
     decode node recomputes the last prompt token before MTP decode. Worker
     metadata must not treat that step as prefill.
     """
-    if vllm_config is None:
-        try:
-            from vllm.config import get_current_vllm_config
+    try:
+        if vllm_config is None:
+            try:
+                from vllm.config import get_current_vllm_config
 
-            vllm_config = get_current_vllm_config()
-        except AssertionError:
-            vllm_config = get_ascend_config().vllm_config
-    kv_cfg = vllm_config.kv_transfer_config
-    if kv_cfg is None or not kv_cfg.is_kv_consumer or kv_cfg.is_kv_producer:
+                vllm_config = get_current_vllm_config()
+            except AssertionError:
+                vllm_config = get_ascend_config().vllm_config
+        if vllm_config is None:
+            return False
+        kv_cfg = vllm_config.kv_transfer_config
+        if kv_cfg is None or not kv_cfg.is_kv_consumer or kv_cfg.is_kv_producer:
+            return False
+        return get_ascend_config().recompute_scheduler_enable
+    except (RuntimeError, AttributeError):
         return False
-    return get_ascend_config().recompute_scheduler_enable
 
 
 def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = False) -> bool:
