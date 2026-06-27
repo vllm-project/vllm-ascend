@@ -17,7 +17,7 @@
 import pytest
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
-from tests.e2e.model_utils import check_outputs_equal
+from tests.e2e.pull_request.utils import compare_logprobs
 
 DS3 = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 MODELS = [
@@ -36,60 +36,13 @@ prompts = [
     "Hello, my name is",
     "The future of AI is",
 ]
-GOLDEN = [
-    (
-        [
-            17464,
-            11,
-            601,
-            1210,
-            317,
-            459,
-            6946,
-            29,
-            32,
-            1568,
-            32092,
-            535,
-            6946,
-            29,
-            285,
-            304,
-            6,
-            76,
-            245,
-            459,
-            6946,
-        ],
-        "Hello, my name is <strong>Alessandro</strong> and I'm a <strong",
-    ),
-    (
-        [
-            549,
-            3680,
-            280,
-            20838,
-            317,
-            6464,
-            11,
-            285,
-            359,
-            487,
-            82,
-            1872,
-            276,
-            330,
-            245,
-            2624,
-            12,
-            73309,
-            279,
-            254,
-            1843,
-        ],
-        "The future of AI is bright, and it’s going to be a game-changer in the world",
-    ),
-]
+
+
+def _full_and_piecewise_config() -> dict[str, object]:
+    return {
+        "cudagraph_mode": "FULL_AND_PIECEWISE",
+        "cudagraph_capture_sizes": [1, 2, 4],
+    }
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -98,25 +51,16 @@ GOLDEN = [
 @pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
 @wait_until_npu_memory_free(target_free_percentage=0.6)
 def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_executor_backend: str) -> None:
-    with VllmRunner(
-        model,
-        tensor_parallel_size=tp_size,
-        pipeline_parallel_size=pp_size,
-        compilation_config={
-            "cudagraph_mode": "PIECEWISE",
-            "cudagraph_capture_sizes": [1, 2, 4],
-        },
-        distributed_executor_backend=distributed_executor_backend,
-        gpu_memory_utilization=0.7,
-        enable_expert_parallel=model in MOE_MODELS,
-    ) as vllm_model:
-        outputs = vllm_model.generate_greedy(prompts, 16)
-        check_outputs_equal(
-            outputs_0_lst=outputs,
-            outputs_1_lst=GOLDEN,
-            name_0=f"{model}-tp{tp_size}pp{pp_size}",
-            name_1="GOLDEN",
-        )
+    runner_kwargs = {
+        "model_name": model,
+        "tensor_parallel_size": tp_size,
+        "pipeline_parallel_size": pp_size,
+        "compilation_config": _full_and_piecewise_config(),
+        "distributed_executor_backend": distributed_executor_backend,
+        "gpu_memory_utilization": 0.7,
+        "enable_expert_parallel": model in MOE_MODELS,
+    }
+    compare_logprobs(runner_kwargs=runner_kwargs, prompts=prompts, runner_cls=VllmRunner)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -125,22 +69,13 @@ def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_exec
 @pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
 @wait_until_npu_memory_free(target_free_percentage=0.6)
 def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_executor_backend: str) -> None:
-    with DPVllmRunner(
-        model,
-        data_parallel_size=dp_size,
-        pipeline_parallel_size=pp_size,
-        compilation_config={
-            "cudagraph_mode": "PIECEWISE",
-            "cudagraph_capture_sizes": [1, 2, 4],
-        },
-        distributed_executor_backend=distributed_executor_backend,
-        gpu_memory_utilization=0.7,
-        enable_expert_parallel=model in MOE_MODELS,
-    ) as vllm_model:
-        outputs = vllm_model.generate_greedy(prompts, 16)
-        check_outputs_equal(
-            outputs_0_lst=outputs,
-            outputs_1_lst=GOLDEN,
-            name_0=f"{model}-dp{dp_size}pp{pp_size}",
-            name_1="GOLDEN",
-        )
+    runner_kwargs = {
+        "model_name": model,
+        "data_parallel_size": dp_size,
+        "pipeline_parallel_size": pp_size,
+        "compilation_config": _full_and_piecewise_config(),
+        "distributed_executor_backend": distributed_executor_backend,
+        "gpu_memory_utilization": 0.7,
+        "enable_expert_parallel": model in MOE_MODELS,
+    }
+    compare_logprobs(runner_kwargs=runner_kwargs, prompts=prompts, runner_cls=DPVllmRunner)

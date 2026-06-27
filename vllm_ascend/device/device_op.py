@@ -31,12 +31,21 @@ from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import HAS_ACLNN_MOE_INIT_ROUTING_CUSTOM, AscendDeviceType, get_ascend_device_type
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
     triton_q_rms = None  # type: ignore
+
+
+def _is_missing_aclnn_kernel_error(exc: RuntimeError) -> bool:
+    msg = str(exc)
+    return "not in libopapi.so" in msg or ("libopapi.so" in msg and "not found" in msg)
+
+
+def _can_use_moe_init_routing_custom_op() -> bool:
+    return HAS_ACLNN_MOE_INIT_ROUTING_CUSTOM
 
 
 class BaseDeviceAdaptor:
@@ -59,17 +68,45 @@ class BaseDeviceAdaptor:
         active_expert_range=None,
         quant_mode: int = -1,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
-            hidden_states,
-            topk_ids,
-            scale=scale,
-            active_num=active_num,
-            expert_num=expert_num,
-            expert_tokens_num_type=expert_tokens_num_type,
-            expert_tokens_num_flag=expert_tokens_num_flag,
-            active_expert_range=active_expert_range,
-            quant_mode=quant_mode,
-        )
+        if not _can_use_moe_init_routing_custom_op():
+            return torch_npu.npu_moe_init_routing_v2(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
+
+        try:
+            return torch.ops._C_ascend.npu_moe_init_routing_custom(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
+        except RuntimeError as exc:
+            if not _is_missing_aclnn_kernel_error(exc):
+                raise
+            return torch_npu.npu_moe_init_routing_v2(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
 
     @staticmethod
     def maybe_normalize_mxfp_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:

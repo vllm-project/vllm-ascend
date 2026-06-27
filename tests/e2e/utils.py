@@ -38,7 +38,14 @@ def fork_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
         # Make the process the leader of its own process group
         # to avoid sending SIGTERM to the parent process
-        os.setpgrp()
+        try:
+            os.setpgrp()
+        except PermissionError:
+            # docker exec may already launch pytest as a session/process-group
+            # leader, where setpgrp() is not permitted but the isolation is
+            # already in place.
+            if os.getpid() != os.getpgrp():
+                raise
         from _pytest.outcomes import Skipped
 
         pid = os.fork()
