@@ -6,7 +6,7 @@ Qwen3 is the latest generation of large language models in Qwen series, offering
 
 This document will demonstrate the main validation steps for Qwen3 Dense models in the vLLM-Ascend environment, including supported features, environment preparation, model quantization, single-node and multi-node deployment, as well as accuracy and performance evaluation. By tailoring service-level configurations to fit different use cases, you can ensure optimal performance across various scenarios.
 
-The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, W4A8 quantization is supported since v0.9.1rc2, and W4A4 is supported since v0.11.0rc1. This document is validated and written based on **vLLM-Ascend v0.13.0**. All **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use v0.13.0 or a later version.
+The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, W4A8 quantization is supported since v0.9.1rc2, and W4A4 is supported since v0.11.0rc1. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use v0.21.0 or a later version.
 
 ## 2 Supported Features
 
@@ -41,7 +41,7 @@ The following model variants are available. It is recommended to download the mo
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
-### 3.2 Verify Multi-node Communication (Optional)
+### 3.2 Verify Multi-node Communication
 
 If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
 
@@ -59,16 +59,66 @@ You can use the official all-in-one Docker image for Qwen3 Dense models.
 docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 ```
 
-**Docker Run (Atlas 800I A2/A3):**
+**Docker Run:**
+
+Start the docker image on your each node.
+
+::::
+::::{tab-item} A3 series
+:sync: A3
 
 ```{code-block} bash
    :substitutions:
 
-# Update --device according to your device (Atlas A2: /dev/davinci[0-7], Atlas A3:/dev/davinci[0-15]).
-# For Atlas A2 machines:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-# For Atlas A3 machines:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+
+docker run --rm \
+    --name vllm-ascend-env \
+    --shm-size=1g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+```
+
+:::{note}
+A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+:::
+
+::::
+::::{tab-item} A2 series
+:sync: A2
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
 docker run --rm \
     --name vllm-ascend-env \
     --shm-size=1g \
@@ -94,41 +144,8 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-**Docker Run (Atlas 800I A5):**
-
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-
-docker run --runtime=runc -u root -it -d --name vllm-ascend-env \
-    --net=host --privileged=true --shm-size=2g \
-    --device=/dev/davinci_manager --device=/dev/hisi_hdc \
-    --device=/dev/ummu --device=/dev/uburma \
-    --device=/dev/davinci0 \
-    --device=/dev/davinci1 \
-    --device=/dev/davinci2 \
-    --device=/dev/davinci3 \
-    --device=/dev/davinci4 \
-    --device=/dev/davinci5 \
-    --device=/dev/davinci6 \
-    --device=/dev/davinci7 \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
-    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
-    -v /usr/local/sbin:/usr/local/sbin \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /var/log/npu/:/usr/slog \
-    -v /root/host:/root/host \
-    -v /mnt:/mnt \
-    -v /data:/data \
-    -v /home/:/home/ \
-    -v /etc/hixlep:/etc/hixlep \
-    $IMAGE bash
-```
+::::
+:::::
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
@@ -198,7 +215,6 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -211,7 +227,8 @@ vllm serve your_model_path \
     --max-num-batched-tokens 40960 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --port <port> \
-    --gpu-memory-utilization 0.9
+    --gpu-memory-utilization 0.9 \
+    --additional-config '{"enable_flashcomm1": true}'
 ```
 
 Atlas 800I A2/A3：
@@ -221,7 +238,6 @@ Qwen3-32B-W4A4:
 export ASCEND_RT_VISIBLE_DEVICES=0,1
 export VLLM_USE_V1=1
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export HCCL_BUFFSIZE=1024
 vllm serve your_model_path \
     --port 8004 \
@@ -235,7 +251,8 @@ vllm serve your_model_path \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
     --quantization ascend \
-    --compilation-config '{"cudagraph_capture_sizes": [64]}'
+    --compilation-config '{"cudagraph_capture_sizes": [64]}' \
+    --additional-config '{"enable_flashcomm1": true}'
 ```
 
 Atlas 800I A2/A3：
@@ -253,7 +270,8 @@ vllm serve your_model_path \
 ```
 
 :::{note}
-For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
+- [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
+- [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 :::
 
 **Service Verification:**
@@ -344,7 +362,7 @@ ais_bench --models vllm_api_general_chat --datasets aime2025_gen_0_shot_chat_pro
 
 > The --models parameter value corresponds to the abbr field in the configuration file above. Adjust max_out_len, batch_size, and dataset tasks based on your scenario.
 
-## 8 Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 
@@ -447,7 +465,6 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve your_model_path \
   --served-model-name qwen3 \
@@ -460,7 +477,7 @@ vllm serve your_model_path \
   --async-scheduling \
   --quantization ascend \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}' \
-  --additional-config '{"weight_prefetch_config":{"enabled":true}, "pa_shape_list":[32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256]}' \
+  --additional-config '{"weight_prefetch_config":{"enabled":true}, "enable_flashcomm1": true, "pa_shape_list":[32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256]}' \
   --host <host_ip> \
   --port <port> \
   --block-size 128 \
@@ -474,7 +491,6 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve your_model_path \
   --host <host_ip> \
@@ -492,7 +508,8 @@ vllm serve your_model_path \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":131072}}' \
   --gpu-memory-utilization 0.9 \
-  --quantization ascend
+  --quantization ascend \
+  --additional-config '{"enable_flashcomm1": true}'
 ```
 
 <u>Low Latency Configuration:</u>
