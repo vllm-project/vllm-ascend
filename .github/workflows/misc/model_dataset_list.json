@@ -317,6 +317,5 @@
       "vllm-ascend/GSM8K_prefix0_in16384_bs1200_deepseek",
       "vllm-ascend/GSM8K_prefix0_in32768_bs1000_deepseek",
       "vllm-ascend/GSM8K_prefix0_in65536_bs400_deepseek"
-
     ]
   }
