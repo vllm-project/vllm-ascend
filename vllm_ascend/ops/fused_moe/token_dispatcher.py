@@ -651,13 +651,15 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             dynamic_scale_after_all2all = dynamic_scale_after_all2all.unsqueeze(-1)
 
         # Non-quantized case
-        global_input_tokens, reversed_global_input_permutation_mapping, _, _ = torch_npu.npu_moe_init_routing_v2(
-            global_input_tokens,
-            global_input_tokens_local_experts_indices.unsqueeze(-1),
-            scale=dynamic_scale_after_all2all,
-            expert_num=self.num_experts,
-            expert_tokens_num_flag=True,
-            active_expert_range=[0, self.num_local_experts],
+        global_input_tokens, reversed_global_input_permutation_mapping, _, dynamic_scale_after_all2all = (
+            torch_npu.npu_moe_init_routing_v2(
+                global_input_tokens,
+                global_input_tokens_local_experts_indices.unsqueeze(-1),
+                scale=dynamic_scale_after_all2all,
+                expert_num=self.num_experts,
+                expert_tokens_num_flag=True,
+                active_expert_range=[0, self.num_local_experts],
+            )
         )
         if with_quant:
             dynamic_scale_after_all2all = dynamic_scale_after_all2all.squeeze(-1)
