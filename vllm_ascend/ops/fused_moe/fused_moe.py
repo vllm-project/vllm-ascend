@@ -482,21 +482,50 @@ class AscendMoERunner(MoERunner):
     def _register_routed_expert_parameter_aliases(self) -> None:
         # test_gpt_oss_distributed_tp2
         # test_qwen3_moe_routing_replay[Qwen/Qwen3.5-35B-A3B]
+        # test_multimodal_reasoning_pp_full_decode_only
+        alias_names = []
         for name, param in self.routed_experts.named_parameters(recurse=False):
-            self.register_parameter(name, param)
+            alias_param = torch.nn.Parameter(param.data, requires_grad=param.requires_grad)
+            alias_param.__dict__.update(param.__dict__)
+            self.register_parameter(name, alias_param)
+            alias_names.append(name)
+
+        original_process_weights = self._quant_method.process_weights_after_loading
+
+        @wraps(original_process_weights)
+        def wrapped_process_weights(layer, *args, **kwargs):
+            for name in alias_names:
+                self._parameters.pop(name, None)
+            return original_process_weights(layer, *args, **kwargs)
+
+        self._quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore[method-assign]
 
     def _needs_routed_expert_parameter_aliases(self) -> bool:
         # test_gpt_oss_distributed_tp2
         # test_qwen3_moe_routing_replay[Qwen/Qwen3.5-35B-A3B]
+        # test_multimodal_reasoning_pp_full_decode_only
         vllm_config = get_current_vllm_config()
         hf_config = getattr(vllm_config.model_config, "hf_config", None)
         model_type = getattr(hf_config, "model_type", None)
         architectures = getattr(hf_config, "architectures", ()) or ()
-        if model_type == "qwen3_5_mtp" or "Qwen3_5MoeMTP" in architectures:
+        if model_type in {"qwen3_5_mtp", "step3p5_mtp"} or set(architectures) & {
+            "Qwen3_5MoeMTP",
+            "Step3p5MTP",
+        }:
             return False
         if self.layer_name.startswith("mtp.") or ".mtp." in self.layer_name:
             return False
-        return model_type in {"gpt_oss", "qwen3_5_moe"}
+        return model_type in {
+            "aria",
+            "aria_text",
+            "gpt_oss",
+            "qwen3_5_moe",
+            "qwen3_vl_moe",
+            "qwen3_vl_moe_text",
+            "step3_text",
+            "step3_vl",
+            "step3p5",
+        }
 
     @property
     def is_internal_router(self) -> bool:
