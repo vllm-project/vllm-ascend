@@ -73,6 +73,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
+::::
 ::::{tab-item} A3 series
 :sync: A3
 
@@ -116,6 +117,9 @@ docker run --rm \
 -v /root/.cache:/root/.cache \
 -it $IMAGE bash
 ```
+
+::::
+:::::
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
