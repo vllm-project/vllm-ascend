@@ -51,6 +51,9 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
     enable_cp,
+    forward_large_head_prefill_attention,
+    get_current_token_kv_from_cache,
+    needs_fia_large_head_fallback,
     needs_layer_aware_fia_graph_replay,
     split_decodes_and_prefills,
     using_paged_attention,
@@ -1384,6 +1387,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if self.kv_sharing_target_layer_name is not None:
+                # Target layers reuse KV written by the producer layer.
+                if self.is_kv_producer:
+                    attn_metadata.reshape_cache_event.record()
+                return query, key, value, output
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
             DeviceOperator.reshape_and_cache(
@@ -1409,12 +1417,64 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
+        use_large_head_fallback = needs_fia_large_head_fallback(self.head_size, self.sinks)
+
+        def forward_large_head(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+            return forward_large_head_prefill_attention(
+                query,
+                key,
+                value,
+                attn_metadata,
+                output,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                scale=self.scale,
+                sliding_window=self.sliding_window,
+                is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
+            )
+
+        if (
+            use_large_head_fallback
+            and self.kv_sharing_target_layer_name is not None
+            and key is not None
+            and value is not None
+            and query.shape[0] == key.shape[0]
+            and attn_metadata.attn_state in (AscendAttentionState.PrefillNoCache, AscendAttentionState.ChunkedPrefill)
+        ):
+            # For KV sharing target layers, the incoming key/value tensors are
+            # not the target layer KV. Gather producer KV before FA fallback.
+            shared_key, shared_value = get_current_token_kv_from_cache(
+                self.key_cache,
+                self.value_cache,
+                attn_metadata.slot_mapping,
+                attn_metadata.actual_seq_lengths_q[-1],
+                self.num_kv_heads,
+                self.head_size,
+            )
+            if shared_key is not None and shared_value is not None:
+                return forward_large_head(query, shared_key, shared_value)
+
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and using_paged_attention(num_tokens, self.vllm_config)
             and self.sliding_window is None
+            and (using_paged_attention(num_tokens, self.vllm_config) or use_large_head_fallback)
         ):
+            # A2/A3 FIA decode also cannot use the unsupported large-head path;
+            # paged attention is the existing decode fallback.
             output = self.forward_paged_attention(query, attn_metadata, output)
+        elif (
+            not _EXTRA_CTX.capturing
+            and use_large_head_fallback
+            and self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+            and query.shape[0] == key.shape[0]
+            and attn_metadata.attn_state in (AscendAttentionState.PrefillNoCache, AscendAttentionState.ChunkedPrefill)
+        ):
+            output = forward_large_head(query, key, value)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
 

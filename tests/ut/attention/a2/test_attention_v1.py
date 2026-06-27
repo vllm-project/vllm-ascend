@@ -16,6 +16,9 @@ from vllm_ascend.attention.utils import (
     cache_graph_workspace,
     needs_layer_aware_fia_graph_replay,
 )
+from vllm_ascend.utils import AscendDeviceType
+
+LARGE_HEAD_PREFILL_PATH = "vllm_ascend.attention.attention_v1.forward_large_head_prefill_attention"
 
 
 class TestAttentionGraphHelpers(TestBase):
@@ -262,6 +265,93 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_sharing_target_layer_name=None,
             sinks=torch.tensor([-3.4062], dtype=torch.bfloat16),
         )
+
+        self.impl_large_head = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=512,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None,
+        )
+
+    @patch("vllm_ascend.attention.utils.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_large_head_prefill_uses_fallback(self, mock_get_device_type):
+        query = torch.randn(2, 8, 512)
+        key = torch.randn(2, 8, 512)
+        value = torch.randn(2, 8, 512)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+
+        self.impl_large_head.forward_fused_infer_attention = MagicMock(return_value=output)
+        with patch(LARGE_HEAD_PREFILL_PATH, return_value=output) as mock_forward:
+            result = self.impl_large_head.forward_impl(query, key, value, (), metadata, output)
+
+        mock_forward.assert_called_once()
+        self.impl_large_head.forward_fused_infer_attention.assert_not_called()
+        self.assertIs(result, output)
+        mock_get_device_type.assert_called()
+
+    @patch("vllm_ascend.attention.utils.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_supported_head_prefill_uses_fia(self, mock_get_device_type):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+
+        self.impl.forward_fused_infer_attention = MagicMock(return_value=output)
+        with patch(LARGE_HEAD_PREFILL_PATH, return_value=output) as mock_forward:
+            result = self.impl.forward_impl(query, key, value, (), metadata, output)
+
+        mock_forward.assert_not_called()
+        self.impl.forward_fused_infer_attention.assert_called_once()
+        self.assertIs(result, output)
+        mock_get_device_type.assert_called()
+
+    @patch("vllm_ascend.attention.utils.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_large_head_decode_uses_paged_attention(self, mock_get_device_type):
+        query = torch.randn(2, 8, 512)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+
+        self.impl_large_head.forward_paged_attention = MagicMock(return_value=output)
+        self.impl_large_head.forward_fused_infer_attention = MagicMock(return_value=output)
+
+        result = self.impl_large_head.forward_impl(query, None, None, (), metadata, output)
+
+        self.impl_large_head.forward_paged_attention.assert_called_once()
+        self.impl_large_head.forward_fused_infer_attention.assert_not_called()
+        self.assertIs(result, output)
+        mock_get_device_type.assert_called()
+
+    @patch("vllm_ascend.attention.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    def test_large_head_prefill_uses_fia_on_a5(self, mock_get_device_type):
+        query = torch.randn(2, 8, 512)
+        key = torch.randn(2, 8, 512)
+        value = torch.randn(2, 8, 512)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+
+        self.impl_large_head.forward_fused_infer_attention = MagicMock(return_value=output)
+        with patch(LARGE_HEAD_PREFILL_PATH, return_value=output) as mock_forward:
+            result = self.impl_large_head.forward_impl(query, key, value, (), metadata, output)
+
+        mock_forward.assert_not_called()
+        self.impl_large_head.forward_fused_infer_attention.assert_called_once()
+        self.assertIs(result, output)
+        mock_get_device_type.assert_called()
 
     def test_forward_no_attn_metadata(self):
         """Test forward pass when attn_metadata is None"""

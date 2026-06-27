@@ -4,9 +4,11 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend.utils import (
@@ -16,6 +18,11 @@ from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
 )
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
+
+# Keep the same semantic as attention_v1.SWA_INT_MAX without importing it,
+# because attention_v1 imports this module.
+SWA_INT_MAX = 2147483647
+A2_A3_FIA_TND_UNSUPPORTED_HEAD_SIZES = {512}
 
 
 def cache_graph_workspace(
@@ -38,6 +45,150 @@ def cache_graph_workspace(
     elif current_workspace is None:
         graph_params.workspaces[num_tokens] = candidate_workspace
     return graph_params.workspaces[num_tokens]
+
+
+def needs_fia_large_head_fallback(head_size: int, sinks: torch.Tensor | None) -> bool:
+    # A2/A3 FIA TND currently does not support 512-dim heads. Sink attention
+    # keeps using its own path, so only the standard attention path falls back.
+    return (
+        get_ascend_device_type() in (AscendDeviceType.A2, AscendDeviceType.A3)
+        and sinks is None
+        and head_size in A2_A3_FIA_TND_UNSUPPORTED_HEAD_SIZES
+    )
+
+
+def get_current_token_kv_from_cache(
+    key_cache: torch.Tensor | None,
+    value_cache: torch.Tensor | None,
+    slot_mapping: torch.Tensor | None,
+    num_tokens: int,
+    num_kv_heads: int,
+    head_size: int,
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
+    # KV sharing target layers do not write KV cache themselves. Rebuild the
+    # current-token KV tensors from the producer layer cache for prefill FA.
+    if key_cache is None or value_cache is None:
+        return None, None
+    if slot_mapping is None or slot_mapping.numel() < num_tokens:
+        return None, None
+    slots = slot_mapping[:num_tokens].long()
+    key = key_cache.reshape(-1, num_kv_heads, head_size).index_select(0, slots)
+    value = value_cache.reshape(-1, num_kv_heads, head_size).index_select(0, slots)
+    return key, value
+
+
+def forward_large_head_prefill_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_metadata: Any,
+    output: torch.Tensor,
+    *,
+    key_cache: torch.Tensor | None,
+    value_cache: torch.Tensor | None,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    scale: float,
+    sliding_window: int | None,
+    is_prefill_no_cache: bool,
+) -> torch.Tensor:
+    # Keep A2/A3 large-head prefill on an NPU attention op path when FIA TND is
+    # unsupported for the head size, instead of routing the whole layer to eager.
+    num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+    query = query[:num_tokens]
+    key, value, actual_seq_lengths_kv = _get_large_head_prefill_kv(
+        key,
+        value,
+        attn_metadata,
+        num_tokens,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        head_size,
+        is_prefill_no_cache,
+    )
+    sparse_mode = 4 if sliding_window is not None else 3 if attn_metadata.causal else 0
+    pre_tokens = sliding_window if sliding_window is not None else SWA_INT_MAX
+    next_tokens = 0 if attn_metadata.causal or sliding_window is not None else SWA_INT_MAX
+    attn_mask = attn_metadata.attn_mask
+    if attn_mask is not None and attn_mask.dtype not in (torch.bool, torch.uint8):
+        attn_mask = attn_mask.bool()
+    attn_output = torch_npu.npu_fusion_attention(
+        query=query,
+        key=key,
+        value=value,
+        head_num=num_heads,
+        input_layout="TND",
+        atten_mask=attn_mask,
+        scale=scale,
+        pre_tockens=pre_tokens,
+        next_tockens=next_tokens,
+        actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+        actual_seq_kvlen=actual_seq_lengths_kv,
+        sparse_mode=sparse_mode,
+    )[0]
+    output[:num_tokens] = attn_output[:num_tokens]
+    return output
+
+
+def _get_large_head_prefill_kv(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_metadata: Any,
+    num_tokens: int,
+    key_cache: torch.Tensor | None,
+    value_cache: torch.Tensor | None,
+    num_kv_heads: int,
+    head_size: int,
+    is_prefill_no_cache: bool,
+) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    # PrefillNoCache already has dense current-step KV tensors. Chunked prefill
+    # may need the historical paged KV cache gathered back to dense TND layout.
+    if is_prefill_no_cache or key_cache is None or value_cache is None:
+        return key[:num_tokens], value[:num_tokens], attn_metadata.actual_seq_lengths_q
+
+    seq_lens = attn_metadata.seq_lens_list
+    if not seq_lens:
+        return key[:num_tokens], value[:num_tokens], attn_metadata.actual_seq_lengths_q
+
+    key, value = _gather_paged_kv_to_dense(
+        key_cache,
+        value_cache,
+        attn_metadata.block_tables,
+        seq_lens,
+        num_kv_heads,
+        head_size,
+    )
+    actual_seq_lengths_kv = torch.tensor(seq_lens, dtype=torch.int32).cumsum(0).tolist()
+    return key, value, actual_seq_lengths_kv
+
+
+def _gather_paged_kv_to_dense(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: list[int],
+    num_kv_heads: int,
+    head_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # npu_fusion_attention consumes dense TND KV tensors, while cached prefill
+    # KV is stored by pages. Gather valid tokens according to the block table.
+    block_size = key_cache.shape[1]
+    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.long, device=key_cache.device)
+    max_seq_len = int(seq_lens_tensor.max().item())
+    num_blocks = cdiv(max_seq_len, block_size)
+    block_table = block_table[: len(seq_lens), :num_blocks].long()
+
+    flat_block_ids = block_table.reshape(-1)
+    max_tokens_padded = num_blocks * block_size
+    dense_shape = (len(seq_lens), max_tokens_padded, num_kv_heads, head_size)
+    gathered_key = key_cache.index_select(0, flat_block_ids).reshape(dense_shape)
+    gathered_value = value_cache.index_select(0, flat_block_ids).reshape(dense_shape)
+
+    positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key_cache.device)
+    valid_mask = positions.unsqueeze(0) < seq_lens_tensor.unsqueeze(1)
+    return gathered_key[valid_mask].contiguous(), gathered_value[valid_mask].contiguous()
 
 
 @lru_cache(maxsize=1)
