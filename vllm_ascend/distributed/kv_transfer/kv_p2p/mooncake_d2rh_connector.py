@@ -32,6 +32,7 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from contextlib import contextmanager
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     GroupPull,
@@ -74,10 +75,13 @@ READY_SCHEDULER = b"ready_scheduler"
 STAGING_FULL = b"staging_full"
 START_PULL = b"START_PULL"
 
+StagingBlockKey = tuple[int, int, int]
+LegacyStagingBlockKey = tuple[int, int]
+
 # ZMQ ports for D2RH (hop1) and scheduler ready signaling (hop1 done).
 # Layout matches side_channel_port + device_index used by KV handshake:
 #   port = BASE + dp_rank * tp_size * pp_size * pcp_size + (pp_rank + pcp_rank) * tp_size + tp_rank
-# TP=1 / DP0 / PP0 / PCP0 → D2RH=8100, READY=8200 (same as legacy hardcoded values).
+# TP=1 / DP0 / PP0 / PCP0 鈫?D2RH=8100, READY=8200 (same as legacy hardcoded values).
 D2RH_ZMQ_PORT_BASE = 8100
 SCHEDULER_READY_ZMQ_PORT_BASE = 8200
 
@@ -265,6 +269,7 @@ class HostListeningThread(threading.Thread):
                 logger.error("Connection listener got exception %s: %s", type(e), e)
 
 
+@contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
     """Context manager for a ZMQ socket"""
 
@@ -544,6 +549,12 @@ def _group_block_map_values(block_map: dict[tuple[int, int], int]) -> BlockIds:
     return tuple(grouped_block_ids)
 
 
+def _get_group_pull_field(group_pull: GroupPull | dict[str, Any], field: str) -> Any:
+    if isinstance(group_pull, dict):
+        return group_pull[field]
+    return getattr(group_pull, field)
+
+
 class D2RHCPUCacheManager:
     def __init__(self, num_blocks: int):
         self.num_blocks = num_blocks
@@ -551,9 +562,21 @@ class D2RHCPUCacheManager:
         self.used_set: set[int] = set()
         self.lock = threading.Lock()
 
-    def alloc_blocks(self, remote_block_ids: BlockIds) -> BlockIds | None:
+    def alloc_block_map(self, remote_block_ids: BlockIds) -> dict[LegacyStagingBlockKey, int] | None:
         with self.lock:
-            num_blocks = sum(len(group_block_ids) for group_block_ids in remote_block_ids)
+            # Deduplicate (group_id, remote_block_id) to avoid over-allocation
+            # when compressed/shared layouts contain repeated remote block ids.
+            remote_keys: list[tuple[int, int]] = []
+            seen_keys: set[tuple[int, int]] = set()
+            for group_id, group_block_ids in enumerate(remote_block_ids):
+                for remote_block_id in group_block_ids:
+                    key = (group_id, remote_block_id)
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    remote_keys.append(key)
+
+            num_blocks = len(remote_keys)
             if num_blocks > len(self.free_queue):
                 logger.info(
                     "CPU staging does not have enough blocks, need=%d free=%d",
@@ -562,20 +585,60 @@ class D2RHCPUCacheManager:
                 )
                 return None
 
-            allocated_block_ids: list[list[int]] = []
-            for group_block_ids in remote_block_ids:
-                group_allocated_block_ids = [self.free_queue.popleft() for _ in group_block_ids]
-                self.used_set.update(group_allocated_block_ids)
-                allocated_block_ids.append(group_allocated_block_ids)
-            return tuple(allocated_block_ids)
+            block_map: dict[LegacyStagingBlockKey, int] = {}
+            for key in remote_keys:
+                local_block_id = self.free_queue.popleft()
+                self.used_set.add(local_block_id)
+                block_map[key] = local_block_id
+            return block_map
 
-    def free_blocks(self, block_ids: BlockIds) -> None:
+    def alloc_sharded_block_map(
+        self,
+        remote_block_ids: BlockIds,
+        group_pulls_by_port: list[list[GroupPull | dict[str, Any]]],
+    ) -> dict[StagingBlockKey, int] | None:
+        offsets_by_group: dict[int, set[int]] = defaultdict(set)
+        for group_pulls in group_pulls_by_port:
+            for group_pull in group_pulls:
+                group_id = int(_get_group_pull_field(group_pull, "group_id"))
+                remote_tp_offset = int(_get_group_pull_field(group_pull, "remote_tp_offset"))
+                offsets_by_group[group_id].add(remote_tp_offset)
+
         with self.lock:
-            for group_blocks in block_ids:
-                for block_id in group_blocks:
-                    if block_id in self.used_set:
-                        self.used_set.remove(block_id)
-                        self.free_queue.append(block_id)
+            remote_keys: list[StagingBlockKey] = []
+            seen_keys: set[StagingBlockKey] = set()
+            for group_id, group_block_ids in enumerate(remote_block_ids):
+                offsets = offsets_by_group.get(group_id) or {0}
+                for remote_block_id in group_block_ids:
+                    for remote_tp_offset in sorted(offsets):
+                        key = (group_id, remote_block_id, remote_tp_offset)
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        remote_keys.append(key)
+
+            num_blocks = len(remote_keys)
+            if num_blocks > len(self.free_queue):
+                logger.info(
+                    "CPU staging does not have enough blocks, need=%d free=%d",
+                    num_blocks,
+                    len(self.free_queue),
+                )
+                return None
+
+            block_map: dict[StagingBlockKey, int] = {}
+            for key in remote_keys:
+                local_block_id = self.free_queue.popleft()
+                self.used_set.add(local_block_id)
+                block_map[key] = local_block_id
+            return block_map
+
+    def free_block_map(self, block_map: dict[tuple[int, ...], int]) -> None:
+        with self.lock:
+            for block_id in set(block_map.values()):
+                if block_id in self.used_set:
+                    self.used_set.remove(block_id)
+                    self.free_queue.append(block_id)
 
 
 class D2RHThread(threading.Thread):
@@ -588,7 +651,7 @@ class D2RHThread(threading.Thread):
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]],
         engine: TransferEngine,
         cpu_kvcache_manager: D2RHCPUCacheManager,
-        remote_local_block_map: dict[str, dict[tuple[int, int], int]],
+        remote_local_block_map: dict[str, dict[tuple[int, ...], int]],
         vllm_config: VllmConfig,
         d2rh_handshake_port: int,
         scheduler_ready_port: int,
@@ -685,14 +748,17 @@ class D2RHThread(threading.Thread):
                 pull_ack = b"ACK"
                 if msg[0] == START_PULL:
                     request_id = msg[1]
+                    params: dict[str, Any] | None = None
                     try:
                         params = msg[2]
                         remote_block_ids: BlockIds = tuple(params.get("remote_block_ids") or ())
-                        cpu_block_ids = self.cpu_kvcache_manager.alloc_blocks(remote_block_ids)
-                        if cpu_block_ids is None:
+                        block_map = self.cpu_kvcache_manager.alloc_sharded_block_map(
+                            remote_block_ids,
+                            params["group_pulls_by_port"],
+                        )
+                        if block_map is None:
                             pull_ack = STAGING_FULL
                         else:
-                            block_map = _build_block_map(remote_block_ids, cpu_block_ids)
                             remote_request_id = params.get("remote_request_id", request_id)
                             self.remote_local_block_map[request_id] = block_map
                             self.remote_local_block_map[remote_request_id] = block_map
@@ -706,9 +772,17 @@ class D2RHThread(threading.Thread):
                                 remote_block_ids=remote_block_ids,
                                 remote_handshake_ports=params["remote_handshake_ports"],
                                 group_pulls_by_port=params["group_pulls_by_port"],
+                                remote_port_send_num=params.get("remote_port_send_num"),
                                 num_computed_tokens=params.get("num_computed_tokens", 0),
                             )
                     except Exception as e:
+                        # Release any partially created mapping to prevent CPU
+                        # staging leaks on handshake/queueing failures.
+                        remote_request_id = params.get("remote_request_id", request_id) if params is not None else request_id
+                        block_map = self.remote_local_block_map.pop(remote_request_id, None)
+                        self.remote_local_block_map.pop(request_id, None)
+                        if block_map:
+                            self.cpu_kvcache_manager.free_block_map(block_map)
                         logger.exception("Failed to handle D2RH START_PULL for request %s: %s", request_id, e)
                         pull_ack = STAGING_FULL
                 else:
@@ -725,8 +799,18 @@ class D2RHThread(threading.Thread):
                 logger.error("D2RH listener exception %s: %s", type(e), e)
 
     def _handle_request(self, req_meta: dict[str, Any]) -> None:
-        self._transfer_kv_cache_all_groups(req_meta)
-        self.send_pull_done(req_meta["request_id"])
+        request_id = req_meta["request_id"]
+        remote_request_id = req_meta["remote_request_id"]
+        try:
+            self._transfer_kv_cache_all_groups(req_meta)
+            self.send_pull_done(request_id)
+        except Exception:
+            # Ensure staged CPU blocks are reclaimed if hop1 transfer fails.
+            block_map = self.remote_local_block_map.pop(remote_request_id, None)
+            self.remote_local_block_map.pop(request_id, None)
+            if block_map:
+                self.cpu_kvcache_manager.free_block_map(block_map)
+            raise
 
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]) -> None:
         remote_request_id = req_meta["remote_request_id"]
@@ -737,6 +821,7 @@ class D2RHThread(threading.Thread):
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
         remote_handshake_ports: list[int] = req_meta["remote_handshake_ports"]
         group_pulls_by_port: list[list[GroupPull]] = req_meta["group_pulls_by_port"]
+        remote_port_send_num = req_meta.get("remote_port_send_num")
         block_map = self.remote_local_block_map[remote_request_id]
 
         if not any(remote_block_ids):
@@ -768,9 +853,22 @@ class D2RHThread(threading.Thread):
                 return [bid * scale + offset for bid in block_ids for offset in range(scale)]
 
             for group_pull in group_pulls:
-                group_id = group_pull.group_id
+                group_id = _get_group_pull_field(group_pull, "group_id")
                 group_spec, layer_indices = self.kv_group2layeridx[group_id]
-                local_group_block_ids = [block_map[(group_id, bid)] for bid in remote_block_ids[group_id]]
+                num_group_pulls = _get_group_pull_field(group_pull, "num_group_pulls")
+                remote_tp_offset = _get_group_pull_field(group_pull, "remote_tp_offset")
+                local_group_block_ids: list[int] = []
+                for bid in remote_block_ids[group_id]:
+                    key_with_offset = (group_id, bid, remote_tp_offset)
+                    key_legacy = (group_id, bid)
+                    if key_with_offset in block_map:
+                        local_group_block_ids.append(block_map[key_with_offset])
+                    elif key_legacy in block_map:
+                        local_group_block_ids.append(block_map[key_legacy])
+                    else:
+                        raise RuntimeError(
+                            f"CPU staging block map missing key {(group_id, bid)} for request {remote_request_id}."
+                        )
                 remote_group_block_ids = list(remote_block_ids[group_id])
                 if not local_group_block_ids:
                     continue
@@ -793,7 +891,7 @@ class D2RHThread(threading.Thread):
                     num_kernel_blocks = min(len(kernel_remote_block_ids), len(kernel_local_block_ids))
                     kernel_remote_block_ids = kernel_remote_block_ids[:num_kernel_blocks]
                     kernel_local_block_ids = kernel_local_block_ids[:num_kernel_blocks]
-                    if group_pull.num_group_pulls == 1:
+                    if num_group_pulls == 1:
                         grouped_remote_block_ids, grouped_local_block_ids = base_group_concurrent_contiguous(
                             kernel_remote_block_ids, kernel_local_block_ids
                         )
@@ -808,7 +906,7 @@ class D2RHThread(threading.Thread):
                         block_len = self.cpu_block_len_per_addr[layer_idx][cache_idx]
                         block_stride = self.cpu_block_stride_per_addr[layer_idx][cache_idx]
                         remote_block_stride = remote_block_stride_per_addr[layer_idx][cache_idx]
-                        inner_block_len = block_len // group_pull.num_group_pulls
+                        inner_block_len = block_len // num_group_pulls
                         transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
                             grouped_remote_block_ids,
                             grouped_local_block_ids,
@@ -820,7 +918,6 @@ class D2RHThread(threading.Thread):
                             src_list.append(
                                 src_layer_base_addr
                                 + local_block_id[0] * block_stride
-                                + group_pull.remote_tp_offset * inner_block_len
                             )
                             dst_list.append(dst_layer_base_addr + remote_block_id[0] * remote_block_stride)
                             length_list.append(inner_block_len * len(local_block_id))
@@ -829,7 +926,12 @@ class D2RHThread(threading.Thread):
                 ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
                 if ret < 0:
                     raise RuntimeError(f"D2RH hop1 transfer failed, ret: {ret}")
-            self._send_done_recv_signal(remote_request_id, port_host, remote_handshake_port)
+            self._send_done_recv_signal(
+                remote_request_id,
+                port_host,
+                remote_handshake_port,
+                remote_port_send_num,
+            )
 
     def _get_remote_metadata(self, remote_host: str, remote_handshake_port: int) -> None:
         sock: zmq.Socket | None = None  # type: ignore[type-arg]
@@ -847,12 +949,22 @@ class D2RHThread(threading.Thread):
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
 
-    def _send_done_recv_signal(self, request_id: str, remote_host: str, remote_handshake_port: int) -> None:
+    def _send_done_recv_signal(
+        self,
+        request_id: str,
+        remote_host: str,
+        remote_handshake_port: int,
+        remote_port_send_num: dict[int, Any] | None = None,
+    ) -> None:
         sock: zmq.Socket | None = None  # type: ignore[type-arg]
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             remote_path = f"{remote_host}:{remote_handshake_port}"
-            ensure_zmq_send(sock, self.encoder.encode((DONE_RECVING_MSG, request_id, {})), remote_path)
+            ensure_zmq_send(
+                sock,
+                self.encoder.encode((DONE_RECVING_MSG, request_id, remote_port_send_num or {})),
+                remote_path,
+            )
             resp = ensure_zmq_recv(sock, self.remote_poller, remote_path, timeout=self.timeout)
             if resp != b"ACK":
                 raise RuntimeError(f"Failed to receive ACK, resp: {resp.decode('utf-8')}")
@@ -900,7 +1012,7 @@ class KVCacheRecvingThread(BaseKVCacheRecvingThread):
         cpu_block_size_scale: list[list[int]],
         cpu_te_rpc_port: int,
         cpu_kvcache_manager: D2RHCPUCacheManager,
-        remote_local_block_map: dict[str, dict[tuple[int, int], int]],
+        remote_local_block_map: dict[str, dict[tuple[int, ...], int]],
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
@@ -926,10 +1038,25 @@ class KVCacheRecvingThread(BaseKVCacheRecvingThread):
             raise RuntimeError(f"CPU staging block map missing for request {remote_request_id}.")
 
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
-        cpu_remote_block_ids: BlockIds = tuple(
-            [block_map[(group_id, block_id)] for block_id in group_block_ids]
-            for group_id, group_block_ids in enumerate(remote_block_ids)
-        )
+        group_pulls: list[GroupPull] = req_meta.get("group_pulls", [])
+        offset_by_group: dict[int, int] = {group_pull.group_id: group_pull.remote_tp_offset for group_pull in group_pulls}
+        cpu_remote_block_ids_groups: list[list[int]] = []
+        for group_id, group_block_ids in enumerate(remote_block_ids):
+            group_remote_tp_offset = offset_by_group.get(group_id, 0)
+            mapped_group_block_ids: list[int] = []
+            for block_id in group_block_ids:
+                key_with_offset = (group_id, block_id, group_remote_tp_offset)
+                key_legacy = (group_id, block_id)
+                if key_with_offset in block_map:
+                    mapped_group_block_ids.append(block_map[key_with_offset])
+                elif key_legacy in block_map:
+                    mapped_group_block_ids.append(block_map[key_legacy])
+                else:
+                    raise RuntimeError(
+                        f"CPU staging block map missing key {(group_id, block_id)} for request {remote_request_id}."
+                    )
+            cpu_remote_block_ids_groups.append(mapped_group_block_ids)
+        cpu_remote_block_ids: BlockIds = tuple(cpu_remote_block_ids_groups)
         cpu_req_meta = dict(req_meta)
         cpu_req_meta["remote_block_ids"] = cpu_remote_block_ids
         cpu_req_meta["remote_engine_id"] = CPU_STAGING_ENGINE_ID
@@ -947,7 +1074,7 @@ class KVCacheRecvingThread(BaseKVCacheRecvingThread):
                 block_map = self.remote_local_block_map.pop(remote_request_id, None)
                 self.remote_local_block_map.pop(request_id, None)
                 if block_map:
-                    self.cpu_kvcache_manager.free_blocks(_group_block_map_values(block_map))
+                    self.cpu_kvcache_manager.free_block_map(block_map)
 
 
 class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
@@ -1014,10 +1141,9 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
         decode_tp_rank: int,
     ) -> list[list[GroupPull]]:
         pulls_by_port: list[list[GroupPull]] = []
-        for port in remote_handshake_ports:
+        for rank_idx, port in enumerate(remote_handshake_ports):
             remote_rank = (port - remote_base_port) % (prefill_tp_size * self._prefill_pp_size)
             prefill_pp_rank = remote_rank // prefill_tp_size
-            remote_tp_offset = remote_rank % max(1, prefill_tp_size // self._decode_tp_size)
             group_pulls: list[GroupPull] = []
             for group_id, group in enumerate(self.kv_cache_groups):
                 if isinstance(group.kv_cache_spec, MambaSpec):
@@ -1025,6 +1151,13 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
                 else:
                     group_spec = self._serialize_group_for_scheduler(group)
                     num_group_pulls = self._get_attention_group_num_need_pulls(group_spec, prefill_tp_size)
+                if len(remote_handshake_ports) % num_group_pulls != 0:
+                    raise RuntimeError(
+                        "Invalid remote handshake ports and group pulls mapping: "
+                        f"len(remote_handshake_ports)={len(remote_handshake_ports)}, "
+                        f"num_group_pulls={num_group_pulls}"
+                    )
+                remote_tp_offset = rank_idx % num_group_pulls
                 group_pulls.append(
                     GroupPull(
                         group_id=group_id,
@@ -1150,7 +1283,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
 class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, engine_id, kv_cache_config)
-        self.remote_local_block_map: dict[str, dict[tuple[int, int], int]] = {}
+        self.remote_local_block_map: dict[str, dict[tuple[int, ...], int]] = {}
 
     def _make_cpu_staging_caches(self, kv_caches: dict[str, torch.Tensor]) -> dict[str, list[torch.Tensor]]:
         cpu_caches: dict[str, list[torch.Tensor]] = {}
@@ -1217,8 +1350,6 @@ class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
             cpu_block_len_per_addr = [[] for _ in range(metadata_layers)]
             cpu_block_stride_per_addr = [[] for _ in range(metadata_layers)]
             cpu_block_size_scale = [[] for _ in range(metadata_layers)]
-            cpu_ptrs: list[int] = []
-            cpu_lengths: list[int] = []
             for layer_name, cpu_cache_tuple in cpu_caches.items():
                 layer_idx = layer_name_to_idx[layer_name]
                 for single_cpu_cache in cpu_cache_tuple:
@@ -1231,10 +1362,12 @@ class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
                         single_cpu_cache.stride(0) * single_cpu_cache.element_size()
                     )
                     cpu_block_size_scale[layer_idx].append(tensor_num_blocks // self.num_blocks)
-                    cpu_ptrs.append(single_cpu_cache.data_ptr())
-                    cpu_lengths.append(single_cpu_cache.element_size() * math.prod(single_cpu_cache.shape))
-            register_regions.ptrs.extend(cpu_ptrs)
-            register_regions.lengths.extend(cpu_lengths)
+            # CPU staging caches are freshly allocated independent tensors and do
+            # not inherit KVCacheTensor shared-by storage layout. Always register
+            # real storages to avoid invalid merged ranges.
+            cpu_register_regions = collect_storage_merged_register_regions(cpu_caches)
+            register_regions.ptrs.extend(cpu_register_regions.ptrs)
+            register_regions.lengths.extend(cpu_register_regions.lengths)
 
         validate_register_region_count(register_regions)
         global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
