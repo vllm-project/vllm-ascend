@@ -28,6 +28,7 @@ test_results=()
 failed_logs=()
 timing_entries=()
 test_index=0
+overall_status=0
 pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
 
 mkdir -p "${pytest_log_dir}"
