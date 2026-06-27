@@ -975,7 +975,7 @@ Run performance evaluation of `Kimi-K2.5-w4a8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-There are three `vllm bench` subcommands:
+There are three `vllm benchmark` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
