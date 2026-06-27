@@ -180,6 +180,7 @@ If deploying a multi-node environment, set up the environment on each node.
 :::
 
 For more details, please refer to the [Installation Guide](../../installation.md).
+
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
@@ -191,6 +192,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 Atlas 800I A2/A3/A5:
 Qwen3-32B-W8A8:
+
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -214,6 +216,7 @@ vllm serve your_model_path \
 
 Atlas 800I A2/A3：
 Qwen3-32B-W4A4:
+
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1
 export VLLM_USE_V1=1
@@ -237,6 +240,7 @@ vllm serve your_model_path \
 
 Atlas 800I A2/A3：
 Qwen3-8B-W4A8:  
+
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -292,6 +296,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
 Install from source:
+
   ```bash
   git clone https://github.com/AISBench/benchmark.git
   cd benchmark
@@ -301,6 +306,7 @@ Install from source:
 The following is an example configuration for the accuracy evaluation config file:
 
 **Accuracy Evaluation Config File:**
+
 ```bash
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
@@ -329,11 +335,13 @@ models = [
     )
 ]
 ```
+
 **Run the accuracy evaluation using the aime2025 dataset as an example:**
 
 ```bash
 ais_bench --models vllm_api_general_chat --datasets aime2025_gen_0_shot_chat_prompt --debug
 ```
+
 > The --models parameter value corresponds to the abbr field in the configuration file above. Adjust max_out_len, batch_size, and dataset tasks based on your scenario.
 
 ## 8 Performance
@@ -372,6 +380,7 @@ models = [
     )
 ]
 ```
+
 **Run the performance evaluation using the GSM8K dataset as an example:**
 
 ```bash
