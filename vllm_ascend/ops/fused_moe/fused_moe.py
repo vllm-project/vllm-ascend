@@ -392,21 +392,6 @@ class AscendMoERunner(MoERunner):
         moe_config.num_local_experts = local_num_experts
         routed_experts.expert_map_manager._local_num_experts = local_num_experts
         routed_experts.expert_map_manager._expert_map = self._expert_map
-        routed_experts.local_num_experts = local_num_experts
-        self.local_num_experts = local_num_experts
-
-        if self.global_redundant_expert_num > 0:
-            routed_experts.quant_method.create_weights(
-                layer=routed_experts,
-                num_experts=local_num_experts,
-                hidden_size=routed_experts.hidden_size,
-                intermediate_size_per_partition=routed_experts.intermediate_size_per_partition,
-                params_dtype=routed_experts.params_dtype,
-                weight_loader=routed_experts.weight_loader,
-            )
-
-        if eplb_config.dynamic_eplb:
-            self._register_routed_expert_parameter_aliases()
 
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
         self.multi_stage = False
@@ -437,19 +422,6 @@ class AscendMoERunner(MoERunner):
         # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
         # so only real MoE layers on this rank are registered.
         VllmEplbAdaptor.register_layer(self)
-
-    def get_log2phy_map(self):
-        return self.log2phy
-
-    @property
-    def ep_rank(self):
-        return self.moe_config.ep_rank
-
-    def clear_moe_load(self):
-        if self.moe_load is not None:
-            self.moe_load.zero_()
-        if self.multi_stage:
-            self.load_counter.zero_()
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated computation."""
