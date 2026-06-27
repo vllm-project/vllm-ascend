@@ -126,6 +126,18 @@ jobs:
           - name: MiniMax-PD-in32k-bs4-1
             config_file_path: MiniMax-PD-in32k-bs4-1.yaml
             size: 3
+          - name: Qwen3.5-397B-w8a8-PD
+            config_file_path: Qwen-3.5-397B-A17B-W8A8-PD.yaml
+            size: 3
+          - name: GLM_5_1_PD_in32k_bs16-0
+            config_file_path: GLM_5_1_PD_in32k_bs16-0.yaml
+            size: 4
+          - name: GLM_5_1_PD_in32k_bs20-90
+            config_file_path: GLM_5_1_PD_in32k_bs20-90.yaml
+            size: 4
+          - name: GLM_5_1_PD_in64k_bs16-90
+            config_file_path: GLM_5_1_PD_in64k_bs16-90.yaml
+            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
