@@ -170,6 +170,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
+        
+        self._share_mtp_indices = False
+        spec_config = self.vllm_config.speculative_config
+        draft_model_config = getattr(spec_config, "draft_model_config", None)
+        draft_hf_config = (
+            draft_model_config.hf_config
+            if draft_model_config is not None
+            else None
+        )
+        self._share_mtp_indices = getattr(
+            draft_hf_config, "index_share_for_mtp_iteration", False
+        )
+
         # NOTE:
         # `draft_tensor_parallel_size` does not take effect for Eagle:
         # the draft model uses the same TP size as the target model in practice.
@@ -468,6 +481,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "[spec_decode/base] Detected MTP model with topk_indices_buffer."
                 " Sharing target model topk_indices_buffer with the draft model."
             )
+            target_buffer = target_language_model.model.topk_indices_buffer
+            draft_model = getattr(self.model, "model", None)
+            if target_buffer is not None and draft_model is not None:
+                for _, module in draft_model.named_modules():
+                    if hasattr(module, "topk_indices_buffer"):
+                        module.topk_indices_buffer = target_buffer
+
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -943,6 +963,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
+        # step 0   
+        draft_model = getattr(self.model, "model", None)
+        if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+            draft_model.set_skip_topk(False)
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -977,6 +1002,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        # step 1+ skip indexer
+        draft_model = getattr(self.model, "model", None)
+        if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+            draft_model.set_skip_topk(True)
+
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
