@@ -221,20 +221,19 @@ The performance result is:
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(16K context)|Single-Node Mixed|2 (A3)|Qwen3-VL-32B-Instruct|Use tp4 for high-resolution text inputs|
-|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-VL-32B-Instruct|tp4 for high-resolution text inputs|
-|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-VL-32B-Instruct|tp4 for high-resolution text inputs|
-|Multimodal<br>(1080P)|Single-Node Mixed|2 (A3)|Qwen/Qwen3-VL-32B-Instruct|tp4 for high-resolution visual inputs|
+|High Throughput<br>(16K context)|Single-Node Mixed|2 (A3)|Qwen3-Next|Use tp2 for high-resolution text inputs|
+|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
+|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
+|Multimodal<br>(1080P)|Single-Node Mixed|2 (A3)|Qwen/Qwen3-Next|tp2 for high-resolution visual inputs|
 
 #### Table 2: Detailed Node Configuration
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput / Low Latency (16K)|Server / Single Machine|4|4|1|~16K|3|
-|Long Context (128K, no cache)|Server / Single Machine|4|4|1|128K|3|
-|Long Context (128K, with cache)|Server / Single Machine|4|4|1|128K|3|
-|Multimodal (1080P)|Server / Single Machine|4|4|1|~16K|3|
-
+|High Throughput / Low Latency (16K)|Server / Single Machine|2|1|1|~16K|3|
+|Long Context (128K, no cache)|Server / Single Machine|2|1|1|128K|3|
+|Long Context (128K, with cache)|Server / Single Machine|2|1|1|128K|3|
+|Multimodal (1080P)|Server / Single Machine|2|1|1|~16K|3|
 
 ### 9.2 Tuning Guidelines
 
@@ -245,5 +244,7 @@ Please refer to the [Public Performance Tuning Documentation](../../developer_gu
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
+
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
 
 1. Qwen3-Next does not support TP>=16 now. Since this model has 16 query heads but only 2 key and value heads, GQA degenerates into MHA when TP >= 16. However, the FIA operator currently fails to function in MHA scenarios with a head dimension of 256 (which is the case for this model).
