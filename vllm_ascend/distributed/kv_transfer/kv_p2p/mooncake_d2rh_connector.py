@@ -778,7 +778,9 @@ class D2RHThread(threading.Thread):
                     except Exception as e:
                         # Release any partially created mapping to prevent CPU
                         # staging leaks on handshake/queueing failures.
-                        remote_request_id = params.get("remote_request_id", request_id) if params is not None else request_id
+                        remote_request_id = (
+                            params.get("remote_request_id", request_id) if params is not None else request_id
+                        )
                         block_map = self.remote_local_block_map.pop(remote_request_id, None)
                         self.remote_local_block_map.pop(request_id, None)
                         if block_map:
@@ -915,10 +917,7 @@ class D2RHThread(threading.Thread):
                             block_len=inner_block_len,
                         )
                         for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
-                            src_list.append(
-                                src_layer_base_addr
-                                + local_block_id[0] * block_stride
-                            )
+                            src_list.append(src_layer_base_addr + local_block_id[0] * block_stride)
                             dst_list.append(dst_layer_base_addr + remote_block_id[0] * remote_block_stride)
                             length_list.append(inner_block_len * len(local_block_id))
 
@@ -1039,7 +1038,9 @@ class KVCacheRecvingThread(BaseKVCacheRecvingThread):
 
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
         group_pulls: list[GroupPull] = req_meta.get("group_pulls", [])
-        offset_by_group: dict[int, int] = {group_pull.group_id: group_pull.remote_tp_offset for group_pull in group_pulls}
+        offset_by_group: dict[int, int] = {
+            group_pull.group_id: group_pull.remote_tp_offset for group_pull in group_pulls
+        }
         cpu_remote_block_ids_groups: list[list[int]] = []
         for group_id, group_block_ids in enumerate(remote_block_ids):
             group_remote_tp_offset = offset_by_group.get(group_id, 0)
