@@ -474,7 +474,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        use_mxfp_quant = token_dispatch_input.quant.is_mxfp_quant
+        use_mxfp_quant = token_dispatch_input.quant.is_mxfp
         with_quant = token_dispatch_input.quant.is_int_quant or token_dispatch_input.quant.is_fp8 or use_mxfp_quant
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
@@ -495,7 +495,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         if with_quant:
             dst_type = (
                 torch.float8_e4m3fn
-                if token_dispatch_input.quant.is_fp8 or token_dispatch_input.quant.is_mxfp_quant
+                if token_dispatch_input.quant.is_fp8 or token_dispatch_input.quant.is_mxfp
                 else torch.int8
             )
             permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(
