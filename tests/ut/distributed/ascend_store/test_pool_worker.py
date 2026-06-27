@@ -98,7 +98,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
     def test_max_intersection_hit_position_empty_group(self):
         cls = self._make_worker_class()
-        hits = []
+        hits: list[list[int]] = []
         self.assertEqual(0, cls._max_intersection_hit_position(hits))
 
     def test_max_intersection_hit_position_multi_group(self):
@@ -117,6 +117,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
         config.model_config.hf_text_config = MagicMock(spec=[])  # no index_topk
         config.model_config.get_num_layers.return_value = 32
         config.model_config.get_total_num_kv_heads.return_value = 8
+        config.model_config.max_model_len = 1024
         config.parallel_config.data_parallel_rank = 0
         config.parallel_config.rank = 0
         config.parallel_config.pipeline_parallel_size = 1
@@ -494,6 +495,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.model_config.model = "org/llama-7b"
         config.model_config.use_mla = False
         config.model_config.hf_text_config = MagicMock(spec=[])
+        config.model_config.max_model_len = 1024
         config.model_config.get_num_layers.return_value = 2
         config.model_config.get_total_num_kv_heads.return_value = 1
         config.parallel_config.data_parallel_rank = 0
