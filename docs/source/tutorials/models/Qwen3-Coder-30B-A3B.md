@@ -54,37 +54,10 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 **Docker Run:**
 
-```{code-block} bash
-   :substitutions:
+:::::{tab-set} :sync-group: hardware
 
-# Update --device according to your device (Atlas A2: /dev/davinci[0-7], Atlas A3: /dev/davinci[0-15]).
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-
-docker run \
-    --name vllm-ascend-env \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -it -d $IMAGE bash
-```
-
-**Docker Run (Ascend 950 Products):**
+::::{tab-item} Ascend 950 Products :sync: a5
+:sync: a5
 
 ```{code-block} bash
    :substitutions:
@@ -119,6 +92,103 @@ docker run --runtime=runc -u root -it -d --name vllm-ascend-env \
     -v /etc/hixlep:/etc/hixlep \
     $IMAGE bash
 ```
+
+::::
+
+::::{tab-item} Atlas 800I A3 :sync: a3
+:sync: a3
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
+docker run \
+    --name vllm-ascend-env \
+    --shm-size=128g \
+    --net=host \
+    --privileged=true \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /home:/home \
+    -v /data:/data \
+    -v /tmp:/tmp \
+    -v /mnt:/mnt \
+    -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
+    -v /root:/host_root \
+    -it -d $IMAGE bash
+```
+
+:::{note}
+A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+:::
+
+::::
+
+::::{tab-item} Atlas 800I A2 :sync: a2
+:sync: a2
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
+docker run \
+    --name vllm-ascend-env \
+    --shm-size=128g \
+    --net=host \
+    --privileged=true \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /home:/home \
+    -v /data:/data \
+    -v /tmp:/tmp \
+    -v /mnt:/mnt \
+    -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
+    -v /root:/host_root \
+    -it -d $IMAGE bash
+```
+
+::::
+
+:::::
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
@@ -366,7 +436,7 @@ vLLM-Ascend also supports the following evaluation tools:
 | LiveCodeBench | pass@1 (0-shot) | 38.60% |
 | AIME 2024 | accuracy (0-shot) | 33.33% |
 
-## 8 Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 
