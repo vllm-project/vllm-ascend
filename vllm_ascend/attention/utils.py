@@ -83,11 +83,16 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     return chunked_prefill_workspace_size
 
 
-def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig) -> bool:
+def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
     if vllm_config.speculative_config is not None:
         return False
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    ascend_device_type = get_ascend_device_type()
+    if ascend_device_type == AscendDeviceType.A5:
         return False
+    # A2/A3 FIA TND does not support Gemma4's 512-dim global attention heads.
+    # Decode can use PA directly; prefill is handled by the device adaptor.
+    if ascend_device_type in {AscendDeviceType.A2, AscendDeviceType.A3} and head_size == 512:
+        return True
     from vllm.config.compilation import CUDAGraphMode
 
     cudagraph_mode = vllm_config.compilation_config.cudagraph_mode

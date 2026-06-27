@@ -1203,7 +1203,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
+        passed_query = query
         passed_key = key
+        passed_value = value
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
         )
@@ -1283,7 +1285,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=4,
                 )
             else:
-                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
@@ -1295,7 +1297,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     actual_seq_lengths_kv=actual_seq_lengths_kv,
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
+                    head_size=self.head_size,
                     scale=self.scale,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    current_query=passed_query,
+                    current_key=passed_key,
+                    current_value=passed_value,
+                    attn_metadata=attn_metadata,
+                    is_kv_sharing_target_layer=self.kv_sharing_target_layer_name is not None,
+                    is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
+                    prefill_states=(AscendAttentionState.PrefillNoCache, AscendAttentionState.ChunkedPrefill),
                     sparse_mode=3,
                 )
 
@@ -1409,10 +1421,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
+
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and using_paged_attention(num_tokens, self.vllm_config)
             and self.sliding_window is None
+            and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
