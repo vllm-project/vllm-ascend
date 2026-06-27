@@ -56,7 +56,6 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 :::::{tab-set}
 :sync-group: hardware
---
 
 ::::{tab-item} Atlas 800I A3
 :sync: a3
