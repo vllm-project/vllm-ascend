@@ -58,45 +58,6 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 :sync-group: hardware
 --
 
-::::{tab-item} Ascend 950 Products
-:sync: a5
-
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-
-docker run --runtime=runc -u root -it -d --name vllm-ascend-env \
-    --net=host --privileged=true --shm-size=2g \
-    --device=/dev/davinci_manager --device=/dev/hisi_hdc \
-    --device=/dev/ummu --device=/dev/uburma \
-    --device=/dev/davinci0 \
-    --device=/dev/davinci1 \
-    --device=/dev/davinci2 \
-    --device=/dev/davinci3 \
-    --device=/dev/davinci4 \
-    --device=/dev/davinci5 \
-    --device=/dev/davinci6 \
-    --device=/dev/davinci7 \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
-    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
-    -v /usr/local/sbin:/usr/local/sbin \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /var/log/npu/:/usr/slog \
-    -v /root/host:/root/host \
-    -v /mnt:/mnt \
-    -v /data:/data \
-    -v /home/:/home/ \
-    -v /etc/hixlep:/etc/hixlep \
-    $IMAGE bash
-```
-
-::::
-
 ::::{tab-item} Atlas 800I A3
 :sync: a3
 
