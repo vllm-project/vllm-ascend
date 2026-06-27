@@ -27,15 +27,12 @@ on:
       - 'main'
       - '*-dev'
       - 'releases/v*'
-  # 支持手动触发
   workflow_dispatch:
 
-# 统一登录shell，加载Ascend环境变量
 defaults:
   run:
     shell: bash -el {0}
 
-# 同PR并发互斥，新提交取消旧任务
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -43,10 +40,7 @@ concurrency:
 jobs:
   run-hitest:
     runs-on: linux-amd64-cpu-8-hk
-    container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
-      # options 移到此处，全局容器注入环境变量
-      options: --env AUROGON_API_PREFIX --env X_APIG_APPCODE --env APP_KEY --env APP_SECRET
+    # 删掉整个 container 块，不用容器，直接宿主机执行
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -56,7 +50,9 @@ jobs:
       - name: Git safe directory config
         run: git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
-      # 可选：简易lint校验新增脚本文件（和E2E保持一致）
+      - name: Install pre-commit dependencies
+        run: pip install pre-commit
+
       - name: Quick lint for shell & python scripts
         env:
           PRE_COMMIT_COLOR: always
@@ -65,7 +61,6 @@ jobs:
           SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
         run: pre-commit run --files .github/workflows/scripts/hitest.sh .github/workflows/scripts/run_hitest.py
 
-      # 执行封装python脚本，内部调用hitest.sh
       - name: Execute hitest entry
         env:
           AUROGON_API_PREFIX: https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service
