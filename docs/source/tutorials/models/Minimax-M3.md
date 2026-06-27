@@ -68,26 +68,52 @@ It is recommended to place the model weight in a shared cache directory.
 
 Start the online serving service with the following command:
 
-```
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export HCCL_OP_EXPANSION_MODE="AIV"
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+- For BF16 version
 
-vllm serve ${WEIGHT_PATH} \
+  ```
+  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+  export HCCL_OP_EXPANSION_MODE="AIV"
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+  vllm serve ${WEIGHT_PATH} \
+    --served-model-name minimax-m3 \
+    --trust-remote-code \
+    --max-model-len 43008 \
+    --tensor-parallel-size 16 \
+    --enable-expert-parallel \
+    --max-num-seqs 16 \
+    --distributed_executor_backend "mp" \
+    --gpu-memory-utilization 0.92 \
+    --reasoning-parser minimax_m3 \
+    --limit-mm-per-prompt '{"image":1}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"enable_static_kernel": true, "fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
+    --port 11223 > ${LOG_PATH} 2>&1 &
+  ```
+
+- For W8A8 version
+  ```
+  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+  export HCCL_OP_EXPANSION_MODE="AIV"
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+  vllm serve ${WEIGHT_PATH} \
   --served-model-name minimax-m3 \
   --trust-remote-code \
-  --max-model-len 46080 \
+  --max-model-len 131072 \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
-  --max-num-seqs 8 \
+  --max-num-seqs 16 \
   --distributed_executor_backend "mp" \
   --gpu-memory-utilization 0.92 \
   --reasoning-parser minimax_m3 \
   --limit-mm-per-prompt '{"image":1}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}' \
-  --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false, "fuse_norm_quant":false}}' \
-  --port 11223 > ${LOG_PATH} 2>&1 & 
-```
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"enable_static_kernel": true, "fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
+  --port 11223 > ${LOG_PATH} 2>&1 &
+  ```
+
+**Note**: In the script above, `max-num-seqs` is set to 16, which represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business
 
 ## Functional Verification
 
@@ -234,10 +260,10 @@ vllm serve ${WEIGHT_PATH} \
 
 | Model                         | Supported Hardware | BF16 | W8A8 | MXFP8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | Thinking | Tool Call | Image | Video | Max Model Len |
 |-------------------------------|------|--------------------|------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------|---------------|---------------|---------------|
-| Minimax m3 | A2/A3 | ✅ | ✅ | ✖️ | ✅ | ✅ | - | - | ✅ | ✅ | - | ✅ | ✅ | ✖️ | ✖️ | ✅ | ✅ | ✖️ | 单图 | ✖️ | 1M |
+| Minimax m3 | A2/A3 | ✅ | ✅ | ✖️ | ✅ | ✅ | - | - | ✅ | ✅ | - | ✅ | ✅ | ✖️ | ✖️ | ✅ | ✅ | ✖️ | ✅ | ✅ | 1M |
 
 * 请参阅 [特性指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html) 获取特性配置说明。
-* 模型支持最长上下文长度为1M，A3单机BF16权重实测可达45K。
+* 模型支持最长上下文长度为1M，A3单机BF16权重实测可达42K，A3单机W8A8权重实测可达128K。
 
 ## Precision
 ### 使用 AISBench
@@ -248,6 +274,8 @@ vllm serve ${WEIGHT_PATH} \
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
 | GSM8K   | GPU      | 96.72 | 65536         | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
 | GSM8K   | NPU      | 96.36 | 10240         | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
+| AIME2025 | GPU     | 95@repeat4 | -        | -            | -           | -          | -                 |
+| AIME2025 | NPU     | 90    | -             | -            | -           | -          | temperature=1.0, top_p=0.95 |
 
 ## FAQ
 - Q: 重装vLLM Ascend

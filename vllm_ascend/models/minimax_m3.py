@@ -426,29 +426,9 @@ class MiniMaxM3Attention(nn.Module):
     ) -> torch.Tensor:
         # logger.error(f"[MiniMax Attention {self.layer_idx}] >>>>>>>>>>  attention input {hidden_states.to(torch.float).norm(p=1)}, shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<<")
         qkv, _ = self.qkv_proj(hidden_states)
-        # logger.error(f"[MiniMax Attention {self.layer_idx}] >>>>>>>>>> attention  input  {qkv.to(torch.float).norm(p=1)}, shape is {qkv.shape}<<<<<<<<<<<<<<<<<<")
-        if  True:
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            q, k = self._qk_norm(q, k)
-            q, k = self.rotary_emb(positions, q, k)
-        else:
-            q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
-                input=qkv.contiguous(),
-                q_weight=self.q_norm.weight_plus_one,
-                k_weight=self.k_norm.weight_plus_one,
-                q_hidden_size=self.q_size,
-                kv_hidden_size=self.kv_size,
-                head_dim=self.head_dim,
-                eps=self.q_norm.variance_epsilon,
-                q_bias=None,
-                k_bias=None,
-                cos_sin_cache=self.rotary_emb.cos_sin_cache,
-                positions=positions,
-            )
-        # logger.error(f"[MiniMax Attention {self.layer_idx}] >>>>>>>>>> attention q  output  {q.to(torch.float).norm(p=1)}, shape is {q.shape}<<<<<<<<<<<<<<<<<<")
-        # logger.error(f"[MiniMax Attention {self.layer_idx}] >>>>>>>>>> attention k  output  {k.to(torch.float).norm(p=1)}, shape is {k.shape}<<<<<<<<<<<<<<<<<<")
-        # logger.error(f"[MiniMax Attention {self.layer_idx}] >>>>>>>>>> attention v  output  {v.to(torch.float).norm(p=1)}, shape is {v.shape}<<<<<<<<<<<<<<<<<<")
-        
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self._qk_norm(q, k)
+        q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         # if get_tensor_model_parallel_rank() == 0:
         #     logger.error(f"[MiniMax GQA after self_attn {self.layer_idx}] >>>>>>>>>> attention  output  {attn_output.to(torch.float).norm(p=1)}, shape is {attn_output.shape}<<<<<<<<<<<<<<<<<<")
@@ -603,6 +583,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self._enable_eagle3_aux_hidden_states = (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.method == "eagle3"
+        )
 
         self.vocab_size = text_config.vocab_size
         self.num_hidden_layers = text_config.num_hidden_layers
@@ -682,6 +666,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         if get_tensor_model_parallel_rank() == 0:
             logger.error(f"[MiniMax Modeling Item {_DECODE_ITEMS}] >>>>>>>>>>  modeling  output  {hidden_states.to(torch.float).norm(p=1)}, shape is {hidden_states.shape}<<<<<<<<<<<<<<<<<<")
         return hidden_states
+
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        if self._enable_eagle3_aux_hidden_states:
+            EagleModelMixin._set_aux_hidden_state_layers(self, layers)
+        else:
+            EagleModelMixin._set_aux_hidden_state_layers(self, ())
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return fused_moe_make_expert_params_mapping(
@@ -1068,17 +1058,21 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
         return self.get_hf_processor(**kwargs).video_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None, "video": None}
+        limits: dict[str, int | None] = {"image": None}
+        mm_config = self.ctx.get_mm_config()
+        if "video" in mm_config.limit_per_prompt:
+            limits["video"] = None
+        return limits
 
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        return {
-            "image": self.get_max_image_tokens(),
-            "video": self.get_max_video_tokens(seq_len, mm_counts),
-        }
+        max_tokens = {"image": self.get_max_image_tokens()}
+        if mm_counts.get("video", 0) > 0:
+            max_tokens["video"] = self.get_max_video_tokens(seq_len, mm_counts)
+        return max_tokens
 
     def get_image_size_with_most_features(self) -> ImageSize:
         return _get_minimax_m3_image_size(self.get_image_processor())
