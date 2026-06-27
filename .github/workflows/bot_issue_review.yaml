@@ -39,26 +39,25 @@ jobs:
       - name: Install dependencies
         run: pip install requests pyyaml regex
 
-      # Step 1: Extract issue type from title → issue_type.txt
-      - name: Extract input
-        id: extract
+      # Step 1: Prepare input — extract type, load template, truncate body
+      - name: Prepare input
+        id: prepare
         env:
           ISSUE_TITLE: ${{ github.event.issue.title }}
-        run: python .github/workflows/scripts/robot/extract_input.py --output issue_type.txt
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python .github/workflows/scripts/robot/prepare_input.py \
+            --type-output issue_type.txt \
+            --template-output template.txt \
+            --body-output body.txt
 
-      # Step 2: Load the matching issue template → template.txt
-      - name: Prepare template
-        id: template
-        if: success()
-        run: python .github/workflows/scripts/robot/prepare_template.py --input issue_type.txt --output template.txt
-
-      # Step 3: Load the system prompt → system_prompt.txt
+      # Step 2: Load the system prompt → system_prompt.txt
       - name: Prepare system prompt
         id: sysprompt
         if: success()
         run: python .github/workflows/scripts/robot/prepare_system_prompt.py --output system_prompt.txt
 
-      # Step 4: Call LLM for description completeness check → review_result.json
+      # Step 3: Call LLM for description completeness check → review_result.json
       - name: Call LLM
         id: llm
         if: success()
@@ -69,15 +68,15 @@ jobs:
           VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
           VLLM_BASE_URL: ${{ secrets.VLLM_BASE_URL }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           python .github/workflows/scripts/robot/call_llm.py \
             --system-prompt system_prompt.txt \
             --template template.txt \
             --type-key issue_type.txt \
+            --body body.txt \
             --output review_result.json
 
-      # Step 5: Post comment if description incomplete → label_actions.json
+      # Step 4: Post comment if description incomplete → label_actions.json
       - name: Post handler
         id: post
         if: success()
@@ -91,7 +90,7 @@ jobs:
             --input review_result.json \
             --label-output label_actions.json
 
-      # Step 6: Add or remove the need-detail-desc label
+      # Step 5: Add or remove the need-detail-desc label
       - name: Manage label
         id: label
         if: success()

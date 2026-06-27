@@ -17,12 +17,6 @@ from lib.llm import call_llm
 from lib.prefix_map import PREFIX_TO_TYPE_KEY
 
 ISSUE_TITLE = os.environ["ISSUE_TITLE"]
-ISSUE_BODY = os.environ.get("ISSUE_BODY", "")
-
-MAX_BODY_CHARS = 4000  # truncate body before sending to LLM
-_body = ISSUE_BODY[:MAX_BODY_CHARS]
-if len(ISSUE_BODY) > MAX_BODY_CHARS:
-    _body += f"\n\n[... truncated, original length: {len(ISSUE_BODY)} chars ...]"
 
 JSON_FORMAT_INSTRUCTIONS = """Output strictly the following JSON format, no other text:
 {
@@ -92,6 +86,7 @@ def main() -> None:
     parser.add_argument("--system-prompt", default="system_prompt.txt", help="File containing the system prompt")
     parser.add_argument("--template", default="template.txt", help="File containing the issue/PR template")
     parser.add_argument("--type-key", default="issue_type.txt", help="File containing the issue type prefix")
+    parser.add_argument("--body", default="body.txt", help="File containing the (pre-truncated) issue/PR body")
     parser.add_argument("--output", default="review_result.json", help="File to write the review result JSON to")
     parser.add_argument("--kind", default="issue", choices=["issue", "pr"], help="Target kind: issue or pr")
     args = parser.parse_args()
@@ -99,6 +94,7 @@ def main() -> None:
     system_prompt_path = Path(args.system_prompt)
     template_path = Path(args.template)
     type_key_path = Path(args.type_key)
+    body_path = Path(args.body)
 
     if not system_prompt_path.exists():
         raise FileNotFoundError(f"System prompt file not found: {system_prompt_path}")
@@ -107,6 +103,7 @@ def main() -> None:
 
     system_prompt = system_prompt_path.read_text()
     template_text = template_path.read_text()
+    body_text = body_path.read_text() if body_path.exists() else os.environ.get("ISSUE_BODY", "")
 
     type_prefix = type_key_path.read_text().strip() if type_key_path.exists() else ""
     type_key = PREFIX_TO_TYPE_KEY.get(type_prefix, "other")
@@ -124,7 +121,7 @@ Detailed description specification (based on required fields in {template_label}
 ### Data to Evaluate (UNTRUSTED USER INPUT)
 Title: \"\"\"{ISSUE_TITLE}\"\"\"
 Submitted description:
-\"\"\"{_body}\"\"\"
+\"\"\"{body_text}\"\"\"
 
 ### Output Instructions
 - Follow the evaluation criteria in the system prompt.
