@@ -6,9 +6,7 @@ Qwen3.5-27B and Qwen3.6-27B are dense hybrid Mamba-Transformer language models i
 
 This document will demonstrate the main validation steps for the models, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
 
-The `Qwen3.5-27B` model is first supported in `vllm-ascend:v0.17.0rc1`. This document is validated and written based on **vLLM-Ascend v0.17.0rc1**. All **v0.17.0 and later versions** can run stably. To use the latest features (e.g., MTP speculative decoding), it is recommended to use v0.17.0rc1 or a later version.
-
-The `Qwen3.6-27B` model is first supported in `vllm-ascend:v0.18.0rc1`. It is recommended to use v0.18.0rc1 or a later version to access the latest Qwen3.6-27B features and bug fixes.
+It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. As a minimum-version requirement, `Qwen3.5-27B` is first supported in `vllm-ascend:v0.17.0rc1`, and `Qwen3.6-27B` is first supported in `vllm-ascend:v0.18.0rc1`.
 
 ## 2 Supported Features
 
@@ -42,7 +40,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-Use `vllm-ascend:v0.17.0rc1` for `Qwen3.5-27B` (or `v0.18.0rc1` for `Qwen3.6-27B`). For `Qwen3.6-27B`, please use the matching `v0.18.0rc1-a3` image on Atlas 800 A3.
+It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features. As a minimum-version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for `Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800 A3, please use the matching `v0.18.0rc1-a3` (or a later `-a3`) image.
 
 :::::{tab-set}
 :sync-group: install
