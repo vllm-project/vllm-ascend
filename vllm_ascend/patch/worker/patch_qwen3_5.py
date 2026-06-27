@@ -160,3 +160,70 @@ else:
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
     _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
+
+
+# ----------------------------------------------------------------------------
+# EVS (Efficient Video Sampling) multimodal pruning for Qwen3.5.
+# Qwen3.5 inherits the full EVS pipeline (pruning in _process_video_input +
+# recompute_mrope_positions) from Qwen3VLForConditionalGeneration but ships
+# with it explicitly disabled. Re-enable it on Ascend NPU by:
+#   1. supports_multimodal_pruning = True
+#   2. drop the NotImplementedError override of recompute_mrope_positions so
+#      the parent's impl is inherited
+#   3. wrap __init__ to honor multimodal_config flags (--video-pruning-rate
+#      q>0) and set the EVS post-processing attributes (_tokenizer /
+#      use_deepstack / visual_dim / ...) that Qwen3.5's __init__ omits (it
+#      calls nn.Module.__init__ instead of super().__init__).
+# The runner-side wiring (NPUModelRunner.load_model setting
+# is_multimodal_pruning_enabled) lives in worker/model_runner_v1.py.
+# ----------------------------------------------------------------------------
+from vllm.model_executor.models.qwen3_5 import (  # noqa: E402
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration,
+)
+from vllm.tokenizers.registry import cached_tokenizer_from_config  # noqa: E402
+
+
+def _set_qwen3_5_evs_attrs(self, vllm_config):
+    mm_config = vllm_config.model_config.multimodal_config
+    config = vllm_config.model_config.hf_config
+    self.is_multimodal_pruning_enabled = mm_config.is_multimodal_pruning_enabled() if mm_config is not None else False
+    self.video_pruning_rate = mm_config.video_pruning_rate if mm_config is not None else 0.0
+    self.model_config = vllm_config.model_config
+    self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+    # Qwen3.5 ships an empty deepstack_visual_indexes; use bool(...) so the
+    # EVS path does not enter the deepstack branch with num_level == 0.
+    vision_config = getattr(config, "vision_config", None)
+    _ds = getattr(vision_config, "deepstack_visual_indexes", None) or []
+    self.use_deepstack = bool(_ds)
+    self.deepstack_num_level = len(_ds)
+    self.visual_dim = vision_config.out_hidden_size if vision_config is not None else 0
+    self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+
+_orig_qwen3_5_init = Qwen3_5ForConditionalGeneration.__init__
+
+
+def _qwen3_5_evs_init(self, *, vllm_config, prefix="model"):
+    _orig_qwen3_5_init(self, vllm_config=vllm_config, prefix=prefix)
+    _set_qwen3_5_evs_attrs(self, vllm_config)
+
+
+Qwen3_5ForConditionalGeneration.__init__ = _qwen3_5_evs_init
+Qwen3_5ForConditionalGeneration.supports_multimodal_pruning = True
+if "recompute_mrope_positions" in Qwen3_5ForConditionalGeneration.__dict__:
+    del Qwen3_5ForConditionalGeneration.recompute_mrope_positions
+
+# MoE variant: it overrides __init__ but inherits recompute_mrope_positions.
+_orig_qwen3_5_moe_init = Qwen3_5MoeForConditionalGeneration.__init__
+
+
+def _qwen3_5_moe_evs_init(self, *, vllm_config, prefix="model"):
+    _orig_qwen3_5_moe_init(self, vllm_config=vllm_config, prefix=prefix)
+    _set_qwen3_5_evs_attrs(self, vllm_config)
+
+
+Qwen3_5MoeForConditionalGeneration.__init__ = _qwen3_5_moe_evs_init
+Qwen3_5MoeForConditionalGeneration.supports_multimodal_pruning = True
+if "recompute_mrope_positions" in Qwen3_5MoeForConditionalGeneration.__dict__:
+    del Qwen3_5MoeForConditionalGeneration.recompute_mrope_positions

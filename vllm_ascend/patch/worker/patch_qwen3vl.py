@@ -108,3 +108,26 @@ def patch_qwen3_vl_moe_pp_layer_range():
 
 
 patch_qwen3_vl_moe_pp_layer_range()
+
+
+# ----------------------------------------------------------------------------
+# EVS (Efficient Video Sampling) device fix for recompute_mrope_positions.
+# mrope_positions is built from numpy in get_mrope_input_positions (CPU) while
+# multimodal_embeddings live on the NPU. The EVS arithmetic inside
+# recompute_mrope_positions (mm_pos[...] + base) mixes the two and raises a
+# cross-device error on NPU. Move mrope_positions to the embeddings' device
+# before delegating to the original implementation. (No-op when already
+# co-located, e.g. on GPU.)
+# ----------------------------------------------------------------------------
+def _evs_recompute_mrope_positions_wrap(orig):
+    def wrap(self, input_ids, multimodal_embeddings, mrope_positions, num_computed_tokens):
+        if mrope_positions is not None and len(multimodal_embeddings):
+            mrope_positions = mrope_positions.to(multimodal_embeddings[0].device)
+        return orig(self, input_ids, multimodal_embeddings, mrope_positions, num_computed_tokens)
+
+    return wrap
+
+
+Qwen3VLForConditionalGeneration.recompute_mrope_positions = _evs_recompute_mrope_positions_wrap(
+    Qwen3VLForConditionalGeneration.recompute_mrope_positions
+)
