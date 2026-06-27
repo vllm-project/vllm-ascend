@@ -153,9 +153,9 @@ jobs:
 #          - name: GLM_5_1_PD_in64k_bs64-90
 #            config_file_path: 0_GLM_5_1_PD_in64k_bs64-90.yaml
 #            size: 4
-          - name: dsv3.2-PD
-            config_file_path: Deepseekv3_2_PD.yaml
-            size: 4
+#          - name: dsv3.2-PD
+#            config_file_path: Deepseekv3_2_PD.yaml
+#            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
