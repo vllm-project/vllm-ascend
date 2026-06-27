@@ -22,7 +22,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### 3.2 Verify Multi-node Communication(Optional)
+### 3.2 Verify Multi-node Communication
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
@@ -34,12 +34,15 @@ You can use our official docker image to run `DeepSeek-OCR-2` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A2 series
+:sync: A2
+
 ```{code-block} bash
    :substitutions:
-# Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
-# Update the vllm-ascend image according to your environment.
-# Note you should download the weight to /root/.cache in advance.
-# Update the vllm-ascend image
+
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
@@ -57,6 +60,50 @@ docker run --rm \
 --device /dev/davinci5 \
 --device /dev/davinci6 \
 --device /dev/davinci7 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-it $IMAGE bash
+```
+
+::::{tab-item} A3 series
+:sync: A3
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export NAME=vllm-ascend
+
+# Run the container using the defined variables
+# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
+docker run --rm \
+--name $NAME \
+--net=host \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci4 \
+--device /dev/davinci5 \
+--device /dev/davinci6 \
+--device /dev/davinci7 \
+--device /dev/davinci8 \
+--device /dev/davinci9 \
+--device /dev/davinci10 \
+--device /dev/davinci11 \
+--device /dev/davinci12 \
+--device /dev/davinci13 \
+--device /dev/davinci14 \
+--device /dev/davinci15 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
 --device /dev/hisi_hdc \
@@ -147,7 +194,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 ## 7 Accuracy Evaluation
 
-Here ia an accuracy evaluation methods.
+Here is an accuracy evaluation methods.
 
 ### Using AISBench
 
@@ -160,7 +207,7 @@ Here ia an accuracy evaluation methods.
 | textvqa | - | accuracy | gen | 50.28 | 1 Atlas 800 A2 |
 | ominidocbench | - | accuracy | gen | 66.86 | 1 Atlas 800 A2 |
 
-## 8 Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 
@@ -173,10 +220,6 @@ The performance result is:
 **Input/Output**: 1080P/256
 
 **Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each card is 864 TPS (Token Per Second).
-
-## Best Practices
-
-In this chapter, we recommend best practices. for details about best practices, see the "Single-node Deployment" section.
 
 ## 9 Performance Tuning
 
