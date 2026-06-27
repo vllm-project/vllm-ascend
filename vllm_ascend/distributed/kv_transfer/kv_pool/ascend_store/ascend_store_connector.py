@@ -84,9 +84,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
-        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
-        self.backend_name = backend_name.lower()
-        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
@@ -101,21 +98,20 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
+        self.sended_but_unfinished_reqs: set[str] = set()
+
         if role == KVConnectorRole.SCHEDULER:
-            assert kv_cache_config is not None
-            page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-            self.connector_scheduler = KVPoolScheduler(
-                vllm_config, self.use_layerwise, kv_cache_config, page_size_bytes=page_size_bytes
-            )
+            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
                 self.use_layerwise,
                 kv_cache_config,
             )
+
             assert self.connector_worker is not None
-            if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
-                self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
+            if vllm_config.parallel_config.rank == 0:
+                self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config, self.use_layerwise)
 
     ############################################################
     # Scheduler Side Methods
@@ -278,8 +274,10 @@ class LookupKeyServer:
         self,
         pool_worker: KVPoolWorker,
         vllm_config: "VllmConfig",
+        use_layerwise: bool,
     ):
         self.decoder = MsgpackDecoder()
+        self.decoder_tensor = MsgpackDecoder(torch.Tensor)
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -291,6 +289,7 @@ class LookupKeyServer:
 
         self.pool_worker = pool_worker
         self.running = True
+        self.use_layerwise = use_layerwise
 
         def process_request():
             while self.running:
@@ -303,7 +302,7 @@ class LookupKeyServer:
                     token_len,
                     hashes_str,
                     kv_group_ids,
-                    use_layerwise=False,
+                    self.use_layerwise,
                 )
                 logger.debug(
                     "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
@@ -319,3 +318,4 @@ class LookupKeyServer:
 
     def close(self):
         self.socket.close(linger=0)
+        # TODO: close the thread!

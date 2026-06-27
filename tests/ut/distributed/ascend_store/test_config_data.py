@@ -202,9 +202,9 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
         self.assertEqual(block_id, 5)
         self.assertEqual(len(addr), 2)
-        # layer_id=0 => kv_caches_base_addr[0*2 + i] per cache i
+        # layer_id=0 => kv_caches_base_addr[0*2] and [0*2+... index mod length]
         self.assertEqual(addr[0], 1000 + 5 * 160)
-        self.assertEqual(addr[1], 2000 + 5 * 320)
+        self.assertEqual(addr[1], 1000 + 5 * 320)
 
     def test_decode_adaptor_prefill_pp_no_partitions(self):
         key, addr, size = self.db.decode_adaptor_prefill_pp(["k1"], [[1, 2]], [[10, 20]])
@@ -447,15 +447,7 @@ class TestReqMeta(unittest.TestCase):
             allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        # Provide block_hashes (2 full blocks for token_len=32 / granularity=16)
-        # so the boundary_without_hash short-circuit does not zero out the save
-        # length and skip; this exercises the original_block_size propagation.
-        meta = ReqMeta.from_request_tracker(
-            tracker,
-            cache_transfer_granularity=16,
-            original_block_size=8,
-            block_hashes=[b"h0", b"h1"],
-        )
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, original_block_size=8)
         self.assertIsNotNone(meta)
         self.assertEqual(meta.original_block_size, 8)
 
