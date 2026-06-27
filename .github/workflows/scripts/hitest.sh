@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-MIN_FREE_GB=3 
+MIN_FREE_GB=3
 
 # 从环境变量读取，兜底空值防止unbound variable
 API_PREFIX="${AUROGON_API_PREFIX:-}"
