@@ -133,6 +133,7 @@
     - tests/e2e/pull_request/one_card/aclgraph
     - tests/e2e/pull_request/two_card/aclgraph
     - tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py
+    - tests/e2e/pull_request/four_card/test_graph_mode.py
 
 - name: compilation_passes_base
   optional: false
@@ -526,8 +527,6 @@
     - tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
     - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
-    - tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py
-    - tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_mem.py
     - tests/e2e/pull_request/one_card/pooling
     - tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py
     - tests/e2e/pull_request/one_card/test_guided_decoding.py
@@ -540,6 +539,7 @@
     - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
     - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
     - tests/e2e/pull_request/four_card/test_qwen3_5.py
+    - tests/e2e/pull_request/four_card/test_graph_mode.py
 
 
 - name: worker_v2
@@ -662,9 +662,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/_310p/test_scoring_310p.py: 290
   tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 250
   tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py: 370
-  tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py: 1780
   tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_batch_invariant.py: 660
-  tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_mem.py: 270
   tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py: 100
   tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py: 80
   tests/e2e/pull_request/one_card/compile/test_norm_quant_fusion.py: 120
@@ -706,8 +704,6 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_vlm.py: 710
   tests/e2e/pull_request/one_card/test_xlite.py: 160
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
-  tests/e2e/pull_request/two_card/aclgraph/test_full_graph_mode.py: 690
-  tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py: 430
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 120
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 260
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 650
@@ -743,6 +739,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 210
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 1250
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1760
+  tests/e2e/pull_request/four_card/test_graph_mode.py: 190
   tests/ut/attention/a2/test_attention_cp.py: 40
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30
