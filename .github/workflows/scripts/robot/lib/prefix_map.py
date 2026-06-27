@@ -10,12 +10,13 @@ TITLE_TO_TEMPLATE: dict[str, str] = {
     "[Usage]": "300-usage.yml",
     "[Doc]": "100-documentation.yml",
     "[Misc]": "800-others.yml",
+    "[Feature]": "500-feature-request.yml",
+    "[Perf]": "700-performance-discussion.yml",
 }
 
 PREFIX_TO_TYPE_KEY: dict[str, str] = {
     "[Bug]": "bug",
     "[Installation]": "installation",
-    "[Install]": "installation",
     "[Usage]": "usage",
     "[Doc]": "document",
     "[Misc]": "other",

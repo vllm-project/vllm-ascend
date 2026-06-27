@@ -24,7 +24,6 @@ jobs:
       (
         startsWith(github.event.issue.title, '[Bug]:') ||
         startsWith(github.event.issue.title, '[Installation]:') ||
-        startsWith(github.event.issue.title, '[Install]:') ||
         startsWith(github.event.issue.title, '[Usage]:') ||
         startsWith(github.event.issue.title, '[Doc]:') ||
         startsWith(github.event.issue.title, '[Misc]:') ||
