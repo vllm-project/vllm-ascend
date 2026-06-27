@@ -70,4 +70,6 @@ jobs:
           X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
           APP_KEY: ${{ secrets.AUROGON_APPKEY }}
           APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
+        # 关键：把上层env全部透传到docker容器
+        options: --env AUROGON_API_PREFIX --env X_APIG_APPCODE --env APP_KEY --env APP_SECRET
         run: python3 .github/workflows/scripts/run_hitest.py
