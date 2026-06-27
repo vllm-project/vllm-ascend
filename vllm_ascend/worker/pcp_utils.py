@@ -50,6 +50,32 @@ class PCPManager:
     num_prefill_reqs: int = 0
     num_decode_tokens: int = 0
     decode_req_mask: np.ndarray | None = None
+    
+    
+    @staticmethod
+    def _debug_np_sample(
+        name: str,
+        value: np.ndarray | None,
+        limit: int = 16,
+    ) -> str:
+        if value is None:
+            return f"{name}=None"
+        arr = np.asarray(value)
+        sample = arr.reshape(-1)[:limit]
+        return f"{name}.shape={arr.shape}, {name}.sample={sample}"
+
+    @staticmethod
+    def _debug_tensor_meta(
+        name: str,
+        value: torch.Tensor | None,
+    ) -> str:
+        if value is None:
+            return f"{name}=None"
+        return (
+            f"{name}.shape={tuple(value.shape)}, "
+            f"{name}.dtype={value.dtype}, "
+            f"{name}.device={value.device}"
+        )
 
     def __init__(
         self,
@@ -663,6 +689,32 @@ class PCPManager:
         # (head and tail). For decode requests, the chunk equals pcp_tokens.
         pcp_chunk_sizes = (pcp_tokens // 2).clip(min=1)
         pcp_chunk_sizes[: self.num_decode_reqs] = pcp_tokens[: self.num_decode_reqs]
+        logger.debug(
+            "[PCP][reorder] split tokens: "
+            "pcp_rank=%s/%s, num_reqs=%s, decode_reqs=%s, prefill_reqs=%s, "
+            "%s, %s, %s, %s",
+            self.pcp_world_rank,
+            self.pcp_world_size,
+            self.num_reqs,
+            self.num_decode_reqs,
+            self.num_prefill_reqs,
+            self._debug_np_sample(
+                "num_scheduled_tokens",
+                num_scheduled_tokens[: self.num_reqs],
+            ),
+            self._debug_np_sample(
+                "num_padded_scheduled_tokens",
+                num_padded_scheduled_tokens[: self.num_reqs],
+            ),
+            self._debug_np_sample(
+                "pcp_tokens",
+                pcp_tokens[: self.num_reqs],
+            ),
+            self._debug_np_sample(
+                "pcp_chunk_sizes",
+                pcp_chunk_sizes[: self.num_reqs],
+            ),
+        )
 
         # Build arange-style helpers for pcp tokens and chunk sizes:
         # - pcp_arange gives indices repeated for each token in pcp_tokens
@@ -717,6 +769,23 @@ class PCPManager:
         all_positions = np.concatenate(all_positions_lst)
         self.pcp_allgather_restore_idx.np[: all_positions.shape[0]] = all_positions.argsort()
         self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
+        logger.debug(
+            "[PCP][reorder] allgather restore idx: "
+            "pcp_rank=%s/%s, all_positions_len=%s, "
+            "pcp_padded_tokens_length=%s, unpad_true=%s, "
+            "%s, %s, %s",
+            self.pcp_world_rank,
+            self.pcp_world_size,
+            all_positions.shape[0],
+            self.pcp_padded_tokens_length,
+            int(self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length].sum()),
+            self._debug_np_sample("positions", positions),
+            self._debug_np_sample("all_positions", all_positions),
+            self._debug_np_sample(
+                "pcp_allgather_restore_idx",
+                self.pcp_allgather_restore_idx.np[: all_positions.shape[0]],
+            ),
+        )
 
         self.pcp_tokens[: self.num_reqs] = pcp_tokens[: self.num_reqs]
         self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_reqs].sum()
@@ -863,6 +932,33 @@ class PCPManager:
             self.num_scheduled_tokens_padded = np.array(self.pcp_tokens_padded, dtype=np.int32)
             self.total_num_scheduled_tokens = num_padded_scheduled_tokens[: self.num_reqs].sum()
             return num_padded_scheduled_tokens, positions_linear
+        logger.debug(
+                "[PCP][reorder][hybrid] FA reorder idx: "
+                "pcp_rank=%s/%s, max_num_tokens_across_pcp=%s, "
+                "total_num_scheduled_tokens=%s, "
+                "total_pcp_padding_tokens_fla=%s, "
+                "pcp_padded_tokens_fla=%s, "
+                "%s, %s, %s, %s",
+                self.pcp_world_rank,
+                self.pcp_world_size,
+                self.max_num_tokens_across_pcp,
+                self.total_num_scheduled_tokens,
+                self.total_pcp_padding_tokens_fla,
+                self.pcp_padded_tokens_fla,
+                self._debug_np_sample("positions_linear", positions_linear),
+                self._debug_tensor_meta(
+                    "pcp_enter_fa_restore_idx",
+                    self.pcp_enter_fa_restore_idx,
+                ),
+                self._debug_tensor_meta(
+                    "pcp_exit_fa_scatter_idx",
+                    self.pcp_exit_fa_scatter_idx.gpu,
+                ),
+                self._debug_tensor_meta(
+                    "pcp_fa_query_idx",
+                    self.pcp_fa_query_idx,
+                ),
+            )
         return pcp_tokens[: self.num_reqs], positions
 
     def get_logits_indices(
