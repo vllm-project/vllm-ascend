@@ -19,13 +19,22 @@ from vllm_ascend.utils import enable_dsa_cp
 class TestAscendSFABackend(TestBase):
     def setUp(self):
         self.mock_config = MagicMock()
+
         mock_parallel_config = MagicMock()
         mock_parallel_config.prefill_context_parallel_size = 1
         mock_parallel_config.decode_context_parallel_size = 1
+
         self.mock_config.parallel_config = mock_parallel_config
 
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
+
+        from vllm_ascend.attention.utils import enable_cp
+
+        enable_cp.cache_clear()
+
+    def tearDown(self):
+        self.utils_patcher.stop()
 
         from vllm_ascend.attention.utils import enable_cp
 
@@ -65,13 +74,8 @@ class TestAscendSFAMetadata(TestBase):
         seq_lens = torch.tensor([30, 50])
         cum_query_lens = torch.tensor([0, 30, 80])
         block_table = torch.randint(0, 100, (100, 4))
-
-        rope_dim = 32
-        max_seq_len = int(seq_lens.max().item())
-        sin = torch.randn(max_seq_len, rope_dim)
-        cos = torch.randn(max_seq_len, rope_dim)
-
         num_input_tokens = 2
+        input_positions = torch.arange(num_input_tokens)
         head_dim = None
         attn_mask = None
         attn_state = AscendAttentionState.ChunkedPrefill
@@ -83,8 +87,7 @@ class TestAscendSFAMetadata(TestBase):
             seq_lens_cpu=seq_lens,
             cum_query_lens=cum_query_lens,
             block_table=block_table,
-            sin=sin,
-            cos=cos,
+            input_positions=input_positions,
             num_input_tokens=num_input_tokens,
             head_dim=head_dim,
             attn_mask=attn_mask,
@@ -96,8 +99,7 @@ class TestAscendSFAMetadata(TestBase):
         self.assertTrue(torch.equal(metadata.seq_lens, seq_lens))
         self.assertTrue(torch.equal(metadata.cum_query_lens, cum_query_lens))
         self.assertIs(metadata.block_table, block_table)
-        self.assertIs(metadata.sin, sin)
-        self.assertIs(metadata.cos, cos)
+        self.assertIs(metadata.input_positions, input_positions)
         self.assertEqual(metadata.num_input_tokens, num_input_tokens)
         self.assertIs(metadata.head_dim, head_dim)
         self.assertIs(metadata.attn_mask, attn_mask)
@@ -194,13 +196,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert builder.vllm_config == vllm_config
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
-    @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build(
         self,
         mock_enable_dsa_cp,
-        mock_get_cos_and_sin_mla,
         mock_get_current_vllm_config,
     ):
         mock_enable_dsa_cp.return_value = False
@@ -238,11 +238,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         common_attn_metadata.block_table_tensor = torch.randn(100, 4)
-        common_attn_metadata.cos = None
-        common_attn_metadata.sin = None
         common_attn_metadata.num_input_tokens = 100
-
-        mock_get_cos_and_sin_mla.return_value = (torch.randn(100), torch.randn(100))
 
         metadata = builder.build(
             common_prefix_len=10,
@@ -254,12 +250,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert metadata.slot_mapping.shape == (100, 4, 1024)
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
-    @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp", return_value=False)
     @patch("vllm.distributed.parallel_state.get_tp_group")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build_for_graph_capture(
-        self, mock_get_tp_group, mock_enable_dsa_cp, mock_get_cos_and_sin_mla, mock_get_current_vllm_config
+        self, mock_get_tp_group, mock_enable_dsa_cp, mock_get_current_vllm_config
     ):
         cfg = MagicMock()
         cfg.model_config = MagicMock()
@@ -295,11 +290,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.attn_mask = None
         common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         common_attn_metadata.block_table_tensor = torch.randn(100, 4)
-        common_attn_metadata.cos = None
-        common_attn_metadata.sin = None
         common_attn_metadata.num_input_tokens = 100
-
-        mock_get_cos_and_sin_mla.return_value = (torch.randn(100), torch.randn(100))
 
         attn_metadata = builder.build_for_graph_capture(
             common_attn_metadata=common_attn_metadata,

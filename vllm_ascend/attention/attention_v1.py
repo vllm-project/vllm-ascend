@@ -72,6 +72,12 @@ SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
 
+def _copy_attention_output(output: torch.Tensor, attn_output: torch.Tensor, num_tokens) -> torch.Tensor:
+    valid_tokens = output.shape[0] if _EXTRA_CTX.flash_comm_v1_enabled else num_tokens
+    output.narrow(0, 0, valid_tokens).copy_(attn_output.narrow(0, 0, valid_tokens))
+    return output
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -1197,12 +1203,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if _EXTRA_CTX.capturing:
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
+                return _copy_attention_output(output, attn_output, num_tokens)
             else:
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
+                return _copy_attention_output(output, attn_output, num_tokens)
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
@@ -1300,8 +1304,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
-        output[:num_tokens] = attn_output[:num_tokens]
-        return output
+        return _copy_attention_output(output, attn_output, num_tokens)
 
     def forward_paged_attention(
         self,
@@ -1479,14 +1482,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-            output[:num_tokens] = attn_output[:num_tokens]
-            return output
+            return _copy_attention_output(output, attn_output, num_tokens)
         if output_padded is not None:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
         else:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
-        output[:num_tokens] = attn_output[:num_tokens]
-        return output
+        return _copy_attention_output(output, attn_output, num_tokens)
 
 
 class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
@@ -1532,13 +1533,11 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             # pooling model branch
             if attn_metadata.model_runner_type == "pooling":
                 attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
+                return _copy_attention_output(output, attn_output, num_tokens)
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 if _EXTRA_CTX.capturing:
                     attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
+                    return _copy_attention_output(output, attn_output, num_tokens)
                 return self._forward_c8_decode(query, attn_metadata, output, layer)
             elif attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
                 return self._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
@@ -1562,14 +1561,12 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 # pooling model branch
                 if attn_metadata.model_runner_type == "pooling":
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
+                    return _copy_attention_output(output, attn_output, num_tokens)
                 if output_padded is not None:
                     attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
                 else:
                     attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
+                return _copy_attention_output(output, attn_output, num_tokens)
             elif not self.is_kv_producer:
                 if key is not None and value is not None:
                     key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
@@ -1577,12 +1574,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 # pooling model branch
                 if attn_metadata.model_runner_type == "pooling":
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
+                    return _copy_attention_output(output, attn_output, num_tokens)
                 if _EXTRA_CTX.capturing:
                     attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
+                    return _copy_attention_output(output, attn_output, num_tokens)
                 elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                     return self._forward_c8_decode(query, attn_metadata, output, layer)
 
@@ -1892,8 +1887,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             sparse_mode=3,
         )
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
-        output[:num_tokens] = attn_output
-        return output
+        return _copy_attention_output(output, attn_output, num_tokens)
 
     def _reshape_and_cache(
         self,

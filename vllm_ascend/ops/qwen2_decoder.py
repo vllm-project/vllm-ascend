@@ -1,4 +1,6 @@
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
+from functools import cache
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -13,11 +15,14 @@ from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2Attention,
     Qwen2DecoderLayer,
     Qwen2Model,
+    Qwen2RotaryEmbedding,
     eager_attention_forward,
 )
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
 from vllm.model_executor.models.deepencoder2 import CustomQwen2Decoder
+
+from vllm_ascend.ops.rope_cache_ops import rotary_mul_by_cache
 
 
 class AscendCustomQwen2Decoder(CustomQwen2Decoder):
@@ -169,6 +174,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
 class AscendQwen2Model(Qwen2Model):
     def __init__(self, config: Qwen2Config):
         super().__init__(config)
+        self.rotary_emb = AscendQwen2RotaryEmbedding(config=config)
         self.layers = nn.ModuleList(
             [AscendQwen2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
@@ -224,8 +230,10 @@ class AscendQwen2Model(Qwen2Model):
 
         hidden_states = inputs_embeds
 
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        # Keep RoPE ownership as positions + cache. The attention layer applies
+        # the cache by token positions and does not receive materialized cos/sin.
+        position_embeddings = self.rotary_emb
+        position_embeddings.ensure_cos_sin_cache(position_ids, hidden_states)
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             hidden_states = decoder_layer(
@@ -261,7 +269,7 @@ class AscendQwen2DecoderLayer(Qwen2DecoderLayer):
         past_key_values: Cache | None = None,
         use_cache: bool | None = False,
         cache_position: torch.LongTensor | None = None,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        position_embeddings: nn.Module | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
         residual = hidden_states
@@ -287,12 +295,115 @@ class AscendQwen2DecoderLayer(Qwen2DecoderLayer):
         return hidden_states
 
 
-def optimized_apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = torch_npu.npu_rotary_mul(q, cos, sin)
-    k_embed = torch_npu.npu_rotary_mul(k, cos, sin)
+class AscendQwen2RotaryEmbedding(Qwen2RotaryEmbedding):
+    """Qwen2 RoPE cache view that matches vLLM's [cos_half, sin_half] layout."""
+
+    def __init__(self, config: Qwen2Config, device=None):
+        super().__init__(config, device=device)
+        self.rotary_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+        self.is_neox_style = True
+        self._set_cos_sin_cache(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+
+    def _set_cos_sin_cache(self, max_seq_len: int, device=None, dtype: torch.dtype | None = None) -> None:
+        cache_dtype = dtype or torch.float32
+        t = torch.arange(max_seq_len, device=device, dtype=torch.float32)
+        inv_freq = self.inv_freq.to(device=device, dtype=torch.float32)
+        freqs = torch.outer(t, inv_freq)
+        cache = torch.cat((freqs.cos(), freqs.sin()), dim=-1) * self.attention_scaling
+        cache = cache.to(dtype=cache_dtype)
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        self.max_seq_len_cached = max_seq_len
+
+    @torch.no_grad()
+    def ensure_cos_sin_cache(self, position_ids: torch.Tensor, ref_tensor: torch.Tensor) -> None:
+        if position_ids.numel() == 0:
+            return
+
+        dynamic_frequency_update = getattr(self, "_dynamic_frequency_update", None)
+        if callable(dynamic_frequency_update):
+            dynamic_frequency_update(position_ids, device=ref_tensor.device)
+
+        max_position = int(position_ids.max().item()) + 1
+        cache_len = self.cos_sin_cache.shape[0]
+        target_len = max(max_position, int(getattr(self, "max_seq_len_cached", cache_len)))
+        if (
+            cache_len == target_len
+            and self.cos_sin_cache.device == ref_tensor.device
+            and self.cos_sin_cache.dtype == ref_tensor.dtype
+        ):
+            return
+
+        self._set_cos_sin_cache(target_len, device=ref_tensor.device, dtype=ref_tensor.dtype)
+
+    def _match_cos_sin_cache_dtype(self, ref_tensor: torch.Tensor) -> torch.Tensor:
+        cos_sin_cache = self.cos_sin_cache
+        if cos_sin_cache.device == ref_tensor.device and cos_sin_cache.dtype == ref_tensor.dtype:
+            return cos_sin_cache
+        return cos_sin_cache.to(device=ref_tensor.device, dtype=ref_tensor.dtype)
+
+
+def _flatten_qwen2_positions(position_ids: torch.Tensor, batch_size: int, seq_len: int) -> torch.Tensor:
+    expected = batch_size * seq_len
+    if position_ids.numel() == expected:
+        positions = position_ids.reshape(-1)
+    elif position_ids.dim() == 1:
+        positions = position_ids.unsqueeze(0).expand(batch_size, -1).reshape(-1)
+    else:
+        positions = position_ids.reshape(-1)
+
+    if positions.numel() != expected:
+        raise ValueError(f"Qwen2 RoPE positions must contain {expected} entries, got {positions.numel()}.")
+    return positions
+
+
+def optimized_apply_rotary_pos_emb_by_cache(q, k, position_ids, rotary_emb):
+    batch_size, num_q_heads, seq_len, head_dim = q.shape
+    num_k_heads = k.shape[1]
+    positions = _flatten_qwen2_positions(position_ids, batch_size, seq_len)
+
+    q_tokens = q.transpose(1, 2).contiguous().view(-1, num_q_heads, 1, head_dim)
+    k_tokens = k.transpose(1, 2).contiguous().view(-1, num_k_heads, 1, head_dim)
+    q_embed = rotary_mul_by_cache(q_tokens, positions, rotary_emb, layout="T11D")
+    k_embed = rotary_mul_by_cache(k_tokens, positions, rotary_emb, layout="T11D")
+    assert q_embed is not None
+    assert k_embed is not None
+    q_embed = q_embed.view(batch_size, seq_len, num_q_heads, head_dim).transpose(1, 2).contiguous()
+    k_embed = k_embed.view(batch_size, seq_len, num_k_heads, head_dim).transpose(1, 2).contiguous()
     return q_embed, k_embed
+
+
+@cache
+def _cache_update_type_uses_rope_kwargs(cache_type: type) -> bool:
+    if cache_type.__name__ in {"SinkCache"}:
+        return True
+
+    update = getattr(cache_type, "update", None)
+    code = getattr(update, "__code__", None)
+    if code is None:
+        return False
+    code_strings = {item for item in code.co_consts if isinstance(item, str)}
+    code_strings.update(code.co_names)
+    return "sin" in code_strings and "cos" in code_strings
+
+
+def _cache_update_uses_rope_kwargs(past_key_values: Cache) -> bool:
+    return _cache_update_type_uses_rope_kwargs(cast(Hashable, type(past_key_values)))
+
+
+def _materialize_qwen2_cache_update_rope(
+    position_ids: torch.Tensor,
+    rotary_emb: AscendQwen2RotaryEmbedding,
+    ref_tensor: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cos_sin = rotary_emb._match_cos_sin_cache_dtype(ref_tensor)[position_ids]
+    cos, sin = cos_sin.chunk(2, dim=-1)
+    if getattr(rotary_emb, "is_neox_style", True):
+        cos = torch.cat((cos, cos), dim=-1)
+        sin = torch.cat((sin, sin), dim=-1)
+    else:
+        cos = cos.repeat_interleave(2, dim=-1)
+        sin = sin.repeat_interleave(2, dim=-1)
+    return cos.contiguous(), sin.contiguous()
 
 
 class AscendQwen2Attention(Qwen2Attention):
@@ -304,7 +415,8 @@ class AscendQwen2Attention(Qwen2Attention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        position_ids: torch.LongTensor,
+        position_embeddings: AscendQwen2RotaryEmbedding,
         attention_mask: torch.Tensor | None,
         past_key_values: Cache | None = None,
         cache_position: torch.LongTensor | None = None,
@@ -317,12 +429,18 @@ class AscendQwen2Attention(Qwen2Attention):
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        cos, sin = position_embeddings
-        query_states, key_states = optimized_apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = optimized_apply_rotary_pos_emb_by_cache(
+            query_states,
+            key_states,
+            position_ids,
+            position_embeddings,
+        )
 
         if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            cache_kwargs = {"cache_position": cache_position}
+            if _cache_update_uses_rope_kwargs(past_key_values):
+                cos, sin = _materialize_qwen2_cache_update_rope(position_ids, position_embeddings, query_states)
+                cache_kwargs.update({"sin": sin, "cos": cos})
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         attention_interface: Callable = eager_attention_forward

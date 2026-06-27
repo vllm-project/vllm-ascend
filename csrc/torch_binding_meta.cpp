@@ -54,6 +54,78 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     return {masked_input, mask};
 }
 
+at::Tensor interleave_rope_by_cache_meta(
+    const at::Tensor &qk,
+    const at::Tensor &positions,
+    const at::Tensor &cos_sin_cache,
+    int64_t rope_dim,
+    bool is_neox_style) {
+    (void)positions;
+    (void)cos_sin_cache;
+    (void)rope_dim;
+    (void)is_neox_style;
+    return at::empty_like(qk);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> kv_rmsnorm_rope_cache_by_cache_meta(
+    const at::Tensor &kv,
+    const at::Tensor &weight,
+    const at::Tensor &positions,
+    const at::Tensor &cos_sin_cache,
+    const at::Tensor &slots,
+    at::Tensor &kv_cache_rope,
+    at::Tensor &kv_cache_nope,
+    double epsilon,
+    int64_t rope_dim,
+    bool is_neox_style,
+    bool is_output_kv,
+    bool cache_mode_is_nz) {
+    (void)positions;
+    (void)cos_sin_cache;
+    (void)slots;
+    (void)epsilon;
+    (void)is_neox_style;
+    (void)cache_mode_is_nz;
+    at::Tensor out_rope = is_output_kv
+        ? at::empty({kv.size(0), 1, 1, rope_dim}, kv.options())
+        : at::empty({0}, kv.options());
+    at::Tensor out_nope = is_output_kv
+        ? at::empty({kv.size(0), 1, 1, weight.size(0)}, kv.options())
+        : at::empty({0}, kv.options());
+    return {kv_cache_rope, kv_cache_nope, out_rope, out_nope};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+kv_rmsnorm_rope_cache_and_interleave_by_cache_meta(
+    const at::Tensor &kv,
+    const at::Tensor &weight,
+    const at::Tensor &q,
+    const at::Tensor &positions,
+    const at::Tensor &cos_sin_cache,
+    const at::Tensor &slots,
+    at::Tensor &kv_cache_rope,
+    at::Tensor &kv_cache_nope,
+    double epsilon,
+    int64_t rope_dim,
+    bool is_neox_style,
+    bool is_output_kv,
+    bool cache_mode_is_nz) {
+    (void)positions;
+    (void)cos_sin_cache;
+    (void)slots;
+    (void)epsilon;
+    (void)is_neox_style;
+    (void)cache_mode_is_nz;
+    at::Tensor q_out = at::empty_like(q);
+    at::Tensor out_rope = is_output_kv
+        ? at::empty({kv.size(0), 1, 1, rope_dim}, kv.options())
+        : at::empty({0}, kv.options());
+    at::Tensor out_nope = is_output_kv
+        ? at::empty({kv.size(0), 1, 1, weight.size(0)}, kv.options())
+        : at::empty({0}, kv.options());
+    return {q_out, kv_cache_rope, kv_cache_nope, out_rope, out_nope};
+}
+
 at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
                         int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
@@ -66,7 +138,7 @@ at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_
     return y_out;
 }
 
-std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess_by_cache(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
     const c10::optional<at::Tensor> &descale0,
@@ -75,8 +147,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     const at::Tensor &wuq,
     const c10::optional<at::Tensor> &descale1,
     const at::Tensor &gamma2,
-    const at::Tensor &cos,
-    const at::Tensor &sin,
+    const at::Tensor &positions,
+    const at::Tensor &cos_sin_cache,
     const at::Tensor &wuk,
     const at::Tensor &kv_cache,
     const at::Tensor &kv_cache_rope,
@@ -92,14 +164,44 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     c10::optional<c10::string_view> cache_mode,
     c10::optional<c10::string_view> quant_mode,
     c10::optional<bool> enable_inner_out,
+    bool is_neox_style,
     at::Tensor &q_out0,
     at::Tensor &kv_cache_out0,
     at::Tensor &q_out1,
     at::Tensor &kv_cache_out1,
-    at::Tensor &inner_out
+    at::Tensor &inner_out,
+    c10::optional<bool> enable_raw_q_out,
+    at::Tensor &raw_q_out
     )
 {
-    return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
+    (void)hiddenState;
+    (void)wdqkv;
+    (void)descale0;
+    (void)gamma1;
+    (void)beta1;
+    (void)wuq;
+    (void)descale1;
+    (void)gamma2;
+    (void)positions;
+    (void)cos_sin_cache;
+    (void)wuk;
+    (void)kv_cache;
+    (void)kv_cache_rope;
+    (void)slotmapping;
+    (void)quant_scale0;
+    (void)quant_offset0;
+    (void)bias0;
+    (void)quant_scale1;
+    (void)quant_offset1;
+    (void)bias1;
+    (void)ctkv_scale;
+    (void)q_nope_scale;
+    (void)cache_mode;
+    (void)quant_mode;
+    (void)enable_inner_out;
+    (void)is_neox_style;
+    (void)enable_raw_q_out;
+    return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out, raw_q_out};
 }
 
 void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor_b, at::Tensor &tensor_c,
@@ -1706,12 +1808,16 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel meta implementations
     ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
+    ops.impl("interleave_rope_by_cache", &vllm_ascend::meta::interleave_rope_by_cache_meta);
+    ops.impl("kv_rmsnorm_rope_cache_by_cache", &vllm_ascend::meta::kv_rmsnorm_rope_cache_by_cache_meta);
+    ops.impl("kv_rmsnorm_rope_cache_and_interleave_by_cache",
+             &vllm_ascend::meta::kv_rmsnorm_rope_cache_and_interleave_by_cache_meta);
     // Bgmv expand
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
-    ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
+    ops.impl("mla_preprocess_by_cache", &vllm_ascend::meta::mla_preprocess_by_cache);
     // batch_matmul_transpose
     ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
 #endif
