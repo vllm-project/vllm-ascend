@@ -38,40 +38,62 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run-hitest:
+  # 宿主机Job：仅导出密钥到仓库临时文件，无lint依赖
+  dump-auth-file:
     runs-on: linux-amd64-cpu-8-hk
-    container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
-      # 挂载runner临时目录，宿主机写入密钥文件，容器可读取
-      volumes:
-        - ${{ runner.temp }}:/host-tmp
     steps:
-      # 1. 宿主机侧写入密钥到临时文件（宿主机能读取secrets）
-      - name: Dump auth env file on host
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Git safe dir
+        run: git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+
+      - name: Write auth env file into repo workspace
         env:
           AUROGON_API_PREFIX: https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service
           X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
           APP_KEY: ${{ secrets.AUROGON_APPKEY }}
           APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
         run: |
-          cat > ${{ runner.temp }}/auth.env <<'EOF'
+          mkdir -p .github/workflows/scripts/tmp
+          cat > .github/workflows/scripts/tmp/auth.env <<'EOF'
           export AUROGON_API_PREFIX="${AUROGON_API_PREFIX}"
           export X_APIG_APPCODE="${X_APIG_APPCODE}"
           export APP_KEY="${APP_KEY}"
           export APP_SECRET="${APP_SECRET}"
           EOF
 
-      # 2. 容器内拉代码
+      # 上传密钥文件给下游容器Job
+      - name: Upload auth env artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-env-file
+          path: .github/workflows/scripts/tmp/auth.env
+
+  # 容器Job：执行lint + hitest，读取上游导出的密钥
+  run-hitest:
+    needs: dump-auth-file
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    steps:
       - name: Checkout repo
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      - name: Download auth env artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: auth-env-file
+          path: .github/workflows/scripts/tmp/
+
       - name: Git safe directory config
         run: git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
-      # 3. 容器自带pre-commit，直接执行，无需安装
-      - name: Quick lint for scripts
+      - name: Quick lint for shell & python scripts
         env:
           PRE_COMMIT_COLOR: always
           FORCE_COLOR: "1"
@@ -79,8 +101,7 @@ jobs:
           SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
         run: pre-commit run --files .github/workflows/scripts/hitest.sh .github/workflows/scripts/run_hitest.py
 
-      # 4. 加载密钥环境变量，执行hitest
-      - name: Execute hitest entry
+      - name: Execute hitest entry with auth env
         run: |
-          source /host-tmp/auth.env
+          source .github/workflows/scripts/tmp/auth.env
           python3 .github/workflows/scripts/run_hitest.py
