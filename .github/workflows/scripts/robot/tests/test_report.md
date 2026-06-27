@@ -13,14 +13,13 @@ Pipeline: `lib/review.py` (shared by production bot and test harness)
 Issues collected from `ai-infra-develop/vllm-ascend` via the GitHub API using
 state-based stratified sampling for balanced representation.
 
-**Total: 84 rows** (67 evaluated, 17 skipped — ineligible title prefix)
+**Total: 84 rows** (59 evaluated, 25 skipped — ineligible title prefix)
 
 Prefix distribution:
 
 | Prefix | Count |
 |--------|-------|
 | `[Bug]` | 57 |
-| `(none / ineligible)` | 6 |
 | `[Contribution]` | 5 |
 | `[Installation]` | 4 |
 | `[Doc]` | 3 |
@@ -29,10 +28,12 @@ Prefix distribution:
 | `[Misc]` | 2 |
 | `[BugFix]` | 1 |
 | `[Usage]` | 1 |
+| `(none / ineligible)` | 6 |
 
-Ineligible titles (skipped by both bot and test harness):
-`[Contribution]`, `[RFC]`, `[BugFix]`, `(none)`, `[Bug][Upstream]` etc. — titles
-without a recognised `[Prefix]:` pattern per `extract_issue_type()`.
+Ineligible titles (skipped by both bot and test harness): `[Contribution]`,
+`[RFC]`, `[BugFix]`, `[Bug][Upstream]:`, `[Bug][v0.20.2]:`, and titles with
+no recognised `[Prefix]:` pattern per `extract_issue_type()` and
+`should_review()`.
 
 ### PR Dataset (`prs.csv`)
 
@@ -44,14 +45,13 @@ Prefix distribution (informational only — PR type key is always `other`):
 
 | Prefix | Count |
 |--------|-------|
-| `[BugFix]` | 16 |
+| `[BugFix]` / `[bugfix]` | 18 |
 | `[CI]` | 15 |
 | `[Doc]` | 7 |
-| `(none)` | 6 |
 | `[Feature]` | 6 |
-| `[EPLB]` | 2 |
+| `(none)` | 6 |
 | `[Misc]` / `[MISC]` | 3 |
-| `[bugfix]` | 2 |
+| `[EPLB]` | 2 |
 | other | 4 |
 
 ---
@@ -65,7 +65,10 @@ Each case is evaluated using the **same `review()` pipeline** as the production
 Title + Body
     │
     ▼
-resolve_type_key(kind, title)     ← same function in bot and test
+should_review(kind, title)        ← gate: mirrors workflow if: filter
+    │
+    ▼
+resolve_type_key(kind, title)     ← derives prefix + type_key from title only
     │
     ▼
 load_template(kind, prefix)       ← loads matching ISSUE_TEMPLATE/*.yml
@@ -86,6 +89,19 @@ validate_result(parse_json_output(raw))
 Results stored as:
 - `deepseek_v4_flash_output` — raw LLM JSON string
 - `expected_ok_dsv4` — parsed boolean (`true` / `false`)
+
+Templates used per prefix:
+
+| Prefix | Template |
+|--------|----------|
+| `[Bug]` | `400-bug-report.yml` |
+| `[Installation]` | `200-installation.yml` |
+| `[Usage]` | `300-usage.yml` |
+| `[Doc]` | `100-documentation.yml` |
+| `[Misc]` | `800-others.yml` |
+| `[Feature]` | `500-feature-request.yml` |
+| `[Perf]` | `700-performance-discussion.yml` |
+| PR (any) | `PULL_REQUEST_TEMPLATE.md` |
 
 ---
 
@@ -110,22 +126,22 @@ across four dimensions:
 | Metric | Value |
 |--------|-------|
 | Total rows | 84 |
-| Ineligible (skipped) | 17 |
-| Evaluated | 67 |
-| ok=true (sufficient) | 34 |
-| ok=false (insufficient) | 33 |
-| Average score | 69.2 / 100 |
-| Judged | 58 |
+| Ineligible (skipped) | 25 |
+| Evaluated | 59 |
+| ok=true (sufficient) | 33 |
+| ok=false (insufficient) | 26 |
+| Average score | 69.1 / 100 |
+| Judged | 59 |
 
 ### Issue Judge Results
 
 | Metric | Count |
 |--------|-------|
-| ok_reasonable=true | 52 |
+| ok_reasonable=true | 53 |
 | ok_reasonable=false | 6 |
-| reasoning_valid=true | 45 |
+| reasoning_valid=true | 46 |
 | reasoning_valid=false | 13 |
-| suggestions_valid=true | 51 |
+| suggestions_valid=true | 52 |
 | suggestions_valid=false | 7 |
 
 **Confusion matrix:**
@@ -133,11 +149,11 @@ across four dimensions:
 | | Judge: reasonable | Judge: not reasonable |
 |---|---|---|
 | **Eval: ok=true** (passed) | TN = 30 | FP = 3 |
-| **Eval: ok=false** (flagged) | TP = 22 | FN = 3 |
+| **Eval: ok=false** (flagged) | TP = 23 | FN = 3 |
 
-- **Accuracy**: 89.7% (52/58)
-- **Precision**: 88.0% (22/25) — of flagged issues, 88% were genuinely bad
-- **Recall**: 88.0% (22/25) — of genuinely bad issues, 88% were correctly flagged
+- **Accuracy**: 89.8% (53/59)
+- **Precision**: 88.5% (23/26) — of flagged issues, 88.5% were genuinely insufficient
+- **Recall**: 88.5% (23/26) — of genuinely insufficient issues, 88.5% were correctly flagged
 
 #### False Positives — bot too lenient (passed a bad description)
 
@@ -151,8 +167,8 @@ across four dimensions:
 
 | # | Title | Judge note |
 |---|-------|------------|
-| 10724 | `[Bug]`: [v0.21.0rc1] Crash on Deepseek v4 Flash on 2\*A2 PD-Mix | Description includes complete repro steps; bot wrongly claimed logs were missing |
-| 10522 | `[Bug]`: 0.20.2rc1 GLM-5.1 PD分离部署，P节点偶现crash | "Describe the bug" section is present with detail; bot incorrectly flagged it missing |
+| 10724 | `[Bug]`: [v0.21.0rc1] Crash on Deepseek v4 Flash on 2\*A2 PD-Mix | Description includes complete stack trace and repro steps; bot wrongly claimed logs were missing |
+| 10522 | `[Bug]`: 0.20.2rc1 GLM-5.1 PD分离部署，P节点偶现crash | "Describe the bug" section is present with detail; bot incorrectly flagged it as missing |
 | 9871 | `[Bug]`: Low MTP acceptance rate for Qwen3.5-122B | Description includes explicit acceptance rate data; bot wrongly called it truncated |
 
 ---
@@ -166,35 +182,35 @@ across four dimensions:
 | ok=true (sufficient) | 34 |
 | ok=false (insufficient) | 27 |
 | Average score | 68.8 / 100 |
-| Judged | 60 |
+| Judged | 61 |
 
 ### PR Judge Results
 
 | Metric | Count |
 |--------|-------|
-| ok_reasonable=true | 59 |
+| ok_reasonable=true | 60 |
 | ok_reasonable=false | 1 |
-| reasoning_valid=true | 60 |
+| reasoning_valid=true | 61 |
 | reasoning_valid=false | 0 |
-| suggestions_valid=true | 59 |
+| suggestions_valid=true | 60 |
 | suggestions_valid=false | 1 |
 
 **Confusion matrix:**
 
 | | Judge: reasonable | Judge: not reasonable |
 |---|---|---|
-| **Eval: ok=true** (passed) | TN = 32 | FP = 1 |
+| **Eval: ok=true** (passed) | TN = 33 | FP = 1 |
 | **Eval: ok=false** (flagged) | TP = 27 | FN = 0 |
 
-- **Accuracy**: 98.3% (59/60)
-- **Precision**: 96.4% (27/28) — of flagged PRs, 96% were genuinely bad
-- **Recall**: 100.0% (27/27) — all genuinely bad PRs were correctly flagged
+- **Accuracy**: 98.4% (60/61)
+- **Precision**: 96.4% (27/28) — of flagged PRs, 96.4% were genuinely insufficient
+- **Recall**: 100.0% (27/27) — all genuinely insufficient PRs were correctly flagged
 
 #### False Positives — bot too lenient
 
 | # | Title | Judge note |
 |---|-------|------------|
-| 10734 | `[Doc]` Translated Doc files 2026-06-19 | Description is a file list with no explanatory summary; lacks substantive content |
+| 10734 | `[Doc]` Translated Doc files 2026-06-19 | Description is a bare file list with no explanatory summary; lacks substantive content |
 
 #### False Negatives
 
@@ -207,25 +223,25 @@ None.
 The review bot pipeline achieves **89–98% accuracy** on description completeness
 judgments across issues and PRs.
 
-| Dataset | Accuracy | Precision | Recall |
-|---------|----------|-----------|--------|
-| Issues | 89.7% | 88.0% | 88.0% |
-| PRs | 98.3% | 96.4% | 100.0% |
+| Dataset | Total | Evaluated | Judged | Accuracy | Precision | Recall |
+|---------|-------|-----------|--------|----------|-----------|--------|
+| Issues | 84 | 59 | 59 | 89.8% | 88.5% | 88.5% |
+| PRs | 61 | 61 | 61 | 98.4% | 96.4% | 100.0% |
 
 **Key observations:**
 
-- **PR evaluation is near-perfect** (98.3% accuracy, 0 false negatives). The PR
-  template is straightforward and the bot reliably identifies incomplete
-  descriptions.
-- **Issue evaluation is solid at 89.7%** with 3 false positives (bot too lenient
-  on incomplete Chinese-language bug reports) and 3 false negatives (bot too
-  strict on descriptions that had sufficient detail in non-standard format).
+- **PR evaluation is near-perfect** (98.4% accuracy, 0 false negatives). The PR
+  template is straightforward and the bot reliably identifies incomplete descriptions.
+- **Issue evaluation is solid at 89.8%** with 3 false positives (bot too lenient
+  on incomplete bug reports, particularly Chinese-language ones missing repro steps)
+  and 3 false negatives (bot too strict on descriptions with sufficient detail in
+  non-standard format).
 - **Reasoning quality**: 78% of issue reasoning and 100% of PR reasoning is
-  self-consistent. The lower issue reasoning rate reflects borderline cases where
-  the bot's judgment is correct but the explanation is imprecise.
+  self-consistent. The lower issue rate reflects borderline cases where the
+  bot's judgment is correct but the explanation imprecise.
 - **Suggestions quality**: 88% of issue suggestions and 98% of PR suggestions
   are specific, actionable, and free of mandatory language.
-- **17 issue rows are ineligible** (e.g. `[Contribution]`, `[RFC]`,
-  `[Bug][Upstream]:`) — these titles are filtered out by both the production
-  workflow `if:` condition and `should_review()` in the test harness, ensuring
-  the test accurately reflects production behaviour.
+- **25 issue rows are ineligible** (e.g. `[Contribution]`, `[RFC]`,
+  `[Bug][Upstream]:`) — filtered out by both the production workflow `if:`
+  condition and `should_review()` in the test harness, ensuring the test
+  accurately reflects production behaviour.

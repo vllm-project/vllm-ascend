@@ -1120,7 +1120,12 @@ NO
     ""summary"": ""Compliant: clear documentation update with minor missing test details"",
     ""missing_items"": [""How was this patch tested""],
     ""suggestions"": [""Consider adding a brief note on how the documentation update was verified, e.g., by reviewing the rendered output locally or relying on CI checks.""]
-}",true,,,,,ERROR: 503 Server Error: Service Unavailable for url: https://opencode.ai/zen/go/v1/chat/completions
+}",true,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""The bot's evaluation is reasonable. The description clearly conveys the purpose for a documentation update, and the missing test details are correctly noted. The suggestion is specific and non-prescriptive. All audit criteria are satisfied.""
+}",true,true,true,"The bot's evaluation is reasonable. The description clearly conveys the purpose for a documentation update, and the missing test details are correctly noted. The suggestion is specific and non-prescriptive. All audit criteria are satisfied."
 10729,[Misc] main2main upgrade vllm to 0619,[Misc],open,"ci/build,module:tests,module:ops,module:core,module:quantization,ready,merge-conflicts",2026-06-18T09:42:31Z,"### What this PR does / why we need it?
 This PR adapts vllm-ascend to the latest upstream vLLM changes (commit `560fb8b867aaa444d471b35fd846368ebacf12b9`). The changes are organized by the upstream PRs they correspond to:
 

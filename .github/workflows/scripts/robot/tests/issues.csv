@@ -1941,14 +1941,7 @@ _____________ test_thinking_token_budget_limits_reasoning[default] _____________
   E       AssertionError: reasoning tokens (99) exceeded thinking_token_budget (5)
   E       assert 99 == 5
   
-  tests/entrypoints/openai/chat_completion/test_thinking_token_budget.py:200: AssertionError","{
-    ""ok"": false,
-    ""score"": 70,
-    ""reasoning"": ""The description clearly identifies the bug with a specific test and an assertion error log, which satisfies the 'Describe the bug' required field. However, the 'Your current environment' required field contains only a placeholder ('Your output of above commands here') with no actual environment information, leaving the maintainer without version/configuration context needed to reproduce or analyze the issue. The missing environment info justifies a non-compliant decision despite the otherwise reasonable bug description."",
-    ""summary"": ""Missing required environment information."",
-    ""missing_items"": [""missing output of collect_env.py (environment info)""],
-    ""suggestions"": [""Please provide the output from `python collect_env.py`, including PyTorch version, CANN version, hardware model, and OS details, as requested in the template.""]
-}",false,,,,,
+  tests/entrypoints/openai/chat_completion/test_thinking_token_budget.py:200: AssertionError",,,,,,,
 10481,[Bug]: 使用vllm0180启动模型失败,[Bug],open,"bug,triaged,qwen3.5,wait-feedback",2026-06-15T06:18:03Z,"### Your current environment
 
 <details>
@@ -2159,14 +2152,7 @@ task1
   E         + dict_keys(['id', 'choices', 'created', 'model', 'object', 'moderation', 'service_tier', 'system_fingerprint', 'usage', 'prompt_logprobs', 'prompt_token_ids', 'kv_transfer_params'])
   E         ?                   ++ ^^ ^                        ++++ ^  ++++++++++++++
   
-  tests/entrypoints/openai/chat_completion/test_chat.py:821: AssertionError","{
-    ""ok"": false,
-    ""score"": 65,
-    ""reasoning"": ""The description includes a detailed error log from a CI run, which partially fulfills the 'Describe the bug' requirement. However, the 'Your current environment' section is a placeholder and contains no actual environment information (OS, Python version, vLLM version, CANN version, hardware model, etc.), which is a required field. Without this information, a maintainer cannot reproduce or investigate the issue effectively. The title and error log provide good context, but the missing environment data is critical for bug analysis."",
-    ""summary"": ""Missing required environment information; bug description has error log but no env details."",
-    ""missing_items"": [""Your current environment (OS, Python version, vLLM version, CANN version, hardware model, etc.)""],
-    ""suggestions"": [""Please run the collect_env.py script and paste the actual output in the 'Your current environment' section."", ""Alternatively, manually provide the OS, Python version, vLLM version, CANN/NPU driver version, and hardware model (e.g., A3, A5).""]
-}",false,,,,,
+  tests/entrypoints/openai/chat_completion/test_chat.py:821: AssertionError",,,,,,,
 10383,[Bug]:  Probabilistic empty outputs under multi-concurrency when testing GSM8K/GPQA on Ascend 950PR,[Bug],open,"bug,triaged,llm-model,deepseek-v4",2026-06-12T03:09:26Z,"### Your current environment
 
 <details>
@@ -2599,14 +2585,7 @@ ___________________________ test_duplicate_dict_args ___________________________
   E        +  where 0 = len([])
   E        +    where [] = <_pytest.logging.LogCaptureFixture object at 0xfffba0e14410>.records
   
-  tests/utils_/test_argparse_utils.py:248: AssertionError","{
-    ""ok"": false,
-    ""score"": 75,
-    ""reasoning"": ""The description provides detailed error logs and test output for the described bug, which is helpful for localization. However, the 'Your current environment' section, which is marked as required in the template, is not filled with actual environment information; it only contains the template placeholder. While the description includes a link to CI logs that might contain environment details, the required field is effectively missing. This omission could affect the maintainer's ability to reproduce the issue without additional context. Therefore, despite the extensive error details, the submission is considered non-compliant due to the missing required environment information."",
-    ""summary"": ""Missing required environment info, but bug description with extensive logs provided."",
-    ""missing_items"": [""Your current environment (environment info not provided)""],
-    ""suggestions"": [""Please provide the output of `python collect_env.py` as requested in the template. If the CI run already includes environment details, consider pasting the relevant environment summary (vllm version, ascend plugin version, CANN version, OS, Python version) directly into the description.""]
-}",false,,,,,
+  tests/utils_/test_argparse_utils.py:248: AssertionError",,,,,,,
 10299,"[Bug]: Ascend950标卡, 单卡四进程 0.19.1rc2版本的 vllm-ascend + qwen3-8B 性能测试benchmark 卡死",[Bug],open,"bug,duplicated,triaged,qwen3-dense,gqa-model",2026-06-10T13:42:58Z,"### Your current environment
 
 <details>
@@ -3062,20 +3041,7 @@ Your output of above commands here
 
 vLLM hangs when running this case, need to decide whether to fix
 
-tests/models/language/pooling_mteb_test/test_qwen3_reranker.py","{
-    ""ok"": false,
-    ""score"": 55,
-    ""reasoning"": ""The description provides only a placeholder for environment information (the required 'Your current environment' field is not filled with actual data) and the bug description is minimal: it states that vLLM hangs on a specific test file but provides no logs, error messages, or details about the hang. Although the test file name is given, the absence of environment details (CANN version, hardware model, etc.) and any diagnostic output makes it very difficult for a maintainer to reproduce or investigate the issue. Score is below 60 due to insufficient actionable information."",
-    ""summary"": ""Environment information missing and bug description incomplete"",
-    ""missing_items"": [
-        ""missing actual environment information (placeholder provided)"",
-        ""missing error logs or detailed hang symptoms""
-    ],
-    ""suggestions"": [
-        ""Run the collect_env.py script and paste its output to provide actual environment details"",
-        ""Include any error logs, console output, or steps that lead to the hang, such as the command used and the point at which it hangs""
-    ]
-}",false,,,,,
+tests/models/language/pooling_mteb_test/test_qwen3_reranker.py",,,,,,,
 10076,[Bug]: /v1/responses endpoint fails on vLLM Asend DeepSeek-V4-Flash,[Bug],open,"bug,stale,llm-model,wait-feedback,deepseek-v4",2026-06-05T07:11:37Z,"### Current environment
 
 Hardware: Ascend 910B Atlas 800 A2
@@ -3945,14 +3911,7 @@ From the runtime logs and stack trace, the failure appears to happen in the MoE 
 - MoeDistributeDispatchV2_0
 - aclnnMoeDistributeDispatchV4
 
-The Ascend runtime reports an AICore timeout with error code 507014.","{
-    ""ok"": true,
-    ""score"": 80,
-    ""reasoning"": ""The description includes the two required sections: 'Your current environment' (partially provided) and '🐛 Describe the bug' (detailed with server logs, plog, and a clear scenario of the hang after one day with the GLM-5.1 model). The environment information is incomplete: only vllm and vllm-ascend versions are given, missing the NPU model, CANN version, OS, and other context from collect_env.py. Despite this, the bug description is rich and actionable, allowing a maintainer to start investigating the AICore timeout in MoeDistributeDispatchV2. Score of 80 reflects the good detail in the bug section but a notable gap in the environment info."",
-    ""summary"": ""Compliant: Detailed bug description with logs but incomplete environment info."",
-    ""missing_items"": [""Full environment details (NPU model, CANN version, OS) from `collect_env.py` output""],
-    ""suggestions"": [""Please provide the complete output of `collect_env.py` by running the command as shown in the template. This includes the NPU model (e.g., A3/A5), CANN version, and operating system, which are important for reproducing the hang.""]
-}",true,,,,,
+The Ascend runtime reports an AICore timeout with error code 507014.",,,,,,,
 9888,[Bug]: Qwen3.6-27B退出vllm-ascend容器后后会出现僵尸进程残留问题,[Bug],open,"bug,triaged",2026-06-02T09:34:29Z,"### Your current environment
 
 <details>
@@ -6237,14 +6196,7 @@ https://github.com/vllm-project/vllm-ascend/actions/runs/27089870391/job/7995134
   >       mamba_utils.cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
   E       AttributeError: module 'vllm.v1.worker.mamba_utils' has no attribute 'cleanup_mamba_state_idx'
   
-  ../vllm_ascend/patch/worker/patch_mamba_utils.py:143: AttributeError","{
-    ""ok"": false,
-    ""score"": 75,
-    ""reasoning"": ""The bug description includes error logs and a link to the full CI log, which details the error. However, the 'Your current environment' section is required but only contains placeholder text; the actual output of `python collect_env.py` is missing. Environment information is critical for reproducing the issue, so the report is not fully compliant."",
-    ""summary"": ""Missing required environment information"",
-    ""missing_items"": [""missing environment information (collect_env.py output)""],
-    ""suggestions"": [""Please provide the output of `python collect_env.py` to help us understand your environment.""]
-}",false,,,,,
+  ../vllm_ascend/patch/worker/patch_mamba_utils.py:143: AttributeError",,,,,,,
 10122,[Bug]: 310p run qwen3.6-27b-w8a8 Exception,[Bug],solved,"bug,310p,triaged,qwen3.6",2026-06-06T03:56:23Z,"### Your current environment
 
 docker ：quay.io/ascend/vllm-ascend:nightly-releases-v0.20.2rc-310p-openeuler 
@@ -6523,14 +6475,7 @@ Your output of above commands here
 
 complete log:
 https://github.com/vllm-project/vllm-ascend/actions/runs/26709805060/job/78717785599
-","{
-    ""ok"": false,
-    ""score"": 65,
-    ""reasoning"": ""The description includes a detailed test failure log and a link to the full CI run, which provides good context for the bug. However, the 'Your current environment' section is a placeholder without any actual environment information (e.g., CANN version, vllm-ascend version, hardware). This is a required field per the specification and is critical for reproducing the issue and understanding the environment. The absence of this information makes the report incomplete, so it is deemed non-compliant."",
-    ""summary"": ""Missing required environment information (placeholder only); bug description is otherwise detailed."",
-    ""missing_items"": [""Your current environment: only placeholder text provided, actual output of collect_env.py required""],
-    ""suggestions"": [""Please provide the actual output of `python collect_env.py` to show your environment details (CANN version, vllm-ascend version, hardware platform, etc.).""]
-}",false,,,,,
+",,,,,,,
 10084,[Bug][Upstream]: AttributeError: 'NoneType' object has no attribute 'hf_config',[Bug],solved,"bug,triaged,llm-model,deepseek-v4",2026-06-05T08:12:00Z,"### Your current environment
 
 This week's vllm-ascend
@@ -6566,18 +6511,7 @@ Your output of above commands here
 many upstream cases lead to this issue.
 e.g.
 tests/lora/test_lora_manager.py
-https://github.com/vllm-project/vllm-ascend/actions/runs/26709805060/job/78717785599","{
-    ""ok"": false,
-    ""score"": 65,
-    ""reasoning"": ""The bug description section includes a code snippet and a reference to a CI run, which is helpful. However, the mandatory 'Your current environment' field contains only a placeholder ('Your output of above commands here') and no actual environment details, making it impossible for a maintainer to know the exact versions and context needed to reproduce the issue. The missing environment information significantly reduces the usability of the report."",
-    ""summary"": ""Missing environment information in required section"",
-    ""missing_items"": [
-        ""Your current environment (required) not provided, only placeholder text""
-    ],
-    ""suggestions"": [
-        ""Please run the collect_env.py script and paste its full output to provide environment details such as vllm-ascend version, Python version, and system info.""
-    ]
-}",false,,,,,
+https://github.com/vllm-project/vllm-ascend/actions/runs/26709805060/job/78717785599",,,,,,,
 10074,[Bug]: torch.ops._C_ascend.npu_sparse_flash_attention op unsupported on a5 env。,[Bug],solved,"bug,resolved,a5",2026-06-05T06:50:36Z,"### Your current environment
 
 <details>
@@ -7579,7 +7513,25 @@ vllm serve /mnt/weight/MiniMax-M2.7-w8a8-quarot/ \
     2>&1 | tee /home/c00913489/logs/log_$(date +%Y%m%d_%H%M%S).log
 
 Running the GPQA dataset, the accuracy is around 80%, which is below expectations. The same issue exists when using pcp/dcp, and this issue is currently being fixed.","{
-",false,,,,,
+    ""ok"": false,
+    ""score"": 60,
+    ""reasoning"": ""The description includes some environment details and a high-level description of an accuracy issue, but critical information is missing. The environment lacks the NPU hardware model (e.g., A3/A5) and the full output of the collect_env.py script (e.g., vllm-ascend version). The bug description mentions 'accuracy is around 80%' but does not specify the expected accuracy or provide a minimal reproduction example, making it difficult for a maintainer to start an investigation. Overall, the information is barely usable and has obvious gaps."",
+    ""summary"": ""Missing NPU hardware model and specific accuracy details; environment info incomplete."",
+    ""missing_items"": [
+        ""missing NPU hardware model (e.g., A3/A5)"",
+        ""incomplete environment information: missing full output of collect_env.py (e.g., vllm-ascend version)""
+    ],
+    ""suggestions"": [
+        ""Provide the NPU hardware model by running 'npu-smi info' or similar command."",
+        ""Run the full collect_env.py script (as recommended in the template) and paste the complete output to include all relevant versions."",
+        ""Specify the expected accuracy vs. the actual accuracy you observed, and consider sharing a minimal code snippet to reproduce the issue without the full production setup.""
+    ]
+}",false,"{
+    ""ok_reasonable"": true,
+    ""reasoning_valid"": true,
+    ""suggestions_valid"": true,
+    ""judge_reasoning"": ""The Review Bot's evaluation is reasonable. The description is incomplete: it lacks the NPU hardware model, full collect_env output (including vllm-ascend version), and expected accuracy. The missing items are genuinely missing, and the suggestions are specific, actionable, and avoid 'must' language. The reasoning is consistent with the ok=false judgment.""
+}",true,true,true,"The Review Bot's evaluation is reasonable. The description is incomplete: it lacks the NPU hardware model, full collect_env output (including vllm-ascend version), and expected accuracy. The missing items are genuinely missing, and the suggestions are specific, actionable, and avoid 'must' language. The reasoning is consistent with the ok=false judgment."
 9913,[Feature]:  支持Draft 模型D2D权重加载,[Feature],solved,feature request,2026-06-03T02:48:38Z,"### 🚀 The feature, motivation and pitch
 
 目标：
