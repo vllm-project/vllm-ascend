@@ -1310,16 +1310,6 @@ class PCPManager:
                 long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
                     :num_actual_tokens_pcp_padded
                 ]
-
-                if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(
-                            "[PCP][DFX] long_seq_metadata.pcp_allgather_restore_idx=%s",
-                            long_seq_metadata.pcp_allgather_restore_idx
-                            .detach()
-                            .cpu()
-                            .tolist(),
-                        )
-
                 if self.pcp_use_hybrid_attn:
                     long_seq_metadata.pcp_exit_fa_scatter_idx = self.pcp_exit_fa_scatter_idx.gpu[
                         : num_scheduled_tokens.sum() - self.num_decode_tokens
@@ -1332,20 +1322,15 @@ class PCPManager:
                     ]
                     
                     if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug(
-                                "[PCP][DFX] long_seq_metadata.pcp_exit_fa_scatter_idx=%s",
-                                long_seq_metadata.pcp_exit_fa_scatter_idx
-                                .detach()
-                                .cpu()
-                                .tolist(),
-                            )
-                            logger.debug(
-                                "[PCP][DFX] long_seq_metadata.pcp_enter_fa_restore_idx=%s",
-                                long_seq_metadata.pcp_enter_fa_restore_idx
-                                .detach()
-                                .cpu()
-                                .tolist(),
-                            )
+                        logger.debug(
+                            "[PCP][DFX] long_seq_metadata reorder idx: "
+                            "pcp_allgather_restore_idx=%s, "
+                            "pcp_exit_fa_scatter_idx=%s, "
+                            "pcp_enter_fa_restore_idx=%s",
+                            long_seq_metadata.pcp_allgather_restore_idx.detach().cpu().tolist(),
+                            long_seq_metadata.pcp_exit_fa_scatter_idx.detach().cpu().tolist(),
+                            long_seq_metadata.pcp_enter_fa_restore_idx.detach().cpu().tolist(),
+                        )
                             
                     long_seq_metadata.max_num_tokens_across_pcp = self.max_num_tokens_across_pcp
                     long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens
