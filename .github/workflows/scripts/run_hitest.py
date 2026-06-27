@@ -3,10 +3,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from typing import Tuple
 
 
-def run_hitest_script() -> Tuple[int, str, str]:
+def run_hitest_script() -> tuple[int, str, str]:
     """
     执行同级目录下 hitest.sh 脚本
     :return: (return_code, stdout, stderr)
