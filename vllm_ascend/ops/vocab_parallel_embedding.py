@@ -299,6 +299,12 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return input_, ~vocab_mask
 
     def forward(self, input_):
+        # EVS may build replacement token IDs as a CPU tensor while the
+        # embedding weight lives on NPU. Keep the lookup co-located before any
+        # collective or embedding kernel sees the indices.
+        weight = getattr(self, "weight", None)
+        if weight is not None and input_.device != weight.device:
+            input_ = input_.to(weight.device)
         if self.token_exchange_group is not None:
             return self._forward_with_token_exchange(input_)
         return self._forward_standard(input_)
