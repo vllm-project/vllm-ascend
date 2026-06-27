@@ -45,6 +45,8 @@ jobs:
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
+      # options 移到此处，全局容器注入环境变量
+      options: --env AUROGON_API_PREFIX --env X_APIG_APPCODE --env APP_KEY --env APP_SECRET
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -70,6 +72,4 @@ jobs:
           X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
           APP_KEY: ${{ secrets.AUROGON_APPKEY }}
           APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
-        # 关键：把上层env全部透传到docker容器
-        options: --env AUROGON_API_PREFIX --env X_APIG_APPCODE --env APP_KEY --env APP_SECRET
         run: python3 .github/workflows/scripts/run_hitest.py
