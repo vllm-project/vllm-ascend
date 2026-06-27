@@ -176,3 +176,4 @@ fi
 
 print_timing_json
 print_summary
+exit "${overall_status}"
