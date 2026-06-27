@@ -2664,14 +2664,20 @@ class NPUModelRunner(GPUModelRunner):
         sampled_token_ids: torch.Tensor,
         draft_token_ids: torch.Tensor | None = None,
     ) -> None:
-        """NPU override: force int64 before broadcasting so sender/receiver
-        dtypes match.
-
-        HCCL is stricter than NCCL and requires all ranks to share the same
-        dataType; the NPU sampler may emit int32 while the receiver's
-        ``recv`` is fixed int64, which would raise ``EI0005 HcomBroadcast``
-        without this cast.
-        """
+        # Fix: 上游期望 sampled [num_reqs, 1] + draft [num_reqs, num_spec]
+        # vllm-ascend 两分支都可能传错 shape，统一在这里对齐
+        if sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] != 1:
+            # async 分支：sampler 输出 [N, 1+spec]，拆分
+            if draft_token_ids is None:
+                draft_token_ids = sampled_token_ids[:, 1:].contiguous()
+            sampled_token_ids = sampled_token_ids[:, :1].contiguous()
+        if (draft_token_ids is not None
+                and self.num_spec_tokens > 0
+                and draft_token_ids.dim() == 2
+                and draft_token_ids.shape[0] != sampled_token_ids.shape[0]):
+            # sync 分支：draft [num_scheduled_tokens, spec] -> [num_reqs, spec]
+            num_reqs = sampled_token_ids.shape[0]
+            draft_token_ids = draft_token_ids[:num_reqs]
         sampled_token_ids = sampled_token_ids.to(dtype=torch.int64)
         if draft_token_ids is not None:
             draft_token_ids = draft_token_ids.to(dtype=torch.int64)
