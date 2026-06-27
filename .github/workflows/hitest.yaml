@@ -38,7 +38,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 宿主机Job：仅导出密钥到仓库临时文件，无lint依赖
   dump-auth-file:
     runs-on: linux-amd64-cpu-8-hk
     steps:
@@ -58,21 +57,20 @@ jobs:
           APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
         run: |
           mkdir -p .github/workflows/scripts/tmp
-          cat > .github/workflows/scripts/tmp/auth.env <<'EOF'
+          # 去掉 EOF 单引号，允许变量展开写入真实密钥
+          cat > .github/workflows/scripts/tmp/auth.env <<EOF
           export AUROGON_API_PREFIX="${AUROGON_API_PREFIX}"
           export X_APIG_APPCODE="${X_APIG_APPCODE}"
           export APP_KEY="${APP_KEY}"
           export APP_SECRET="${APP_SECRET}"
           EOF
 
-      # 上传密钥文件给下游容器Job
       - name: Upload auth env artifact
         uses: actions/upload-artifact@v4
         with:
           name: auth-env-file
           path: .github/workflows/scripts/tmp/auth.env
 
-  # 容器Job：执行lint + hitest，读取上游导出的密钥
   run-hitest:
     needs: dump-auth-file
     runs-on: linux-amd64-cpu-8-hk
@@ -100,6 +98,10 @@ jobs:
           TERM: xterm-256color
           SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
         run: pre-commit run --files .github/workflows/scripts/hitest.sh .github/workflows/scripts/run_hitest.py
+
+      # 先打印文件内容调试，确认密钥写入成功
+      - name: Debug print env file
+        run: cat .github/workflows/scripts/tmp/auth.env
 
       - name: Execute hitest entry with auth env
         run: |
