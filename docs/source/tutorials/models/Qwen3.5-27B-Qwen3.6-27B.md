@@ -128,7 +128,7 @@ vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
 --trust-remote-code \
 --gpu-memory-utilization 0.90 \
 --no-enable-prefix-caching \
---speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_cpu_binding":true}' \
 --async-scheduling
@@ -163,7 +163,7 @@ vllm serve Eco-Tech/Qwen3.6-27B-w8a8 \
 --trust-remote-code \
 --gpu-memory-utilization 0.90 \
 --no-enable-prefix-caching \
---speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_cpu_binding":true}' \
 --async-scheduling
@@ -183,7 +183,7 @@ The parameters are explained as follows:
 - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, for mamba-like models Qwen3.5, set `--enable-prefix-caching` and `--mamba-cache-mode align`. Notice the current implementation of hybrid kv cache might result in a very large block_size when scheduling. For example, the block_size may be adjusted to 2048, which means that any prefix shorter than 2048 will never be cached.
 - `--quantization` "ascend" indicates that quantization is used. To disable quantization, remove this option.
-- `--speculative_config` uses `qwen3_5_mtp` for both Qwen3.5 and Qwen3.6 because they share the same MTP head design.
+- `--speculative-config` uses `qwen3_5_mtp` for both Qwen3.5 and Qwen3.6 because they share the same MTP head design.
 - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are "cudagraph_mode" and "cudagraph_capture_sizes", which have the following meanings:
 "cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
 - "cudagraph_capture_sizes": represents different levels of graph modes. The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
