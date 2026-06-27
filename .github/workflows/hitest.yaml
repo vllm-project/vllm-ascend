@@ -40,7 +40,6 @@ concurrency:
 jobs:
   run-hitest:
     runs-on: linux-amd64-cpu-8-hk
-    # 删掉整个 container 块，不用容器，直接宿主机执行
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -50,8 +49,9 @@ jobs:
       - name: Git safe directory config
         run: git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
+      # 使用pip3替代pip，runner默认只有pip3
       - name: Install pre-commit dependencies
-        run: pip install pre-commit
+        run: pip3 install pre-commit
 
       - name: Quick lint for shell & python scripts
         env:
