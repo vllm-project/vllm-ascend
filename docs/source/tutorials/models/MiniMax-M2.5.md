@@ -1,6 +1,6 @@
 # MiniMax-M2.5
 
-## Introduction
+## 1. Introduction
 
 MiniMax‑M2.5 is MiniMax’s flagship large language model, reinforced for high‑value scenarios such as code generation, agentic tool calling/search, and complex office workflows, with an emphasis on reasoning efficiency and end‑to‑end speed on challenging tasks.
 
@@ -9,15 +9,19 @@ This document provides a unified deployment guide for `MiniMax-M2.5` on vLLM Asc
 - **A3 single-node** deployment (Atlas 800 A3)
 - **A2 single-node** deployment (Atlas 800I A2)
 
-## Supported Features
+The `Minimax M2.5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all v0.17.0rc1 and later versions can run stably. To use the latest features (e.g., PD separation), it is recommended to use v0.18.0 or a later version.
+
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment.
+
+## 2. Supported Features
 
 Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3. Environment Preparation
 
-### Model Weights
+### 3.1 Model Weights
 
 - `MiniMax-M2.5` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** or **1× Atlas 800I A2** nodes. Download the model weights from [MiniMax/MiniMax-M2.5](https://modelscope.cn/models/MiniMax/MiniMax-M2.5).
 - `MiniMax-M2.5-w8a8-QuaRot` : Download the model weights from [Eco-Tech/MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot).
@@ -25,15 +29,17 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 It is recommended to download the model weights to a shared directory, such as `/mnt/sfs_turbo/.cache/`. The current release automatically detects the MiniMax-M2 fp8 checkpoint, disables fp8 quantization kernels on NPU, and loads the weights by dequantizing to bf16. This behavior may be removed once public bf16 weights are available.
 
-### Installation
+### 3.2 Verify Multi-node Communication (Optional)
 
-You can use the official docker image to run `MiniMax-M2.5` directly.
+If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
 
-Select an image based on your machine type and start the container on your node. See [using docker](../../installation.md#set-up-using-docker).
+## 4. Installation
 
-## Run with Docker
+### 4.1 Docker Image Installation
 
-### A3 (single node)
+You can use our official docker image to run Minimax M2.5 directly.
+
+#### A3 (single node)
 
 ```{code-block} bash
    :substitutions:
@@ -76,7 +82,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-### A2 (single node)
+#### A2 (single node)
 
 Create and run `minimax25-docker-run.sh`.
 
@@ -118,9 +124,17 @@ docker run -itd -u 0 --ipc=host --privileged \
 # docker exec -it minimax2_5 bash
 ```
 
-## Online Inference on Multi-NPU
+### 4.2 Source Code Installation
 
-### A3 (single node)
+In addition, if you don't want to use the docker image as above, you can also build all from source:
+
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+
+If you want to deploy multi-node environment, you need to set up environment on each node.
+
+## 5. Online Inference on Multi-NPU
+
+### 5.1 A3 (single node)
 
 Below is a recommended startup configuration for short-context condition like 3.5k/1.5k to reach a good performance.
 
@@ -190,7 +204,7 @@ Remarks:
     --reasoning-parser minimax_m2_append_think \
 ```
 
-### A2 (single node)
+### 5.2 A2 (single node)
 
 ```{code-block} bash
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
@@ -236,9 +250,9 @@ Remarks:
 - `--max-num-batched-tokens 16384` is applicable to the input sequence length of 16k.
 - `--max-num-batched-tokens 6144` is applicable to short sequence input scenarios such as 2k and 3.5k.
 
-## Verify the Service
+## 6. Verify the Service
 
-### A3 (single node)
+### 6.1 A3 (single node)
 
 Test with an OpenAI-compatible client:
 
@@ -284,7 +298,7 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-### A2 (single node)
+### 6.2 A2 (single node)
 
 Run the following from any machine that can reach the service node (replace `{NodeIP}` with the real IP):
 
@@ -302,7 +316,7 @@ curl http://{NodeIP}:8000/v1/chat/completions \
   }'
 ```
 
-## FAQ
+## 7. FAQ
 
 - **Q: What should I do if the output is garbled in EP mode?**
 
