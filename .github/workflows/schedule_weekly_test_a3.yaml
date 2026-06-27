@@ -129,33 +129,15 @@ jobs:
           - name: Qwen3.5-397B-w8a8-PD
             config_file_path: Qwen-3.5-397B-A17B-W8A8-PD.yaml
             size: 3
-#          - name: GLM_5_1_PD_in16k_bs32-0
-#            config_file_path: 0_GLM_5_1_PD_in16k_bs32-0.yaml
-#            size: 4
-#          - name: GLM_5_1_PD_in16k_bs126-0
-#            config_file_path: 0_GLM_5_1_PD_in16k_bs126-0.yaml
-#            size: 4
           - name: GLM_5_1_PD_in32k_bs16-0
             config_file_path: GLM_5_1_PD_in32k_bs16-0.yaml
             size: 4
           - name: GLM_5_1_PD_in32k_bs20-90
             config_file_path: GLM_5_1_PD_in32k_bs20-90.yaml
             size: 4
-#          - name: GLM_5_1_PD_in32k_bs62-0
-#            config_file_path: 0_GLM_5_1_PD_in32k_bs62-0.yaml
-#            size: 4
-#          - name: GLM_5_1_PD_in32k_bs64-90
-#            config_file_path: 0_GLM_5_1_PD_in32k_bs64-90.yaml
-#            size: 4
           - name: GLM_5_1_PD_in64k_bs16-90
             config_file_path: GLM_5_1_PD_in64k_bs16-90.yaml
             size: 4
-#          - name: GLM_5_1_PD_in64k_bs64-90
-#            config_file_path: 0_GLM_5_1_PD_in64k_bs64-90.yaml
-#            size: 4
-#          - name: dsv3.2-PD
-#            config_file_path: Deepseekv3_2_PD.yaml
-#            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
