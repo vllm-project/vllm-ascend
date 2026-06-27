@@ -430,10 +430,10 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             skip2=None,
             bias=None,
             export_for_source_row=None,
-            expanded_permuted_rows=hidden_states,
+            expanded_permuted_rows=hidden_states.unsqueeze(0),
             expanded_src_to_dst_row=combine_metadata.expanded_row_idx,
             scales=combine_metadata.topk_weights,
-            drop_pad_mode=2,
+            drop_pad_mode=3,
         )
         if len(combine_metadata.restore_shape) == 3:
             final_hidden_states = final_hidden_states.view(combine_metadata.restore_shape)
