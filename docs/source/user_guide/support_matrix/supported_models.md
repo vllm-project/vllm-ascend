@@ -87,6 +87,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Qwen3-VL-MOE                   | ✅            |                                                                      | ✅ | A2/A3||✅|✅|||✅|✅|✅|✅|✅|✅|✅|✅|256k||[Qwen3-VL-MOE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)|
 | Qwen3.5-397B-A17B              | ✅            |                                                                      |✅| A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
 | Qwen3.5-27B / Qwen3.6-27B                    | ✅            |                                                                      |✅| A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+| Qwen3.6-35B-A3B                | 🔵            |                                                                      |✅| A2/A3 |✅|✅|✅||🔵|✅|✅||✅|✅|❌|✅|✅|262144|| [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
 | Qwen3-Omni-30B-A3B-Thinking    | 🔵            |                                                                      ||A2/A3|||||||✅||✅|||||||[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)|
 | Kimi-K2.5/Kimi-K2.6    | ✅            |                                                                      ||A2/A3||✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144||[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)|
 
