@@ -62,6 +62,7 @@ python3 quant_qwen_moe_w8a8.py --model_path /path/to/your/Qwen3-235B-A22B \
     --trust_remote_code True \
     --rot
 ```
+
 ### 3.3 Verify Multi-node Communication (Optional)
 
 If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
@@ -212,6 +213,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
 Atlas 800I A2/A3/A5:
+
 ```shell
 export VLLM_USE_MODELSCOPE=True
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
@@ -257,6 +259,7 @@ If the service starts successfully, the following startup log will be displayed:
 ```
 
 ### 5.2 Multi-Node PD Separation Deployment
+
 PD (Prefill-Decode) separation splits the Prefill and Decode phases across different nodes for better throughput. The following example shows the parameter configuration for a three-node A3 PD disaggregation scenario (one Prefill node + two Decode nodes):
 
 For the detailed deployment guide, please refer to [Prefill-Decode Disaggregation Mooncake Verification](../features/pd_disaggregation_mooncake_multi_node.md).
@@ -620,14 +623,17 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
 Install from source:
+
   ```bash
   git clone https://github.com/AISBench/benchmark.git
   cd benchmark
   pip install -e .
   ```
+
 The following is an example configuration for the accuracy evaluation config file:
 
 **Accuracy Evaluation Config File:**
+
 ```bash
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
@@ -656,11 +662,13 @@ models = [
     )
 ]
 ```
+
 **Run the accuracy evaluation using the aime2024 dataset as an example:**
 
 ```bash
 ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt --debug
 ```
+
 > The --models parameter value corresponds to the abbr field in the configuration file above. Adjust max_out_len, batch_size, and dataset tasks based on your scenario.
 
 ## 8 Performance
@@ -699,6 +707,7 @@ models = [
     )
 ]
 ```
+
 **Run the performance evaluation using the GSM8K dataset as an example:**
 
 ```bash
