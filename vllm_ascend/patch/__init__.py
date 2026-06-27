@@ -112,38 +112,6 @@
 #       Remove this patch if upstream provides an official NPU graph-capture
 #       guidance / auto-configuration path for HCCL.
 #
-#   3. `vllm.config.speculative.SpeculativeConfig._verify_args`
-#    Why:
-#       Upstream vLLM's eagle3/extract_hidden_states restricts target model types
-#       via a whitelist. MiniMax-M2 should be allowed once the worker-side model
-#       can emit auxiliary hidden states.
-#    How：
-#       Monkey-patch `_verify_args` to bypass only the whitelist ValueError for
-#       MiniMax model_type when method is eagle3/extract_hidden_states.
-#       SpeculativeConfig is a Pydantic dataclass (`@config`); init validation calls
-#       `__pydantic_decorators__.model_validators["_verify_args"].func`, so that
-#       `Decorator.func` must be replaced (not only `SpeculativeConfig._verify_args`),
-#       then `rebuild_dataclass(SpeculativeConfig, force=True)`.
-#       If `VllmConfig` was imported earlier, also `rebuild_dataclass(VllmConfig, ...)`
-#       so nested `speculative_config` validation does not use a stale schema.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Remove this patch once upstream whitelist includes MiniMax.
-#
-#   4. `vllm.model_executor.models.registry` (spec decode aliases)
-#    Why:
-#       Some Eagle3 draft checkpoints may declare a MiniMax-specific architecture
-#       string while reusing the shared Eagle3 implementation.
-#    How：
-#       Register `Eagle3MiniMaxM2ForCausalLM` as an alias pointing to the
-#       existing Eagle3 implementation in the speculative decoding registry.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Drop the alias once upstream registry includes it or the checkpoint
-#       standardizes architecture strings.
-#
 # ** 7. File: platform/patch_chat_usage_accounting.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
@@ -321,23 +289,19 @@
 #
 # ** 11. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.entrypoints.openai.engine.serving.OpenAIServing._parse_tool_calls_from_content`
-#      `vllm.parser.abstract_parser.DelegatingParser._parse_tool_calls`
+#   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
+#      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
 #    Why:
-#       Forced tool choice can receive `content=None` when reasoning extraction
-#       consumes the whole generated text, for example when generation stops at
-#       `max_tokens`. Upstream vLLM 0.19.1 asserts in that case.
+#       vLLM v0.23.0 can serialize empty `tool_calls: []` fields for content-only
+#       OpenAI chat responses / streaming deltas, while OpenAI-compatible SDKs
+#       expect those empty fields to be omitted so clients see `tool_calls=None`.
 #    How：
-#       Return an empty tool-call list for forced tool choice with `content=None`
-#       and mark the current named chat tool-choice result so the downstream
-#       chat response path does not assert. Preserve normal forced tool-call
-#       behavior when content is present.
+#       Wrap `model_dump` / `model_dump_json` for chat response payloads and drop
+#       empty `tool_calls` lists from `message` / `delta` objects.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/40148
-#       https://github.com/vllm-project/vllm-ascend/pull/8400
+#       https://github.com/vllm-project/vllm/pull/44105
 #    Future Plan:
-#       Remove this patch once the vLLM fix is included in the supported vLLM
-#       version.
+#       Remove this patch once the supported vLLM version contains PR #44105.
 #
 # ** 12. File: platform/patch_deepseek_v4_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -685,17 +649,18 @@
 #    Future Plan:
 #       Move this behavior upstream once a generic MoE reduce hook exists.
 #
-#   2. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.__init__`
+#   2. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.forward`
 #    Why:
-#       When total kv heads < TP world size, kv head replication happens and k_norm
-#       weights should be sharded to match the replication layout.
+#       MiniMax-M2 attention benefits from the NPU fused split-qkv + RMSNorm + rope
+#       kernel path.
 #    How：
-#       Add `num_kv_head_replicas` and create sharded `k_norm` via
-#       `MiniMaxText01RMSNormTP(..., weight_shard_world_size=total_num_kv_heads, ...)`.
+#       Replace `forward` to call `torch.ops.vllm.split_qkv_tp_rmsnorm_rope` before
+#       the upstream attention and output projection steps.
 #    Related PR (if no, explain why):
-#       No, depends on Ascend kernel behavior and TP layout.
+#       No, backend-specific fused kernel path.
 #    Future Plan:
-#       Remove this patch if upstream implements kv-head-aware norm sharding.
+#       Remove this patch when upstream exposes a backend dispatch path for this
+#       fused attention preparation.
 #
 #   3. `vllm.model_executor.models.minimax_m2.MiniMaxM2Model.load_weights`
 #    Why:
@@ -708,31 +673,6 @@
 #       No, fp8 load format and backend constraints are model/backend specific.
 #    Future Plan:
 #       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
-#
-#   4. `vllm.model_executor.models.minimax_m2.MiniMaxM2Model.forward`
-#    Why:
-#       Eagle3 speculative decoding needs auxiliary hidden states from specific
-#       transformer layers of the target model.
-#    How：
-#       Extend `MiniMaxM2Model.forward` to optionally collect and return
-#       `(final_hidden_states, aux_hidden_states)` when `aux_hidden_state_layers`
-#       is set by the runtime.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Remove this patch once upstream MiniMax-M2 integrates Eagle3 support.
-#
-#   5. `vllm.model_executor.models.minimax_m2.MiniMaxM2ForCausalLM`
-#    Why:
-#       vLLM core uses SupportsEagle3-style methods to configure which layers
-#       should emit auxiliary hidden states.
-#    How：
-#       Inject `set_aux_hidden_state_layers` and default-layer getters onto
-#       `MiniMaxM2ForCausalLM` so vLLM can configure the target model.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Remove this patch once upstream provides these methods on the model.
 #
 # ** 16. File: worker/patch_minimax_m2_linear_attn.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
