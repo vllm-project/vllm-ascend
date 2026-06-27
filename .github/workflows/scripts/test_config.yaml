@@ -648,6 +648,19 @@
   tests:
     - tests/ut/_tools
 
+# W4A4 fused MoE mega kernel
+- name: quantization_w4a4_mega
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/ops/mega_moe_w4a4.py
+    - vllm_ascend/ops/mega_moe_w4a4_pto-isa.cpp
+    - vllm_ascend/ops/int4_cvt.hpp
+    - vllm_ascend/quantization/methods/w4a4_dynamic.py
+  tests:
+    - tests/ut/ops/test_mega_moe_w4a4.py
+    - tests/ut/quantization/methods/a2/test_w4a4_dynamic.py
+    - tests/e2e/pull_request/four_card/test_qwen3_6_w4a4_mega_moe.py
+
 ---
 # === Estimated Times ===
 # Per-test estimated execution time in seconds.
@@ -740,6 +753,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 590
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 210
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 1250
+  tests/e2e/pull_request/four_card/test_qwen3_6_w4a4_mega_moe.py: 600
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1760
   tests/e2e/pull_request/four_card/test_graph_mode.py: 190
   tests/ut/attention/a2/test_attention_cp.py: 40
@@ -765,6 +779,7 @@ estimated_times:
   tests/ut/ops/a3_2/test_activation.py: 30
   tests/ut/ops/a3_2/test_select_experts.py: 30
   tests/ut/quantization/methods/a2/test_w4a16.py: 30
+  tests/ut/quantization/methods/a2/test_w4a4_dynamic.py: 30
   tests/ut/quantization/methods/a2/test_w4a4_flatquant.py: 40
   tests/ut/quantization/methods/a2/test_w4a4_laos_dynamic.py: 30
   tests/ut/quantization/methods/a2/test_w4a8.py: 40

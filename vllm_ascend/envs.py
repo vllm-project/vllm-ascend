@@ -47,6 +47,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The C compiler used for compiling the package. If not set, the default
     # value is None, which means the system default C compiler will be used.
     "C_COMPILER": lambda: os.getenv("C_COMPILER", None),
+    # Optional override for the JIT-compiled W4A4 fused-MoE "mega" kernel .so path.
+    # If unset, the kernel is built next to its source under vllm_ascend/ops/.
+    "VLLM_ASCEND_MEGA_MOE_SO": lambda: os.getenv("VLLM_ASCEND_MEGA_MOE_SO", None),
     # The version of the Ascend chip. It's used for package building.
     # If not set, we will query chip info through `npu-smi`.
     # Please make sure that the version is correct.
