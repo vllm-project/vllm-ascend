@@ -37,7 +37,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install dependencies
-        run: pip install requests pyyaml
+        run: pip install requests pyyaml regex
 
       # Step 1: Extract issue type from title → issue_type.txt
       - name: Extract input
