@@ -2580,9 +2580,23 @@ class NPUModelRunner(GPUModelRunner):
                      and torch.is_tensor(self._draft_token_ids)
                      else None)
             if self.use_async_scheduling:
-                self._pp_broadcast_prev_sampled_token_ids(
-                    sampler_output.sampled_token_ids, draft,
-                )
+                # async 分支：与 sync 路径完全对齐——用 parse_output 过滤
+                # PLACEHOLDER 后取 ids[-1]。rejection sampler 的 bonus 仅在
+                # 全接受时写入列 num_draft_tokens，部分拒绝时该列及之后保持
+                # PLACEHOLDER，故不能取固定列（[:, -1:] 在部分拒绝时取到
+                # PLACEHOLDER，广播 -1 给非 last rank 导致 KV 错位）。
+                if spec_decode_metadata is not None and self.num_spec_tokens > 0:
+                    valid_sampled, _ = RejectionSampler.parse_output(
+                        sampler_output.sampled_token_ids,
+                        self.input_batch.vocab_size,
+                    )
+                    sampled = torch.tensor(
+                        [[ids[-1]] if ids else [0] for ids in valid_sampled],
+                        device=self.device, dtype=torch.int64,
+                    )
+                else:
+                    sampled = sampler_output.sampled_token_ids
+                self._pp_broadcast_prev_sampled_token_ids(sampled, draft)
             else:
                 # Sync path: sampler_output.sampled_token_ids is
                 # List[List[int]]; align to (num_reqs, 1) int64 tensor.

@@ -271,6 +271,14 @@ class ProfilingChunkScheduler(Scheduler):
             # <<< PROFILING CHUNK <<<
             request = self.running[req_index]
 
+            current_batch_size = (
+                len(scheduled_new_reqs)
+                + len(scheduled_resumed_reqs)
+                + len(scheduled_running_reqs)
+            )
+            if current_batch_size == self.max_num_per_batch:
+                break
+
             if (
                 request.num_output_placeholders > 0
                 and request.num_computed_tokens + 2 - request.num_output_placeholders
@@ -280,7 +288,10 @@ class ProfilingChunkScheduler(Scheduler):
                 continue
 
             num_new_tokens = (
-                request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
+                request.num_tokens_with_spec
+                + request.num_output_placeholders
+                + request.num_spec_tokens_in_flight
+                - request.num_computed_tokens
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
@@ -452,7 +463,13 @@ class ProfilingChunkScheduler(Scheduler):
             # >>> PROFILING CHUNK >>>
             while (self.waiting or self.skipped_waiting) and token_budget > 0 and time_budget > 0:
                 # <<< PROFILING CHUNK <<<
-                if len(self.running) == self.max_num_running_reqs:
+                current_batch_size = (
+                    len(scheduled_new_reqs)
+                    + len(scheduled_resumed_reqs)
+                    + len(scheduled_running_reqs)
+                )
+                if (len(self.running) == self.max_num_running_reqs
+                        or current_batch_size == self.max_num_per_batch):
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
