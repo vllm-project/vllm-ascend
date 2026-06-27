@@ -155,16 +155,7 @@ def get_quant_type_for_layer(
         packed_modules_mapping = dict()
 
     proj_name = prefix.split(".")[-1]
-    if proj_name == "experts" and proj_name not in packed_modules_mapping:
-        for key, value in quant_description.items():
-            # For MoE experts, we use a simple way to find the quantization type, not to verify strictly.
-            # Based on preconditions as following, which should be guaranteed currently:
-            # 1. Every expert in one layer has the same quantization type.
-            # 2. Gate/Up/Down proj has the same quantization type.
-            if key.startswith(prefix + ".0.") and key.endswith(".weight"):
-                quant_type = value
-                break
-    elif proj_name in packed_modules_mapping:
+    if proj_name in packed_modules_mapping:
         quant_type = None
         shard_prefixes = [
             prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]
@@ -231,11 +222,10 @@ class AscendModelSlimConfig(QuantizationConfig):
     quantized using the ModelSlim tool.
     """
 
-    # This will be updated by upstream vLLM with model-specific mappings.
-    packed_modules_mapping: dict[str, list[str]] = {}
-
     def __init__(self, quant_config: dict[str, Any] | None = None):
         super().__init__()
+        # This will be updated by upstream vLLM with model-specific mappings.
+        self.packed_modules_mapping: dict[str, list[str]] = {}
         self.quant_description = quant_config if quant_config is not None else {}
         self._apply_extra_quant_adaptations()
         self.model_type: str | None = None
@@ -362,6 +352,27 @@ class AscendModelSlimConfig(QuantizationConfig):
                         return candidate
         return prefix
 
+    def _discover_experts_mapping(self) -> None:
+        """Auto-discover expert shard names from quant_description and add them
+        to packed_modules_mapping.
+
+        This runs once per config (first call to get_quant_method) so that the
+        standard consistency verification in get_quant_type_for_layer applies
+        to all expert shards (gate/up/down or w1/w2/w3).
+
+        If the user has already provided a custom ``"experts"`` mapping via
+        ``UPDATED_PACKED_MODULES_MAPPING``, this is a no-op.
+        """
+        if "experts" in self.packed_modules_mapping:
+            return
+        shard_names: set[str] = set()
+        for key in self.quant_description:
+            m = re.search(r"\.experts\.\d+\.(\w+)\.weight$", key)
+            if m:
+                shard_names.add(m.group(1))
+        if shard_names:
+            self.packed_modules_mapping["experts"] = [f"experts.0.{name}" for name in sorted(shard_names)]
+
     def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
         from .method_adapters import (
             AscendEmbeddingMethod,
@@ -391,6 +402,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         # Only update packed_modules_mapping if the upstream model definition not satisfies our scenario.
         if model_type in UPDATED_PACKED_MODULES_MAPPING:
             self.packed_modules_mapping.update(UPDATED_PACKED_MODULES_MAPPING[model_type])
+        self._discover_experts_mapping()
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         quant_type = get_quant_type_for_layer(self.quant_description, prefix, self.packed_modules_mapping)
@@ -410,6 +422,8 @@ class AscendModelSlimConfig(QuantizationConfig):
             if self.is_fa_quant_layer(prefix):
                 if "fa_quant_type" in self.quant_description:
                     quant_type = self.quant_description["fa_quant_type"]
+                if quant_type is None or quant_type == "FLOAT":
+                    return None
                 scheme = create_scheme_for_layer(quant_type, prefix, "attention")
                 logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa]")
             elif self.is_indexer_quant_layer(prefix):
@@ -419,6 +433,8 @@ class AscendModelSlimConfig(QuantizationConfig):
                 layer_indexer_quant_type = self.quant_description.get(f"{prefix}.indexer.quant_type")
                 if layer_indexer_quant_type is not None:
                     quant_type = layer_indexer_quant_type
+                if quant_type is None or quant_type == "FLOAT":
+                    return None
                 scheme = create_scheme_for_layer(quant_type, prefix, "attention")
                 logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[indexer]")
             elif self.is_c8_quant_layer(prefix):

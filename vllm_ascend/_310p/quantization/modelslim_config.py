@@ -107,6 +107,7 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
         # Only update packed_modules_mapping if the upstream model definition not satisfies our scenario.
         if model_type in UPDATED_PACKED_MODULES_MAPPING:
             self.packed_modules_mapping.update(UPDATED_PACKED_MODULES_MAPPING[model_type])
+        self._discover_experts_mapping()
 
         prefix = self.quant_prefix_mapper(model_type, prefix)
         quant_type = get_quant_type_for_layer(self.quant_description, prefix, self.packed_modules_mapping)

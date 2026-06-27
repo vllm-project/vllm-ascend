@@ -193,6 +193,69 @@ class TestAscendModelSlimConfig(TestBase):
             method = self.ascend_config.get_quant_method(fused_moe_layer, "moe_layer")
             self.assertIs(method, mock_ascend_moe.return_value)
 
+    def test_discover_experts_mapping_gate_up_down(self):
+        """_discover_experts_mapping discovers gate/up/down shard names."""
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.3.mlp.experts.0.gate_proj.weight": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.0.gate_proj.weight_scale": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.0.up_proj.weight": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.0.up_proj.weight_scale": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.0.down_proj.weight": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.0.down_proj.weight_scale": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.1.gate_proj.weight": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.1.up_proj.weight": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.1.down_proj.weight": "W8A8_DYNAMIC",
+            }
+        )
+        self.assertNotIn("experts", config.packed_modules_mapping)
+        config._discover_experts_mapping()
+        self.assertIn("experts", config.packed_modules_mapping)
+        # sorted: down_proj < gate_proj < up_proj
+        self.assertEqual(
+            config.packed_modules_mapping["experts"],
+            ["experts.0.down_proj", "experts.0.gate_proj", "experts.0.up_proj"],
+        )
+
+    def test_discover_experts_mapping_w1_w2_w3(self):
+        """_discover_experts_mapping discovers Minimax-style w1/w2/w3."""
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": "W8A8_DYNAMIC",
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": "W8A8_DYNAMIC",
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": "W8A8_DYNAMIC",
+            }
+        )
+        config._discover_experts_mapping()
+        self.assertEqual(
+            config.packed_modules_mapping["experts"],
+            ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+        )
+
+    def test_discover_experts_mapping_idempotent(self):
+        """_discover_experts_mapping is a no-op when experts already in mapping."""
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.0.mlp.experts.0.gate_proj.weight": "W8A8_DYNAMIC",
+            }
+        )
+        # Pre-populate with a custom mapping
+        config.packed_modules_mapping["experts"] = ["experts.0.custom"]
+        config._discover_experts_mapping()
+        # Should not be overwritten
+        self.assertEqual(config.packed_modules_mapping["experts"], ["experts.0.custom"])
+
+    def test_discover_experts_mapping_no_experts(self):
+        """_discover_experts_mapping does nothing when no expert weights exist."""
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC",
+            }
+        )
+        self.assertNotIn("experts", config.packed_modules_mapping)
+        config._discover_experts_mapping()
+        self.assertNotIn("experts", config.packed_modules_mapping)
+
     def test_init_with_default_config(self):
         config = AscendModelSlimConfig()
         self.assertEqual(config.quant_description, {})
@@ -526,8 +589,8 @@ class TestGetQuantTypeForLayer(TestBase):
         with self.assertRaises(ValueError):
             get_quant_type_for_layer(quant_desc, "model.layers.0.self_attn.qkv_proj", mapping)
 
-    def test_experts_dynamic_lookup_quantized(self):
-        """Experts layer uses dynamic lookup when not in packed_modules_mapping."""
+    def test_experts_with_mapping_quantized(self):
+        """Experts with mapping runs consistency check on all shards."""
         quant_desc = {
             "model.layers.3.mlp.experts.0.gate_proj.weight": "W8A8_DYNAMIC",
             "model.layers.3.mlp.experts.0.gate_proj.weight_scale": "W8A8_DYNAMIC",
@@ -539,37 +602,45 @@ class TestGetQuantTypeForLayer(TestBase):
             "model.layers.3.mlp.experts.0.down_proj.weight_scale": "W8A8_DYNAMIC",
             "model.layers.3.mlp.experts.0.down_proj.weight_offset": "W8A8_DYNAMIC",
         }
-        result = get_quant_type_for_layer(quant_desc, "model.layers.3.mlp.experts", {})
+        mapping = {"experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]}
+        result = get_quant_type_for_layer(quant_desc, "model.layers.3.mlp.experts", mapping)
         self.assertEqual(result, "W8A8_DYNAMIC")
 
-    def test_experts_dynamic_lookup_w1_w2_w3(self):
-        """Experts layer dynamic lookup works with Minimax-style w1/w2/w3 naming."""
+    def test_experts_with_mapping_w1_w2_w3(self):
+        """Experts with Minimax-style w1/w2/w3 mapping."""
         quant_desc = {
             "model.layers.0.block_sparse_moe.experts.0.w1.weight": "W8A8_DYNAMIC",
             "model.layers.0.block_sparse_moe.experts.0.w1.weight_scale": "W8A8_DYNAMIC",
-            "model.layers.0.block_sparse_moe.experts.0.w1.weight_offset": "W8A8_DYNAMIC",
             "model.layers.0.block_sparse_moe.experts.0.w2.weight": "W8A8_DYNAMIC",
             "model.layers.0.block_sparse_moe.experts.0.w2.weight_scale": "W8A8_DYNAMIC",
-            "model.layers.0.block_sparse_moe.experts.0.w2.weight_offset": "W8A8_DYNAMIC",
             "model.layers.0.block_sparse_moe.experts.0.w3.weight": "W8A8_DYNAMIC",
             "model.layers.0.block_sparse_moe.experts.0.w3.weight_scale": "W8A8_DYNAMIC",
-            "model.layers.0.block_sparse_moe.experts.0.w3.weight_offset": "W8A8_DYNAMIC",
         }
-        result = get_quant_type_for_layer(quant_desc, "model.layers.0.block_sparse_moe.experts", {})
+        mapping = {"experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"]}
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.block_sparse_moe.experts", mapping)
         self.assertEqual(result, "W8A8_DYNAMIC")
 
-    def test_experts_dynamic_lookup_float_returns_none(self):
-        """Experts layer with FLOAT weights returns None via dynamic lookup."""
+    def test_experts_with_mapping_float_returns_none(self):
+        """Experts with all-FLOAT weights return None."""
         quant_desc = {
             "model.layers.3.mlp.experts.0.gate_proj.weight": "FLOAT",
-            "model.layers.3.mlp.experts.0.gate_proj.weight_scale": "FLOAT",
             "model.layers.3.mlp.experts.0.up_proj.weight": "FLOAT",
-            "model.layers.3.mlp.experts.0.up_proj.weight_scale": "FLOAT",
             "model.layers.3.mlp.experts.0.down_proj.weight": "FLOAT",
-            "model.layers.3.mlp.experts.0.down_proj.weight_scale": "FLOAT",
         }
-        result = get_quant_type_for_layer(quant_desc, "model.layers.3.mlp.experts", {})
+        mapping = {"experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]}
+        result = get_quant_type_for_layer(quant_desc, "model.layers.3.mlp.experts", mapping)
         self.assertIsNone(result)
+
+    def test_experts_with_mapping_inconsistent_raises(self):
+        """Experts with inconsistent shard quant types raise ValueError."""
+        quant_desc = {
+            "model.layers.3.mlp.experts.0.gate_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.3.mlp.experts.0.up_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.3.mlp.experts.0.down_proj.weight": "W4A8_DYNAMIC",
+        }
+        mapping = {"experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]}
+        with self.assertRaises(ValueError):
+            get_quant_type_for_layer(quant_desc, "model.layers.3.mlp.experts", mapping)
 
     def test_packed_modules_mapping_none_defaults_to_empty(self):
         """None packed_modules_mapping is treated as empty dict."""
