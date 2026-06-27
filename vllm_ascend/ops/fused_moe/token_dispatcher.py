@@ -663,6 +663,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         )
         if with_quant:
             dynamic_scale_after_all2all = dynamic_scale_after_all2all.squeeze(-1)
+        else:
+            dynamic_scale_after_all2all = None
         return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(
