@@ -54,7 +54,9 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 **Docker Run:**
 
-:::::{tab-set} :sync-group: hardware
+:::::{tab-set}
+:sync-group: hardware
+--
 
 ::::{tab-item} Ascend 950 Products
 :sync: a5
