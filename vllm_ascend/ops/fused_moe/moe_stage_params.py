@@ -76,10 +76,6 @@ class MoEQuantParams:
         return self.quant_type in (QuantType.W8A8, QuantType.W4A8)
 
     @property
-    def is_mxfp_quant(self) -> bool:
-        return self.quant_type in (QuantType.MXFP8, QuantType.MXFP4)
-
-    @property
     def is_fp8(self) -> bool:
         return self.quant_type == QuantType.W8A8FP8
 
