@@ -393,6 +393,7 @@
     - tests/ut/test_compressed_prefix_cache.py
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
+    - tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py
 
 - name: patch_mamba_utils_310p
   optional: false
@@ -673,6 +674,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/lora/test_qwen3_multi_loras.py: 140
   tests/e2e/pull_request/one_card/lora/test_qwen3_reranker_lora.py: 160
   tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py: 750
+  tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 750
   tests/e2e/pull_request/one_card/pooling/test_classification.py: 190
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 410
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 550
