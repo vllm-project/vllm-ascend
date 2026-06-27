@@ -646,10 +646,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         if self.num_local_experts <= 1:
             return global_input_tokens, dynamic_scale_after_all2all, None
 
-        # Handle quantized case
-        if with_quant:
-            dynamic_scale_after_all2all = dynamic_scale_after_all2all.unsqueeze(-1)
-
         # Non-quantized case
         global_input_tokens, reversed_global_input_permutation_mapping, _, dynamic_scale_after_all2all = (
             torch_npu.npu_moe_init_routing_v2(
@@ -661,10 +657,9 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 active_expert_range=[0, self.num_local_experts],
             )
         )
-        if with_quant:
-            dynamic_scale_after_all2all = dynamic_scale_after_all2all.squeeze(-1)
-        else:
+        if not with_quant:
             dynamic_scale_after_all2all = None
+
         return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(
