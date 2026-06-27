@@ -321,7 +321,7 @@ templates:
 benchmarks:
   perf_1:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs500_glm
+    dataset_path: vllm-ascend/GSM8K_prefix90_in65536_bs100_glm
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 64
@@ -332,7 +332,7 @@ benchmarks:
     threshold: 0.97
   perf_2:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs500_glm
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_glm
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 32
