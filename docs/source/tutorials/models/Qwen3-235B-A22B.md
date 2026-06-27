@@ -6,7 +6,7 @@ Qwen3 is the latest generation of large language models in Qwen series, offering
 
 This document will demonstrate the main validation steps for Qwen3-235B-A22B in the vLLM-Ascend environment, including supported features, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-The Qwen3-235B-A22B model is first supported in **v0.8.4rc2**. This document is validated and written based on **vLLM-Ascend v0.13.0**. All **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, fused MC2), it is recommended to use v0.13.0 or a later version.
+The Qwen3-235B-A22B model is first supported in **v0.8.4rc2**. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use v0.21.0 or a later version.
 
 ## 2 Supported Features
 
@@ -34,7 +34,7 @@ The following model variants are available. It is recommended to download the mo
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
-### 3.2 Model Quantization (Optional)
+### 3.2 Model Quantization
 
 **Install msmodelslim:**
 
@@ -63,7 +63,7 @@ python3 quant_qwen_moe_w8a8.py --model_path /path/to/your/Qwen3-235B-A22B \
     --rot
 ```
 
-### 3.3 Verify Multi-node Communication (Optional)
+### 3.3 Verify Multi-node Communication
 
 If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
 
@@ -81,16 +81,66 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
 docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 ```
 
-**Docker Run (Atlas 800I A2/A3):**
+**Docker Run:**
+
+Start the docker image on your each node.
+
+::::
+::::{tab-item} A3 series
+:sync: A3
 
 ```{code-block} bash
    :substitutions:
 
-# Update --device according to your device (Atlas A2: /dev/davinci[0-7], Atlas A3:/dev/davinci[0-15]).
-# For Atlas A2 machines:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-# For Atlas A3 machines:
-# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+
+docker run --rm \
+    --name vllm-ascend-env \
+    --shm-size=1g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+```
+
+:::{note}
+A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+:::
+
+::::
+::::{tab-item} A2 series
+:sync: A2
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
 docker run --rm \
     --name vllm-ascend-env \
     --shm-size=1g \
@@ -116,41 +166,8 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-**Docker Run (Atlas 800I A5):**
-
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-
-docker run --runtime=runc -u root -it -d --name vllm-ascend-env \
-    --net=host --privileged=true --shm-size=2g \
-    --device=/dev/davinci_manager --device=/dev/hisi_hdc \
-    --device=/dev/ummu --device=/dev/uburma \
-    --device=/dev/davinci0 \
-    --device=/dev/davinci1 \
-    --device=/dev/davinci2 \
-    --device=/dev/davinci3 \
-    --device=/dev/davinci4 \
-    --device=/dev/davinci5 \
-    --device=/dev/davinci6 \
-    --device=/dev/davinci7 \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
-    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
-    -v /usr/local/sbin:/usr/local/sbin \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /var/log/npu/:/usr/slog \
-    -v /root/host:/root/host \
-    -v /mnt:/mnt \
-    -v /data:/data \
-    -v /home/:/home/ \
-    -v /etc/hixlep:/etc/hixlep \
-    $IMAGE bash
-```
+::::
+:::::
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
@@ -221,7 +238,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export TASK_QUEUE_ENABLE=1
 
 vllm serve your_model_path \
@@ -240,12 +256,14 @@ vllm serve your_model_path \
     --gpu-memory-utilization 0.95 \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_flashcomm1": true}' \
     --async-scheduling
 ```
 
 :::{note}
 
-- For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
+- [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
+- [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 :::
 
 **Service Verification:**
@@ -355,10 +373,8 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
@@ -379,6 +395,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --quantization ascend \
     --no-enable-prefix-caching \
     --enforce-eager \
+    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -419,10 +436,8 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export VLLM_ASCEND_ENABLE_FUSED_MC2=2
 export VLLM_TORCH_PROFILER_WITH_STACK=0
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -445,6 +460,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --no-enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 2}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -485,10 +501,8 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export VLLM_ASCEND_ENABLE_FUSED_MC2=2
 export VLLM_TORCH_PROFILER_WITH_STACK=0
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -511,6 +525,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --no-enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 2}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -585,8 +600,8 @@ python load_balance_proxy_server_example.py \
 ```
 
 :::{note}
-
-- For additional parameter details, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments).
+- [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
+- [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 :::
 
 **Service Verification:**
@@ -671,7 +686,7 @@ ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_pro
 
 > The --models parameter value corresponds to the abbr field in the configuration file above. Adjust max_out_len, batch_size, and dataset tasks based on your scenario.
 
-## 8 Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 
@@ -788,9 +803,6 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -812,7 +824,7 @@ vllm serve your_model_path \
     --quantization ascend \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true}'
+    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
 ```
 
 <u>Single-node PD Hybrid — Low Latency:</u>
@@ -836,7 +848,6 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -859,7 +870,7 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"method": "eagle3", "model":"your_eagle3_model_path", "num_speculative_tokens": 3}' \
-    --additional-config '{"enable_cpu_binding":true}'
+    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true}'
 ```
 
 <u>Single-node PD Hybrid — Long Context:</u>
@@ -883,9 +894,6 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -906,7 +914,7 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":131072}}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true}'
+    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
 ```
 
 ### 9.2 Tuning Guidelines
@@ -914,7 +922,7 @@ vllm serve your_model_path \
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
@@ -932,7 +940,7 @@ Use yarn rope-scaling. For vLLM >= v0.12.0: `--hf-overrides '{"rope_parameters":
 
 Single-node deployment is simpler and recommended when the model fits within a single node. PD disaggregation separates Prefill and Decode across nodes, enabling higher throughput for large-scale serving. For Qwen3-235B-A22B, three A3 nodes with PD disaggregation can achieve ~3× the throughput of single-node deployment.
 
-### Q: What is the difference between `VLLM_ASCEND_ENABLE_FUSED_MC2=1` and `=2`?
+### Q: What is the difference between `enable_fused_mc2=1` and `=2`?
 
 Value `1` enables the base MoE fused operator, suitable for typical EP configurations. Value `2` enables an alternative fusion strategy optimized for large-scale EP (e.g., EP32 in PD disaggregation scenarios). Both are experimental and currently only support W8A8 quantization on Atlas A3 servers.
 
