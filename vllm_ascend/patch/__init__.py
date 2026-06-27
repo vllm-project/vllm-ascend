@@ -182,24 +182,6 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM47 inline zero-argument streaming parser fix.
 #
-# ** 7d. File: platform/patch_anthropic_system_message.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.entrypoints.anthropic.protocol.AnthropicMessage`
-#      `vllm.entrypoints.anthropic.serving.AnthropicServingMessages`
-#    Why:
-#       Recent Claude Code clients can send `role: system` entries inside the
-#       Anthropic Messages API `messages` array. The pinned vLLM rejects those
-#       requests before inference starts.
-#    How：
-#       Monkey-patch Anthropic message role validation to accept `system`, merge
-#       inline system messages with the top-level system prompt, and skip inline
-#       system entries when converting the remaining chat history.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/issues/44000
-#       https://github.com/vllm-project/vllm/pull/44283
-#    Future Plan:
-#       Remove this patch once the supported vLLM version contains PR #44283.
-#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
@@ -356,17 +338,6 @@
 #       Remove this patch if upstream exposes a platform allocator capability hook
 #       for sleep mode validation.
 #
-# ** 14. File: platform/patch_scheduler.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
-#    Why:
-#       Upstream vLLM has an assert logic, cause it fails when external KV connector hit
-#    How:
-#      remove the assert
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/43935
-#    Future Plan:
-#       Remove this patch if upstream streaming behavior is updated to support mamba external KV connector
 # ** 15. File: platform/patch_weight_transfer_engine.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["nccl"]`
