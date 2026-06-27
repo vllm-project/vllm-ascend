@@ -39,25 +39,30 @@ jobs:
       - name: Install dependencies
         run: pip install requests pyyaml regex
 
-      # Step 1: Prepare input — extract type, load template, truncate body
+      # Step 1: Prepare input — truncate issue body → body.txt
       - name: Prepare input
         id: prepare
-        env:
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           python .github/workflows/scripts/robot/prepare_input.py \
-            --type-output issue_type.txt \
-            --template-output template.txt \
             --body-output body.txt
 
-      # Step 2: Load the system prompt → system_prompt.txt
+      # Step 2: Extract issue type + load matching template → issue_type.txt, template.txt
+      - name: Extract input and prepare template
+        id: template
+        if: success()
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          python .github/workflows/scripts/robot/extract_input.py --output issue_type.txt
+          python .github/workflows/scripts/robot/prepare_template.py --input issue_type.txt --output template.txt
+
+      # Step 3: Load the system prompt → system_prompt.txt
       - name: Prepare system prompt
         id: sysprompt
         if: success()
         run: python .github/workflows/scripts/robot/prepare_system_prompt.py --output system_prompt.txt
 
-      # Step 3: Call LLM for description completeness check → review_result.json
+      # Step 4: Call LLM for description completeness check → review_result.json
       - name: Call LLM
         id: llm
         if: success()
@@ -76,7 +81,7 @@ jobs:
             --body body.txt \
             --output review_result.json
 
-      # Step 4: Post comment if description incomplete → label_actions.json
+      # Step 5: Post comment if description incomplete → label_actions.json
       - name: Post handler
         id: post
         if: success()
@@ -90,7 +95,7 @@ jobs:
             --input review_result.json \
             --label-output label_actions.json
 
-      # Step 5: Add or remove the need-detail-desc label
+      # Step 6: Add or remove the need-detail-desc label
       - name: Manage label
         id: label
         if: success()

@@ -14,49 +14,46 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-latest
-    if: github.event.pull_request.state == 'open'
+    if: |
+      github.event.pull_request.state == 'open' &&
+      (
+        github.event.action == 'opened' ||
+        github.event.action == 'reopened' ||
+        (github.event.action == 'edited' && (github.event.changes.title || github.event.changes.body))
+      )
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
       - name: Install dependencies
         run: pip install requests pyyaml regex
 
-      # Step 1: Prepare input — extract PR info, load template, truncate body
+      # Step 1: Prepare input — truncate PR body → body.txt
       - name: Prepare input
         id: prepare
-        env:
-          ISSUE_TITLE: ${{ github.event.pull_request.title }}
-          ISSUE_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python .github/workflows/scripts/robot/prepare_input.py \
+            --body-output body.txt
+
+      # Step 2: Extract PR info + load PR template → pr_info.json, template.txt
+      - name: Extract input and prepare template
+        id: template
+        if: success()
         run: |
           python .github/workflows/scripts/robot/extract_pr_info.py --output pr_info.json
           python .github/workflows/scripts/robot/prepare_template.py --input pr_info.json --output template.txt
-          python -c "
-import os; body = os.environ.get('ISSUE_BODY', ''); out = body[:4000]
-if len(body) > 4000: out += f'\n\n[... truncated, original length: {len(body)} chars ...]'
-open('body.txt', 'w').write(out)
-print(f'Body prepared ({len(out)} chars, original: {len(body)} chars)')
-"
 
-      # Step 2: Prepare description system prompt → desc_system_prompt.txt
+      # Step 3: Load the system prompt → system_prompt.txt
       - name: Prepare system prompt
         id: sysprompt
         if: success()
-        run: python .github/workflows/scripts/robot/prepare_system_prompt.py --variant pr --output desc_system_prompt.txt
+        run: python .github/workflows/scripts/robot/prepare_system_prompt.py --variant pr --output system_prompt.txt
 
-      # Step 3: Call LLM for PR description check → description_result.json
-      - name: Call LLM for description
-        id: llm_desc
-        if: |
-          success() &&
-          (
-            github.event.action == 'opened' ||
-            github.event.action == 'reopened' ||
-            (github.event.action == 'edited' && (github.event.changes.title || github.event.changes.body))
-          )
+      # Step 4: Call LLM for description completeness check → review_result.json
+      - name: Call LLM
+        id: llm
+        if: success()
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
@@ -66,21 +63,13 @@ print(f'Body prepared ({len(out)} chars, original: {len(body)} chars)')
           ISSUE_TITLE: ${{ github.event.pull_request.title }}
         run: |
           python .github/workflows/scripts/robot/call_llm.py \
-            --system-prompt desc_system_prompt.txt \
+            --system-prompt system_prompt.txt \
             --template template.txt \
-            --type-key issue_type.txt \
             --body body.txt \
             --kind pr \
-            --output description_result.json
+            --output review_result.json
 
-      # If description check was skipped, create a placeholder
-      - name: Skip description check
-        id: skip_desc
-        if: success() && steps.llm_desc.outcome == 'skipped'
-        run: |
-          echo '{"ok": true, "score": 100, "executed": false}' > description_result.json
-
-      # Step 4: Post comment + write label actions → label_actions.json
+      # Step 5: Post comment if description incomplete → label_actions.json
       - name: Post handler
         id: post
         if: success()
@@ -91,12 +80,12 @@ print(f'Body prepared ({len(out)} chars, original: {len(body)} chars)')
           NEED_DETAIL_LABEL: ${{ vars.PR_DESC_CHECK_NEED_DETAIL_LABEL || 'need-detail-desc' }}
         run: |
           python .github/workflows/scripts/robot/handle_review.py \
-            --input description_result.json \
+            --input review_result.json \
             --label-output label_actions.json \
             --kind pr
 
-      # Step 5: Manage labels (add/remove need-detail-desc)
-      - name: Manage labels
+      # Step 6: Add or remove the need-detail-desc label
+      - name: Manage label
         id: label
         if: success()
         env:
