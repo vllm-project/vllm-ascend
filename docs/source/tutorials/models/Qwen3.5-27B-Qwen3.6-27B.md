@@ -205,7 +205,7 @@ curl http://localhost:8000/v1/completions \
 
 ## Accuracy Evaluation
 
-Here is one accuracy evaluation method.
+Here is an accuracy evaluation method.
 
 ### Using AISBench
 
