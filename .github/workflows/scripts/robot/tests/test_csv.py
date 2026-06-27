@@ -27,7 +27,6 @@ environment variables (same as production).
 import argparse
 import csv
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -35,24 +34,8 @@ from pathlib import Path
 # Add parent to path so we can import the step modules
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib.llm import call_llm
-from lib.prefix_map import PREFIX_TO_TYPE_KEY, extract_issue_type
 from lib.prompts import load_system_prompt
-from lib.templates import load_issue_template, load_pr_template
-
-JSON_FORMAT_INSTRUCTIONS = """Output strictly the following JSON format, no other text:
-{
-    "ok": true or false,
-    "score": integer 0-100,
-    "reasoning": "explanation of the score in English",
-    "summary": "one-line summary of the judgment",
-    "missing_items": ["missing item 1", "missing item 2"],
-    "suggestions": ["suggestion 1", "suggestion 2"]
-}
-Notes:
-- missing_items must only contain required fields that are actually absent
-- suggestions must only offer improvement advice; do NOT use "required/must" language
-- if missing_items is empty, ok must be true
-- output JSON only, no other text (no ```json markers)"""
+from lib.review import is_output_valid, parse_json_output, review, validate_result
 
 JUDGE_SYSTEM_PROMPT = """You are a review quality auditor.
 Your task is to audit whether another LLM (Review Bot)'s evaluation
@@ -156,89 +139,16 @@ def judge_row(row: dict, kind: str) -> dict:
         }
 
 
-def parse_json_output(text: str) -> dict:
-    json_match = re.search(r"\{[\s\S]*\}", text)
-    if json_match:
-        return json.loads(json_match.group(0))
-    raise ValueError(f"Could not extract JSON from LLM output: {text[:200]}")
-
-
-def is_output_valid(text: str) -> bool:
-    """Check if LLM output is parseable JSON (not truncated/malformed)."""
-    if not text or not text.strip():
-        return False
-    try:
-        parse_json_output(text)
-        return True
-    except (json.JSONDecodeError, ValueError):
-        return False
-
-
-def validate_result(data: dict) -> dict:
-    ok = bool(data.get("ok", False))
-    score = int(data.get("score", 0))
-    missing_items = data.get("missing_items", [])
-    if not isinstance(missing_items, list):
-        missing_items = []
-    suggestions = data.get("suggestions", [])
-    if not isinstance(suggestions, list):
-        suggestions = []
-    return {
-        "ok": ok,
-        "score": max(0, min(100, score)),
-        "reasoning": str(data.get("reasoning", "")),
-        "summary": str(data.get("summary", "")),
-        "missing_items": missing_items,
-        "suggestions": suggestions,
-    }
-
-
-def build_user_prompt(title: str, body: str, template_text: str, type_key: str, kind: str = "issue") -> str:
-    template_label = "PR Template" if kind == "pr" else "Issue Template"
-    return f"""### Task Background
-Target type: {kind}
-Description type: {type_key}
-
-### Reference Specification
-Detailed description specification (based on required fields in {template_label}):
-{template_text}
-
-### Data to Evaluate (UNTRUSTED USER INPUT)
-Title: \"\"\"{title}\"\"\"
-Submitted description:
-\"\"\"{body}\"\"\"
-
-### Output Instructions
-- Follow the evaluation criteria in the system prompt.
-- missing_items lists key information that is actually missing
-  (e.g. "missing env info", "missing error logs", "missing repro steps").
-- suggestions must be specific and actionable; do NOT use "required/must" language.
-- If screenshots/images are provided in the description, treat them as
-  having provided log-related information; do not ask for logs or convert to text.
-- Do not mention 910/910B in hardware examples; use A5/A5 exclusively.
-
-{JSON_FORMAT_INSTRUCTIONS}"""
-
-
-def load_template(kind: str, prefix: str) -> str:
-    if kind == "pr":
-        return load_pr_template()
-    return load_issue_template(prefix)
-
-
 def process_row(row: dict, kind: str, system_prompt: str) -> dict:
     title = row.get("title", "")
     body = row.get("body", "")
-    prefix = row.get("prefix", "") or (extract_issue_type(title) or "[Misc]")
-    type_key = PREFIX_TO_TYPE_KEY.get(prefix, "other")
-    template_text = load_template(kind, prefix)
-    user_prompt = build_user_prompt(title, body, template_text, type_key, kind)
-    raw_output = call_llm(system_prompt, user_prompt)
-    try:
-        parsed = validate_result(parse_json_output(raw_output))
-    except (json.JSONDecodeError, ValueError):
-        parsed = {"ok": False, "score": 0}
-    return {"raw_output": raw_output, "expected_ok": parsed["ok"], "score": parsed["score"]}
+    prefix = row.get("prefix", "")
+    outcome = review(title, body, kind, system_prompt, prefix=prefix)
+    raw_output = outcome["raw_output"]
+    result = outcome["result"]
+    if not is_output_valid(raw_output):
+        print(f"  WARN: could not parse LLM output, raw: {raw_output[:200]!r}")
+    return {"raw_output": raw_output, "expected_ok": result["ok"], "score": result["score"]}
 
 
 def main() -> None:
