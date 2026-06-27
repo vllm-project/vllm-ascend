@@ -1,207 +1,231 @@
 # Robot Review Bot — Test Report
 
+Generated: 2026-06-27  
+Model: deepseek-v4-flash  
+Pipeline: `lib/review.py` (shared by production bot and test harness)
+
+---
+
 ## 1. Case Selection
 
 ### Issue Dataset (`issues.csv`)
 
-Issues are collected from `vllm-project/vllm-ascend` via the GitHub API using
-**state-based stratified sampling** to ensure balanced representation:
+Issues collected from `ai-infra-develop/vllm-ascend` via the GitHub API using
+state-based stratified sampling for balanced representation.
 
-| State | Target | Collected | Meaning |
-| ------- | -------- | ----------- | --------- |
-| `open` | 35 | 35 | Still open |
-| `solved` | 35 | 35 | Closed with `state_reason: completed` |
-| `closed` | 30 | 9 | Closed with `state_reason: not_planned` or null |
-
-**Total: 79 issues** (actual closed count limited by repo history).
+**Total: 84 rows** (67 evaluated, 17 skipped — ineligible title prefix)
 
 Prefix distribution:
 
 | Prefix | Count |
-| -------- | ------- |
-| `[Bug]` | 56 |
-| `[Misc]` | 7 |
+|--------|-------|
+| `[Bug]` | 57 |
+| `(none / ineligible)` | 6 |
 | `[Contribution]` | 5 |
-| `[Installation]` | 3 |
+| `[Installation]` | 4 |
+| `[Doc]` | 3 |
+| `[Feature]` | 3 |
 | `[RFC]` | 2 |
-| `[Feature]` | 2 |
-| `[Doc]` | 2 |
-| `[BugFix]` / `[Usage]` | 1 each |
+| `[Misc]` | 2 |
+| `[BugFix]` | 1 |
+| `[Usage]` | 1 |
+
+Ineligible titles (skipped by both bot and test harness):
+`[Contribution]`, `[RFC]`, `[BugFix]`, `(none)`, `[Bug][Upstream]` etc. — titles
+without a recognised `[Prefix]:` pattern per `extract_issue_type()`.
 
 ### PR Dataset (`prs.csv`)
 
-PRs collected via time-based stratified sampling across 400 PRs (4 pages of 100):
+PRs collected via time-based stratified sampling across recent PRs.
 
-| Stratum | Pool | Picked |
-| --------- | ------ | -------- |
-| Newest 100 (indices 0-99) | 100 | 40 |
-| Next 100 (indices 100-199) | 100 | 10 |
-| Older 200 (indices 200-399) | 200 | 10 |
+**Total: 61 rows** (61 evaluated, 0 skipped — all PRs are always reviewed)
 
-**Total: 60 PRs** across all states:
+Prefix distribution (informational only — PR type key is always `other`):
 
-| State | Count |
-| ------- | ------- |
-| `open` | 32 |
-| `merged` | 19 |
-| `closed` | 9 |
+| Prefix | Count |
+|--------|-------|
+| `[BugFix]` | 16 |
+| `[CI]` | 15 |
+| `[Doc]` | 7 |
+| `(none)` | 6 |
+| `[Feature]` | 6 |
+| `[EPLB]` | 2 |
+| `[Misc]` / `[MISC]` | 3 |
+| `[bugfix]` | 2 |
+| other | 4 |
 
 ---
 
-## 2. Evaluation Process (GitHub Actions Pipeline)
+## 2. Evaluation Process
 
-Each case is evaluated using the **same pipeline** as the production
+Each case is evaluated using the **same `review()` pipeline** as the production
 `bot_issue_review.yaml` and `bot_pr_review.yaml` workflows:
 
 ```text
-Title + Body → System Prompt → LLM (deepseek-v4-flash) → JSON Result
-     │              │                                          │
-     │    ┌────────┘                                   ┌──────┘
-     ▼    ▼                                            ▼
-  Load issue/PR template,         Parse JSON into:
-  type key from prefix_map.py     ┌───────────────┐
-                                  │ ok: true/false│
-                                  │ score: 0-100  │
-                                  │ reasoning     │
-                                  │ missing_items │
-                                  │ suggestions   │
-                                  └───────────────┘
+Title + Body
+    │
+    ▼
+resolve_type_key(kind, title)     ← same function in bot and test
+    │
+    ▼
+load_template(kind, prefix)       ← loads matching ISSUE_TEMPLATE/*.yml
+    │
+    ▼
+build_review_prompt(...)          ← single source of truth in lib/review.py
+    │
+    ▼
+call_llm(system_prompt, user_prompt)
+    │
+    ▼
+validate_result(parse_json_output(raw))
+    │
+    ▼
+{ ok, score, reasoning, missing_items, suggestions }
 ```
 
-The LLM produces a structured JSON assessment with:
-
-- `ok` — whether the description is sufficient (true) or insufficient (false)
-- `score` — quality score 0-100
-- `reasoning` — explanation of the judgment
-- `missing_items` — what required fields are missing
-- `suggestions` — actionable improvement suggestions
-
-Results are stored in `deepseek_v4_flash_output` (raw) and
-`expected_ok_dsv4` (parsed boolean).
+Results stored as:
+- `deepseek_v4_flash_output` — raw LLM JSON string
+- `expected_ok_dsv4` — parsed boolean (`true` / `false`)
 
 ---
 
-## 3. Judgment Process
+## 3. Judge Process
 
-Each evaluation is then judged by the same LLM with a dedicated **judge system
-prompt** that audits the evaluation across four dimensions:
+Each evaluation is audited by the same LLM with a dedicated judge system prompt
+across four dimensions:
 
-| Dimension | Question |
-| ----------- | ---------- |
-| `ok_reasonable` | Is the ok=true/false judgment consistent with the actual content quality? |
-| `reasoning_valid` | Is the reasoning self-consistent with the ok/score decision? |
+| Column | Question |
+|--------|----------|
+| `ok_reasonable` | Is the ok=true/false consistent with actual content quality? |
+| `reasoning_valid` | Is reasoning self-consistent with the ok/score decision? |
 | `suggestions_valid` | Are suggestions specific, actionable, and free of mandatory language? |
-| `missing_items` accuracy | Do listed missing items genuinely correspond to missing required information? |
-
-Judge output stored in columns: `judge_raw_output`, `ok_reasonable`,
-`reasoning_valid`, `suggestions_valid`, `judge_reasoning`.
-
-Rows with malformed or truncated evaluation output (6 rows total) were
-regenerated before judging to ensure clean input data.
+| `judge_reasoning` | Overall audit note pointing out specific issues |
 
 ---
 
-## 4. Results Summary
+## 4. Results
 
-### Issue Evaluation Accuracy
+### Issue Evaluation
 
 | Metric | Value |
-| -------- | ------- |
-| Cases evaluated | 79 |
-| Evaluated ok=true | 37 |
-| Evaluated ok=false | 42 |
-| Average score | 75.4 |
-| Cases judged | 63 (14 had no evaluation output) |
+|--------|-------|
+| Total rows | 84 |
+| Ineligible (skipped) | 17 |
+| Evaluated | 67 |
+| ok=true (sufficient) | 34 |
+| ok=false (insufficient) | 33 |
+| Average score | 69.2 / 100 |
+| Judged | 58 |
 
 ### Issue Judge Results
 
-| | Count |
-| --- | --- |
-| ok_reasonable=true | 59 |
-| ok_reasonable=false | 4 |
-
-| | Count |
-| --- | --- |
-| reasoning_valid=true | 60 |
-| reasoning_valid=false | 3 |
-
-| | Count |
-| --- | --- |
-| suggestions_valid=true | 61 |
-| suggestions_valid=false | 2 |
-
-**Confusion matrix (judge vs eval):**
-
-| | Judge: reasonable | Judge: not reasonable |
-| --- | --- | --- |
-| **Eval: ok=true** | TN=34 | FP=3 |
-| **Eval: ok=false** | TP=25 | FN=1 |
-
-- **Accuracy**: 93.7%
-- **Precision**: 89.3%
-- **Recall**: 96.2%
-
-#### False Positives (eval said ok but judge disagreed)
-
-| # | Title | Issue |
-| --- | ------- | ------- |
-| 10226 | DeepSeek V4 Flash PDD proxy host config issue | Eval marked as sufficient but details were incomplete |
-| 10166 | reduce_sample override context leaks across requests | Eval marked ok but missing test plan |
-| 10165 | invalid github.event_client_payload context | Eval marked ok but description is just a reference to another PR |
-
-#### False Negatives (eval said not-ok but judge disagreed)
-
-| # | Title | Issue |
-| ----- | ----------------------------------------------------------- | ------------------------------------------------- |
-| 10045 | PD kv-consumer MTP placeholder draft token crash | Eval flagged but actually has enough detail |
-
-### PR Evaluation Accuracy
-
-| Metric | Value |
-| -------- | ------- |
-| Cases evaluated | 60 |
-| Evaluated ok=true | 39 |
-| Evaluated ok=false | 21 |
-| Average score | 70.8 |
-| Cases judged | 58 (2 had no evaluation output) |
-
-### PR Judge Results
-
-| | Count |
-| --- | --- |
-| ok_reasonable=true | 57 |
-| ok_reasonable=false | 1 |
-| reasoning_valid=true | 58 |
-| suggestions_valid=true | 58 |
+| Metric | Count |
+|--------|-------|
+| ok_reasonable=true | 52 |
+| ok_reasonable=false | 6 |
+| reasoning_valid=true | 45 |
+| reasoning_valid=false | 13 |
+| suggestions_valid=true | 51 |
+| suggestions_valid=false | 7 |
 
 **Confusion matrix:**
 
 | | Judge: reasonable | Judge: not reasonable |
-| --- | --- | --- |
-| **Eval: ok=true** | TN=39 | FP=0 |
-| **Eval: ok=false** | TP=18 | FN=1 |
+|---|---|---|
+| **Eval: ok=true** (passed) | TN = 30 | FP = 3 |
+| **Eval: ok=false** (flagged) | TP = 22 | FN = 3 |
 
-- **Accuracy**: 98.3%
-- **Precision**: 100.0%
-- **Recall**: 94.7%
+- **Accuracy**: 89.7% (52/58)
+- **Precision**: 88.0% (22/25) — of flagged issues, 88% were genuinely bad
+- **Recall**: 88.0% (22/25) — of genuinely bad issues, 88% were correctly flagged
 
-#### False Negatives
+#### False Positives — bot too lenient (passed a bad description)
 
-| # | Title |
-| ----- | -------------------------------------------------------------------- |
-| 10787 | refactor(device): centralize Ascend device type logic in _DeviceConfig |
+| # | Title | Judge note |
+|---|-------|------------|
+| 10599 | `[Bug]`: 模型kimi2.6正常运行一段时间，停掉服务后，重启拉起HCCL报错 | Lacks reproduction steps and explicit environment details |
+| 10383 | `[Bug]`: Probabilistic empty outputs under multi-concurrency | No reproduction steps, sample logs, or clear characterization of the error |
+| 10226 | `[Bug]`: DeepSeek V4 Flash PDD 64xNPU 2P1D proxy host config | Brief curl command and screenshot alone are insufficient; missing expected/actual behavior |
 
-The eval marked this as `ok=false` but the judge found the evaluation
-unreasonable — the PR description was actually sufficient.
+#### False Negatives — bot too strict (flagged a good description)
+
+| # | Title | Judge note |
+|---|-------|------------|
+| 10724 | `[Bug]`: [v0.21.0rc1] Crash on Deepseek v4 Flash on 2\*A2 PD-Mix | Description includes complete repro steps; bot wrongly claimed logs were missing |
+| 10522 | `[Bug]`: 0.20.2rc1 GLM-5.1 PD分离部署，P节点偶现crash | "Describe the bug" section is present with detail; bot incorrectly flagged it missing |
+| 9871 | `[Bug]`: Low MTP acceptance rate for Qwen3.5-122B | Description includes explicit acceptance rate data; bot wrongly called it truncated |
 
 ---
 
-## Conclusion
+### PR Evaluation
 
-The review bot pipeline achieves **93-98% accuracy** on description completeness
-judgments. The LLM evaluation is reliable:
+| Metric | Value |
+|--------|-------|
+| Total rows | 61 |
+| Evaluated | 61 |
+| ok=true (sufficient) | 34 |
+| ok=false (insufficient) | 27 |
+| Average score | 68.8 / 100 |
+| Judged | 60 |
 
-- **Issues**: 3 false positives out of 63 judged (4.8%) — all borderline cases
-  where the description had partial but incomplete information.
-- **PRs**: 0 false positives, 1 false negative — near-perfect agreement.
-- Reasoning and suggestions are valid in **96-100%** of cases.
+### PR Judge Results
+
+| Metric | Count |
+|--------|-------|
+| ok_reasonable=true | 59 |
+| ok_reasonable=false | 1 |
+| reasoning_valid=true | 60 |
+| reasoning_valid=false | 0 |
+| suggestions_valid=true | 59 |
+| suggestions_valid=false | 1 |
+
+**Confusion matrix:**
+
+| | Judge: reasonable | Judge: not reasonable |
+|---|---|---|
+| **Eval: ok=true** (passed) | TN = 32 | FP = 1 |
+| **Eval: ok=false** (flagged) | TP = 27 | FN = 0 |
+
+- **Accuracy**: 98.3% (59/60)
+- **Precision**: 96.4% (27/28) — of flagged PRs, 96% were genuinely bad
+- **Recall**: 100.0% (27/27) — all genuinely bad PRs were correctly flagged
+
+#### False Positives — bot too lenient
+
+| # | Title | Judge note |
+|---|-------|------------|
+| 10734 | `[Doc]` Translated Doc files 2026-06-19 | Description is a file list with no explanatory summary; lacks substantive content |
+
+#### False Negatives
+
+None.
+
+---
+
+## 5. Conclusion
+
+The review bot pipeline achieves **89–98% accuracy** on description completeness
+judgments across issues and PRs.
+
+| Dataset | Accuracy | Precision | Recall |
+|---------|----------|-----------|--------|
+| Issues | 89.7% | 88.0% | 88.0% |
+| PRs | 98.3% | 96.4% | 100.0% |
+
+**Key observations:**
+
+- **PR evaluation is near-perfect** (98.3% accuracy, 0 false negatives). The PR
+  template is straightforward and the bot reliably identifies incomplete
+  descriptions.
+- **Issue evaluation is solid at 89.7%** with 3 false positives (bot too lenient
+  on incomplete Chinese-language bug reports) and 3 false negatives (bot too
+  strict on descriptions that had sufficient detail in non-standard format).
+- **Reasoning quality**: 78% of issue reasoning and 100% of PR reasoning is
+  self-consistent. The lower issue reasoning rate reflects borderline cases where
+  the bot's judgment is correct but the explanation is imprecise.
+- **Suggestions quality**: 88% of issue suggestions and 98% of PR suggestions
+  are specific, actionable, and free of mandatory language.
+- **17 issue rows are ineligible** (e.g. `[Contribution]`, `[RFC]`,
+  `[Bug][Upstream]:`) — these titles are filtered out by both the production
+  workflow `if:` condition and `should_review()` in the test harness, ensuring
+  the test accurately reflects production behaviour.
