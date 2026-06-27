@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -euo pipefail 
 
 # ===================== 配置常量 =====================
 MIN_FREE_GB=3
