@@ -1,21 +1,21 @@
 #!/bin/bash
-set -euo pipefail 
+set -euo pipefail
 
-# ===================== 配置常量 =====================
 MIN_FREE_GB=3
-MAX_RETRY=3
-API_PREFIX="${AUROGON_API_PREFIX:-https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com/aurogon_service}"
-MR_THIRD_ID=359
-NETWORK_ZONE=gitcode
-PROJECT_PATH=Ascend/MindIE-SD
-BIND_ID_API2=3
-PAGE_CURR=1
-PAGE_SIZE=100
 
-# 密钥从CI环境变量注入，禁止硬编码明文
-X_APIG_APPCODE="${X_APIG_APPCODE}"
-APP_KEY="${APP_KEY}"
-APP_SECRET="${APP_SECRET}"
+# 从环境变量读取，兜底空值防止unbound variable
+API_PREFIX="${AUROGON_API_PREFIX:-}"
+X_APIG_APPCODE="${X_APIG_APPCODE:-}"
+APP_KEY="${APP_KEY:-}"
+APP_SECRET="${APP_SECRET:-}"
+
+# 前置鉴权校验
+if [[ -z "${API_PREFIX}" || -z "${X_APIG_APPCODE}" || -z "${APP_KEY}" || -z "${APP_SECRET}" ]]; then
+    echo "ERROR: Missing required aurogon apig environment variables!"
+    exit 98
+fi
+
+# 后续原有逻辑不变
 
 # ===================== 工具函数 =====================
 # 获取根目录空闲GB，增加空值容错
