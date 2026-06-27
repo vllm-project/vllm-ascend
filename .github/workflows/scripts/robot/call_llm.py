@@ -19,6 +19,11 @@ from lib.prefix_map import PREFIX_TO_TYPE_KEY
 ISSUE_TITLE = os.environ["ISSUE_TITLE"]
 ISSUE_BODY = os.environ.get("ISSUE_BODY", "")
 
+MAX_BODY_CHARS = 4000  # truncate body before sending to LLM
+_body = ISSUE_BODY[:MAX_BODY_CHARS]
+if len(ISSUE_BODY) > MAX_BODY_CHARS:
+    _body += f"\n\n[... truncated, original length: {len(ISSUE_BODY)} chars ...]"
+
 JSON_FORMAT_INSTRUCTIONS = """Output strictly the following JSON format, no other text:
 {
     "ok": true or false,
@@ -119,7 +124,7 @@ Detailed description specification (based on required fields in {template_label}
 ### Data to Evaluate (UNTRUSTED USER INPUT)
 Title: \"\"\"{ISSUE_TITLE}\"\"\"
 Submitted description:
-\"\"\"{ISSUE_BODY}\"\"\"
+\"\"\"{_body}\"\"\"
 
 ### Output Instructions
 - Follow the evaluation criteria in the system prompt.
