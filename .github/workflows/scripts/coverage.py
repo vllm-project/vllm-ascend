@@ -1,5 +1,6 @@
 # How to use this script: in vllm-ascend directory
 # python .github/workflows/scripts/coverage.py
+import ast
 import contextlib
 import sys
 from pathlib import Path
@@ -176,6 +177,104 @@ for key, val in sorted(_part.items()):
 part_broken = len(part_errors) > 0
 
 # ============================================================
+# 8. E2E decorator coverage — every test_* fn must have
+#    @pytest.mark.e2e_features(+@pytest.mark.e2e_model)
+#    and features/models must be in ALLOWED_FEATURES/ALLOWED_MODELS
+# ============================================================
+
+e2e_root = Path("tests/e2e")
+conftest_path = e2e_root / "conftest.py"
+
+
+def _parse_frozenset_from_conftest(varname: str) -> frozenset[str]:
+    """Extract a frozenset[str] variable from tests/e2e/conftest.py via AST."""
+    if not conftest_path.exists():
+        return frozenset()
+    try:
+        source = conftest_path.read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source)
+    except Exception:
+        return frozenset()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == varname:
+                if isinstance(node.value, ast.Call):
+                    if len(node.value.args) == 1:
+                        arg = node.value.args[0]
+                        if isinstance(arg, ast.List):
+                            return frozenset(
+                                elt.value
+                                for elt in arg.elts
+                                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                            )
+    return frozenset()
+
+
+def _parse_e2e_marks(source_code: str, method_name: str) -> tuple[list[str], list[str]]:
+    """Extract (features, models) from @pytest.mark.e2e_features / e2e_model."""
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return [], []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != method_name:
+            continue
+        features, models = [], []
+        for dec in node.decorator_list:
+            if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute):
+                if dec.func.attr == "e2e_features":
+                    for arg in dec.args:
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            features.append(arg.value)
+                if dec.func.attr == "e2e_model":
+                    for arg in dec.args:
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            models.append(arg.value)
+        return features, models
+    return [], []
+
+
+allowed_features = _parse_frozenset_from_conftest("ALLOWED_FEATURES")
+allowed_models = _parse_frozenset_from_conftest("ALLOWED_MODELS")
+missing_marks: list[str] = []
+unknown_features: list[str] = []
+unknown_models: list[str] = []
+
+e2e_pr = Path("tests/e2e/pull_request")
+if e2e_pr.exists():
+    for f in sorted(e2e_pr.rglob("test_*.py")):
+        rel = str(f.relative_to(e2e_root))
+        try:
+            source = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not node.name.startswith("test_"):
+                continue
+            method = node.name
+            features, models = _parse_e2e_marks(source, method)
+            if not features:
+                missing_marks.append(f"{rel}::{method}: missing @pytest.mark.e2e_features")
+            if not models:
+                missing_marks.append(f"{rel}::{method}: missing @pytest.mark.e2e_model")
+            for feat in features:
+                if allowed_features and feat not in allowed_features:
+                    unknown_features.append(f"{rel}::{method}: '{feat}'")
+            for model in models:
+                if allowed_models and model not in allowed_models:
+                    unknown_models.append(f"{rel}::{method}: '{model}'")
+
+# ============================================================
 # REPORT
 # ============================================================
 print("=" * 70)
@@ -250,8 +349,33 @@ if part_errors:
 else:
     print("    ✓ All partition keys valid and map to active runners")
 
-print("\n" + "=" * 70)
+print("\n[8] E2E decorator coverage (@pytest.mark.e2e_features / e2e_model):")
+e2e_pr_count = (
+    len(list(Path("tests/e2e/pull_request").rglob("test_*.py"))) if Path("tests/e2e/pull_request").exists() else 0
+)
+print(f"    Files: {e2e_pr_count} total")
+print(f"    Missing marks: {len(missing_marks)}")
+print(f"    Unknown features: {len(unknown_features)}")
+print(f"    Unknown models: {len(unknown_models)}")
+if missing_marks:
+    for p in missing_marks:
+        print(f"    ✗ MISSING MARKS: {p}")
+else:
+    print("    ✓ All test methods have @pytest.mark.e2e_features and @pytest.mark.e2e_model")
+if unknown_features:
+    for p in unknown_features:
+        print(f"    ✗ UNKNOWN FEATURE: {p}")
+else:
+    print("    ✓ All features are in ALLOWED_FEATURES")
+if unknown_models:
+    for p in unknown_models:
+        print(f"    ✗ UNKNOWN MODEL: {p}")
+else:
+    print("    ✓ All models are in ALLOWED_MODELS")
 
+# ============================================================
+# FIX INSTRUCTIONS
+# ============================================================
 has_errors = bool(
     broken
     or uncovered_e2e
@@ -261,6 +385,91 @@ has_errors = bool(
     or cpu_ut_leaked
     or rm_errors
     or part_errors
+    or missing_marks
+    or unknown_features
+    or unknown_models
 )
+
 if has_errors:
+    print("\n" + "=" * 70)
+    print("HOW TO FIX")
+    print("=" * 70)
+
+    if broken:
+        print(f"\n  [1] BROKEN PATHS ({len(broken)}):")
+        print("      These paths are referenced in .github/workflows/scripts/test_config.yaml")
+        print("      but do not exist on disk.")
+        print("      → Fix: update the paths in .github/workflows/scripts/test_config.yaml,")
+        print("        or restore the missing files.")
+
+    if uncovered_e2e:
+        print(f"\n  [2] UNCOVERED E2E TESTS ({len(uncovered_e2e)}):")
+        print("      These test files exist under tests/e2e/pull_request/ but are not")
+        print("      referenced in .github/workflows/scripts/test_config.yaml.")
+        print("      → Fix: add the missing test files to")
+        print("        .github/workflows/scripts/test_config.yaml under the")
+        print("        appropriate module's 'tests' list.")
+
+    if uncovered_ut:
+        print(f"\n  [3] UNCOVERED UT TESTS ({len(uncovered_ut)}):")
+        print("      These test files exist under tests/ut/ but are not referenced in")
+        print("      .github/workflows/scripts/test_config.yaml.")
+        print("      → Fix: add the missing test files to")
+        print("        .github/workflows/scripts/test_config.yaml under the")
+        print("        appropriate module's 'tests' list.")
+
+    if uncovered_source:
+        print(f"\n  [4] UNCOVERED SOURCE ({len(uncovered_source)}):")
+        print("      These .py files under vllm_ascend/ are not covered by any module's")
+        print("      'source_file_dependencies' in .github/workflows/scripts/test_config.yaml.")
+        print("      → Fix: add the missing files or their parent directories to")
+        print("        'source_file_dependencies' in")
+        print("        .github/workflows/scripts/test_config.yaml.")
+
+    if missing_et:
+        print(f"\n  [5] MISSING estimated_times ({len(missing_et)}):")
+        print("      These E2E/NPU UT test files have no entry in the 'estimated_times'")
+        print("      section of .github/workflows/scripts/test_config.yaml.")
+        print("      → Fix: add an estimated time (in seconds) for each missing file in")
+        print("        the 'estimated_times' map in")
+        print("        .github/workflows/scripts/test_config.yaml.")
+
+    if cpu_ut_leaked:
+        print(f"\n  [6] CPU UT LEAKED in estimated_times ({len(cpu_ut_leaked)}):")
+        print("      These CPU UT files should NOT have entries in 'estimated_times'.")
+        print("      → Fix: remove these entries from the 'estimated_times' map in")
+        print("        .github/workflows/scripts/test_config.yaml.")
+
+    if rm_errors:
+        print(f"\n  [7] runner_mapping ERRORS ({len(rm_errors)}):")
+        print("      Issues with runner_mapping patterns in")
+        print("      .github/workflows/scripts/test_config.yaml.")
+        print("      → Fix: correct the regex patterns or add missing 'default' keys.")
+
+    if part_errors:
+        print(f"\n  [8] partition ERRORS ({len(part_errors)}):")
+        print("      Issues with partition keys in")
+        print("      .github/workflows/scripts/test_config.yaml.")
+        print("      → Fix: ensure keys follow the '<runner>_x<num_npus>' format and")
+        print("        map to active runners.")
+
+    if missing_marks or unknown_features or unknown_models:
+        print("\n  [9] E2E DECORATOR ISSUES:")
+        if missing_marks:
+            print(f"      {len(missing_marks)} test method(s) missing decorators (BLOCKING).")
+            print("      → Fix: add @pytest.mark.e2e_features(...) and @pytest.mark.e2e_model(...)")
+            print("        to each test function. Features must be from ALLOWED_FEATURES,")
+            print("        models from ALLOWED_MODELS in tests/e2e/conftest.py.")
+            print("        Example: @pytest.mark.e2e_features('dense', 'gqa', 'eager_mode')")
+            print("                 @pytest.mark.e2e_model('Qwen/Qwen3-8B')")
+        if unknown_features:
+            print(f"      {len(unknown_features)} feature(s) not in ALLOWED_FEATURES (BLOCKING).")
+            print("      → Fix: either correct the feature name or add it to ALLOWED_FEATURES")
+            print("        in tests/e2e/conftest.py.")
+        if unknown_models:
+            print(f"      {len(unknown_models)} model(s) not in ALLOWED_MODELS (BLOCKING).")
+            print("      → Fix: either correct the model name or add it to ALLOWED_MODELS")
+            print("        in tests/e2e/conftest.py.")
+
+    print()
     sys.exit(1)

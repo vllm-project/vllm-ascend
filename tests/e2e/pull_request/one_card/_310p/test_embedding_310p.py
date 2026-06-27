@@ -28,6 +28,8 @@ MODELS = [
 ]
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode")
+@pytest.mark.e2e_model("BAAI/bge-m3", "Qwen/Qwen3-Embedding-0.6B", "intfloat/multilingual-e5-small")
 @pytest.mark.parametrize("model", MODELS)
 def test_embed_models_correctness(model: str):
     queries = ["What is the capital of China?", "Explain gravity"]
@@ -59,6 +61,8 @@ def test_embed_models_correctness(model: str):
     )
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "full_decode_only")
+@pytest.mark.e2e_model("BAAI/bge-m3", "Qwen/Qwen3-Embedding-0.6B", "intfloat/multilingual-e5-small")
 def test_bge_m3_correctness():
     queries = ["What is the capital of China?", "Explain gravity"]
 

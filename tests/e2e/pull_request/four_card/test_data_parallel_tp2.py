@@ -13,6 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 DATA_PARALLEL_SCRIPT = REPO_ROOT / "examples" / "offline_data_parallel.py"
 
 
+@pytest.mark.e2e_features("dense", "eager_mode")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
 @pytest.mark.skip(reason="broken, fix me")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])

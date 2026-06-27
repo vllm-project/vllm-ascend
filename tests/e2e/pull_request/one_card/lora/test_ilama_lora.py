@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import pytest
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -39,6 +40,8 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("vllm-ascend/ilama-3.2-1B")
 def test_ilama_lora(ilama_lora_files):
     with VllmRunner(
         MODEL_PATH,

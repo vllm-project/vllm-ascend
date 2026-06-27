@@ -13,6 +13,8 @@ MODELS = [
 ]
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "moe_routing_replay", "async_scheduling")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B", "Qwen/Qwen3.5-35B-A3B")
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"OMP_NUM_THREADS": "1"})
 def test_qwen3_moe_routing_replay(model):

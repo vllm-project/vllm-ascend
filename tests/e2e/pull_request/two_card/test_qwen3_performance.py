@@ -50,6 +50,8 @@ vllm_bench_cases = {
 baseline_throughput = 1514.0  # baseline throughput for Qwen3-8B, measured with num_prompts=500
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "weight_prefetch", "hccl_weight_transfer")
+@pytest.mark.e2e_model("Qwen/Qwen3-8B")
 @pytest.mark.skip(reason="Temporarily skipped due to flaky failures, pending investigation.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.asyncio

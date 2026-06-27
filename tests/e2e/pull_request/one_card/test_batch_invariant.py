@@ -89,6 +89,8 @@ def _extract_step_logprobs(request_output):
     return None, None
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(1000)
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(monkeypatch: pytest.MonkeyPatch):
     """
@@ -209,6 +211,8 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(monkeypat
         cleanup_dist_env_and_memory()
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "logprobs")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.MonkeyPatch):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
@@ -399,6 +403,8 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.Monkey
         pytest.fail(msg)
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 def test_simple_generation(monkeypatch: pytest.MonkeyPatch):
     """
     Simple test that runs the model with a basic prompt and prints the output.
@@ -445,6 +451,8 @@ def test_simple_generation(monkeypatch: pytest.MonkeyPatch):
         cleanup_dist_env_and_memory()
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "logprobs")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 def test_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.MonkeyPatch):
     """
     This test is the inverse of test_logprobs_bitwise_batch_invariance_bs1_vs_bsN.

@@ -15,6 +15,8 @@ PROMPTS = [
 ]
 
 
+@pytest.mark.e2e_features("moe", "eager_mode", "tp", "ep", "flash_comm1", "logprobs", "shared_expert_dp")
+@pytest.mark.e2e_model("deepseek-ai/DeepSeek-V2-Lite")
 @wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("model", MODELS)
 def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(model: str, monkeypatch) -> None:

@@ -35,6 +35,8 @@ QWEN_DENSE_MODELS = [
 ]
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "pd_disaggregation")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B", "vllm-ascend/DeepSeek-V2-Lite-W8A8", "vllm-ascend/Qwen3-0.6B-W8A8")
 @pytest.mark.skip(reason="test is broken, fix me")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "1"})
@@ -57,6 +59,8 @@ def test_qwen3_moe_fc2_oshard_tp2() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "w8a8")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B", "vllm-ascend/DeepSeek-V2-Lite-W8A8", "vllm-ascend/Qwen3-0.6B-W8A8")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_deepseek_v2_lite_fc1_tp2() -> None:
     example_prompts = [
@@ -75,6 +79,8 @@ def test_deepseek_v2_lite_fc1_tp2() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B", "vllm-ascend/DeepSeek-V2-Lite-W8A8", "vllm-ascend/Qwen3-0.6B-W8A8")
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_dense_fc1_tp2(model):
@@ -94,6 +100,8 @@ def test_qwen3_dense_fc1_tp2(model):
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "weight_prefetch")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B", "vllm-ascend/DeepSeek-V2-Lite-W8A8", "vllm-ascend/Qwen3-0.6B-W8A8")
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_qwen3_dense_prefetch_mlp_weight_tp2(model):

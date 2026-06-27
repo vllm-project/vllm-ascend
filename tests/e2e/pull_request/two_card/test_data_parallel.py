@@ -35,6 +35,8 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 DATA_PARALLEL_SCRIPT = REPO_ROOT / "examples" / "offline_data_parallel.py"
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "w8a8")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})

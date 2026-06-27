@@ -594,6 +594,8 @@ def check_capture_mem(capture_mem, baseline_capture_mem=0.2, capture_mem_toleran
     )
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "w8a8")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8")
 @wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH])
 def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch):

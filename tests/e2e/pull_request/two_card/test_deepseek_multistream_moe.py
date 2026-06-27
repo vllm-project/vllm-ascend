@@ -16,9 +16,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "multistream_moe")
+@pytest.mark.e2e_model("vllm-ascend/DeepSeek-V3-Pruning")
 def test_deepseek_multistream_moe_tp2():
     example_prompts = [
         "Hello, my name is",

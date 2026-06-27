@@ -36,6 +36,10 @@ WHISPER_MODELS = [
 ]
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model(
+    "Qwen/Qwen2-Audio-7B-Instruct", "Qwen/Qwen3-VL-8B-Instruct", "openai-mirror/whisper-large-v3-turbo"
+)
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_multimodal_vl(vl_config):
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
@@ -69,6 +73,10 @@ def test_multimodal_vl(vl_config):
             assert output_str, "Generated output should not be empty."
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model(
+    "Qwen/Qwen2-Audio-7B-Instruct", "Qwen/Qwen3-VL-8B-Instruct", "openai-mirror/whisper-large-v3-turbo"
+)
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_multimodal_vl_language_model_only():
     example_prompts = [
@@ -88,6 +96,10 @@ def test_multimodal_vl_language_model_only():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model(
+    "Qwen/Qwen2-Audio-7B-Instruct", "Qwen/Qwen3-VL-8B-Instruct", "openai-mirror/whisper-large-v3-turbo"
+)
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_multimodal_audio():
     audio_prompt = "".join([f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(2)])
@@ -120,6 +132,10 @@ def test_multimodal_audio():
         assert len(outputs) > 0, "Generated outputs should not be empty."
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode")
+@pytest.mark.e2e_model(
+    "Qwen/Qwen2-Audio-7B-Instruct", "Qwen/Qwen3-VL-8B-Instruct", "openai-mirror/whisper-large-v3-turbo"
+)
 @pytest.mark.parametrize("model", WHISPER_MODELS)
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_whisper(model) -> None:

@@ -33,6 +33,8 @@ Numbers should be represented as integers only.
 SEED = 42
 
 
+@pytest.mark.e2e_features("dense", "eager_mode")
+@pytest.mark.e2e_model("Qwen/Qwen3-1.7B", "vllm-ascend/Qwen3-1.7B_eagle3", "vllm-ascend/qwen-linear-algebra-coder")
 @pytest.mark.parametrize(
     "model_setup",
     [

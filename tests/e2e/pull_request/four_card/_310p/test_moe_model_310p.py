@@ -16,9 +16,13 @@
 # This file is a part of the vllm-ascend project.
 
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B", "Qwen/Qwen3.5-35B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8")
 def test_qwen3_moe_tp4_fp16():
     example_prompts = [
         "Hello, my name is",
@@ -36,6 +40,8 @@ def test_qwen3_moe_tp4_fp16():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode", "w8a8")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B", "Qwen/Qwen3.5-35B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8")
 def test_qwen3_moe_tp2_w8a8():
     example_prompts = [
         "Hello, my name is",
@@ -54,6 +60,8 @@ def test_qwen3_moe_tp2_w8a8():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode", "mamba_ssm")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B", "Qwen/Qwen3.5-35B-A3B", "vllm-ascend/Qwen3-30B-A3B-W8A8")
 def test_qwen3_5_moe_tp4_fp16():
     example_prompts = [
         "Hello, my name is",

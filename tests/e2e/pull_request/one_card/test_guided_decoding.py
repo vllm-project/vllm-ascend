@@ -47,10 +47,7 @@ def model_runner_env(request):
 
 @pytest.fixture(scope="module")
 def sample_regex():
-    return (
-        r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
-        r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)"
-    )
+    return r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}" r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)"
 
 
 @pytest.fixture(scope="module")
@@ -78,6 +75,8 @@ def sample_json_schema():
     }
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "guided_decoding")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema, model_runner_env):
     runner_kwargs: dict[str, Any] = {}
@@ -108,6 +107,8 @@ def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema
             jsonschema.validate(instance=output_json, schema=sample_json_schema)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "guided_decoding")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_regex(guided_decoding_backend: str, sample_regex, model_runner_env):
     if guided_decoding_backend == "outlines":

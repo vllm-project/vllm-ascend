@@ -15,6 +15,8 @@ from tests.e2e.pull_request.one_card.spec_decode.utils import (
 )
 
 
+@pytest.mark.e2e_features("dense", "gqa", "piecewise_graph", "draft_parallel")
+@pytest.mark.e2e_model("LLM-Research/Meta-Llama-3.1-8B-Instruct", "amd/PARD-Llama-3.2-1B")
 @pytest.mark.parametrize("method", DRAFT_PARALLEL_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [1])

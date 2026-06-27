@@ -9,6 +9,8 @@ MODELS = [
 ]
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("Qwen/Qwen3-VL-2B-Instruct")
 @pytest.mark.parametrize("model", MODELS)
 def test_qwen3_vl_sp_tp2(model: str) -> None:
     prompts = [

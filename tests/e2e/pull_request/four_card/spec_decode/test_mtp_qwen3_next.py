@@ -34,6 +34,8 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 MODELS = ["Qwen/Qwen3-Next-80B-A3B-Instruct"]
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "mtp")
+@pytest.mark.e2e_model("Qwen/Qwen3-Next-80B-A3B-Instruct")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_qwen3_next_mtp_acceptance_tp4(model_name):
     golden = [0.85, 0.46, 0.19]

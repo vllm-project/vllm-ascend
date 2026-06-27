@@ -35,6 +35,8 @@ def get_prompt_embeds(chat, tokenizer, embedding_layer):
     return prompt_embeds
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "prompt_embeds")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_mixed_prompt_embeds_and_text(model_name):
     """Test mixed inputs with both prompt embeddings and text prompts."""

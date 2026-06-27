@@ -38,6 +38,8 @@ def _build_kv_transfer_config(
     )
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "prefix_caching", "sleep_wake_up", "cpu_offloading")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 def test_simple_cpu_offload_accuracy() -> None:
     """Reset GPU prefix cache after a cold run; verify the CPU-loaded KV
     cache reproduces the cold-run output deterministically."""
@@ -77,6 +79,8 @@ def test_simple_cpu_offload_accuracy() -> None:
         )
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "cpu_offloading")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.parametrize("lazy", [False, True])
 def test_simple_cpu_offload_no_crash_on_repeat(lazy: bool) -> None:
     """Smoke test: many short generations exercise both eager and lazy

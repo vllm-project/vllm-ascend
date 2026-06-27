@@ -4,6 +4,8 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.lora.test_ilama_lora import EXPECTED_LORA_OUTPUT, MODEL_PATH, do_sample
 
 
+@pytest.mark.e2e_features("dense", "gqa", "full_decode_only", "lora", "tp")
+@pytest.mark.e2e_model("vllm-ascend/ilama-3.2-1B")
 @pytest.mark.parametrize("distributed_executor_backend", ["mp"])
 def test_ilama_lora_tp2(distributed_executor_backend, ilama_lora_files):
     with VllmRunner(

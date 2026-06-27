@@ -38,6 +38,10 @@ def model_name(request):
     )
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model(
+    "BAAI/bge-reranker-v2-m3", "dengcao/ms-marco-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L12-v2"
+)
 def test_cross_encoder_score_1_to_1(model_name):
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 
@@ -55,6 +59,10 @@ def test_cross_encoder_score_1_to_1(model_name):
     assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model(
+    "BAAI/bge-reranker-v2-m3", "dengcao/ms-marco-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L12-v2"
+)
 def test_cross_encoder_score_1_to_N(model_name):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
@@ -76,6 +84,10 @@ def test_cross_encoder_score_1_to_N(model_name):
     assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model(
+    "BAAI/bge-reranker-v2-m3", "dengcao/ms-marco-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L12-v2"
+)
 def test_cross_encoder_score_N_to_N(model_name):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
@@ -105,6 +117,10 @@ def emb_model_name(request):
     )
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model(
+    "BAAI/bge-reranker-v2-m3", "dengcao/ms-marco-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L12-v2"
+)
 def test_embedding_score_1_to_1(emb_model_name):
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 
@@ -123,6 +139,10 @@ def test_embedding_score_1_to_1(emb_model_name):
     assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model(
+    "BAAI/bge-reranker-v2-m3", "dengcao/ms-marco-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L12-v2"
+)
 def test_embedding_score_1_to_N(emb_model_name):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
@@ -145,6 +165,10 @@ def test_embedding_score_1_to_N(emb_model_name):
     assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model(
+    "BAAI/bge-reranker-v2-m3", "dengcao/ms-marco-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L12-v2"
+)
 def test_embedding_score_N_to_N(emb_model_name):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],

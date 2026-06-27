@@ -466,6 +466,8 @@ def sequence_parallelism_moe_workers() -> Generator[Callable[[str], None], None,
                 worker.join()
 
 
+@pytest.mark.e2e_features("moe", "eager_mode", "sequence_parallelism")
+@pytest.mark.e2e_model("N/A")
 @pytest.mark.parametrize("case_name", tuple(PATTERN_TEST_CASES), ids=tuple(PATTERN_TEST_CASES))
 def test_sequence_parallelism_moe_patterns(
     sequence_parallelism_moe_workers: Callable[[str], None], case_name: str

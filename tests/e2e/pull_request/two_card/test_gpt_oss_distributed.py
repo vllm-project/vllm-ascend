@@ -30,6 +30,8 @@ GPT_OSS_MODELS = [
 ]
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode")
+@pytest.mark.e2e_model("unsloth/gpt-oss-20b-BF16")
 @pytest.mark.parametrize("model", GPT_OSS_MODELS)
 def test_gpt_oss_distributed_tp2(model):
     example_prompts = [

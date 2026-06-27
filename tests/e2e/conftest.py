@@ -32,7 +32,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, overload
 
 import huggingface_hub
 import numpy as np
@@ -1699,3 +1699,261 @@ def vl_config(request):
     if "skip" in config:
         pytest.skip(config["skip"])
     return config
+
+
+# ============================================================
+# E2E Coverage: feature & model declaration via pytest marks
+# ============================================================
+
+# Global feature allowlist — every @pytest.mark.e2e_features(...) must
+# reference only features defined here.  This is the single source of
+# truth for which features exist; generate_coverage_md.py reads it.
+ALLOWED_FEATURES = frozenset(
+    [
+        # model architecture
+        "dense",
+        "moe",
+        "embedding",
+        "classification",
+        "reranker",
+        "multimodal",
+        # graph
+        "eager_mode",
+        "full_graph",
+        "full_decode_only",
+        "piecewise_graph",
+        # hardware
+        "310P",
+        # parallelism
+        "tp",
+        "pp",
+        "ep",
+        "pcp",
+        "dcp",
+        # eplb
+        "eplb",
+        # pd disaggregation
+        "pd_disaggregation",
+        # quantization
+        "fp16",
+        "w8a8",
+        "w4a8",
+        "w4a16",
+        "w8a8_mxfp8",
+        "w8a8_mxfp4",
+        "w8a8_fp8",
+        # lora
+        "lora",
+        "multi_lora",
+        # spec decode
+        "mtp",
+        "eagle_3",
+        "ngram",
+        "suffix",
+        "dflash",
+        "draft_parallel",
+        "extract_hidden_states",
+        # attention
+        "gqa",
+        "sfa",
+        "dsa",
+        "mamba_ssm",
+        # feature
+        "flash_comm1",
+        "flash_comm2",
+        "chunked_prefill",
+        "prefix_caching",
+        "sleep_wake_up",
+        "xlite_graph",
+        "logprobs",
+        "multistream_moe",
+        "shared_expert_dp",
+        "guided_decoding",
+        "cpu_offloading",
+        "weight_prefetch",
+        "prompt_embeds",
+        "multi_instance",
+        "fia",
+        "external_launcher",
+        "disaggregated_encoder",
+        "sequence_parallelism",
+        "moe_routing_replay",
+        "hccl_weight_transfer",
+        "offline_weight_load",
+        "async_scheduling",
+    ]
+)
+
+# Global model allowlist — every @pytest.mark.e2e_model(...) should
+# reference models from here.  Used by CI validation scripts to
+# ensure consistency.
+ALLOWED_MODELS = frozenset(
+    [
+        # --- Qwen3 (base) ---
+        "Qwen/Qwen3-0.6B",
+        "Qwen/Qwen3-1.7B",
+        "Qwen/Qwen3-8B",
+        "Qwen/Qwen3-32B",
+        "Qwen/Qwen3-30B-A3B",
+        "Qwen/Qwen3-Next-80B-A3B-Instruct",
+        "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+        "Qwen/Qwen3-Reranker-0.6B",
+        "Qwen/Qwen3-Embedding-0.6B",
+        # --- Qwen3 (quantized) ---
+        "vllm-ascend/Qwen3-0.6B-W8A8",
+        "vllm-ascend/Qwen3-8B-W8A8",
+        "vllm-ascend/Qwen3-32B-W8A8",
+        "vllm-ascend/Qwen3-30B-A3B-W8A8",
+        "vllm-ascend/Qwen3-30B-A3B-W8A8-QuaRot",
+        "vllm-ascend/Qwen3-32B-W8A8-QuaRot",
+        "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8",
+        "vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w4a8",
+        # --- Qwen3.5 ---
+        "Qwen/Qwen3.5-0.8B",
+        "Qwen/Qwen3.5-4B",
+        "Qwen/Qwen3.5-27B",
+        "Qwen/Qwen3.5-35B-A3B",
+        "Qwen/Qwen3.6-27B",
+        "Eco-Tech/Qwen3.5-35B-A3B-w8a8-mtp",
+        "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp",
+        "Eco-Tech/Qwen3.5-27B-w8a8-mtp",
+        "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
+        "Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp",
+        # --- Qwen VL / Audio ---
+        "Qwen/Qwen3-VL-2B-Instruct",
+        "Qwen/Qwen3-VL-8B-Instruct",
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "Qwen/Qwen2.5-VL-7B-Instruct",
+        "Qwen/Qwen2-Audio-7B-Instruct",
+        "Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot",
+        "Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-QuaRot",
+        # --- Qwen3 (spec decode helpers) ---
+        "vllm-ascend/Qwen3-1.7B_eagle3",
+        "vllm-ascend/Qwen3-30B-A3B-vwn-eagle-model",
+        "vllm-ascend/qwen-linear-algebra-coder",
+        "RedHatAI/Qwen3-8B-speculator.eagle3",
+        "z-lab/Qwen3-8B-DFlash-b16",
+        # --- DeepSeek ---
+        "deepseek-ai/DeepSeek-V2-Lite",
+        "deepseek-ai/DeepSeek-V2-Lite-Chat",
+        "vllm-ascend/DeepSeek-V2-Lite-W8A8",
+        "vllm-ascend/DeepSeek-V3-Pruning",
+        "vllm-ascend/DeepSeek-V3-W8A8",
+        "vllm-ascend/DeepSeek-V3.2-W8A8",
+        "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+        "vllm-ascend/DeepSeek-R1-0528-W8A8",
+        "unsloth/DeepSeek-V3.1-BF16",
+        "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+        "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp",
+        "wemaster/deepseek_mtp_main_random_bf16",
+        # --- Llama / MiniCPM ---
+        "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+        "meta-llama/Llama-3.2-3B-Instruct",
+        "vllm-ascend/Llama-3.2-3B-Instruct",
+        "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+        "vllm-ascend/ilama-3.2-1B",
+        "amd/PARD-Llama-3.2-1B",
+        "OpenBMB/MiniCPM4-0.5B",
+        "openbmb/MiniCPM-2B-sft-bf16",
+        "unsloth/gpt-oss-20b-BF16",
+        # --- BGE / reranker / embedding / classification ---
+        "BAAI/bge-m3",
+        "BAAI/bge-reranker-v2-m3",
+        "dengcao/ms-marco-MiniLM-L6-v2",
+        "sentence-transformers/all-MiniLM-L12-v2",
+        "intfloat/multilingual-e5-small",
+        "Howeee/Qwen2.5-1.5B-apeach",
+        # --- Whisper ---
+        "openai-mirror/whisper-large-v3-turbo",
+        # --- GLM ---
+        "Eco-Tech/GLM-4.7-W8A8-floatmtp",
+        "Eco-Tech/GLM-5-w4a8",
+        "Eco-Tech/GLM-5.1-w8a8",
+        "Eco-Tech/GLM-5.2-w8a8",
+        "vllm-ascend/GLM-4.7-W8A8C8",
+        # --- Kimi / Moonshot ---
+        "Eco-Tech/Kimi-K2.5-W4A8",
+        "moonshotai/Kimi-K2-Thinking",
+        # --- MiniMax ---
+        "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
+        # --- Hy ---
+        "Tencent-Hunyuan/Hy3-preview",
+        # --- Internal / no real model ---
+        "N/A",
+    ]
+)
+
+
+def pytest_configure(config):
+    """Register custom pytest markers for E2E coverage."""
+    config.addinivalue_line(
+        "markers",
+        "e2e_features: E2E test feature tags — must be from ALLOWED_FEATURES. "
+        "Example: @pytest.mark.e2e_features('dense', 'gqa', 'eager_mode')",
+    )
+    config.addinivalue_line(
+        "markers",
+        "e2e_model: E2E test model name(s) — should be from ALLOWED_MODELS. "
+        "Example: @pytest.mark.e2e_model('Qwen/Qwen3-8B') or "
+        "@pytest.mark.e2e_model('Qwen/Qwen3-8B', 'vllm-ascend/Qwen3-8B-W8A8')",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Validate e2e_features/e2e_model markers at collection time."""
+    for item in items:
+        m = item.get_closest_marker("e2e_features")
+        if m:
+            for feat in m.args:
+                if feat not in ALLOWED_FEATURES:
+                    raise ValueError(
+                        f"{item.nodeid}: feature '{feat}' is not in ALLOWED_FEATURES. "
+                        f"Add it to tests/e2e/conftest.py:ALLOWED_FEATURES or fix the typo."
+                    )
+        m = item.get_closest_marker("e2e_model")
+        if m:
+            for model in m.args:
+                if model not in ALLOWED_MODELS:
+                    raise ValueError(
+                        f"{item.nodeid}: model '{model}' is not in ALLOWED_MODELS. "
+                        f"Add it to tests/e2e/conftest.py:ALLOWED_MODELS or fix the typo."
+                    )
+
+
+@overload
+def get_e2e_model(request: pytest.FixtureRequest) -> str: ...
+@overload
+def get_e2e_model(request: pytest.FixtureRequest, index: int) -> str: ...
+@overload
+def get_e2e_model(request: pytest.FixtureRequest, index: None) -> tuple[str, ...]: ...
+
+
+def get_e2e_model(request: pytest.FixtureRequest, index: int | None = 0) -> str | tuple[str, ...]:
+    """Read model(s) from @pytest.mark.e2e_model on the calling test.
+
+    Without arguments returns the first model (most common case):
+        @pytest.mark.e2e_model("Qwen/Qwen3-8B")
+        def test_xxx(request):
+            model = get_e2e_model(request)  # "Qwen/Qwen3-8B"
+            with VllmRunner(model, ...):
+
+    With index=n returns the n-th model:
+        @pytest.mark.e2e_model("model-a", "model-b")
+        def test_xxx(request):
+            m1 = get_e2e_model(request, 0)  # "model-a"
+            m2 = get_e2e_model(request, 1)  # "model-b"
+
+    With index=None returns all models as a tuple:
+        @pytest.mark.e2e_model("model-a", "model-b")
+        def test_xxx(request):
+            for model in get_e2e_model(request, None):
+                ...
+    """
+    marker = request.node.get_closest_marker("e2e_model")
+    if marker is None:
+        raise ValueError(f"Test '{request.node.name}' has no @pytest.mark.e2e_model marker")
+    if index is None:
+        return marker.args
+    if index >= len(marker.args):
+        raise IndexError(f"@pytest.mark.e2e_model only has {len(marker.args)} models, requested index {index}")
+    return marker.args[index]

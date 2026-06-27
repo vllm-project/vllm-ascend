@@ -28,6 +28,8 @@ def model_name(request):
     yield snapshot_download(request.param)
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode")
+@pytest.mark.e2e_model("BAAI/bge-reranker-v2-m3")
 def test_cross_encoder_score_1_to_1(model_name):
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 
@@ -45,6 +47,8 @@ def test_cross_encoder_score_1_to_1(model_name):
     assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode")
+@pytest.mark.e2e_model("BAAI/bge-reranker-v2-m3")
 def test_cross_encoder_score_1_to_N(model_name):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
@@ -66,6 +70,8 @@ def test_cross_encoder_score_1_to_N(model_name):
     assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode")
+@pytest.mark.e2e_model("BAAI/bge-reranker-v2-m3")
 def test_cross_encoder_score_N_to_N(model_name):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],

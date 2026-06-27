@@ -17,12 +17,15 @@
 #
 
 import huggingface_hub
+import pytest
 from modelscope import snapshot_download as modelscope_snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import HfRunner, VllmRunner, cleanup_dist_env_and_memory, wait_until_npu_memory_free
 from tests.e2e.utils import check_embeddings_close
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("Qwen/Qwen3-Embedding-0.6B")
 @wait_until_npu_memory_free()
 def test_embedding_full_decode_only():
     """Verify embedding outputs with full decode only."""

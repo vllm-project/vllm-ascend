@@ -233,6 +233,8 @@ class TestModelSPWithBias(nn.Module):
         return [torch.ops.npu.npu_add_rms_norm_quant.default, torch.ops.vllm.maybe_all_gather_and_maybe_unpad.default]
 
 
+@pytest.mark.e2e_features("eager_mode")
+@pytest.mark.e2e_model("N/A")
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("num_tokens", [257])

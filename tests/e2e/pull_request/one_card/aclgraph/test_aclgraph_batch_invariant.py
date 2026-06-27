@@ -105,6 +105,8 @@ def _extract_step_logprobs(generate_output):
     return logprobs_tensor, output_ids
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(1000)
 def test_aclgraph_v1_generation_is_deterministic_across_batch_sizes_with_needle(monkeypatch: pytest.MonkeyPatch):
     """
@@ -213,6 +215,8 @@ def test_aclgraph_v1_generation_is_deterministic_across_batch_sizes_with_needle(
             )
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "logprobs")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 def test_aclgraph_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pytest.MonkeyPatch):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
@@ -402,6 +406,8 @@ def test_aclgraph_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pyte
         pytest.fail(msg)
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 def test_aclgraph_simple_generation(monkeypatch: pytest.MonkeyPatch):
     """
     Simple test that runs the model with a basic prompt and prints the output.
@@ -440,6 +446,8 @@ def test_aclgraph_simple_generation(monkeypatch: pytest.MonkeyPatch):
         print(f"{'=' * 80}\n")
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "logprobs")
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
 def test_aclgraph_logprobs_without_batch_invariance_should_fail(monkeypatch: pytest.MonkeyPatch):
     """
     This test is the inverse of test_logprobs_bitwise_batch_invariance_bs1_vs_bsN.

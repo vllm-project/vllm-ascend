@@ -15,9 +15,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode", "mtp", "mamba_ssm")
+@pytest.mark.e2e_model("Qwen/Qwen3.5-4B")
 def test_qwen3_5_mtp_tp1_eager():
     example_prompts = ["Hello, my name is"]
     with VllmRunner(

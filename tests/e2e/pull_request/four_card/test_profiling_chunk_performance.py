@@ -17,6 +17,8 @@ import statistics
 import time
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 MODEL = "Qwen/Qwen3-30B-A3B"
@@ -33,6 +35,8 @@ NUM_TEST = 5
 BASELINE_TTFT_S = 5.2
 
 
+@pytest.mark.e2e_features("multimodal", "eager_mode", "flash_comm1", "async_scheduling")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
 @patch.dict(
     os.environ,
     {

@@ -16,7 +16,9 @@
 # This file is a part of the vllm-ascend project.
 
 
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+import pytest
+
+from tests.e2e.conftest import VllmRunner, get_e2e_model, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
 QWEN3_5_PREFIX_MAMBA_PROMPT = (
@@ -35,12 +37,12 @@ QWEN3_5_PREFIX_MAMBA_PROMPTS = [
 ]
 
 
-def _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[tuple[list[int], str]]:
+def _generate_qwen3_5_prefix_mamba_outputs(model: str, enable_prefix_caching: bool) -> list[tuple[list[int], str]]:
     outputs: list[tuple[list[int], str]] = []
 
     if enable_prefix_caching:
         with VllmRunner(
-            "Qwen/Qwen3.5-4B",
+            model,
             tensor_parallel_size=1,
             enforce_eager=True,
             dtype="float16",
@@ -54,7 +56,7 @@ def _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[
                 outputs.extend(vllm_model.generate_greedy([prompt], max_tokens=8))
     else:
         with VllmRunner(
-            "Qwen/Qwen3.5-4B",
+            model,
             tensor_parallel_size=1,
             enforce_eager=True,
             dtype="float16",
@@ -68,13 +70,16 @@ def _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[
     return outputs
 
 
-def test_qwen3_dense_tp1_fp16():
+@pytest.mark.e2e_features("310P", "dense", "gqa", "eager_mode", "fp16")
+@pytest.mark.e2e_model("Qwen/Qwen3-8B")
+def test_qwen3_dense_tp1_fp16(request):
     example_prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
+    model = get_e2e_model(request)
     with VllmRunner(
-        "Qwen/Qwen3-8B",
+        model,
         tensor_parallel_size=1,
         enforce_eager=True,
         dtype="float16",
@@ -84,13 +89,16 @@ def test_qwen3_dense_tp1_fp16():
 
 
 @wait_until_npu_memory_free(0.7)
-def test_qwen3_dense_tp1_fp16_aclgraph():
+@pytest.mark.e2e_features("310P", "dense", "gqa", "full_decode_only", "fp16")
+@pytest.mark.e2e_model("Qwen/Qwen3-8B")
+def test_qwen3_dense_tp1_fp16_aclgraph(request):
     example_prompts = [
         "Hello, my name is",
     ] * 8
     max_tokens = 2
+    model = get_e2e_model(request)
     with VllmRunner(
-        "Qwen/Qwen3-8B",
+        model,
         tensor_parallel_size=1,
         dtype="float16",
         max_num_seqs=16,
@@ -105,13 +113,16 @@ def test_qwen3_dense_tp1_fp16_aclgraph():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_qwen3_dense_tp1_w8a8():
+@pytest.mark.e2e_features("310P", "dense", "gqa", "eager_mode", "w8a8", "fp16")
+@pytest.mark.e2e_model("vllm-ascend/Qwen3-8B-W8A8")
+def test_qwen3_dense_tp1_w8a8(request):
     example_prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
+    model = get_e2e_model(request)
     with VllmRunner(
-        "vllm-ascend/Qwen3-8B-W8A8",
+        model,
         tensor_parallel_size=1,
         enforce_eager=True,
         dtype="float16",
@@ -121,13 +132,16 @@ def test_qwen3_dense_tp1_w8a8():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_qwen3_5_dense_tp1_fp16():
+@pytest.mark.e2e_features("310P", "mamba_ssm", "eager_mode", "fp16")
+@pytest.mark.e2e_model("Qwen/Qwen3.5-4B")
+def test_qwen3_5_dense_tp1_fp16(request):
     example_prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
+    model = get_e2e_model(request)
     with VllmRunner(
-        "Qwen/Qwen3.5-4B",
+        model,
         tensor_parallel_size=1,
         enforce_eager=True,
         dtype="float16",
@@ -137,9 +151,12 @@ def test_qwen3_5_dense_tp1_fp16():
 
 
 @wait_until_npu_memory_free(0.7)
-def test_qwen3_5_dense_prefix_mamba_cache_tp1_fp16():
-    prefix_cache_outputs = _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching=True)
-    no_prefix_cache_outputs = _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching=False)
+@pytest.mark.e2e_features("310P", "eager_mode", "fp16", "prefix_caching")
+@pytest.mark.e2e_model("Qwen/Qwen3.5-4B")
+def test_qwen3_5_dense_prefix_mamba_cache_tp1_fp16(request):
+    model = get_e2e_model(request)
+    prefix_cache_outputs = _generate_qwen3_5_prefix_mamba_outputs(model, enable_prefix_caching=True)
+    no_prefix_cache_outputs = _generate_qwen3_5_prefix_mamba_outputs(model, enable_prefix_caching=False)
 
     assert len(prefix_cache_outputs) == len(no_prefix_cache_outputs) == len(QWEN3_5_PREFIX_MAMBA_PROMPTS)
     check_outputs_equal(
@@ -151,13 +168,16 @@ def test_qwen3_5_dense_prefix_mamba_cache_tp1_fp16():
 
 
 @wait_until_npu_memory_free(0.7)
-def test_qwen3_5_dense_tp1_fp16_aclgraph():
+@pytest.mark.e2e_features("310P", "mamba_ssm", "full_decode_only", "fp16")
+@pytest.mark.e2e_model("Qwen/Qwen3.5-4B")
+def test_qwen3_5_dense_tp1_fp16_aclgraph(request):
     example_prompts = [
         "Hello, my name is",
     ] * 8
     max_tokens = 2
+    model = get_e2e_model(request)
     with VllmRunner(
-        "Qwen/Qwen3.5-4B",
+        model,
         tensor_parallel_size=1,
         dtype="float16",
         max_num_seqs=16,

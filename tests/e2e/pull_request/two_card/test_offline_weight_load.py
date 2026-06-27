@@ -33,6 +33,8 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
 
 
+@pytest.mark.e2e_features("dense", "eager_mode", "sleep_wake_up", "external_launcher", "offline_weight_load")
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
 @pytest.mark.skip("fix me, unstable, timeout")
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})

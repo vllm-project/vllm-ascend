@@ -17,15 +17,18 @@
 #
 
 import huggingface_hub
+import pytest
 from huggingface_hub import snapshot_download as hf_snapshot_download
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
 
 
+@pytest.mark.e2e_features("multimodal", "full_decode_only", "mtp", "mamba_ssm")
+@pytest.mark.e2e_model("Qwen/Qwen3.5-0.8B")
 @wait_until_npu_memory_free()
 def test_mamba_ssm_multimodal_reasoning_mtp_full_decode_only():
-    """Verify Mamba/SSM multimodal reasoning with MTP and full decode only."""
+    """Verify Mamba/SSM Multimodal with MTP and full decode only."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
     img_questions = [
         "What is the content of this image?",

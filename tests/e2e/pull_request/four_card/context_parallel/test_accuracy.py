@@ -30,10 +30,8 @@ import pytest
 from PIL import Image
 from vllm import SamplingParams
 
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import VllmRunner, get_e2e_model, wait_until_npu_memory_free
 
-DEEPSEEK_V2_LITE = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
-DEEPSEEK_MTP = "wemaster/deepseek_mtp_main_random_bf16"
 MAX_NUM_SEQS = 4
 E2E_ROOT = Path(__file__).resolve().parents[3]
 QWEN_IMAGE_PATH = E2E_ROOT / "prompts" / "qwen.png"
@@ -117,15 +115,14 @@ DEEPSEEK_V4_GOLDEN = ["Hello, my name is {name} and I", 'What is the meaning of 
 @dataclass(frozen=True)
 class AccuracyCase:
     name: str
-    model: str
     prompts: Sequence[str]
     expected_outputs: Sequence[str] | Sequence[Sequence[str]]
     max_tokens: int
     runner_kwargs: dict[str, Any]
 
 
-def _run_accuracy_case(case: AccuracyCase) -> None:
-    with VllmRunner(case.model, **case.runner_kwargs) as runner:
+def _run_accuracy_case(model: str, case: AccuracyCase) -> None:
+    with VllmRunner(model, **case.runner_kwargs) as runner:
         outputs = runner.generate_greedy(list(case.prompts), case.max_tokens)
 
     if isinstance(case.expected_outputs[0], str):
@@ -168,7 +165,9 @@ def match_outputs_with_goldens(outputs: list[tuple[list[int], str]], goldens: Se
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_qwen3_vl_multimodal_pcp_accuracy_guard() -> None:
+@pytest.mark.e2e_features("multimodal", "gqa", "tp", "pcp", "full_decode_only")
+@pytest.mark.e2e_model("Qwen/Qwen3-VL-8B-Instruct")
+def test_qwen3_vl_multimodal_pcp_accuracy_guard(request) -> None:
     image = Image.open(QWEN_IMAGE_PATH).convert("RGB")
     single_image_prompt = (
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
@@ -196,9 +195,9 @@ def test_qwen3_vl_multimodal_pcp_accuracy_guard() -> None:
         },
     ]
     sampling_params = SamplingParams(max_tokens=16, temperature=0.0)
-
+    model = get_e2e_model(request)
     with VllmRunner(
-        "Qwen/Qwen3-VL-8B-Instruct",
+        model,
         enforce_eager=False,
         max_model_len=4096,
         tensor_parallel_size=2,
@@ -240,7 +239,6 @@ DSV2_COMMON_KWARGS: dict[str, Any] = {
 DSV2_PARALLEL_CASES = [
     AccuracyCase(
         name="dsv2_pcp_dcp_full_features",
-        model=DEEPSEEK_V2_LITE,
         prompts=DSV2_PROMPTS,
         expected_outputs=DSV2_PCP_GOLDEN,
         max_tokens=10,
@@ -255,7 +253,6 @@ DSV2_PARALLEL_CASES = [
     ),
     AccuracyCase(
         name="dsv2_pcp_only_full_features",
-        model=DEEPSEEK_V2_LITE,
         prompts=DSV2_PROMPTS,
         expected_outputs=DSV2_PCP_GOLDEN,
         max_tokens=10,
@@ -270,7 +267,6 @@ DSV2_PARALLEL_CASES = [
     ),
     AccuracyCase(
         name="dsv2_dcp_only_full_features",
-        model=DEEPSEEK_V2_LITE,
         prompts=DSV2_PROMPTS,
         expected_outputs=DSV2_DCP_GOLDEN,
         max_tokens=10,
@@ -291,7 +287,6 @@ DSV2_PARALLEL_CASES = [
 FULL_FEATURE_MODEL_CASES = [
     AccuracyCase(
         name="qwen3_pcp_dcp_full_features",
-        model="vllm-ascend/Qwen3-30B-A3B-W8A8",
         prompts=COMMON_PROMPTS,
         expected_outputs=QWEN3_GOLDEN,
         max_tokens=5,
@@ -314,7 +309,6 @@ FULL_FEATURE_MODEL_CASES = [
     ),
     AccuracyCase(
         name="qwen3_next_pcp_dcp_full_features",
-        model="Qwen/Qwen3-Next-80B-A3B-Instruct",
         prompts=COMMON_PROMPTS,
         expected_outputs=QWEN3_NEXT_GOLDEN,
         max_tokens=5,
@@ -337,7 +331,6 @@ FULL_FEATURE_MODEL_CASES = [
     ),
     AccuracyCase(
         name="dsv3_2_pcp_dcp_full_features",
-        model="vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
         prompts=COMMON_PROMPTS,
         # TODO(qcs): Remove multi-expected_outputs after the first request output is stable.
         expected_outputs=(DSV3_2_GOLDEN, *DSV3_2_GOLDEN_BACKUPS),
@@ -365,38 +358,33 @@ FULL_FEATURE_MODEL_CASES = [
             "enforce_eager": True,
         },
     ),
-    pytest.param(
-        AccuracyCase(
-            name="deepseek_mtp3_pcp_dcp_full_features",
-            model=DEEPSEEK_MTP,
-            prompts=COMMON_PROMPTS,
-            expected_outputs=DEEPSEEK_MTP3_GOLDEN,
-            max_tokens=5,
-            runner_kwargs={
-                "max_model_len": 1024,
-                "max_num_seqs": MAX_NUM_SEQS,
-                "max_num_batched_tokens": 1024,
-                "tensor_parallel_size": 2,
-                "prefill_context_parallel_size": 2,
-                "decode_context_parallel_size": 2,
-                "enable_expert_parallel": True,
-                "enable_chunked_prefill": True,
-                "enable_prefix_caching": True,
-                "block_size": 128,
-                "long_prefill_token_threshold": 4,
-                "speculative_config": {
-                    "method": "mtp",
-                    "num_speculative_tokens": 3,
-                },
-                "compilation_config": FULL_DECODE_GRAPH,
-                "additional_config": {"enable_flashcomm1": True},
+    AccuracyCase(
+        name="deepseek_mtp3_pcp_dcp_full_features",
+        prompts=COMMON_PROMPTS,
+        expected_outputs=DEEPSEEK_MTP3_GOLDEN,
+        max_tokens=5,
+        runner_kwargs={
+            "max_model_len": 1024,
+            "max_num_seqs": MAX_NUM_SEQS,
+            "max_num_batched_tokens": 1024,
+            "tensor_parallel_size": 2,
+            "prefill_context_parallel_size": 2,
+            "decode_context_parallel_size": 2,
+            "enable_expert_parallel": True,
+            "enable_chunked_prefill": True,
+            "enable_prefix_caching": True,
+            "block_size": 128,
+            "long_prefill_token_threshold": 4,
+            "speculative_config": {
+                "method": "mtp",
+                "num_speculative_tokens": 3,
             },
-        ),
-        marks=pytest.mark.skip(reason="Temporarily skip MTP with PCP/DCP until the token layout issue is fixed."),
+            "compilation_config": FULL_DECODE_GRAPH,
+            "additional_config": {"enable_flashcomm1": True},
+        },
     ),
     AccuracyCase(
         name="deepseek_v4_w4a8_dsa_cp_full_features",
-        model="gdydems/DeepSeek-V4-Flash-w4a8-mtp",
         prompts=DEEPSEEK_V4_PROMPTS,
         expected_outputs=DEEPSEEK_V4_GOLDEN,
         max_tokens=5,
@@ -425,6 +413,11 @@ FULL_FEATURE_MODEL_CASES = [
 ]
 
 
+FULL_FEATURE_SKIP_REASONS: dict[str, str] = {
+    "deepseek_mtp3_pcp_dcp_full_features": "Temporarily skip MTP with PCP/DCP until the token layout issue is fixed.",
+}
+
+
 @patch.dict(
     os.environ,
     {
@@ -433,8 +426,11 @@ FULL_FEATURE_MODEL_CASES = [
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 @pytest.mark.parametrize("case", DSV2_PARALLEL_CASES, ids=lambda case: case.name)
-def test_dsv2_lite_parallel_config_accuracy(case: AccuracyCase) -> None:
-    _run_accuracy_case(case)
+@pytest.mark.e2e_features("moe", "tp", "ep", "pcp", "dcp", "full_decode_only", "w8a8", "flash_comm1")
+@pytest.mark.e2e_model("vllm-ascend/DeepSeek-V2-Lite-W8A8")
+def test_dsv2_lite_parallel_config_accuracy(request, case: AccuracyCase) -> None:
+    model = get_e2e_model(request)
+    _run_accuracy_case(model, case)
 
 
 @patch.dict(
@@ -445,6 +441,50 @@ def test_dsv2_lite_parallel_config_accuracy(case: AccuracyCase) -> None:
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-@pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
-def test_models_pcp_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
-    _run_accuracy_case(case)
+@pytest.mark.parametrize(
+    "index, case",
+    [
+        pytest.param(
+            i,
+            c,
+            marks=pytest.mark.skip(reason=reason) if (reason := FULL_FEATURE_SKIP_REASONS.get(c.name)) else [],
+            id=c.name,
+        )
+        for i, c in enumerate(FULL_FEATURE_MODEL_CASES)
+    ],
+)
+@pytest.mark.e2e_features(
+    "moe",
+    "tp",
+    "ep",
+    "pcp",
+    "dcp",
+    "full_decode_only",
+    "eager_mode",
+    "w8a8",
+    "w4a8",
+    "chunked_prefill",
+    "prefix_caching",
+    "sfa",
+    "dsa",
+    "flash_comm1",
+    "mtp",
+)
+@pytest.mark.e2e_model(
+    "vllm-ascend/Qwen3-30B-A3B-W8A8",
+    "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+    "wemaster/deepseek_mtp_main_random_bf16",
+    "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+)
+def test_models_pcp_dcp_full_feature_accuracy(request, index: int, case: AccuracyCase) -> None:
+    """Cross-mode parametrized test spanning both eager and graph cases.
+
+    This single test function is parametrized over multiple models whose
+    ``AccuracyCase`` runner_kwargs mix ``enforce_eager=True`` (eager_mode)
+    and ``compilation_config=FULL_DECODE_GRAPH`` (full_decode_only).
+    Because ``@pytest.mark.e2e_features`` is per-function, both modes are
+    listed together even though they are mutually exclusive per-case.
+    """
+    model = get_e2e_model(request, index)
+    _run_accuracy_case(model, case)

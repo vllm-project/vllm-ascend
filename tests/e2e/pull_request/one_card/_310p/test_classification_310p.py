@@ -1,3 +1,4 @@
+import pytest
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from transformers import AutoModelForSequenceClassification
@@ -5,6 +6,8 @@ from transformers import AutoModelForSequenceClassification
 from tests.e2e.conftest import HfRunner, VllmRunner
 
 
+@pytest.mark.e2e_features("310P", "multimodal", "eager_mode")
+@pytest.mark.e2e_model("Howeee/Qwen2.5-1.5B-apeach")
 def test_qwen_pooling_classify_correctness() -> None:
     model_name = snapshot_download("Howeee/Qwen2.5-1.5B-apeach")
 
