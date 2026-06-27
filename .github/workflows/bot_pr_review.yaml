@@ -23,26 +23,31 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install dependencies
-        run: pip install requests pyyaml
+        run: pip install requests pyyaml regex
 
-      # Step 1: Extract PR info → pr_info.json
-      - name: Extract PR info
-        id: extract
-        run: python .github/workflows/scripts/robot/extract_pr_info.py --output pr_info.json
+      # Step 1: Prepare input — extract PR info, load template, truncate body
+      - name: Prepare input
+        id: prepare
+        env:
+          ISSUE_TITLE: ${{ github.event.pull_request.title }}
+          ISSUE_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python .github/workflows/scripts/robot/extract_pr_info.py --output pr_info.json
+          python .github/workflows/scripts/robot/prepare_template.py --input pr_info.json --output template.txt
+          python -c "
+import os; body = os.environ.get('ISSUE_BODY', ''); out = body[:4000]
+if len(body) > 4000: out += f'\n\n[... truncated, original length: {len(body)} chars ...]'
+open('body.txt', 'w').write(out)
+print(f'Body prepared ({len(out)} chars, original: {len(body)} chars)')
+"
 
-      # Step 2: Load the PR template → template.txt
-      - name: Prepare template
-        id: template
-        if: success()
-        run: python .github/workflows/scripts/robot/prepare_template.py --input pr_info.json --output template.txt
-
-      # Step 3: Prepare description system prompt → desc_system_prompt.txt
+      # Step 2: Prepare description system prompt → desc_system_prompt.txt
       - name: Prepare system prompt
         id: sysprompt
         if: success()
         run: python .github/workflows/scripts/robot/prepare_system_prompt.py --variant pr --output desc_system_prompt.txt
 
-      # Step 4: Call LLM for PR description check → description_result.json
+      # Step 3: Call LLM for PR description check → description_result.json
       - name: Call LLM for description
         id: llm_desc
         if: |
@@ -59,12 +64,12 @@ jobs:
           VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
           VLLM_BASE_URL: ${{ secrets.VLLM_BASE_URL }}
           ISSUE_TITLE: ${{ github.event.pull_request.title }}
-          ISSUE_BODY: ${{ github.event.pull_request.body }}
         run: |
           python .github/workflows/scripts/robot/call_llm.py \
             --system-prompt desc_system_prompt.txt \
             --template template.txt \
             --type-key issue_type.txt \
+            --body body.txt \
             --kind pr \
             --output description_result.json
 
@@ -75,7 +80,7 @@ jobs:
         run: |
           echo '{"ok": true, "score": 100, "executed": false}' > description_result.json
 
-      # Step 5: Post comment + write label actions → label_actions.json
+      # Step 4: Post comment + write label actions → label_actions.json
       - name: Post handler
         id: post
         if: success()
@@ -90,7 +95,7 @@ jobs:
             --label-output label_actions.json \
             --kind pr
 
-      # Step 6: Manage labels (add/remove need-detail-desc)
+      # Step 5: Manage labels (add/remove need-detail-desc)
       - name: Manage labels
         id: label
         if: success()
