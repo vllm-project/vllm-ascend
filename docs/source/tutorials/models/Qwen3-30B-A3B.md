@@ -56,7 +56,7 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 :::::{tab-set} :sync-group: hardware
 
-::::{tab-item} Ascend 950 Products :sync: a5
+::::{tab-item} Ascend 950 Products
 :sync: a5
 
 ```{code-block} bash
@@ -95,7 +95,7 @@ docker run --runtime=runc -u root -it -d --name vllm-ascend-env \
 
 ::::
 
-::::{tab-item} Atlas 800I A3 :sync: a3
+::::{tab-item} Atlas 800I A3
 :sync: a3
 
 ```{code-block} bash
@@ -148,7 +148,7 @@ If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci
 
 ::::
 
-::::{tab-item} Atlas 800I A2 :sync: a2
+::::{tab-item} Atlas 800I A2
 :sync: a2
 
 ```{code-block} bash
