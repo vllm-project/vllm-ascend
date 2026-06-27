@@ -27,7 +27,7 @@ require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 16) node:
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
-### 4 Installation
+## 4 Installation
 
 ### 4.1 Docker Image Installation
 
@@ -35,7 +35,7 @@ Select an image based on your machine type and start the docker image on your no
 
 **A3 series**
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 ``` bash
 # Update the vllm-ascend image
@@ -317,6 +317,14 @@ After about several minutes, you can get the performance evaluation result.
 
 **Notice:**
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
+
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
