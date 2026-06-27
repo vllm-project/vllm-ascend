@@ -12,7 +12,7 @@ import json
 import os
 from pathlib import Path
 
-MAX_BODY_CHARS = 4000
+MAX_BODY_CHARS = 10000
 
 
 def get_body() -> str:
