@@ -35,7 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib.llm import call_llm
 from lib.prompts import load_system_prompt
-from lib.review import is_output_valid, parse_json_output, review, validate_result
+from lib.review import is_output_valid, parse_json_output, review, should_review, validate_result
 
 JUDGE_SYSTEM_PROMPT = """You are a review quality auditor.
 Your task is to audit whether another LLM (Review Bot)'s evaluation
@@ -142,8 +142,7 @@ def judge_row(row: dict, kind: str) -> dict:
 def process_row(row: dict, kind: str, system_prompt: str) -> dict:
     title = row.get("title", "")
     body = row.get("body", "")
-    prefix = row.get("prefix", "")
-    outcome = review(title, body, kind, system_prompt, prefix=prefix)
+    outcome = review(title, body, kind, system_prompt)
     raw_output = outcome["raw_output"]
     result = outcome["result"]
     if not is_output_valid(raw_output):
@@ -227,6 +226,13 @@ def main() -> None:
         num = row.get("issue_number") or row.get("pr_number") or "?"
         title = row.get("title", "")
         print(f"\n[{i + 1}/{total}] #{num}: {title[:80]}...")
+
+        # Mirror the production workflow filter: only titles that the bot would
+        # actually review are processed, so the harness stays in lock-step.
+        if not should_review(kind, title):
+            print("  SKIP (title not eligible for review, matches production filter)")
+            skipped += 1
+            continue
 
         if is_judge:
             existing_judge = (row.get("judge_reasoning") or "").strip()

@@ -29,47 +29,19 @@ jobs:
       - name: Install dependencies
         run: pip install requests pyyaml regex
 
-      # Step 1: Prepare input — truncate PR body → body.txt
-      - name: Prepare input
-        id: prepare
-        run: |
-          python .github/workflows/scripts/robot/prepare_input.py \
-            --body-output body.txt
-
-      # Step 2: Extract PR info + load PR template → pr_info.json, template.txt
-      - name: Extract input and prepare template
-        id: template
-        if: success()
-        run: |
-          python .github/workflows/scripts/robot/extract_pr_info.py --output pr_info.json
-          python .github/workflows/scripts/robot/prepare_template.py --input pr_info.json --output template.txt
-
-      # Step 3: Load the system prompt → system_prompt.txt
-      - name: Prepare system prompt
-        id: sysprompt
-        if: success()
-        run: python .github/workflows/scripts/robot/prepare_system_prompt.py --variant pr --output system_prompt.txt
-
-      # Step 4: Call LLM for description completeness check → review_result.json
+      # Step 1: Review the PR description with the LLM → review_result.json
       - name: Call LLM
         id: llm
-        if: success()
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
-          VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
-          VLLM_BASE_URL: ${{ secrets.VLLM_BASE_URL }}
-          ISSUE_TITLE: ${{ github.event.pull_request.title }}
         run: |
           python .github/workflows/scripts/robot/call_llm.py \
-            --system-prompt system_prompt.txt \
-            --template template.txt \
-            --body body.txt \
             --kind pr \
             --output review_result.json
 
-      # Step 5: Post comment if description incomplete → label_actions.json
+      # Step 2: Post comment if description incomplete → label_actions.json
       - name: Post handler
         id: post
         if: success()
@@ -84,7 +56,7 @@ jobs:
             --label-output label_actions.json \
             --kind pr
 
-      # Step 6: Add or remove the need-detail-desc label
+      # Step 3: Add or remove the need-detail-desc label
       - name: Manage label
         id: label
         if: success()

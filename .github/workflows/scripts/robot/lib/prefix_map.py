@@ -1,7 +1,7 @@
 """Single source of truth for issue-title prefix mappings.
 
-Consolidates the mappings that were previously duplicated across
-``extract_input.py`` and ``call_llm.py``.
+Consolidates the prefix-to-template and prefix-to-type-key mappings used by
+the review pipeline (``lib/review.py``).
 """
 
 TITLE_TO_TEMPLATE: dict[str, str] = {
