@@ -159,6 +159,14 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
+
+# NOTE: the grammar-bitmask Triton kernel currently lives in the v2
+# structured_outputs module. Our device-apply helpers were added there
+# alongside the pre-existing v2 kernel (which patch/worker/patch_v2/
+# patch_triton.py also imports), so they are imported here to share a
+# single implementation across the v1 and v2 paths. TODO: hoist these
+# shared helpers into a neutral vllm_ascend/ops/structured_outputs.py in
+# a follow-up to drop this v1->v2 dependency.
 from vllm_ascend.worker.v2.structured_outputs import (
     apply_grammar_bitmask as apply_grammar_bitmask_npu,
 )
@@ -5012,11 +5020,11 @@ class NPUModelRunner(GPUModelRunner):
         if mgr is not None and hasattr(self, "update_stream"):
             mgr.update_stream = self.update_stream
 
-        self._maybe_warmup_grammar_bitmask_kernel()
+        self.maybe_warmup_grammar_bitmask_kernel()
 
         return cuda_graph_size
 
-    def _maybe_warmup_grammar_bitmask_kernel(self) -> None:
+    def maybe_warmup_grammar_bitmask_kernel(self) -> None:
         """Pay the structured-output bitmask kernel's one-time JIT cost upfront.
 
         The first launch of the NPU grammar-bitmask Triton kernel triggers a
