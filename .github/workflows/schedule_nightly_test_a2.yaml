@@ -25,7 +25,7 @@ on:
       vllm_ascend_branch:
         description: 'Branch to test'
         required: true
-        default: 'main'
+        default: 'releases/v0.22.1rc'
         type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
@@ -280,7 +280,6 @@ jobs:
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
-      needs.parse-trigger.outputs.is_pr_event != 'true' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
