@@ -115,6 +115,7 @@ events — it will **not** run on PR-triggered runs even with `/nightly all`.
 | `multi-node-kimi-k2-instruct-w8a8` | Kimi-K2-Instruct-W8A8, 2-node |
 | `multi-node-deepseek-v3.1` | DeepSeek-V3.1-BF16, 2-node |
 | `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |
+| `multi-node-glm-5.2` | GLM-5.1-W8A8, 2-node |
 
 **Single-node tests** (run after multi-node tests complete):
 

@@ -739,6 +739,22 @@
 #       https://github.com/vllm-project/vllm/pull/41706
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+# ** 19a. File: worker/patch_deepseek_v2.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2Attention.__init__`
+#    Why:
+#       GLM/DeepSeek DSA models can skip topk on selected layers. Those layers
+#       should not initialize `Indexer`, while MTP layers still need full indexer
+#       initialization.
+#    How:
+#       Wrap `DeepseekV2Attention.__init__` and skip `Indexer` construction on
+#       backbone layers whose config marks topk as skipped.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/45895
+#    Future Plan:
+#       Remove this patch when vLLM Ascend depends on a vLLM version that includes
+#       PR #45895.
+#
 # ** 19b. File: worker/model_runner_v1.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `NPUModelRunner._check_and_update_cudagraph_mode`
