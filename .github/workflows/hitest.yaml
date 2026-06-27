@@ -57,4 +57,11 @@ jobs:
           X_APIG_APPCODE: ${{ secrets.AUROGON_APPCODE }}
           APP_KEY: ${{ secrets.AUROGON_APPKEY }}
           APP_SECRET: ${{ secrets.AUROGON_APPSECRET }}
-        run: python3 .github/workflows/scripts/run_hitest.py
+        run: |
+          echo "====DEBUG ENV START===="
+          echo "AUROGON_API_PREFIX=$AUROGON_API_PREFIX"
+          echo "X_APIG_APPCODE length: ${#X_APIG_APPCODE}"
+          echo "APP_KEY length: ${#APP_KEY}"
+          echo "APP_SECRET length: ${#APP_SECRET}"
+          echo "====DEBUG ENV END===="
+          python3 .github/workflows/scripts/run_hitest.py
