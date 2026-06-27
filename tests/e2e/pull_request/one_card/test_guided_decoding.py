@@ -89,7 +89,7 @@ def test_guided_json_completion(guided_decoding_backend: str, sample_json_schema
         "seed": 0,
         "structured_outputs_config": {"backend": guided_decoding_backend},
     }
-    with VllmRunner(MODEL_NAME, compilation_config={"cudagraph_mode": "PIECEWISE"}, **runner_kwargs) as vllm_model:
+    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
         prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
         inputs = vllm_model.get_inputs(prompts)
         outputs = vllm_model.model.generate(inputs, sampling_params=sampling_params)

@@ -72,7 +72,6 @@ def select_experts(
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            num_experts=global_num_experts,
         )
     # Apply routed scaling factor to weights
     if routed_scaling_factor != 1.0:
