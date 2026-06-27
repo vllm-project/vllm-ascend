@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -91,6 +92,47 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
     )
 
 
+def _make_deepseek_v4_sliding_kv_cache_config() -> KVCacheConfig:
+    full_spec = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+    )
+    sliding_spec = SlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+        sliding_window=256,
+    )
+    full_group_spec = UniformTypeKVCacheSpecs.from_specs({"full_attn": full_spec})
+    sliding_group_spec = UniformTypeKVCacheSpecs.from_specs({"sliding_attn": sliding_spec})
+    assert full_group_spec is not None
+    assert sliding_group_spec is not None
+    return KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[
+            KVCacheTensor(size=full_spec.page_size_bytes * 10, shared_by=["full_attn"]),
+            KVCacheTensor(
+                size=sliding_spec.page_size_bytes * 10,
+                shared_by=["sliding_attn"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["full_attn"], kv_cache_spec=full_group_spec),
+            KVCacheGroupSpec(
+                layer_names=["sliding_attn"],
+                kv_cache_spec=sliding_group_spec,
+            ),
+        ],
+    )
+
+
 def _make_vllm_config(
     *,
     enable_prefix_caching: bool,
@@ -121,6 +163,36 @@ def _make_coordinator_for_effective_block_size(
     coordinator.pcp_world_size = pcp_world_size
     coordinator.enable_caching = enable_caching
     return coordinator
+
+
+class _FakeManager:
+    def __init__(self, kv_cache_spec) -> None:
+        self.kv_cache_spec = kv_cache_spec
+        self.use_eagle = False
+        self.cache_calls = []
+
+    def cache_blocks(
+        self,
+        request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+    ) -> None:
+        self.cache_calls.append((request, num_tokens, retention_interval))
+
+
+def _install_fake_manager_factory(monkeypatch) -> list[_FakeManager]:
+    managers: list[_FakeManager] = []
+
+    def _fake_get_manager_for_kv_cache_spec(kv_cache_spec, **kwargs):
+        manager = _FakeManager(kv_cache_spec)
+        managers.append(manager)
+        return manager
+
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_coordinator.get_manager_for_kv_cache_spec",
+        _fake_get_manager_for_kv_cache_spec,
+    )
+    return managers
 
 
 @pytest.mark.parametrize(
@@ -193,6 +265,26 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
             16,
             id="full-attention-no-cp",
         ),
+        pytest.param(
+            lambda: UniformTypeKVCacheSpecs.from_specs(
+                {
+                    "sliding": SlidingWindowMLASpec(
+                        block_size=128,
+                        num_kv_heads=1,
+                        head_size=128,
+                        dtype=torch.float16,
+                        compress_ratio=4,
+                        model_version="deepseek_v4",
+                        sliding_window=256,
+                    )
+                }
+            ),
+            2,
+            1,
+            True,
+            1024,
+            id="nested-sliding-mla-scales-with-cp-and-compression",
+        ),
     ],
 )
 def test_get_effective_block_size(
@@ -208,7 +300,9 @@ def test_get_effective_block_size(
         enable_caching=enable_caching,
     )
 
-    assert coordinator._get_effective_block_size(spec_factory()) == expected
+    spec = spec_factory()
+    assert spec is not None
+    assert coordinator._get_effective_block_size(spec) == expected
 
 
 def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
@@ -302,6 +396,106 @@ def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> No
     )
 
     assert coordinator is sentinel
+
+
+def test_retention_validation_accepts_nested_sliding_window_mla(
+    monkeypatch,
+) -> None:
+    kv_cache_config = _make_deepseek_v4_sliding_kv_cache_config()
+    managers = _install_fake_manager_factory(monkeypatch)
+    monkeypatch.setattr(
+        "vllm.v1.core.block_pool.BlockPool.__init__",
+        lambda self, *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm.envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL",
+        256,
+    )
+
+    coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=128,
+        scheduler_block_size=128,
+    )
+
+    expected_specs = []
+    for group in kv_cache_config.kv_cache_groups:
+        assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        expected_specs.append(next(iter(group.kv_cache_spec.kv_cache_specs.values())))
+
+    assert coordinator.retention_interval == 256
+    assert [manager.kv_cache_spec for manager in managers] == expected_specs
+
+
+def test_retention_validation_rejects_without_sliding_window(
+    monkeypatch,
+) -> None:
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+    _install_fake_manager_factory(monkeypatch)
+    monkeypatch.setattr(
+        "vllm.v1.core.block_pool.BlockPool.__init__",
+        lambda self, *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm.envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL",
+        128,
+    )
+
+    with pytest.raises(ValueError, match="no sliding-window KV cache group"):
+        AscendHybridKVCacheCoordinator(
+            kv_cache_config,
+            max_model_len=1024,
+            max_num_batched_tokens=1024,
+            use_eagle=False,
+            enable_caching=True,
+            enable_kv_cache_events=False,
+            dcp_world_size=1,
+            pcp_world_size=1,
+            hash_block_size=128,
+            scheduler_block_size=128,
+        )
+
+
+def test_cache_blocks_aligns_and_keeps_effective_eagle_lookahead(
+    monkeypatch,
+) -> None:
+    kv_cache_config = _make_deepseek_v4_sliding_kv_cache_config()
+    kv_cache_config.kv_cache_groups[1].is_eagle_group = True
+    managers = _install_fake_manager_factory(monkeypatch)
+    monkeypatch.setattr(
+        "vllm.v1.core.block_pool.BlockPool.__init__",
+        lambda self, *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm.envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL",
+        256,
+    )
+    request = SimpleNamespace(request_id="request-0")
+
+    coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config,
+        max_model_len=4096,
+        max_num_batched_tokens=1024,
+        use_eagle=True,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=2,
+        pcp_world_size=1,
+        hash_block_size=128,
+        scheduler_block_size=256,
+    )
+    coordinator.cache_blocks(request, num_computed_tokens=800)
+
+    assert [manager.use_eagle for manager in managers] == [False, True]
+    assert managers[0].cache_calls == [(request, 768, 256)]
+    assert managers[1].cache_calls == [(request, 800, 256)]
 
 
 def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
