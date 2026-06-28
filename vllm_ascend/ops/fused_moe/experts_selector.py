@@ -26,6 +26,23 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
 from vllm_ascend.utils import get_weight_prefetch_method
 
+# Process-wide cache for runtime CANN capability. Some CANN versions reject
+# aclnnMoeGatingTopK with renorm != 0. On the first such failure we flip
+# this flag so subsequent renormalize=True calls take the native path.
+# On CANN versions that support renorm=1 this flag stays True and the
+# fused kernel is used as before.
+_fused_moe_gating_renorm_supported: bool = True
+
+
+def _disable_fused_moe_gating_renorm() -> None:
+    global _fused_moe_gating_renorm_supported
+    _fused_moe_gating_renorm_supported = False
+
+
+def _is_renorm_unsupported_error(exc: BaseException) -> bool:
+    msg = str(exc)
+    return "MoeGatingTopK" in msg and "renorm" in msg
+
 
 def select_experts(
     hidden_states: torch.Tensor,
@@ -83,21 +100,32 @@ def select_experts(
     )
 
     if is_support_npu_moe_gating_top_k:
-        topk_weights, topk_ids = _select_experts_with_fusion_ops(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            topk_group=topk_group,
-            renormalize=renormalize,
-            e_score_correction_bias=e_score_correction_bias,
-            num_expert_group=num_expert_group,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            tid2eid=tid2eid,
-            input_ids=input_ids,
-        )
-    else:
+        try:
+            topk_weights, topk_ids = _select_experts_with_fusion_ops(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=top_k,
+                use_grouped_topk=use_grouped_topk,
+                topk_group=topk_group,
+                renormalize=renormalize,
+                e_score_correction_bias=e_score_correction_bias,
+                num_expert_group=num_expert_group,
+                scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
+                tid2eid=tid2eid,
+                input_ids=input_ids,
+            )
+        except RuntimeError as exc:
+            # Some CANN versions reject aclnnMoeGatingTopK with renorm != 0.
+            # Fall back to the native path once and remember the capability
+            # so subsequent forwards skip the failing fused call.
+            if renormalize and _is_renorm_unsupported_error(exc):
+                _disable_fused_moe_gating_renorm()
+                is_support_npu_moe_gating_top_k = False
+            else:
+                raise
+
+    if not is_support_npu_moe_gating_top_k:
         topk_weights, topk_ids = _native_select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -146,6 +174,10 @@ def check_npu_moe_gating_top_k(
     custom_routing_function: Callable | None = None,
 ):
     if scoring_func == "sigmoid" and not renormalize:  # sigmoid + renorm=0 is not supported in current branch
+        return False
+    # On CANN versions that rejected aclnnMoeGatingTopK with renorm != 0
+    # earlier in this process, skip the fused path for renormalize=True.
+    if renormalize and not _fused_moe_gating_renorm_supported:
         return False
     if custom_routing_function is not None:
         return False

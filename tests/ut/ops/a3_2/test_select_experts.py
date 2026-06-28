@@ -22,7 +22,12 @@ from pytest_mock import MockerFixture
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
+from vllm_ascend.ops.fused_moe import experts_selector as experts_selector_module
+from vllm_ascend.ops.fused_moe.experts_selector import (
+    check_npu_moe_gating_top_k,
+    select_experts,
+    zero_experts_compute,
+)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.utils import AscendDeviceType, adapt_patch, enable_custom_op
 
@@ -479,6 +484,96 @@ class TestExpertsSelector:
                 e_score_correction_bias=None,
                 num_experts=4,
             )
+
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock())
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k", return_value=True)
+    def test_select_experts_falls_back_when_fused_renorm_unsupported(self, _, __):
+        # Some CANN versions reject aclnnMoeGatingTopK with renorm != 0.
+        # The fused path should catch that error once, flip the module
+        # capability flag, and route subsequent renormalize=True calls
+        # through the native path.
+        original_flag = experts_selector_module._fused_moe_gating_renorm_supported
+        experts_selector_module._fused_moe_gating_renorm_supported = True
+        try:
+            hidden_states = torch.randn(4, 8)
+            router_logits = torch.randn(4, 8)
+            renorm_err = RuntimeError(
+                "EZ9999: Inner Error! aclnnMoeGatingTopK failed: renorm is: 1, but currently only support 0"
+            )
+            with patch(
+                "vllm_ascend.ops.fused_moe.experts_selector._select_experts_with_fusion_ops",
+                side_effect=renorm_err,
+            ) as fused_mock:
+                topk_weights, topk_ids = select_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    top_k=2,
+                    use_grouped_topk=False,
+                    renormalize=True,
+                    topk_group=None,
+                    num_expert_group=None,
+                    custom_routing_function=None,
+                    scoring_func="softmax",
+                    e_score_correction_bias=None,
+                    num_experts=8,
+                )
+                fused_mock.assert_called_once()
+
+            assert topk_weights.shape == (4, 2)
+            assert topk_ids.shape == (4, 2)
+            assert not experts_selector_module._fused_moe_gating_renorm_supported
+
+            # After the flag flips, check_npu_moe_gating_top_k must
+            # report False for renormalize=True regardless of other
+            # conditions, so we re-enable real check to confirm.
+            assert (
+                check_npu_moe_gating_top_k(
+                    hidden_states=hidden_states,
+                    top_k=2,
+                    renormalize=True,
+                    topk_group=1,
+                    num_expert_group=1,
+                    scoring_func="softmax",
+                )
+                is False
+            )
+        finally:
+            experts_selector_module._fused_moe_gating_renorm_supported = original_flag
+
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock())
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k", return_value=True)
+    def test_select_experts_reraises_unrelated_fused_errors(self, _, __):
+        # Errors that are not the renorm-capability mismatch must
+        # propagate; we only want to swallow the one specific failure.
+        original_flag = experts_selector_module._fused_moe_gating_renorm_supported
+        experts_selector_module._fused_moe_gating_renorm_supported = True
+        try:
+            hidden_states = torch.randn(4, 8)
+            router_logits = torch.randn(4, 8)
+            unrelated = RuntimeError("some other NPU failure")
+            with (
+                patch(
+                    "vllm_ascend.ops.fused_moe.experts_selector._select_experts_with_fusion_ops",
+                    side_effect=unrelated,
+                ),
+                pytest.raises(RuntimeError, match="some other NPU failure"),
+            ):
+                select_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    top_k=2,
+                    use_grouped_topk=False,
+                    renormalize=True,
+                    topk_group=None,
+                    num_expert_group=None,
+                    custom_routing_function=None,
+                    scoring_func="softmax",
+                    e_score_correction_bias=None,
+                    num_experts=8,
+                )
+            assert experts_selector_module._fused_moe_gating_renorm_supported is True
+        finally:
+            experts_selector_module._fused_moe_gating_renorm_supported = original_flag
 
 
 class TestFusedMoENPUOpsAccuracy:
