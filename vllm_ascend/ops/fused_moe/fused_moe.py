@@ -202,7 +202,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 hidden_states=x,
             )
 
-        topk_weights = topk_weights.to(x.dtype)
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        if moe_comm_type not in {MoECommType.MC2, MoECommType.FUSED_MC2}:
+            topk_weights = topk_weights.to(x.dtype)
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.

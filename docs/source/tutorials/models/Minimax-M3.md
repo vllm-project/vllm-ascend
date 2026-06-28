@@ -10,7 +10,7 @@ It is recommended to place the model weight in a shared cache directory.
 
 ### Installation
 
-- Step 1： Download v0.20.2rc1 Docker image
+- Step 1： Download v0.21.0rc1 Docker image
   ```
   docker pull quay.io/ascend/vllm-ascend:v0.21.0rc1-a3
   ```
@@ -57,7 +57,13 @@ It is recommended to place the model weight in a shared cache directory.
   -it $IMAGE bash
   ```
 
-- Step 3: Update vLLM Ascend
+- Step 3: Update vLLM
+  ```
+  cd /vllm-workspace/vllm
+  git checkout v0.23.0
+  ```
+
+- Step 4: Update vLLM Ascend
   ```
   cd /vllm-workspace/vllm-ascend
   git fetch origin pull/10682/merge:pr-10682
@@ -108,8 +114,9 @@ Start the online serving service with the following command:
   --gpu-memory-utilization 0.92 \
   --reasoning-parser minimax_m3 \
   --limit-mm-per-prompt '{"image":1}' \
+  --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"enable_static_kernel": true, "fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
+  --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"enable_static_kernel": true, "fuse_norm_quant": true}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
   --port 11223 > ${LOG_PATH} 2>&1 &
   ```
 

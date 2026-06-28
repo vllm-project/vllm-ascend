@@ -3,8 +3,8 @@
 """Triton kernels for MiniMax M3 block-sparse GQA attention on Ascend.
 
 Migrated from reference/vllm_cp/vllm/models/minimax_m3/common/ops/sparse_attn.py.
-The Python wrappers adapt vLLM Ascend's KV cache layout to the paged layout
-expected by the migrated kernels.
+The kernels accept K/V cache tensors directly so Ascend's split cache layout
+does not need to be materialized into the GPU ``[num_blocks, 2, ...]`` layout.
 """
 
 from __future__ import annotations
@@ -18,18 +18,31 @@ from vllm.triton_utils import tl, triton
 SPARSE_BLOCK_SIZE = 128
 
 
-def _as_triton_main_kv_cache(
-    kv_cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-) -> torch.Tensor:
+_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+
+
+def _split_triton_main_kv_cache(
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
     if isinstance(kv_cache, (tuple, list)):
-        kv_cache = torch.stack((kv_cache[0], kv_cache[1]), dim=1)
-    if kv_cache.ndim != 5:
-        raise ValueError(f"Unexpected main kv cache ndim: {kv_cache.ndim}")
-    if kv_cache.shape[0] == 2:
-        return kv_cache.permute(1, 0, 2, 3, 4)
-    if kv_cache.shape[1] == 2:
-        return kv_cache
-    raise ValueError(f"Unexpected main kv cache shape: {tuple(kv_cache.shape)}")
+        if len(kv_cache) < 2:
+            raise ValueError("Main kv cache tuple must contain K and V tensors")
+        k_cache, v_cache = kv_cache[0], kv_cache[1]
+    else:
+        if kv_cache.ndim != 5:
+            raise ValueError(f"Unexpected main kv cache ndim: {kv_cache.ndim}")
+        if kv_cache.shape[0] == 2:
+            k_cache, v_cache = kv_cache[0], kv_cache[1]
+        elif kv_cache.shape[1] == 2:
+            k_cache, v_cache = kv_cache[:, 0], kv_cache[:, 1]
+        else:
+            raise ValueError(f"Unexpected main kv cache shape: {tuple(kv_cache.shape)}")
+    if k_cache.ndim != 4 or v_cache.ndim != 4:
+        raise ValueError(
+            "Unexpected split main kv cache shapes: "
+            f"{tuple(k_cache.shape)}, {tuple(v_cache.shape)}"
+        )
+    return k_cache, v_cache
 
 
 def _is_arch_support_pdl() -> bool:
@@ -83,7 +96,8 @@ def _sparse_attn_num_stages_kwarg() -> dict:
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
 def _gqa_sparse_fwd_kernel(
     q_ptr,  # [total_q, num_heads, head_dim]
-    kv_cache_ptr,  # main cache: [num_blocks, 2, 128, num_kv_heads, head_dim]
+    k_cache_ptr,  # [num_blocks, 128, num_kv_heads, head_dim]
+    v_cache_ptr,  # [num_blocks, 128, num_kv_heads, head_dim]
     t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
     o_ptr,  # [total_q, num_heads, head_dim]
     block_table_ptr,  # [num_reqs, max_blocks]
@@ -100,11 +114,14 @@ def _gqa_sparse_fwd_kernel(
     stride_qn,
     stride_qh,
     stride_qd,
-    stride_kv_blk,
-    stride_kv_kv,
-    stride_kv_pos,
-    stride_kv_h,
-    stride_kv_d,
+    stride_k_blk,
+    stride_k_pos,
+    stride_k_h,
+    stride_k_d,
+    stride_v_blk,
+    stride_v_pos,
+    stride_v_h,
+    stride_v_d,
     stride_th,
     stride_tn,
     stride_tk,
@@ -171,12 +188,11 @@ def _gqa_sparse_fwd_kernel(
             pos = c + off_n
             pos_mask = pos < seq_len
             k = tl.load(
-                kv_cache_ptr
-                + page * stride_kv_blk
-                + 0 * stride_kv_kv
-                + off_n[None, :] * stride_kv_pos
-                + pid_kh * stride_kv_h
-                + off_d[:, None] * stride_kv_d,
+                k_cache_ptr
+                + page * stride_k_blk
+                + off_n[None, :] * stride_k_pos
+                + pid_kh * stride_k_h
+                + off_d[:, None] * stride_k_d,
                 mask=d_mask[:, None] & pos_mask[None, :],
                 other=0.0,
             )
@@ -193,12 +209,11 @@ def _gqa_sparse_fwd_kernel(
             l_ij = tl.sum(p, axis=1)
             acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
             v = tl.load(
-                kv_cache_ptr
-                + page * stride_kv_blk
-                + 1 * stride_kv_kv
-                + off_n[:, None] * stride_kv_pos
-                + pid_kh * stride_kv_h
-                + off_d[None, :] * stride_kv_d,
+                v_cache_ptr
+                + page * stride_v_blk
+                + off_n[:, None] * stride_v_pos
+                + pid_kh * stride_v_h
+                + off_d[None, :] * stride_v_d,
                 mask=pos_mask[:, None] & d_mask[None, :],
                 other=0.0,
             )
@@ -240,7 +255,8 @@ def _gqa_sparse_fwd_kernel(
 @triton.jit(do_not_specialize=["decode_query_len"])
 def _gqa_sparse_decode_kernel(
     q_ptr,  # [total_q, num_heads, head_dim]
-    kv_cache_ptr,  # main cache: [num_blocks, 2, 128, num_kv_heads, head_dim]
+    k_cache_ptr,  # [num_blocks, 128, num_kv_heads, head_dim]
+    v_cache_ptr,  # [num_blocks, 128, num_kv_heads, head_dim]
     t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
     o_ptr,  # partial out: [NUM_TOPK_CHUNKS, total_q, num_heads, head_dim]
     lse_ptr,  # partial lse (log2): [NUM_TOPK_CHUNKS, total_q, num_heads]
@@ -255,11 +271,14 @@ def _gqa_sparse_decode_kernel(
     stride_qn,
     stride_qh,
     stride_qd,
-    stride_kv_blk,
-    stride_kv_kv,
-    stride_kv_pos,
-    stride_kv_h,
-    stride_kv_d,
+    stride_k_blk,
+    stride_k_pos,
+    stride_k_h,
+    stride_k_d,
+    stride_v_blk,
+    stride_v_pos,
+    stride_v_h,
+    stride_v_d,
     stride_th,
     stride_tn,
     stride_tk,
@@ -334,12 +353,11 @@ def _gqa_sparse_decode_kernel(
         pos = c + off_n
         pos_mask = pos < kv_len
         k = tl.load(
-            kv_cache_ptr
-            + page * stride_kv_blk
-            + 0 * stride_kv_kv
-            + off_n[None, :] * stride_kv_pos
-            + pid_kh * stride_kv_h
-            + off_d[:, None] * stride_kv_d,
+            k_cache_ptr
+            + page * stride_k_blk
+            + off_n[None, :] * stride_k_pos
+            + pid_kh * stride_k_h
+            + off_d[:, None] * stride_k_d,
             mask=d_mask[:, None] & pos_mask[None, :],
             other=0.0,
         )
@@ -353,12 +371,11 @@ def _gqa_sparse_decode_kernel(
         l_ij = tl.sum(p, axis=1)
         acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
         v = tl.load(
-            kv_cache_ptr
-            + page * stride_kv_blk
-            + 1 * stride_kv_kv
-            + off_n[:, None] * stride_kv_pos
-            + pid_kh * stride_kv_h
-            + off_d[None, :] * stride_kv_d,
+            v_cache_ptr
+            + page * stride_v_blk
+            + off_n[:, None] * stride_v_pos
+            + pid_kh * stride_v_h
+            + off_d[None, :] * stride_v_d,
             mask=pos_mask[:, None] & d_mask[None, :],
             other=0.0,
         )
@@ -454,7 +471,7 @@ def _merge_topk_attn_out_kernel(
 @torch.no_grad()
 def minimax_m3_sparse_attn(
     q: torch.Tensor,  # [total_q, num_heads, head_dim]
-    kv_cache: torch.Tensor,  # [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
     topk_idx: torch.Tensor,  # [num_kv_heads, total_q, topk]
     block_table: torch.Tensor,  # [batch, max_blocks]
     cu_seqlens_q: torch.Tensor,  # [batch+1] int32
@@ -466,16 +483,17 @@ def minimax_m3_sparse_attn(
     output: torch.Tensor,  # [total_q, num_heads, head_dim]
 ) -> None:
     """GQA block-sparse attention over the selected blocks. block_size_q == 1."""
-    kv_cache = _as_triton_main_kv_cache(kv_cache)
+    k_cache, v_cache = _split_triton_main_kv_cache(kv_cache)
     total_q, num_heads, head_dim = q.shape
     batch = cu_seqlens_q.shape[0] - 1
     topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
-    use_fp8 = kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    use_fp8 = k_cache.dtype in _FP8_DTYPES or v_cache.dtype in _FP8_DTYPES
     grid = (max_query_len, num_kv_heads, batch)
     _gqa_sparse_fwd_kernel[grid](
         q,
-        kv_cache,
+        k_cache,
+        v_cache,
         topk_idx,
         output,
         block_table,
@@ -492,11 +510,14 @@ def minimax_m3_sparse_attn(
         q.stride(0),
         q.stride(1),
         q.stride(2),
-        kv_cache.stride(0),
-        kv_cache.stride(1),
-        kv_cache.stride(2),
-        kv_cache.stride(3),
-        kv_cache.stride(4),
+        k_cache.stride(0),
+        k_cache.stride(1),
+        k_cache.stride(2),
+        k_cache.stride(3),
+        v_cache.stride(0),
+        v_cache.stride(1),
+        v_cache.stride(2),
+        v_cache.stride(3),
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
@@ -514,7 +535,7 @@ def minimax_m3_sparse_attn(
 @torch.no_grad()
 def minimax_m3_sparse_attn_decode(
     q: torch.Tensor,  # [total_q, num_heads, head_dim]
-    kv_cache: torch.Tensor,  # [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
     topk_idx: torch.Tensor,  # [num_kv_heads, total_q, topk]
     block_table: torch.Tensor,  # [num_reqs, max_blocks]
     seq_lens: torch.Tensor,  # [num_reqs] int32
@@ -524,12 +545,12 @@ def minimax_m3_sparse_attn_decode(
     decode_query_len: int,
 ) -> None:
     """GQA block-sparse attention for decode (split-K over the top-k blocks)."""
-    kv_cache = _as_triton_main_kv_cache(kv_cache)
+    k_cache, v_cache = _split_triton_main_kv_cache(kv_cache)
     total_q, num_heads, head_dim = q.shape
     assert total_q == seq_lens.shape[0] * decode_query_len
     max_topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
-    use_fp8 = kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    use_fp8 = k_cache.dtype in _FP8_DTYPES or v_cache.dtype in _FP8_DTYPES
     use_pdl = _is_arch_support_pdl()
     # `launch_pdl` is a Triton runtime kwarg only some backends accept (CUDA
     # SM9+); this ROCm Triton rejects it even when False ("Keyword argument
@@ -549,7 +570,8 @@ def minimax_m3_sparse_attn_decode(
     grid = (total_q * num_topk_chunks, num_kv_heads)
     _gqa_sparse_decode_kernel[grid](
         q,
-        kv_cache,
+        k_cache,
+        v_cache,
         topk_idx,
         o_partial,
         lse_partial,
@@ -564,11 +586,14 @@ def minimax_m3_sparse_attn_decode(
         q.stride(0),
         q.stride(1),
         q.stride(2),
-        kv_cache.stride(0),
-        kv_cache.stride(1),
-        kv_cache.stride(2),
-        kv_cache.stride(3),
-        kv_cache.stride(4),
+        k_cache.stride(0),
+        k_cache.stride(1),
+        k_cache.stride(2),
+        k_cache.stride(3),
+        v_cache.stride(0),
+        v_cache.stride(1),
+        v_cache.stride(2),
+        v_cache.stride(3),
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
