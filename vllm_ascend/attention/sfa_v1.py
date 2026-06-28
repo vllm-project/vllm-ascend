@@ -1174,16 +1174,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         rope_sin = sin.view(sin.shape[0], sin.shape[-1])
         return token_x, dynamic_scale, rope_cos, rope_sin
 
-    def _maybe_dequant_query_norm(
-        self,
-        q_c: torch.Tensor,
-        q_c_scale: torch.Tensor | None,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        if q_c_scale is None or q_c_scale.numel() == 0 or q_c.dtype not in (torch.int8, torch.uint8):
-            return q_c
-        return q_c.to(dtype) * q_c_scale.view(-1, 1).to(dtype)
-
     def _sfa_preprocess_with_prolog_v3(
         self,
         hidden_states: torch.Tensor,
@@ -1192,7 +1182,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         slot_mapping: torch.Tensor,
         cache_mode: str,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         assert self.q_a_layernorm is not None
         assert self.kv_a_layernorm is not None
 
@@ -1205,7 +1202,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             "query_quant_mode": 0,
             "weight_quant_mode": 2,
             "kv_cache_quant_mode": 0,
-            "query_norm_flag": True,
+            "query_norm_flag": self.has_indexer,
             "rmsnorm_epsilon_cq": self.q_a_layernorm.variance_epsilon,
             "rmsnorm_epsilon_ckv": self.kv_a_layernorm.variance_epsilon,
             "qc_qr_scale": 1.0,
@@ -1225,10 +1222,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         ql_nope = ql_nope.view(-1, self.local_num_heads, self.kv_lora_rank)
         q_pe = q_pe.view(-1, self.local_num_heads, self.qk_rope_head_dim)
-        if q_c is None:
-            raise RuntimeError("npu_mla_prolog_v3 did not return query_norm for SFA.")
-        q_c = self._maybe_dequant_query_norm(q_c, q_c_scale, hidden_states.dtype)
-        q_c = q_c.view(-1, self.q_lora_rank)
+        if self.has_indexer:
+            if q_c is None:
+                raise RuntimeError("npu_mla_prolog_v3 did not return query_norm for SFA indexer.")
+            q_c = q_c.view(-1, self.q_lora_rank)
+            if q_c_scale is not None and self.wq_b is not None and self._is_w8a8_dynamic_linear(self.wq_b):
+                q_c = (q_c, q_c_scale.view(-1))
+            elif q_c_scale is not None and q_c.dtype in (torch.int8, torch.uint8):
+                q_c = q_c.to(hidden_states.dtype) * q_c_scale.view(-1, 1).to(hidden_states.dtype)
+        else:
+            q_c = None
         k_nope = kv_cache[0] if cache_mode == "TND" else None
         k_pe = kv_cache[1] if cache_mode == "TND" else None
         return hidden_states, ql_nope, q_pe, q_c, k_nope, k_pe
@@ -1238,7 +1241,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         hidden_states: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         k_nope = torch.empty(
             (hidden_states.shape[0], self.num_kv_heads, self.kv_lora_rank),
             dtype=hidden_states.dtype,
@@ -1314,7 +1324,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _prepare_sparse_c8_indexer_query(
         self,
         x: torch.Tensor,
-        q_c: torch.Tensor,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1372,7 +1382,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def indexer_select_post_process(
         self,
         x: torch.Tensor,
-        q_c: torch.Tensor,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
         cos: torch.Tensor,
@@ -1400,7 +1410,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         kw, _ = self.wk_weights_proj(x)
         weights = kw[:, self.head_dim :]
-        if isinstance(q_c, tuple):
+        if isinstance(q_c, tuple) and q_c[0].dtype == torch.float8_e4m3fn:
             # MLAPO in C8 scenario already quantizes q_c to MXFP8 (fp8) with a per-token scale.
             # Skip wq_b's internal npu_dynamic_mx_quant and directly use the
             # pre-quantized values in npu_quant_matmul to avoid double quantization.
@@ -1703,6 +1713,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         async_op=async_op,
                     )
                     if self.use_sparse_c8_indexer and not hasattr(self, "pcp_size"):
+                        assert q_c is not None
                         precomputed_c8_query = self._prepare_sparse_c8_indexer_query(
                             x=hidden_states,
                             q_c=q_c,
@@ -2023,6 +2034,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             if not self.has_indexer:
                 raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
+            assert q_c is not None
             topk_indices = self.indexer_select_post_process(
                 x=hidden_states,
                 q_c=q_c,
