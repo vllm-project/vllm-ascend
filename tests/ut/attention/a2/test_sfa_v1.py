@@ -65,6 +65,7 @@ class TestAscendSFAPrologV3(TestBase):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.has_indexer = has_indexer
         impl.local_num_heads = 2
+        impl.num_kv_heads = 1
         impl.kv_lora_rank = 128
         impl.qk_rope_head_dim = 16
         impl.q_lora_rank = 8
@@ -92,6 +93,7 @@ class TestAscendSFAPrologV3(TestBase):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.has_indexer = False
         impl.use_sparse_c8_indexer = False
+        impl.use_a5_sparse_c8_indexer = False
 
         k_pe = torch.randn(2, 1, 16)
         k_nope = torch.randn(2, 1, 128)
@@ -99,7 +101,7 @@ class TestAscendSFAPrologV3(TestBase):
         handle = MagicMock()
         mock_all_gather.return_value = (gathered, handle)
 
-        fused_kv, k_li, k_li_scale, handles = impl._start_dsa_cp_kv_all_gather(
+        fused_kv, k_li, k_li_scale, result_handle = impl._start_dsa_cp_kv_all_gather(
             k_pe=k_pe,
             k_nope=k_nope,
             k_li=None,
@@ -110,7 +112,7 @@ class TestAscendSFAPrologV3(TestBase):
         self.assertIs(fused_kv, gathered)
         self.assertIsNone(k_li)
         self.assertIsNone(k_li_scale)
-        self.assertEqual(handles, [handle])
+        self.assertIs(result_handle, handle)
         gather_input = mock_all_gather.call_args.args[0]
         self.assertEqual(gather_input.shape, (2, 144))
         mock_all_gather.assert_called_once_with(
@@ -128,10 +130,10 @@ class TestAscendSFAPrologV3(TestBase):
         attn_metadata = SimpleNamespace(num_actual_tokens=4)
 
         with patch("vllm_ascend.attention.sfa_v1.DeviceOperator.reshape_and_cache") as mock_reshape_and_cache:
-            result_k_li, o_proj_handle = impl._finish_dsa_cp_kv_all_gather(
+            result_k_li, o_proj_handle, o_proj_param_handles = impl._finish_dsa_cp_kv_all_gather(
                 fused_kv_no_split=fused_kv,
                 k_li=k_li,
-                handles=handles,
+                handle=result_handle,
                 kv_cache=(key_cache, value_cache, torch.empty(0)),
                 slot_mapping=slot_mapping,
                 attn_metadata=attn_metadata,
@@ -140,6 +142,7 @@ class TestAscendSFAPrologV3(TestBase):
 
         self.assertIsNone(result_k_li)
         self.assertIsNone(o_proj_handle)
+        self.assertIsNone(o_proj_param_handles)
         handle.wait.assert_called_once()
         cache_kwargs = mock_reshape_and_cache.call_args.kwargs
         self.assertEqual(cache_kwargs["key"].shape, (4, 1, 128))
@@ -147,30 +150,108 @@ class TestAscendSFAPrologV3(TestBase):
         self.assertIs(cache_kwargs["key_cache"], key_cache)
         self.assertIs(cache_kwargs["value_cache"], value_cache)
 
+    @patch("vllm_ascend.attention.sfa_v1.get_tp_group")
+    @patch("vllm_ascend.attention.sfa_v1.all_gather_async")
+    def test_dsa_cp_all_gather_preserves_a5_quantized_kv_layout(self, mock_all_gather, mock_get_tp_group):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.use_sparse_c8_indexer = True
+        impl.use_a5_sparse_c8_indexer = True
+        impl.enable_dsa_cp_with_layer_shard = False
+
+        k_nope = torch.randn(2, 1, 128)
+        k_pe = torch.randn(2, 1, 16)
+        knope_scale = torch.randn(2, 1, 1)
+        k_li = torch.randint(-128, 127, (2, 1, 128), dtype=torch.int8)
+        k_li_scale = torch.ones(2, 1)
+        gathered_kv = torch.randn(4, 145)
+        gathered_k_li = torch.randint(-128, 127, (4, 1, 128), dtype=torch.int8)
+        gathered_k_li_scale = torch.ones(4, 1)
+        handles = [MagicMock(), MagicMock(), MagicMock()]
+        mock_all_gather.side_effect = [
+            (gathered_kv, handles[0]),
+            (gathered_k_li, handles[1]),
+            (gathered_k_li_scale, handles[2]),
+        ]
+
+        result = impl._start_dsa_cp_kv_all_gather(
+            k_pe=k_pe,
+            k_nope=k_nope,
+            k_li=k_li,
+            k_li_scale=k_li_scale,
+            async_op=True,
+            knope_scale=knope_scale,
+            a5_quantized_kv=True,
+        )
+
+        fused_kv, result_k_li, result_scale, result_handle = result
+        expected_input = torch.cat(
+            [
+                k_nope.view(2, -1),
+                k_pe.view(2, -1),
+                knope_scale.view(2, -1),
+            ],
+            dim=1,
+        )
+        self.assertTrue(torch.equal(mock_all_gather.call_args_list[0].args[0], expected_input))
+        self.assertIs(fused_kv, gathered_kv)
+        self.assertIs(result_k_li, gathered_k_li)
+        self.assertIs(result_scale, gathered_k_li_scale)
+        self.assertIs(result_handle, handles[-1])
+
+        kv_cache = (torch.empty(4, 145), torch.empty(0), torch.empty(0))
+        with (
+            patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_scatter_nd_update_") as mock_scatter,
+            patch("vllm_ascend.attention.sfa_v1.DeviceOperator.reshape_and_cache") as mock_reshape_and_cache,
+        ):
+            impl._finish_dsa_cp_kv_all_gather(
+                fused_kv_no_split=fused_kv,
+                k_li=result_k_li,
+                handle=result_handle,
+                kv_cache=kv_cache,
+                slot_mapping=torch.arange(4),
+                attn_metadata=SimpleNamespace(num_actual_tokens=4),
+                full_gather_o_proj_enabled=False,
+                a5_quantized_kv=True,
+            )
+
+        mock_scatter.assert_called_once()
+        mock_reshape_and_cache.assert_not_called()
+        handles[-1].wait.assert_called_once()
+
     def test_indexer_reuses_query_precomputed_during_all_gather(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.use_sparse_c8_indexer = True
+        impl.use_torch_npu_lightning_indexer = False
         expected = torch.zeros(2, 1, dtype=torch.int32)
-        impl._run_sparse_c8_indexer_with_precomputed_query = MagicMock(return_value=expected)
         precomputed_query = (
             torch.empty(2, 1, 128, dtype=torch.int8),
             torch.ones(2, 1),
             torch.ones(2, 64),
         )
 
-        result = impl.indexer_select_post_process(
-            x=torch.empty(2, 8),
-            q_c=torch.empty(2, 8),
-            kv_cache=(torch.empty(0),) * 4,
-            attn_metadata=MagicMock(),
-            cos=torch.empty(2, 1, 1, 16),
-            sin=torch.empty(2, 1, 1, 16),
-            actual_seq_lengths_query=torch.tensor([2], dtype=torch.int32),
-            actual_seq_lengths_key=torch.tensor([2], dtype=torch.int32),
-            precomputed_c8_query=precomputed_query,
-        )
+        with patch(
+            "vllm_ascend.attention.sfa_v1.DeviceOperator.indexer_select_post_process",
+            return_value=expected,
+        ) as mock_post_process:
+            result = impl.indexer_select_post_process(
+                x=torch.empty(2, 8),
+                q_c=torch.empty(2, 8),
+                kv_cache=(torch.empty(0),) * 4,
+                attn_metadata=MagicMock(),
+                cos=torch.empty(2, 1, 1, 16),
+                sin=torch.empty(2, 1, 1, 16),
+                actual_seq_lengths_query=torch.tensor([2], dtype=torch.int32),
+                actual_seq_lengths_key=torch.tensor([2], dtype=torch.int32),
+                precomputed_c8_query=precomputed_query,
+            )
 
         self.assertIs(result, expected)
-        impl._run_sparse_c8_indexer_with_precomputed_query.assert_called_once()
+        args = mock_post_process.call_args.args
+        self.assertIs(args[1], precomputed_query[0])
+        self.assertIs(args[2], precomputed_query[1])
+        self.assertEqual(args[3], precomputed_query[0].shape)
+        self.assertIs(args[4], precomputed_query[2])
 
     def test_prolog_v3_uses_unquantized_kv_cache(self):
         impl = self._make_prolog_impl(has_indexer=True)
@@ -267,8 +348,31 @@ class TestAscendSFAPrologV3(TestBase):
         self.assertFalse(mock_prolog.call_args.kwargs["query_norm_flag"])
         self.assertIsNone(result[3])
 
+    def test_prolog_v3_tnd_allows_missing_query_norm_without_indexer(self):
+        impl = self._make_prolog_impl(has_indexer=False)
+        hidden_states = torch.randn(2, 8)
+        ql_nope = torch.randn(2, 2, 128)
+        q_pe = torch.randn(2, 2, 16)
+        k_nope = torch.randn(2, 1, 128)
+        k_pe = torch.randn(2, 1, 16)
+
+        with patch.object(
+            impl,
+            "_sfa_preprocess_with_prolog_v3",
+            return_value=(hidden_states, ql_nope, q_pe, None, k_nope, k_pe),
+        ):
+            result = impl._sfa_preprocess_with_prolog_v3_tnd_cache(
+                hidden_states,
+                cos=torch.randn(2, 1, 1, 16),
+                sin=torch.randn(2, 1, 1, 16),
+            )
+
+        self.assertIsNone(result[3])
+        self.assertIs(result[4], k_nope)
+        self.assertIs(result[5], k_pe)
+
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    def test_prolog_v3_gathers_flashcomm_hidden_states(self, mock_all_gather):
+    def test_sfa_gathers_flashcomm_hidden_states(self, mock_all_gather):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.enable_sp = True
         impl.enable_dsa_cp = False
@@ -276,19 +380,19 @@ class TestAscendSFAPrologV3(TestBase):
         gathered_hidden_states = torch.randn(32, 8)
         mock_all_gather.return_value = gathered_hidden_states
 
-        result = impl._gather_prolog_v3_hidden_states(hidden_states, need_gather_q_kv=True)
+        result = impl._maybe_all_gather_hidden_states(hidden_states, need_gather_q_kv=True)
 
         self.assertIs(result, gathered_hidden_states)
         mock_all_gather.assert_called_once_with(hidden_states.contiguous(), True)
 
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    def test_prolog_v3_keeps_dsa_cp_hidden_states_local(self, mock_all_gather):
+    def test_sfa_keeps_dsa_cp_hidden_states_local(self, mock_all_gather):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.enable_sp = True
         impl.enable_dsa_cp = True
         hidden_states = torch.randn(2, 8)
 
-        result = impl._gather_prolog_v3_hidden_states(hidden_states, need_gather_q_kv=True)
+        result = impl._maybe_all_gather_hidden_states(hidden_states, need_gather_q_kv=True)
 
         self.assertIs(result, hidden_states)
         mock_all_gather.assert_not_called()
