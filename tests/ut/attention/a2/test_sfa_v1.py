@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -56,6 +57,99 @@ class TestAscendSFABackend(TestBase):
         mock_enable_cp.return_value = True
         impl_cls = AscendSFABackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
+
+
+class TestAscendSFAPrologV3(TestBase):
+    def test_indexer_reuses_query_precomputed_during_all_gather(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        expected = torch.zeros(2, 1, dtype=torch.int32)
+        impl._run_sparse_c8_indexer_with_precomputed_query = MagicMock(return_value=expected)
+        precomputed_query = (
+            torch.empty(2, 1, 128, dtype=torch.int8),
+            torch.ones(2, 1),
+            torch.ones(2, 64),
+        )
+
+        result = impl.indexer_select_post_process(
+            x=torch.empty(2, 8),
+            q_c=torch.empty(2, 8),
+            kv_cache=(torch.empty(0),) * 4,
+            attn_metadata=MagicMock(),
+            cos=torch.empty(2, 1, 1, 16),
+            sin=torch.empty(2, 1, 1, 16),
+            actual_seq_lengths_query=torch.tensor([2], dtype=torch.int32),
+            actual_seq_lengths_key=torch.tensor([2], dtype=torch.int32),
+            precomputed_c8_query=precomputed_query,
+        )
+
+        self.assertIs(result, expected)
+        impl._run_sparse_c8_indexer_with_precomputed_query.assert_called_once()
+
+    def test_prolog_v3_uses_unquantized_kv_cache(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.local_num_heads = 2
+        impl.kv_lora_rank = 128
+        impl.qk_rope_head_dim = 16
+        impl.q_lora_rank = 8
+        impl.q_a_layernorm = SimpleNamespace(
+            weight=SimpleNamespace(data=torch.ones(8)),
+            variance_epsilon=1e-5,
+        )
+        impl.kv_a_layernorm = SimpleNamespace(
+            weight=SimpleNamespace(data=torch.ones(128)),
+            variance_epsilon=1e-5,
+        )
+        impl.weight_dq = torch.empty(1)
+        impl.weight_uq_qr = torch.empty(1)
+        impl.W_UK_T = torch.empty(1)
+        impl.weight_dkv_kr = torch.empty(1)
+        impl.dequant_scale_w_dq = torch.empty(1)
+        impl.dequant_scale_w_uq_qr = torch.empty(1)
+        impl.dequant_scale_w_dkv_kr = torch.empty(1)
+
+        hidden_states = torch.randn(2, 8)
+        k_cache = torch.empty(4, 16, 1, 128, dtype=torch.bfloat16)
+        kr_cache = torch.empty(4, 16, 1, 16, dtype=torch.bfloat16)
+
+        with (
+            patch.object(
+                impl,
+                "_format_prolog_v3_inputs",
+                return_value=(
+                    torch.empty(2, 8, dtype=torch.int8),
+                    torch.ones(2, 1),
+                    torch.randn(2, 16),
+                    torch.randn(2, 16),
+                ),
+            ),
+            patch(
+                "vllm_ascend.device.device_op.torch_npu.npu_mla_prolog_v3",
+                create=True,
+                return_value=(
+                    torch.randn(2, 2, 128),
+                    torch.randn(2, 2, 16),
+                    None,
+                    torch.randn(2, 8),
+                    None,
+                ),
+            ) as mock_prolog,
+        ):
+            impl._sfa_preprocess_with_prolog_v3(
+                hidden_states=hidden_states,
+                kv_cache=(k_cache, kr_cache),
+                cos=torch.randn(2, 1, 1, 16),
+                sin=torch.randn(2, 1, 1, 16),
+                slot_mapping=torch.arange(2),
+                cache_mode="PA_BSND",
+            )
+
+        call_kwargs = mock_prolog.call_args.kwargs
+        self.assertIs(call_kwargs["kv_cache"], k_cache)
+        self.assertIs(call_kwargs["kr_cache"], kr_cache)
+        self.assertEqual(call_kwargs["kv_cache_quant_mode"], 0)
+        self.assertEqual(call_kwargs["weight_quant_mode"], 2)
+        self.assertEqual(call_kwargs["cache_mode"], "PA_BSND")
+        self.assertEqual(call_kwargs["cache_index"].tolist(), [0, 1])
 
 
 class TestAscendSFAMetadata(TestBase):
