@@ -8,7 +8,7 @@ from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_simple_string(api_client, request, stream):
-    """content为普通字符串，请求正常"""
+    """Content is a plain string, request should succeed normally"""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "你好，请简单介绍一下自己"}],
@@ -18,14 +18,14 @@ def test_content_simple_string(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：finish_reason有效
+    # Checkpoint 3: finish_reason is valid
     if stream:
         finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     else:
@@ -35,7 +35,7 @@ def test_content_simple_string(api_client, request, stream):
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_empty_string(api_client, request, stream):
-    """content为空字符串，请求正常"""
+    """Content is an empty string, request should succeed normally"""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": ""}],
@@ -45,14 +45,14 @@ def test_content_empty_string(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：finish_reason为stop或length
+    # Checkpoint 3: finish_reason is stop or length
     if stream:
         finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     else:
@@ -62,7 +62,7 @@ def test_content_empty_string(api_client, request, stream):
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_null(api_client, request, stream):
-    """content为null，请求正常"""
+    """Content is null, request should succeed normally"""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": None}],
@@ -72,12 +72,12 @@ def test_content_null(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验：error code为400错误，或者finish_reason为stop/length都算pass
+    # Check: error code 400, or finish_reason stop/length both pass
     if assertion.has_error_code(response):
-        # 存在error code，校验为400
+        # Error code exists, validate it is 400
         assertion.assert_error_code_400(response)
     else:
-        # 没有error code，检查finish_reason为stop或length
+        # No error code, check finish_reason is stop or length
         if stream:
             assertion.assert_stream_has_done(response.text)
 
@@ -90,7 +90,7 @@ def test_content_null(api_client, request, stream):
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_array_empty(api_client, request, stream):
-    """content为空数组[]，请求正常"""
+    """Content is an empty array [], request should succeed normally"""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": []}],
@@ -100,14 +100,14 @@ def test_content_array_empty(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：finish_reason为stop或length
+    # Checkpoint 3: finish_reason is stop or length
     if stream:
         finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     else:
@@ -117,13 +117,13 @@ def test_content_array_empty(api_client, request, stream):
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_missing(api_client, request, stream):
-    """message对象缺少content字段，请求正常"""
+    """Message object missing content field, request should succeed normally"""
     request_body = {
         "model": "auto",
         "messages": [
             {
                 "role": "user"
-                # 缺少content字段
+                # missing content field
             }
         ],
         "stream": stream,
@@ -132,14 +132,14 @@ def test_content_missing(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：finish_reason为stop或length
+    # Checkpoint 3: finish_reason is stop or length
     if stream:
         finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     else:
@@ -149,7 +149,7 @@ def test_content_missing(api_client, request, stream):
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_with_special_chars(api_client, request, stream):
-    """content包含特殊字符（标点、符号等），请求正常"""
+    """Content contains special characters (punctuation, symbols, etc.), request should succeed normally"""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "Hello! 你好~ @#$%^&*()_+-=[]{}|;':\",./<>?"}],
@@ -159,17 +159,17 @@ def test_content_with_special_chars(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_multiline_text(api_client, request, stream):
-    """content包含多行文本（换行符），请求正常"""
+    """Content contains multiline text (newline characters), request should succeed normally"""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "第一行\n第二行\n\n空行后的第三行"}],
@@ -179,17 +179,17 @@ def test_content_multiline_text(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_with_emoji(api_client, request, stream):
-    """content包含Emoji表情，请求正常"""
+    """Content contains emoji, request should succeed normally"""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "你好👋 很高兴见到你😊 这是一颗星星⭐"}],
@@ -199,17 +199,17 @@ def test_content_with_emoji(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_unicode_chinese(api_client, request, stream):
-    """content包含中文字符和Unicode字符，请求正常"""
+    """Content contains Chinese characters and Unicode characters, request should succeed normally"""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": " apples 中文测试 日本語テスト 한국어"}],
@@ -219,17 +219,17 @@ def test_content_unicode_chinese(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_long_text(api_client, request, stream):
-    """content为较长文本（约1000字符），请求正常"""
+    """Content is a long text (approx. 1000 characters), request should succeed normally"""
     long_content = "这是测试文本。" * 100
     request_body = {
         "model": "auto",
@@ -240,17 +240,17 @@ def test_content_long_text(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_code_snippet(api_client, request, stream):
-    """content为代码片段，请求正常"""
+    """Content is a code snippet, request should succeed normally"""
     request_body = {
         "model": "auto",
         "messages": [
@@ -265,10 +265,10 @@ def test_content_code_snippet(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
@@ -278,7 +278,7 @@ def test_content_code_snippet(api_client, request, stream):
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_array_text_objects(api_client, request, stream):
-    """content为多文本对象数组格式（OpenAI多模态标准格式）"""
+    """Content is an array of multiple text objects (OpenAI multimodal standard format)"""
     request_body = {
         "model": "auto",
         "messages": [
@@ -296,14 +296,14 @@ def test_content_array_text_objects(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：finish_reason有效
+    # Checkpoint 3: finish_reason is valid
     if stream:
         finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     else:
@@ -313,7 +313,7 @@ def test_content_array_text_objects(api_client, request, stream):
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_array_single_text_object(api_client, request, stream):
-    """content为单文本对象数组格式"""
+    """Content is an array with a single text object"""
     request_body = {
         "model": "auto",
         "messages": [
@@ -328,17 +328,17 @@ def test_content_array_single_text_object(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_array_empty_text(api_client, request, stream):
-    """content为数组格式但text为空字符串"""
+    """Content is an array format but text is an empty string"""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": [{"type": "text", "text": ""}]}],
@@ -348,16 +348,16 @@ def test_content_array_empty_text(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点：状态码应为200或400（取决于引擎实现）
+    # Checkpoint: status code should be 200 or 400 (depends on engine implementation)
     assert response.status_code in [
         200,
         400,
-    ], f"状态码应为200或400，实际为{response.status_code}"
+    ], f"Status code should be 200 or 400, got {response.status_code}"
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_content_array_many_text_objects(api_client, request, stream):
-    """content为包含多个文本对象的数组（边界测试）"""
+    """Content is an array containing many text objects (boundary test)"""
     request_body = {
         "model": "auto",
         "messages": [
@@ -377,9 +377,9 @@ def test_content_array_many_text_objects(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Checkpoint 1: status code 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Checkpoint 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)

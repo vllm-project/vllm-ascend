@@ -1,11 +1,11 @@
 """
-thinking 和 enable_thinking 字段测试
-- thinking: 用于 deepseek/ds 系列模型
-- enable_thinking: 用于 qwen 系列模型
+Tests for the thinking and enable_thinking fields.
+- thinking: used by DeepSeek/DS model families.
+- enable_thinking: used by Qwen model families.
 
-当字段为 true 时，需要校验 `` 标签完整性
-当字段为 false 时，需要校验不存在 `` 标签
-参照 think_tag 目录的校验规则
+When the field is true, validate that the think tags are complete.
+When the field is false, validate that no think tags are present.
+Follow the validation rules from the think_tag directory.
 """
 
 import pytest
@@ -17,12 +17,12 @@ from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
 
 
 def is_qwen_model(model_name):
-    """判断是否qwen系列模型（大小写不敏感）"""
+    """Return whether the model belongs to the Qwen family, case-insensitively."""
     return model_name and "qwen" in model_name.lower()
 
 
 def is_deepseek_model(model_name):
-    """判断是否deepseek/ds系列模型（大小写不敏感）"""
+    """Return whether the model belongs to the DeepSeek/DS family, case-insensitively."""
     if not model_name:
         return False
     model_lower = model_name.lower()
@@ -30,19 +30,19 @@ def is_deepseek_model(model_name):
 
 
 def should_check_think_tag(request):
-    """判断是否需要进行think标签校验"""
+    """Return whether think-tag validation should be performed."""
     return request.config.getoption("--thinkTagOutput").strip().lower() == "true"
 
 
-# ==================== Qwen系列模型测试 - enable_thinking ====================
+# ==================== Qwen Model Tests - enable_thinking ====================
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_qwen_enable_thinking_true(api_client, request, stream):
-    """qwen模型：enable_thinking=true，正常开启思考模式，需要校验think标签完整性"""
+    """Qwen model: enable_thinking=true enables thinking mode; validate complete think tags."""
     model = request.config.getoption("--model")
     if not is_qwen_model(model):
-        pytest.skip(f"当前模型 {model} 不是qwen系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the Qwen family; skipping this test")
 
     request_body = {
         "model": "auto",
@@ -54,24 +54,24 @@ def test_chat_template_kwargs_qwen_enable_thinking_true(api_client, request, str
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：think标签完整性（enable_thinking=true时）
+    # Check 3: think tags are complete when enable_thinking=true
     if should_check_think_tag(request):
         assertion.assert_think_tag_present(response.content.decode("utf-8"), "enable_thinking=true")
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_qwen_enable_thinking_false(api_client, request, stream):
-    """qwen模型：enable_thinking=false，关闭思考模式，需要校验不存在think标签"""
+    """Qwen model: enable_thinking=false disables thinking mode; validate that no think tags are present."""
     model = request.config.getoption("--model")
     if not is_qwen_model(model):
-        pytest.skip(f"当前模型 {model} 不是qwen系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the Qwen family; skipping this test")
 
     request_body = {
         "model": "auto",
@@ -83,27 +83,27 @@ def test_chat_template_kwargs_qwen_enable_thinking_false(api_client, request, st
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：不存在think标签（enable_thinking=false时）
+    # Check 3: no think tags are present when enable_thinking=false
     if should_check_think_tag(request):
         assertion.assert_no_think_tag(response.content.decode("utf-8"), "enable_thinking=false")
 
 
-# ==================== DeepSeek/DS系列模型测试 - thinking ====================
+# ==================== DeepSeek/DS Model Tests - thinking ====================
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_deepseek_thinking_true(api_client, request, stream):
-    """deepseek/ds模型：thinking=true，正常开启思考模式，需要校验think标签完整性"""
+    """DeepSeek/DS model: thinking=true enables thinking mode; validate complete think tags."""
     model = request.config.getoption("--model")
     if not is_deepseek_model(model):
-        pytest.skip(f"当前模型 {model} 不是deepseek/ds系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the DeepSeek/DS family; skipping this test")
 
     request_body = {
         "model": "auto",
@@ -115,24 +115,24 @@ def test_chat_template_kwargs_deepseek_thinking_true(api_client, request, stream
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：think标签完整性（thinking=true时）
+    # Check 3: think tags are complete when thinking=true
     if should_check_think_tag(request):
         assertion.assert_think_tag_present(response.content.decode("utf-8"), "thinking=true")
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_deepseek_thinking_false(api_client, request, stream):
-    """deepseek/ds模型：thinking=false，关闭思考模式，需要校验不存在think标签"""
+    """DeepSeek/DS model: thinking=false disables thinking mode; validate that no think tags are present."""
     model = request.config.getoption("--model")
     if not is_deepseek_model(model):
-        pytest.skip(f"当前模型 {model} 不是deepseek/ds系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the DeepSeek/DS family; skipping this test")
 
     request_body = {
         "model": "auto",
@@ -144,78 +144,78 @@ def test_chat_template_kwargs_deepseek_thinking_false(api_client, request, strea
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：不存在think标签（thinking=false时）
+    # Check 3: no think tags are present when thinking=false
     if should_check_think_tag(request):
         assertion.assert_no_think_tag(response.content.decode("utf-8"), "thinking=false")
 
 
-# ==================== 非适用模型测试 - 异常场景 ====================
+# ==================== Inapplicable Model Tests - Abnormal Scenarios ====================
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_qwen_field_on_deepseek(api_client, request, stream):
-    """异常：在deepseek模型上使用enable_thinking字段"""
+    """Abnormal: use the enable_thinking field on a DeepSeek model."""
     model = request.config.getoption("--model")
     if not is_deepseek_model(model):
-        pytest.skip(f"当前模型 {model} 不是deepseek/ds系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the DeepSeek/DS family; skipping this test")
 
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "你好"}],
-        "chat_template_kwargs": {"enable_thinking": True},  # 在deepseek上使用qwen的字段
+        "chat_template_kwargs": {"enable_thinking": True},  # Use the Qwen field on DeepSeek
         "stream": stream,
         "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点：可能200（引擎忽略未知字段）或400（引擎严格校验）
+    # Check: either 200 if the engine ignores unknown fields, or 400 if it validates strictly
     assert response.status_code in [
         200,
         400,
-    ], f"状态码应为200或400，实际为{response.status_code}"
+    ], f"status code should be 200 or 400, got {response.status_code}"
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_deepseek_field_on_qwen(api_client, request, stream):
-    """异常：在qwen模型上使用thinking字段"""
+    """Abnormal: use the thinking field on a Qwen model."""
     model = request.config.getoption("--model")
     if not is_qwen_model(model):
-        pytest.skip(f"当前模型 {model} 不是qwen系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the Qwen family; skipping this test")
 
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "你好"}],
-        "chat_template_kwargs": {"thinking": True},  # 在qwen上使用deepseek的字段
+        "chat_template_kwargs": {"thinking": True},  # Use the DeepSeek field on Qwen
         "stream": stream,
         "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点：可能200（引擎忽略未知字段）或400（引擎严格校验）
+    # Check: either 200 if the engine ignores unknown fields, or 400 if it validates strictly
     assert response.status_code in [
         200,
         400,
-    ], f"状态码应为200或400，实际为{response.status_code}"
+    ], f"status code should be 200 or 400, got {response.status_code}"
 
 
-# ==================== 边界测试 ====================
+# ==================== Boundary Tests ====================
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_qwen_enable_thinking_null(api_client, request, stream):
-    """异常：qwen模型enable_thinking为null"""
+    """Abnormal: enable_thinking is null for a Qwen model."""
     model = request.config.getoption("--model")
     if not is_qwen_model(model):
-        pytest.skip(f"当前模型 {model} 不是qwen系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the Qwen family; skipping this test")
 
     request_body = {
         "model": "auto",
@@ -231,10 +231,10 @@ def test_chat_template_kwargs_qwen_enable_thinking_null(api_client, request, str
 
 
 def test_chat_template_kwargs_deepseek_thinking_null_non_stream(api_client, request):
-    """异常：deepseek模型thinking为null（非流式），错误码400"""
+    """Abnormal: thinking is null for a DeepSeek model in non-streaming mode; error code is 400."""
     model = request.config.getoption("--model")
     if not is_deepseek_model(model):
-        pytest.skip(f"当前模型 {model} 不是deepseek/ds系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the DeepSeek/DS family; skipping this test")
 
     request_body = {
         "model": "auto",
@@ -250,10 +250,10 @@ def test_chat_template_kwargs_deepseek_thinking_null_non_stream(api_client, requ
 
 
 def test_chat_template_kwargs_deepseek_thinking_null_stream(api_client, request):
-    """异常：deepseek模型thinking为null（流式），状态码200，错误码400"""
+    """Abnormal: thinking is null for a DeepSeek model in streaming mode; status code is 200 and error code is 400."""
     model = request.config.getoption("--model")
     if not is_deepseek_model(model):
-        pytest.skip(f"当前模型 {model} 不是deepseek/ds系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the DeepSeek/DS family; skipping this test")
 
     request_body = {
         "model": "auto",
@@ -265,17 +265,17 @@ def test_chat_template_kwargs_deepseek_thinking_null_stream(api_client, request)
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点：状态码200，错误码400
+    # Check: status code is 200 and error code is 400
     assertion.assert_status_code_200(response)
     assertion.assert_error_code_400(response)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_qwen_enable_thinking_string(api_client, request, stream):
-    """异常：qwen模型enable_thinking为字符串"""
+    """Abnormal: enable_thinking is a string for a Qwen model."""
     model = request.config.getoption("--model")
     if not is_qwen_model(model):
-        pytest.skip(f"当前模型 {model} 不是qwen系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the Qwen family; skipping this test")
 
     request_body = {
         "model": "auto",
@@ -290,15 +290,15 @@ def test_chat_template_kwargs_qwen_enable_thinking_string(api_client, request, s
     assert response.status_code in [
         200,
         400,
-    ], f"状态码应为200或400，实际为{response.status_code}"
+    ], f"status code should be 200 or 400, got {response.status_code}"
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_deepseek_thinking_string(api_client, request, stream):
-    """异常：deepseek模型thinking为字符串"""
+    """Abnormal: thinking is a string for a DeepSeek model."""
     model = request.config.getoption("--model")
     if not is_deepseek_model(model):
-        pytest.skip(f"当前模型 {model} 不是deepseek/ds系列，跳过此测试")
+        pytest.skip(f"current model {model} is not in the DeepSeek/DS family; skipping this test")
 
     request_body = {
         "model": "auto",
@@ -313,4 +313,4 @@ def test_chat_template_kwargs_deepseek_thinking_string(api_client, request, stre
     assert response.status_code in [
         200,
         400,
-    ], f"状态码应为200或400，实际为{response.status_code}"
+    ], f"status code should be 200 or 400, got {response.status_code}"

@@ -8,7 +8,7 @@ from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_null(api_client, request, stream):
-    """chat_template_kwargs为null，请求应正常响应"""
+    """chat_template_kwargs is null; the request should respond normally."""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "你好"}],
@@ -19,14 +19,14 @@ def test_chat_template_kwargs_null(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：finish_reason为stop或length
+    # Check 3: finish_reason is stop or length
     if stream:
         finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     else:
@@ -36,7 +36,7 @@ def test_chat_template_kwargs_null(api_client, request, stream):
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_empty_object(api_client, request, stream):
-    """chat_template_kwargs为空对象{}，请求应视为可选字段正常处理"""
+    """chat_template_kwargs is an empty object {}; the optional field should be handled normally."""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "你好"}],
@@ -47,14 +47,14 @@ def test_chat_template_kwargs_empty_object(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：finish_reason有效
+    # Check 3: finish_reason is valid
     if stream:
         finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     else:
@@ -64,7 +64,7 @@ def test_chat_template_kwargs_empty_object(api_client, request, stream):
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_with_add_generation_prompt(api_client, request, stream):
-    """chat_template_kwargs设置add_generation_prompt参数，控制是否添加生成提示"""
+    """Set add_generation_prompt in chat_template_kwargs to control generation prompt insertion."""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "你好"}],
@@ -75,17 +75,17 @@ def test_chat_template_kwargs_with_add_generation_prompt(api_client, request, st
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_with_custom_system_prompt(api_client, request, stream):
-    """chat_template_kwargs设置自定义系统提示词相关参数"""
+    """Set custom system-prompt-related parameters in chat_template_kwargs."""
     request_body = {
         "model": "auto",
         "messages": [
@@ -99,17 +99,17 @@ def test_chat_template_kwargs_with_custom_system_prompt(api_client, request, str
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_date_params(api_client, request, stream):
-    """chat_template_kwargs包含日期相关参数（某些模型支持动态日期）"""
+    """chat_template_kwargs contains date-related parameters; some models support dynamic dates."""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "今天是星期几"}],
@@ -120,17 +120,17 @@ def test_chat_template_kwargs_date_params(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_multiple_params(api_client, request, stream):
-    """chat_template_kwargs包含多个有效参数组合"""
+    """chat_template_kwargs contains multiple valid parameters."""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "请简单回答"}],
@@ -145,17 +145,17 @@ def test_chat_template_kwargs_multiple_params(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_with_tools_prompt(api_client, request, stream):
-    """chat_template_kwargs设置tools_prompt参数，控制工具调用提示格式"""
+    """Set tools_prompt in chat_template_kwargs to control the tool-call prompt format."""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "需要查询天气"}],
@@ -180,17 +180,17 @@ def test_chat_template_kwargs_with_tools_prompt(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_bos_token(api_client, request, stream):
-    """chat_template_kwargs设置add_special_tokens或bos_token相关参数"""
+    """Set add_special_tokens or bos_token-related parameters in chat_template_kwargs."""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "你好"}],
@@ -201,17 +201,17 @@ def test_chat_template_kwargs_bos_token(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_chat_template_kwargs_skip_special_tokens(api_client, request, stream):
-    """chat_template_kwargs设置skip_special_tokens参数"""
+    """Set skip_special_tokens in chat_template_kwargs."""
     request_body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "你好"}],
@@ -222,9 +222,9 @@ def test_chat_template_kwargs_skip_special_tokens(api_client, request, stream):
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
-    # 校验点1：状态码200
+    # Check 1: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check 2: streaming response contains [DONE]
     if stream:
         assertion.assert_stream_has_done(response.text)
