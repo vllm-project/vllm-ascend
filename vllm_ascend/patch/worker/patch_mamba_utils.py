@@ -1,5 +1,6 @@
 # mypy: ignore-errors
 
+import itertools
 from typing import Any
 
 import torch
@@ -14,6 +15,7 @@ from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
+from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
 from vllm_ascend.utils import is_310p
 
 
@@ -113,6 +115,7 @@ def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
 if _can_launch_triton_batch_memcpy():
     mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
     mamba_utils.batch_memcpy = _batch_memcpy_triton
+    mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel
 else:
     mamba_utils.batch_memcpy = _batch_memcpy_unavailable
     mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch
@@ -140,7 +143,11 @@ def preprocess_mamba(
     # TODO(Chen): we need to optimize this function a lot
     # assert cache_config.enable_prefix_caching
     block_size = mamba_spec.block_size
-    mamba_utils.cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
+    finished_req_ids = scheduler_output.finished_req_ids
+    preempted_req_ids = scheduler_output.preempted_req_ids or set()
+    resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+    for req_id in itertools.chain(finished_req_ids, preempted_req_ids, resumed_req_ids):
+        mamba_state_idx.pop(req_id, None)
 
     copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):

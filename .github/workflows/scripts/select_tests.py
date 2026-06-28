@@ -16,37 +16,36 @@
 #
 """Determine which tests to run based on changed files in a PR.
 
-Pipeline:
+Two input modes are supported (mutually exclusive):
+
+- ``--changed-files`` / ``--diff-base``: PR-driven. The input is a list of
+  source files changed in a PR. Modules are matched by their
+  ``source_file_dependencies``, and their configured tests are collected
+  and routed to runners.
+
+- ``--explicit-e2e-tests``: Slash-command driven. The input is a list of
+  e2e test paths (files or directories) supplied via the ``/e2e`` PR
+  comment. Module matching is bypassed entirely; each path is routed
+  directly to the appropriate runner.
+
+Pipeline (PR-driven mode):
   1. Diff       -- get changed files from git.
   2. Match      -- identify affected modules via test_config.yaml.
   3. Collect    -- gather test paths (always resolved to individual files).
-  4. Route      -- determine runner for each test file by convention:
-                      UT:  directory path pattern (a2/, a3_2/, 310p/, etc.)
-                      E2E: directory path pattern (one_card, two_card, four_card, 310p)
-  5. Output     -- write test_groups / has_tests / matched_modules.
+  4. Route      -- determine runner via config-driven runner_mapping.
+  5. Partition  -- split test groups across parallel runners by estimated time.
+  6. Output     -- write test_groups / has_tests / matched_modules.
 
-Directory conventions for UT runner routing:
-  tests/ut/<module>/            -> CPU runner (default)
-  tests/ut/<module>/a2/         -> A2 NPU x1
-  tests/ut/<module>/a2_2/       -> A2 NPU x2
-  tests/ut/<module>/a3_2/       -> A3 NPU x2
-  tests/ut/<module>/a3_4/       -> A3 NPU x4
-  tests/ut/<module>/310p/       -> 310P NPU x1
+Test-only optimization:
+  If a PR changes only files under ``tests/`` (no source code touched), the
+  module-matching step is bypassed. Only the ``default_cpu_ut`` module (which
+  is always-on) and the changed test files themselves are run. This avoids
+  the broad regression triggered by ``optional: false`` modules when the
+  intent of the PR is purely to add or adjust tests.
 
-Directory conventions for E2E runner routing:
-  tests/e2e/pull_request/one_card/    -> A2 NPU x1
-  tests/e2e/pull_request/two_card/    -> A3 NPU x2
-  tests/e2e/pull_request/four_card/   -> A3 NPU x4
-  *_310p.py under one/two-card paths  -> 310P NPU x1
-  *_310p.py under four-card paths     -> 310P NPU x4
-
-Usage:
-    python select_tests.py --diff-base origin/main
-    python select_tests.py --changed-files file1.py file2.py
-
-Flags:
-    --run-all-modules   Run tests for all configured modules regardless of
-                        changed files
+Routing is driven by ``test_config.yaml`` ``runner_mapping:`` (regex patterns).
+Partition sizing by ``partition:`` config block.
+See ``test_config.yaml`` for details.
 """
 
 from __future__ import annotations
@@ -76,7 +75,7 @@ class NpuType(str, Enum):
     CPU = "cpu"
 
 
-@dataclass
+@dataclass(frozen=True)
 class RunnerInfo:
     num_npus: int
     npu_type: NpuType
@@ -87,23 +86,75 @@ class RunnerInfo:
 RunnerKey = tuple[int, NpuType]
 _DEFAULT_KEY: RunnerKey = (0, NpuType.CPU)
 
-_UT_DIR_PATTERNS: list[tuple[re.Pattern, NpuType, int]] = [
-    # Order matters: longer/more-specific patterns first (e.g. /a2_2/ before /a2/).
-    (re.compile(r"/a2_2/"), NpuType.A2, 2),
-    (re.compile(r"/a2/"), NpuType.A2, 1),
-    (re.compile(r"/a3_4/"), NpuType.A3, 4),
-    (re.compile(r"/a3_2/"), NpuType.A3, 2),
-    # /310p/ matches the convention subdir (e.g. tests/ut/<module>/310p/).
-    # Note: tests/ut/_310p/ (top-level module, underscore prefix) is NOT matched
-    # by this pattern — those tests run on CPU in mock mode, which is intentional.
-    (re.compile(r"/310p/"), NpuType._310P, 1),
-]
+# The always-on CPU UT module. In test-only changes, only this module
+# is selected for UT runs (along with the changed test files).
+DEFAULT_CPU_UT_MODULE = "default_cpu_ut"
 
-_E2E_DIR_PATTERNS: list[tuple[re.Pattern, NpuType, int]] = [
-    (re.compile(r"/four_card/"), NpuType.A3, 4),
-    (re.compile(r"/two_card/"), NpuType.A3, 2),
-    (re.compile(r"/one_card/"), NpuType.A2, 1),
-]
+# Populated by _load_runner_mapping(). Ordered list of (regex, {key: RunnerKey}).
+_RUNNER_MAPPING: list[tuple[re.Pattern, dict[str, RunnerKey]]] = []
+
+
+def _parse_runner_key(runner_key: str) -> RunnerKey:
+    """Parse ``a2_x1`` → ``(1, NpuType.A2)``, ``310p_x4`` → ``(4, NpuType._310P)``."""
+    parts = runner_key.rsplit("_x", 1)
+    if len(parts) != 2:
+        raise ValueError(f"Invalid runner key: {runner_key!r}")
+    raw_type, raw_npus = parts
+    npu_type = NpuType(raw_type)
+    num_npus = int(raw_npus)
+    return (num_npus, npu_type)
+
+
+def _load_runner_mapping(meta: dict) -> None:
+    """Load runner mapping from the config meta dict into ``_RUNNER_MAPPING``.
+
+    Config format::
+
+        runner_mapping:
+          <regex_pattern>:
+            default: <runner_key>
+            "310p": <runner_key>   # optional override for 310P files
+
+    Patterns are sorted longest first so more specific patterns match first.
+    """
+    global _RUNNER_MAPPING
+    _RUNNER_MAPPING = []
+    raw = list((meta.get("runner_mapping", {}) or {}).items())
+    raw.sort(key=lambda x: -len(x[0]))
+    for pattern_str, runner_config in raw:
+        runners: dict[str, RunnerKey] = {}
+        for key, val in runner_config.items():
+            runners[key] = _parse_runner_key(val)
+        _RUNNER_MAPPING.append((re.compile(pattern_str), runners))
+
+
+def _resolve_runner(file_path: str) -> RunnerKey | None:
+    """Match *file_path* against ``_RUNNER_MAPPING``.
+
+    Returns the ``default`` runner for the first matching pattern.
+    If the filename contains ``_310p`` and the matched pattern has
+    a ``"310p"`` entry, that entry is returned instead.
+    """
+    route_path = _as_posix_path(_pytest_node_file_path(file_path))
+    for pattern, runners in _RUNNER_MAPPING:
+        if pattern.search(route_path):
+            if "_310p" in Path(route_path).name and "310p" in runners:
+                return runners["310p"]
+            return runners.get("default")
+    return None
+
+
+def _route_ut_dir(dir_path: str) -> RunnerKey:
+    result = _resolve_runner(dir_path)
+    return result if result is not None else _DEFAULT_KEY
+
+
+def _route_e2e_dir(dir_path: str) -> RunnerKey | None:
+    return _resolve_runner(dir_path)
+
+
+def _route_e2e_file(file_path: str) -> RunnerKey | None:
+    return _resolve_runner(file_path)
 
 
 def _as_posix_path(path: str) -> str:
@@ -113,15 +164,6 @@ def _as_posix_path(path: str) -> str:
 def _pytest_node_file_path(path: str) -> str:
     """Return the real file path for a pytest nodeid target."""
     return path.split("::", 1)[0]
-
-
-def _route_e2e_file(file_path: str) -> RunnerKey | None:
-    route_path = _as_posix_path(_pytest_node_file_path(file_path))
-    if "_310p" in Path(route_path).name:
-        if "/four_card/" in route_path:
-            return (4, NpuType._310P)
-        return (1, NpuType._310P)
-    return _route_e2e_dir(route_path)
 
 
 def _load_runners() -> list[RunnerInfo]:
@@ -145,7 +187,7 @@ def _get_changed_files(base_ref: str) -> list[str]:
         text=True,
         check=True,
     )
-    return [f for f in result.stdout.strip().split("\n") if f]
+    return [f for f in result.stdout.strip().splitlines() if f]
 
 
 def _matches_path_dependency(file_path: str, dependency: str) -> bool:
@@ -161,7 +203,7 @@ def _as_base_list(base: str | list[str] | None) -> list[str]:
     return base
 
 
-def _merge_unique(parent: list, child: list) -> list:
+def _merge_unique(parent: list[str], child: list[str]) -> list[str]:
     result = list(parent)
     for item in child:
         if item not in result:
@@ -284,30 +326,26 @@ def _is_skipped_test_target(target: str, skip_tests: set[str]) -> bool:
     return target in skip_tests or _pytest_node_file_path(target) in skip_tests
 
 
-def _route_ut_dir(dir_path: str) -> RunnerKey:
-    dir_path = _pytest_node_file_path(dir_path)
-    normalized = dir_path if dir_path.endswith("/") else dir_path + "/"
-    normalized = _as_posix_path(normalized)
-    for pattern, npu_type, num_npus in _UT_DIR_PATTERNS:
-        if pattern.search(normalized):
-            return (num_npus, npu_type)
-    return _DEFAULT_KEY
-
-
-def _route_e2e_dir(dir_path: str) -> RunnerKey | None:
-    dir_path = _as_posix_path(dir_path)
-    for pattern, npu_type, num_npus in _E2E_DIR_PATTERNS:
-        if pattern.search(dir_path):
-            return (num_npus, npu_type)
-    return None
-
-
 def _is_ut_path(path: str) -> bool:
     return path == "tests/ut" or path.startswith("tests/ut/")
 
 
 def _is_e2e_path(path: str) -> bool:
     return path == "tests/e2e" or path.startswith("tests/e2e/")
+
+
+def _is_test_path(path: str) -> bool:
+    return _is_ut_path(path) or _is_e2e_path(path)
+
+
+def _is_test_only_change(changed_files: list[str]) -> bool:
+    """Return True if *changed_files* contains only files under ``tests/``.
+
+    When a PR touches nothing but test files, there is no source change
+    requiring broad regression; only the changed tests (and the always-on
+    ``default_cpu_ut`` module) need to run.
+    """
+    return bool(changed_files) and all(_is_test_path(f) for f in changed_files)
 
 
 def _scan_ut_test_dir(
@@ -334,12 +372,17 @@ def _scan_ut_test_dir(
     if path.is_file():
         key = _route_ut_dir(dir_path)
         if cpu_only and key != _DEFAULT_KEY:
+            print(
+                f"Warning: cpu_only module test {dir_path} routes to NPU runner;"
+                " check test_config.yaml for misconfigured cpu_only tests.",
+                file=sys.stderr,
+            )
             return
         groups[key].append(dir_path)
         return
 
     for f in sorted(path.rglob("test_*.py")):
-        if any(part in ("__pycache__",) for part in f.parts):
+        if "__pycache__" in f.parts:
             continue
         key = _route_ut_dir(str(f))
         if cpu_only and key != _DEFAULT_KEY:
@@ -358,6 +401,10 @@ def _scan_e2e_test_dir(
     """
     path = Path(_pytest_node_file_path(dir_path))
     if not path.exists():
+        print(
+            f"Warning: Path does not exist: {dir_path}",
+            file=sys.stderr,
+        )
         return
 
     if path.is_file():
@@ -418,12 +465,115 @@ def _find_runner(
     return candidates[0] if candidates else None
 
 
+def _load_estimated_times(meta: dict) -> dict[str, float]:
+    """Load per-test estimated times from the config meta dict.
+
+    Tests not listed default to 600s when used by _partition_tests.
+    """
+    return {k: float(v) for k, v in meta.get("estimated_times", {}).items()}
+
+
+def _load_partition_config(meta: dict) -> dict[str, int]:
+    """Load partition configuration from the config meta dict.
+
+    Returns a dict mapping runner keys (e.g. ``a2_x1``) to partition
+    counts.  Runner keys not listed default to 1.
+    """
+    return {k: int(v) for k, v in meta.get("partition", {}).items()}
+
+
+def _lookup_estimated_time(
+    test_name: str,
+    estimated_times: dict[str, float],
+    default: float = 600.0,
+) -> float:
+    """Look up the estimated time for *test_name*, falling back to defaults.
+
+    1. Try exact match (handles both file-level and ``::nodeid`` keys).
+    2. Strip any ``::nodeid`` suffix and try again.
+    3. Otherwise use *default*.
+
+    Note: when both a file-level path and a ``::nodeid`` path for the same
+    file exist in module ``tests:`` lists, that method executes twice.
+    Avoid mixing levels for the same file in ``tests:``.
+    """
+    val = estimated_times.get(test_name)
+    if val is not None:
+        return val
+    base = _pytest_node_file_path(test_name)
+    if base != test_name:
+        val = estimated_times.get(base)
+        if val is not None:
+            return val
+    return default
+
+
+def _partition_tests(
+    tests: list[str],
+    partition_size: int,
+    estimated_times: dict[str, float],
+) -> list[list[str]]:
+    """Split *tests* into *partition_size* groups of roughly equal total time.
+
+    Uses a greedy algorithm: sort tests descending by estimated time, then
+    place each test into the currently lightest bucket.
+    """
+    if not tests or partition_size <= 1:
+        return [tests]
+
+    indexed = sorted(
+        enumerate(tests),
+        key=lambda x: (-_lookup_estimated_time(x[1], estimated_times), x[0]),
+    )
+
+    buckets: list[list[int]] = [[] for _ in range(partition_size)]
+    sums = [0.0] * partition_size
+
+    for idx, test in indexed:
+        lightest = sums.index(min(sums))
+        buckets[lightest].append(idx)
+        sums[lightest] += _lookup_estimated_time(test, estimated_times)
+
+    result = []
+    for bucket in buckets:
+        result.append(
+            sorted(
+                (tests[i] for i in bucket),
+                key=lambda t: -_lookup_estimated_time(t, estimated_times),
+            )
+        )
+    return result
+
+
+def _build_test_group(
+    num_npus: int,
+    npu_type: NpuType,
+    runner: RunnerInfo,
+    tests: list[str],
+    partition: str,
+) -> dict:
+    group: dict = {
+        "num_npus": num_npus,
+        "npu_type": npu_type.value,
+        "runner": runner.label,
+        "tests": " ".join(sorted(tests)),
+        "partition": partition,
+    }
+    if runner.image_tag:
+        group["image_tag"] = runner.image_tag
+    return group
+
+
 def _resolve_to_runners(
     all_groups: dict[RunnerKey, list[str]],
     runners: list[RunnerInfo],
+    partition_config: dict[str, int] | None = None,
+    estimated_times: dict[str, float] | None = None,
 ) -> list[dict]:
     result: list[dict] = []
     errors: list[str] = []
+    partition_config = partition_config or {}
+    estimated_times = estimated_times or {}
 
     for (num_npus, npu_type), tests in sorted(all_groups.items()):
         if not tests:
@@ -441,21 +591,25 @@ def _resolve_to_runners(
             errors.append(header + runners_line + tests_line)
             continue
 
-        group: dict = {
-            "num_npus": num_npus,
-            "npu_type": npu_type.value,
-            "runner": runner.label,
-            "tests": " ".join(sorted(tests)),
-        }
-        if runner.image_tag:
-            group["image_tag"] = runner.image_tag
-        result.append(group)
+        partition_key = f"{npu_type.value}_x{num_npus}"
+        psize = partition_config.get(partition_key, 1)
+
+        if psize > 1:
+            buckets = _partition_tests(sorted(tests), psize, estimated_times)
+            for i, bucket in enumerate(buckets):
+                if not bucket:
+                    continue
+                result.append(_build_test_group(num_npus, npu_type, runner, bucket, f"{i + 1}-{psize}"))
+        else:
+            result.append(_build_test_group(num_npus, npu_type, runner, tests, "1-1"))
 
     if errors:
+        details = "".join(errors)
         print(
-            "\nERROR: The following test groups cannot be routed to any runner"
-            " in runner_label.json:" + "".join(errors) + "\n\nPlease fix the directory structure or add the"
-            " missing runner to runner_label.json.\n",
+            f"\nERROR: The following test groups cannot be routed to any runner"
+            f" in runner_label.json:\n{details}\n\n"
+            "Please fix the directory structure or add the missing runner"
+            " to runner_label.json.\n",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -505,10 +659,11 @@ def _print_summary(
         num_npus = group["num_npus"]
         runner = group["runner"]
         tests = group["tests"].split()
+        partition_info = group.get("partition", "full")
         if npu_type == "cpu":
-            header = f"### CPU ({len(tests)} tests) -> `{runner}`"
+            header = f"### CPU ({len(tests)} tests) part {partition_info} -> `{runner}`"
         else:
-            header = f"### {npu_type.upper()} x{num_npus} ({len(tests)} tests) -> `{runner}`"
+            header = f"### {npu_type.upper()} x{num_npus} ({len(tests)} tests) part {partition_info} -> `{runner}`"
         print(f"\n  {header}", file=sys.stderr)
         for t in tests:
             print(f"    - {t}", file=sys.stderr)
@@ -518,7 +673,7 @@ def _print_summary(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Determine test scope based on changed files",
+        description="Determine test scope from changed files or explicit e2e test paths",
     )
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument(
@@ -530,6 +685,15 @@ def main():
         "--diff-base",
         type=str,
         help="Git ref to diff against (e.g. origin/main)",
+    )
+    input_group.add_argument(
+        "--explicit-e2e-tests",
+        nargs="+",
+        help="List of explicit e2e test paths (files or directories) to run. "
+        "Bypasses module matching and routes each path to the appropriate runner. "
+        "Use this for the /e2e slash command to run a specific subset of tests. "
+        "Supports ``::nodeid`` suffix (e.g. ``test_foo.py::TestClass::test_method``) "
+        "to run a single test method.",
     )
     parser.add_argument(
         "--config",
@@ -544,69 +708,94 @@ def main():
     )
 
     args = parser.parse_args()
-    config = _resolve_config_inheritance(yaml.safe_load(args.config.read_text()))
-
-    changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
-    matched_modules = (
-        [module["name"] for module in config] if args.run_all_modules else _match_modules(changed_files, config)
-    )
-    test_dirs, cpu_only_dirs = _collect_test_dirs(matched_modules, config)
+    docs = list(yaml.safe_load_all(args.config.read_text()))
+    config = _resolve_config_inheritance(docs[0])
+    meta = docs[1] if len(docs) >= 2 and docs[1] else {}
+    _load_runner_mapping(meta)
 
     skip_tests: set[str] = set()
     for module in config:
         for s in module.get("skip_tests", []):
             skip_tests.add(s.rstrip("/"))
 
-    changed_test_files = [
-        f
-        for f in changed_files
-        if (_is_ut_path(f) or _is_e2e_path(f))
-        and Path(_pytest_node_file_path(f)).name.startswith("test_")
-        and Path(_pytest_node_file_path(f)).exists()
-    ]
-
-    ut_dirs = [d for d in test_dirs if _is_ut_path(d)]
-    cpu_only_ut_dirs = [d for d in cpu_only_dirs if _is_ut_path(d)]
-    e2e_dirs = [d for d in test_dirs if _is_e2e_path(d)]
-
-    all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
-
-    for dir_path in ut_dirs:
-        p = Path(_pytest_node_file_path(dir_path))
-        if p.is_file():
-            key = _route_ut_dir(dir_path)
-            all_groups[key].append(dir_path)
-        else:
-            _scan_ut_test_dir(dir_path, all_groups)
-    for dir_path in cpu_only_ut_dirs:
-        p = Path(_pytest_node_file_path(dir_path))
-        if p.is_file():
-            key = _route_ut_dir(dir_path)
-            if key == _DEFAULT_KEY:
-                all_groups[key].append(dir_path)
-        else:
-            _scan_ut_test_dir(dir_path, all_groups, cpu_only=True)
-
-    for dir_path in e2e_dirs:
-        _scan_e2e_test_dir(dir_path, all_groups)
-
-    for changed_test_file in changed_test_files:
-        if "::" in changed_test_file:
-            changed_targets = [changed_test_file]
-        else:
-            changed_targets = _configured_nodeid_targets_for_file(changed_test_file, config) or [changed_test_file]
-        for f in changed_targets:
-            if _is_skipped_test_target(f, skip_tests):
+    if args.explicit_e2e_tests:
+        matched_modules: list[str] = []
+        all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
+        for path in args.explicit_e2e_tests:
+            if not _is_e2e_path(path):
+                print(
+                    f"Warning: Skipping non-e2e path: {path}",
+                    file=sys.stderr,
+                )
                 continue
-            if _is_ut_path(f):
-                key = _route_ut_dir(f)
-                all_groups[key].append(f)
-            elif _is_e2e_path(f):
-                key = _route_e2e_file(f)
-                if key is not None:
-                    all_groups[key].append(f)
+            _scan_e2e_test_dir(path, all_groups)
+    else:
+        changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
+        test_only_change = _is_test_only_change(changed_files)
+        if test_only_change:
+            print(
+                "Detected test-only change: running only default_cpu_ut"
+                " and the changed test files (skipping source-driven modules).",
+                file=sys.stderr,
+            )
+        if args.run_all_modules:
+            matched_modules = [module["name"] for module in config]
+        elif test_only_change:
+            matched_modules = [m["name"] for m in config if m["name"] == DEFAULT_CPU_UT_MODULE]
+        else:
+            matched_modules = _match_modules(changed_files, config)
+        test_dirs, cpu_only_dirs = _collect_test_dirs(matched_modules, config)
 
-    _dedup_groups(all_groups)
+        changed_test_files = []
+        for f in changed_files:
+            if not _is_test_path(f):
+                continue
+            target = Path(_pytest_node_file_path(f))
+            if target.name.startswith("test_") and target.exists():
+                changed_test_files.append(f)
+
+        ut_dirs = [d for d in test_dirs if _is_ut_path(d)]
+        cpu_only_ut_dirs = [d for d in cpu_only_dirs if _is_ut_path(d)]
+        e2e_dirs = [d for d in test_dirs if _is_e2e_path(d)]
+
+        all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
+
+        for dir_path in ut_dirs:
+            p = Path(_pytest_node_file_path(dir_path))
+            if p.is_file():
+                key = _route_ut_dir(dir_path)
+                all_groups[key].append(dir_path)
+            else:
+                _scan_ut_test_dir(dir_path, all_groups)
+        for dir_path in cpu_only_ut_dirs:
+            p = Path(_pytest_node_file_path(dir_path))
+            if p.is_file():
+                key = _route_ut_dir(dir_path)
+                if key == _DEFAULT_KEY:
+                    all_groups[key].append(dir_path)
+            else:
+                _scan_ut_test_dir(dir_path, all_groups, cpu_only=True)
+
+        for dir_path in e2e_dirs:
+            _scan_e2e_test_dir(dir_path, all_groups)
+
+        for changed_test_file in changed_test_files:
+            if "::" in changed_test_file:
+                changed_targets = [changed_test_file]
+            else:
+                changed_targets = _configured_nodeid_targets_for_file(changed_test_file, config) or [changed_test_file]
+            for f in changed_targets:
+                if _is_skipped_test_target(f, skip_tests):
+                    continue
+                if _is_ut_path(f):
+                    key = _route_ut_dir(f)
+                    all_groups[key].append(f)
+                elif _is_e2e_path(f):
+                    key = _route_e2e_file(f)
+                    if key is not None:
+                        all_groups[key].append(f)
+
+        _dedup_groups(all_groups)
 
     if skip_tests:
         for key in list(all_groups.keys()):
@@ -627,7 +816,9 @@ def main():
         _dedup_groups(all_groups)
 
     runners = _load_runners()
-    test_groups = _resolve_to_runners(all_groups, runners)
+    estimated_times = _load_estimated_times(meta)
+    partition_config = _load_partition_config(meta)
+    test_groups = _resolve_to_runners(all_groups, runners, partition_config, estimated_times)
 
     _write_output(test_groups, matched_modules)
 

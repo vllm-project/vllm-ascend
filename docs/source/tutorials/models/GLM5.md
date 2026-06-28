@@ -4,9 +4,9 @@
 
 This document applies to both `GLM-5` and `GLM-5.1`. Unless otherwise specified, all descriptions, configurations, and deployment procedures for `GLM-5` in this document also apply to `GLM-5.1`. For brevity, `GLM-5` is used hereafter as a unified reference to both `GLM-5` and `GLM-5.1`.
 
-[GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
+[GLM-5](https://huggingface.co/zai-org/GLM-5) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
-The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all **v0.17.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use v0.17.0rc1 or a later version.The version of transformers need to be upgraded to 5.2.0.
+The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all **v0.17.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use v0.17.0rc1 or a later version. The version of transformers need to be upgraded to 5.2.0.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -156,6 +156,9 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 ```{code-block} bash
    :substitutions:
+# The version of transformers needs to be upgraded to 5.2.0.
+# pip install transformers==5.2.0 --upgrade
+
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
@@ -241,7 +244,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --data-parallel-size 1 \
@@ -409,7 +412,7 @@ export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --data-parallel-size 2 \
@@ -456,7 +459,7 @@ export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --host 0.0.0.0 \
 --port 8077 \
 --headless \
@@ -483,7 +486,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 ::::
 :::::
 
-- For bf16 weight, use this script on each node to enable [Multi Token Prediction (MTP)](../../user_guide/feature_guide/Multi_Token_Prediction.md).
+- For bf16 weight, use this script on each node to enable [Multi Token Prediction (MTP)](../../user_guide/feature_guide/speculative_decoding.md).
 
 ```shell
 python adjust_weight.py "path_of_bf16_weight"
@@ -658,7 +661,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 
 ### 5.3 Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance.
+We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
 Before you start, please
 
@@ -799,7 +802,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        vllm serve /root/.cache/glm5-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -879,7 +882,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-        vllm serve /root/.cache/glm5-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -961,7 +964,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
     
-        vllm serve /root/.cache/glm5-w8a8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -1041,7 +1044,7 @@ Before you start, please
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
             
-         vllm serve /root/.cache/glm5-w8a8 \
+         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
              --data-parallel-size $3 \
@@ -1121,7 +1124,7 @@ Before you start, please
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
             
-         vllm serve /root/.cache/glm5-w8a8 \
+         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
              --data-parallel-size $3 \
@@ -1201,7 +1204,7 @@ Before you start, please
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
             
-         vllm serve /root/.cache/glm5-w8a8 \
+         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
              --data-parallel-size $3 \

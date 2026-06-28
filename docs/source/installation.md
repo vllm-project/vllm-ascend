@@ -24,7 +24,7 @@ There are two installation methods:
 
 ## Configure Ascend CANN environment
 
-Before installation, you need to make sure firmware/driver, and CANN are installed correctly, refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
+Before installation, you need to make sure firmware/driver, and CANN are installed correctly, refer to [Ascend Environment Setup Guide](https://www.hiascend.com/cann/download?versionId=735&ids=d806%2Ch0501%2Ch0601%2Ch0702) for more details.
 
 ### Configure hardware environment
 
@@ -182,8 +182,16 @@ pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from wheelnext index.
 uv pip install --system \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant https://mirrors.huaweicloud.com/ascend/repos/pypi   \
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
+--index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
 vllm-ascend==|pip_vllm_ascend_version|
+
+```
+
+```{note}
+If you encounter errors during `uv pip install` (e.g., corrupted cache or stale package data), try clearing the uv cache first and then re-run the install command:
+
+    uv cache clean
 
 ```
 
@@ -230,7 +238,12 @@ If you are building in a CPU-only environment where `npu-smi` is unavailable, yo
 - Atlas A2: `export SOC_VERSION=ascend910b1`
 - Atlas A3: `export SOC_VERSION=ascend910_9391`
 - Atlas 300I: `export SOC_VERSION=ascend310p1`
-- Atlas A5: `export SOC_VERSION=<value starting with "ascend950">`
+- Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
+```
+
+```{note}
+To enable the batch invariance feature, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
+For usage guidance on the batch invariance feature, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/batch_invariance.md>
 ```
 
 ## Set up using Docker
@@ -354,7 +367,7 @@ Prompt: 'The capital of France is', Generated text: ' a city. What is the capita
 Prompt: 'The future of AI is', Generated text: ' a topic that is being discussed in various contexts. In the business world, AI'
 ```
 
-This section shows process exits after offline inference, and is does not affect actual inference:
+This section shows process exits after offline inference, and does not affect actual inference:
 
 ```bash
 (EngineCore pid=970) INFO 05-12 11:36:00 [core.py:1201] Shutdown initiated (timeout=0)

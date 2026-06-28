@@ -20,6 +20,7 @@ namespace FusedGdnGating {
 constexpr uint32_t VECTOR_BYTES_PER_ITER = 256;
 constexpr uint32_t DATACOPY_MIN_BYTES = 32;
 constexpr uint32_t BF16_PER_BLOCK = DATACOPY_MIN_BYTES / 2;  // 16
+constexpr uint32_t MASK_ALIGN_ELEMS = 64;
 
 /// Align count to vector unit width (256 bytes) for given dtype size.
 inline uint32_t AlignCountToVectorBytes(uint32_t count, uint32_t dtypeSize)
@@ -64,22 +65,23 @@ inline uint32_t ComputeRowsPerIter(uint32_t numHeads, uint64_t ubBudget,
                                    uint32_t ubDim = 0)
 {
     if (ubDim == 0) {
-        // Use DMA-friendly alignment matching kernel's DMA_ALIGN_ELEMS=16.
-        // 16 bf16/fp16 elements = 32 bytes = 1 DMA block (min alignment).
-        // 16 fp32 elements = 64 bytes = 2 DMA blocks.
-        ubDim = ((numHeads + BF16_PER_BLOCK - 1) / BF16_PER_BLOCK) * BF16_PER_BLOCK;
+        // Match the kernel's fp32 compute/mask alignment.
+        ubDim = ((numHeads + MASK_ALIGN_ELEMS - 1) / MASK_ALIGN_ELEMS) * MASK_ALIGN_ELEMS;
     }
+    uint32_t maskUbDim = ubDim;
 
-    // 3 fp32 constant buffers, each 1 row.
-    uint32_t sharedBytes = 3 * ubDim * static_cast<uint32_t>(sizeof(float));
+    // 2 parameter input queues + 2 fp32 constant buffers, each 1 row.
+    // Use fp32 for the parameter queues as a conservative upper bound.
+    uint32_t sharedBytes = 4 * ubDim * static_cast<uint32_t>(sizeof(float));
 
     // Multi-row constant buffers (precomputed once, scaled by R):
     //   dtBiasMultiBuf_ + negExpMultiBuf_: 2 fp32 buffers.
     uint32_t constPerRowBytes = 2 * ubDim * static_cast<uint32_t>(sizeof(float));
 
-    // Per-row (per-chunk): 3 bf16/fp16 buffers + 6 fp32 buffers.
+    // Per-row (per-chunk): 3 bf16/fp16 buffers + 5 fp32 buffers + 1 uint8 mask buffer.
     uint32_t perRowBytes = 3 * ubDim * static_cast<uint32_t>(sizeof(int16_t))   // a, b, betaOut
-                         + 6 * ubDim * static_cast<uint32_t>(sizeof(float));    // g, x, betaX, abs, tmp, betaFp32
+                         + 5 * ubDim * static_cast<uint32_t>(sizeof(float))     // g, x, betaX, tmp, betaFp32
+                         + 1 * maskUbDim * static_cast<uint32_t>(sizeof(uint8_t)); // threshold mask
 
     if (perRowBytes == 0) {
         return 1;

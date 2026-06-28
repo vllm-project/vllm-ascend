@@ -51,7 +51,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import RequestStatus
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
@@ -182,7 +181,7 @@ class KVCacheTaskTracker:
         while self.delayed_free_requests:
             request_id = next(iter(self.delayed_free_requests))
             delay_start_time = self.delayed_free_requests[request_id]
-            if current_time - delay_start_time > envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT:
+            if current_time - delay_start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
@@ -724,7 +723,7 @@ class KVCacheRecvingThread(threading.Thread):
         is_kv_transfer_end = global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
         need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
-        use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
+        use_fused_op = get_ascend_config().enable_transpose_kv_cache_by_block
         if need_nz_cache or need_cat_cache:
             # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
             if use_fused_op and enable_custom_op():
@@ -1206,17 +1205,15 @@ class MooncakeConnectorScheduler:
     def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         transfer_block_ids = []
         for i, blocks in enumerate(block_ids):
-            if self.num_swa_blocks[i] == 0:
-                if self.use_compress:
-                    group_block_len = math.ceil((prompt_len // self.group_compress_ratio[i]) / self.group_block_size[i])
-                else:
-                    group_block_len = math.ceil(prompt_len / self.group_block_size[i])
-                if group_block_len > 0:
-                    transfer_block_ids.append(blocks[:group_block_len])
-                else:
-                    transfer_block_ids.append([])
+            if self.use_compress and self.num_swa_blocks[i] == 0:
+                group_token_len = prompt_len // self.group_compress_ratio[i]
             else:
-                transfer_block_ids.append(blocks)
+                group_token_len = prompt_len
+            group_block_len = math.ceil(group_token_len / self.group_block_size[i])
+            if group_block_len > 0:
+                transfer_block_ids.append(blocks[:group_block_len])
+            else:
+                transfer_block_ids.append([])
         return tuple(transfer_block_ids)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
@@ -1329,16 +1326,17 @@ class MooncakeConnectorScheduler:
         ):
             return False, None
 
-        computed_block_ids = block_ids
+        # P-side truncation can leave block ids allocated for the original
+        # prompt length. Drop those unwritten blocks before SWA tail clipping.
+        computed_block_ids = self._compute_transfer_block_ids(block_ids, request.num_prompt_tokens)
+        computed_block_ids = self.get_sw_clipped_blocks(computed_block_ids)
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
         delay_free_blocks = sum(computed_block_lens) > 0
         if delay_free_blocks:
-            logger.info("Delaying free of %d blocks for request %s", len(computed_block_ids), request.request_id)
+            logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
-            computed_block_ids = self.get_sw_clipped_blocks(computed_block_ids)
 
-        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
-        computed_block_ids = self._compute_transfer_block_ids(computed_block_ids, len(request.prompt_token_ids))
+        num_prompt_blocks = math.ceil(request.num_prompt_tokens / self.block_size)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -1541,6 +1539,7 @@ class MooncakeConnectorWorker:
                 if share_tensor_addr:
                     ptrs.append(min(share_tensor_addr))
                     lengths.append(kv_cache_tensor.size)
+            self.block_stride_per_addr.extend(self.block_len_per_addr)
         elif self.use_compress:
             layer_group_idx = dict[str, int]()
             for i, group in enumerate(self.kv_cache_config.kv_cache_groups):

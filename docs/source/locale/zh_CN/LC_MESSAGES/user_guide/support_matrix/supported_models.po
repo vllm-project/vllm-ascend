@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-07 05:04+0000\n"
+"POT-Creation-Date: 2026-06-22 05:29+0000\n"
 "PO-Revision-Date: 2026-01-22 16:18+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -54,12 +54,12 @@ msgid "Text-Only Language Models"
 msgstr "纯文本语言模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:14
-#: ../../source/user_guide/support_matrix/supported_models.md:79
+#: ../../source/user_guide/support_matrix/supported_models.md:80
 msgid "Generative Models"
 msgstr "生成模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:16
-#: ../../source/user_guide/support_matrix/supported_models.md:81
+#: ../../source/user_guide/support_matrix/supported_models.md:82
 msgid "Core Supported Models"
 msgstr "核心支持的模型"
 
@@ -278,6 +278,14 @@ msgid "[GLM-5](../../tutorials/models/GLM5.md)"
 msgstr "[GLM-5](../../tutorials/models/GLM5.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
+msgid "GLM-5.2"
+msgstr "GLM-5.2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "[GLM-5](../../tutorials/models/GLM5.2.md)"
+msgstr "[GLM-5](../../tutorials/models/GLM5.2.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Kimi-K2-Thinking"
 msgstr "Kimi-K2-Thinking"
 
@@ -333,8 +341,8 @@ msgstr "4096"
 msgid "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
 msgstr "[Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:36
-#: ../../source/user_guide/support_matrix/supported_models.md:91
+#: ../../source/user_guide/support_matrix/supported_models.md:37
+#: ../../source/user_guide/support_matrix/supported_models.md:93
 msgid "Extended Compatible Models"
 msgstr "扩展兼容模型"
 
@@ -442,7 +450,7 @@ msgstr "Mllama"
 msgid "MiniMax-Text"
 msgstr "MiniMax-Text"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:64
+#: ../../source/user_guide/support_matrix/supported_models.md:65
 msgid "Pooling Models"
 msgstr "池化模型"
 
@@ -498,7 +506,7 @@ msgstr "Bert"
 msgid "Reward Model, gsm8k_correctness accuracy=0.80"
 msgstr "奖励模型，gsm8k_correctness 准确率=0.80"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:77
+#: ../../source/user_guide/support_matrix/supported_models.md:78
 msgid "Multimodal Language Models"
 msgstr "多模态语言模型"
 
@@ -549,6 +557,18 @@ msgid ""
 msgstr ""
 "[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-"
 "Thinking.md)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Kimi-K2.5/Kimi-K2.6"
+msgstr "Kimi-K2.5/Kimi-K2.6"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "262144"
+msgstr "262144"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)"
+msgstr "[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen2-VL"

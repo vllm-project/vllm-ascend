@@ -148,6 +148,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
             )
 
+    def refresh_hccl_group(self) -> None:
+        """Refresh MC2 communicator metadata after HCCL groups are recreated."""
+        device_group = get_mc2_group().device_group
+        local_rank = torch.distributed.get_rank(group=device_group)
+        backend = device_group._get_backend(torch.device("npu"))
+        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+
     def get_dispatch_mc2_kwargs(
         self,
         token_dispatch_input: MoETokenDispatchInput,
@@ -201,7 +208,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # Only dispatch-enabled MXFP paths pass y_dtype through MC2.
         if (
             self.a5_need_extra_args
-            and token_dispatch_input.quant.is_mxfp
+            and (token_dispatch_input.quant.is_mxfp or token_dispatch_input.quant.is_fp8)
             and token_dispatch_input.quant.dispatch_with_quant
         ):
             y_dtype = torch.float8_e4m3fn
@@ -356,7 +363,9 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # TODO: After AllGather MXFP4 communication quantization thorough verification, remove this judgment.
         #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
         with_quant = (
-            token_dispatch_input.quant.dispatch_with_quant and token_dispatch_input.quant.quant_type != QuantType.MXFP4
+            token_dispatch_input.quant.dispatch_with_quant
+            and token_dispatch_input.quant.quant_type != QuantType.MXFP4
+            and token_dispatch_input.quant.quant_type != QuantType.W8A8FP8
         )
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
@@ -466,7 +475,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        with_quant = token_dispatch_input.quant.is_int_quant
+        with_quant = token_dispatch_input.quant.is_int_quant or token_dispatch_input.quant.is_fp8
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
@@ -484,7 +493,10 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         dynamic_scale_after_all2all = None
         if with_quant:
-            permutated_local_input_tokens, dynamic_scale = torch_npu.npu_dynamic_quant(permutated_local_input_tokens)
+            dst_type = torch.float8_e4m3fn if token_dispatch_input.quant.is_fp8 else torch.int8
+            permutated_local_input_tokens, dynamic_scale = torch_npu.npu_dynamic_quant(
+                permutated_local_input_tokens, dst_type=dst_type
+            )
             _, dynamic_scale_after_all2all, permute2_ep_all_to_all_handle = async_all_to_all(
                 dynamic_scale, output_splits, input_splits, self.ep_group
             )
