@@ -48,6 +48,29 @@ def assert_finish_reason_valid(finish_reason, msg=""):
     check.is_in(finish_reason, ["stop", "length"], f"{msg}finish_reason is not stop or length")
 
 
+def assert_chat_completion_success(response, stream, msg=""):
+    """Verify chat completion success response and return finish_reason."""
+    assert_status_code_200(response, msg)
+
+    if stream:
+        assert_stream_has_done(response.text, msg)
+        finish_reason = assert_stream_single_finish_reason(response.text, msg)
+    else:
+        finish_reason = response.json()["choices"][0]["finish_reason"]
+
+    assert_finish_reason_valid(finish_reason, msg)
+    return finish_reason
+
+
+def assert_non_empty_message_content(response, msg=""):
+    """Verify non-streaming chat completion content is non-empty and return it."""
+    assert_status_code_200(response, msg)
+    content = response.json()["choices"][0]["message"]["content"]
+    check.is_true(content is not None, f"{msg}response content is None")
+    check.is_true(len(content) > 0, f"{msg}response content is empty")
+    return content
+
+
 def assert_stream_has_done(response_text, msg=""):
     """Verify streaming response contains [DONE]"""
     check.is_true(
@@ -112,6 +135,15 @@ def assert_error_code_400(response, msg=""):
         match = re.search(r"\"code\"\s?:\s?(\d+)", response.text, re.M)
         if match:
             check.equal(int(match.group(1)), 400, f"{msg}Streaming response error code is not 400")
+
+
+def assert_architecture_error_code_400_response(response, request, stream, msg=""):
+    """Verify 400 error response status according to engine architecture."""
+    if stream and request.config.getoption("--engineArchitecture") == "pd":
+        assert_status_code_200(response, msg)
+    else:
+        assert_status_code_400(response, msg)
+    assert_error_code_400(response, msg)
 
 
 def assert_error_code_422(response, msg=""):

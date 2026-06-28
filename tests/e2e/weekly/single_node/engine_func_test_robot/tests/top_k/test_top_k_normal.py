@@ -6,17 +6,6 @@ from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
 )
 
 
-def _assert_success_response(response, stream):
-    assertion.assert_status_code_200(response)
-
-    if stream:
-        assertion.assert_stream_has_done(response.text)
-        finish_reason = assertion.assert_stream_single_finish_reason(response.text)
-    else:
-        finish_reason = response.json()["choices"][0]["finish_reason"]
-    assertion.assert_finish_reason_valid(finish_reason)
-
-
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 @pytest.mark.parametrize(
     "top_k",
@@ -36,7 +25,7 @@ def test_top_k_normal_values(api_client, stream, top_k):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -54,7 +43,7 @@ def test_top_k_with_temperature(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -72,7 +61,7 @@ def test_top_k_with_top_p(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -89,4 +78,4 @@ def test_top_k_disable_with_minus_one(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)

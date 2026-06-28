@@ -6,17 +6,6 @@ from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
 )
 
 
-def _assert_success_response(response, stream):
-    assertion.assert_status_code_200(response)
-
-    if stream:
-        assertion.assert_stream_has_done(response.text)
-        finish_reason = assertion.assert_stream_single_finish_reason(response.text)
-    else:
-        finish_reason = response.json()["choices"][0]["finish_reason"]
-    assertion.assert_finish_reason_valid(finish_reason)
-
-
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_top_p_boundary_zero(api_client, stream):
     """top_p=0.0 is outside the supported range and should return error code 400."""
@@ -48,7 +37,7 @@ def test_top_p_boundary_one(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -99,7 +88,7 @@ def test_top_p_boundary_precision_decimal(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -115,7 +104,7 @@ def test_top_p_without_explicit_setting(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -132,4 +121,4 @@ def test_top_p_boundary_very_small_positive(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)

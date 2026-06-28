@@ -6,25 +6,6 @@ from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
 )
 
 
-def _assert_success_response(response, stream):
-    assertion.assert_status_code_200(response)
-
-    if stream:
-        assertion.assert_stream_has_done(response.text)
-        finish_reason = assertion.assert_stream_single_finish_reason(response.text)
-    else:
-        finish_reason = response.json()["choices"][0]["finish_reason"]
-    assertion.assert_finish_reason_valid(finish_reason)
-
-
-def _assert_error_code_400_response(response, request, stream):
-    if stream and request.config.getoption("--engineArchitecture") == "pd":
-        assertion.assert_status_code_200(response)
-    else:
-        assertion.assert_status_code_400(response)
-    assertion.assert_error_code_400(response)
-
-
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
 def test_top_k_boundary_one(api_client, stream):
     """top_k=1 is the lower positive boundary and should respond normally."""
@@ -39,7 +20,7 @@ def test_top_k_boundary_one(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -56,7 +37,7 @@ def test_top_k_very_large(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -73,7 +54,7 @@ def test_top_k_minus_one_boundary(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -89,7 +70,7 @@ def test_top_k_without_setting(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -106,7 +87,7 @@ def test_top_k_zero_boundary(api_client, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: request succeeds and finish_reason is valid
-    _assert_success_response(response, stream)
+    assertion.assert_chat_completion_success(response, stream)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -123,4 +104,4 @@ def test_top_k_minus_two_boundary(api_client, request, stream):
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: status behavior differs by architecture, but error code is 400
-    _assert_error_code_400_response(response, request, stream)
+    assertion.assert_architecture_error_code_400_response(response, request, stream)
