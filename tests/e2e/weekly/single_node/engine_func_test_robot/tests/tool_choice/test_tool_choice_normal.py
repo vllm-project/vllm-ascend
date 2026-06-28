@@ -11,35 +11,25 @@ TOOLS_DEFINITION = [
         "type": "function",
         "function": {
             "name": "get_weather",
-            "description": 'Get weather information.',
+            "description": "Get weather information.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": 'City name.'
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": 'Date in YYYY-MM-DD.'
-                    }
+                    "city": {"type": "string", "description": "City name."},
+                    "date": {"type": "string", "description": "Date in YYYY-MM-DD."},
                 },
-                "required": ["city"]
-            }
-        }
+                "required": ["city"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_time",
-            "description": 'Get current time.',
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    }
+            "description": "Get current time.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 
@@ -48,14 +38,11 @@ def test_tool_choice_none(api_client, request, stream):
     """Test tool choice none."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'What is the weather?'
-        }],
+        "messages": [{"role": "user", "content": "What is the weather?"}],
         "tools": TOOLS_DEFINITION,
         "tool_choice": "none",
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -73,14 +60,11 @@ def test_tool_choice_auto(api_client, request, stream):
     """Test tool choice auto."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'What is the weather?'
-        }],
+        "messages": [{"role": "user", "content": "What is the weather?"}],
         "tools": TOOLS_DEFINITION,
         "tool_choice": "auto",
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -98,14 +82,11 @@ def test_tool_choice_required(api_client, request, stream):
     """Test tool choice required."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'What time is it?'
-        }],
+        "messages": [{"role": "user", "content": "What time is it?"}],
         "tools": TOOLS_DEFINITION,
         "tool_choice": "required",
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -123,14 +104,11 @@ def test_tool_choice_specific_function_string(api_client, request, stream):
     """Test tool choice specific function string."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'What is the weather?'
-        }],
+        "messages": [{"role": "user", "content": "What is the weather?"}],
         "tools": TOOLS_DEFINITION,
         "tool_choice": "get_weather",
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -144,19 +122,11 @@ def test_tool_choice_function_object(api_client, request, stream):
     """Test tool choice function object."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'What is the weather?'
-        }],
+        "messages": [{"role": "user", "content": "What is the weather?"}],
         "tools": TOOLS_DEFINITION,
-        "tool_choice": {
-            "type": "function",
-            "function": {
-                "name": "get_weather"
-            }
-        },
+        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -174,13 +144,10 @@ def test_tool_choice_without_tools(api_client, request, stream):
     """Test tool choice without tools."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Hello.'
-        }],
+        "messages": [{"role": "user", "content": "Hello."}],
         "tool_choice": "auto",
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -194,14 +161,11 @@ def test_tool_choice_with_tools_non_function_call_query(api_client, request, str
     """Test tool choice with tools non function call query."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Introduce yourself.'
-        }],
+        "messages": [{"role": "user", "content": "Introduce yourself."}],
         "tools": TOOLS_DEFINITION,
         "tool_choice": "auto",
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -223,27 +187,18 @@ def test_tool_choice_tool_with_null_description(api_client, request, stream):
             "function": {
                 "name": "simple_tool",
                 "description": None,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "input": {"type": "string"}
-                    },
-                    "required": ["input"]
-                }
-            }
+                "parameters": {"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"]},
+            },
         }
     ]
 
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Call the tool.'
-        }],
+        "messages": [{"role": "user", "content": "Call the tool."}],
         "tools": tools_with_null_desc,
         "tool_choice": "auto",
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -260,30 +215,27 @@ def test_tool_choice_parallel_tools(api_client, request, stream):
             "type": "function",
             "function": {
                 "name": "tool_a",
-                "description": 'Tool A.',
-                "parameters": {"type": "object", "properties": {}}
-            }
+                "description": "Tool A.",
+                "parameters": {"type": "object", "properties": {}},
+            },
         },
         {
             "type": "function",
             "function": {
                 "name": "tool_b",
-                "description": 'Tool B.',
-                "parameters": {"type": "object", "properties": {}}
-            }
-        }
+                "description": "Tool B.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
     ]
 
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Call both tools.'
-        }],
+        "messages": [{"role": "user", "content": "Call both tools."}],
         "tools": multiple_tools,
         "tool_choice": "required",
         "stream": stream,
-        "max_tokens": 5120
+        "max_tokens": 5120,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)

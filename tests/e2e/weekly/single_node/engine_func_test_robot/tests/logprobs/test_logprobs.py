@@ -14,14 +14,11 @@ def test_logprobs_normal_boundary(api_client, request, stream, top_logprobs):
     """Test logprobs normal boundary."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Say hello.'
-        }],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "logprobs": True,
         "top_logprobs": top_logprobs,
         "stream": stream,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -41,14 +38,11 @@ def test_logprobs_exceed_20_non_stream(api_client, request):
     """Test logprobs exceed 20 non stream."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Say hello.'
-        }],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "logprobs": True,
         "top_logprobs": 21,
         "stream": False,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -62,14 +56,11 @@ def test_logprobs_exceed_20_stream(api_client, request):
     """Test logprobs exceed 20 stream."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Say hello.'
-        }],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "logprobs": True,
         "top_logprobs": 21,
         "stream": True,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -84,14 +75,11 @@ def test_logprobs_with_logit_bias(api_client, request, stream):
     """Test logprobs with logit bias."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Say hello.'
-        }],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "logprobs": True,
         "logit_bias": {"6002": -100},
         "stream": stream,
-        "max_tokens": 5120
+        "max_tokens": 5120,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)

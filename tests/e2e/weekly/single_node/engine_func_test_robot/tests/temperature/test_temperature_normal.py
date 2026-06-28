@@ -16,13 +16,10 @@ def test_temperature_normal_values(api_client, request, stream, temperature):
     """Test temperature normal values."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Describe the weather.'
-        }],
+        "messages": [{"role": "user", "content": "Describe the weather."}],
         "temperature": temperature,
         "stream": stream,
-        "max_tokens": 50
+        "max_tokens": 50,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -47,13 +44,10 @@ def test_temperature_zero_deterministic(api_client, request, stream):
     """Test temperature zero deterministic."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Describe the weather.'
-        }],
+        "messages": [{"role": "user", "content": "Describe the weather."}],
         "temperature": 0.0,
         "stream": stream,
-        "max_tokens": 10
+        "max_tokens": 10,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -78,13 +72,10 @@ def test_temperature_high_creative(api_client, request, stream):
     """Test temperature high creative."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Describe the weather.'
-        }],
+        "messages": [{"role": "user", "content": "Describe the weather."}],
         "temperature": 2.0,
         "stream": stream,
-        "max_tokens": 100
+        "max_tokens": 100,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -109,14 +100,11 @@ def test_temperature_with_top_p(api_client, request, stream):
     """Test temperature with top p."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Describe the weather.'
-        }],
+        "messages": [{"role": "user", "content": "Describe the weather."}],
         "temperature": 0.7,
         "top_p": 0.9,
         "stream": stream,
-        "max_tokens": 50
+        "max_tokens": 50,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -141,13 +129,10 @@ def test_temperature_without_setting(api_client, request, stream):
     """Test temperature without setting."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Describe the weather.'
-        }],
+        "messages": [{"role": "user", "content": "Describe the weather."}],
         # Check: response behavior is valid
         "stream": stream,
-        "max_tokens": 50
+        "max_tokens": 50,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -172,13 +157,10 @@ def test_temperature_balanced_default(api_client, request, stream):
     """Test temperature balanced default."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Describe the weather.'
-        }],
+        "messages": [{"role": "user", "content": "Describe the weather."}],
         "temperature": 1.0,
         "stream": stream,
-        "max_tokens": 50
+        "max_tokens": 50,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)

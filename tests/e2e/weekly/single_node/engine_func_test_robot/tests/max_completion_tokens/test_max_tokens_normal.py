@@ -12,12 +12,9 @@ def test_max_tokens_normal_values(api_client, request, stream, max_tokens):
     """Test max tokens normal values."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Write a short line.'
-        }],
+        "messages": [{"role": "user", "content": "Write a short line."}],
         "max_completion_tokens": max_tokens,
-        "stream": stream
+        "stream": stream,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -42,12 +39,9 @@ def test_max_tokens_boundary_1(api_client, request, stream):
     """Test max tokens boundary 1."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Write a short line.'
-        }],
+        "messages": [{"role": "user", "content": "Write a short line."}],
         "max_completion_tokens": 1,
-        "stream": stream
+        "stream": stream,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -73,12 +67,9 @@ def test_max_tokens_large_value(api_client, request, stream):
     """Test max tokens large value."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Write a short line.'
-        }],
+        "messages": [{"role": "user", "content": "Write a short line."}],
         "max_completion_tokens": 2048,
-        "stream": stream
+        "stream": stream,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -103,12 +94,9 @@ def test_max_tokens_without_setting(api_client, request, stream):
     """Test max tokens without setting."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Write a short line.'
-        }],
+        "messages": [{"role": "user", "content": "Write a short line."}],
         # Check: response behavior is valid
-        "stream": stream
+        "stream": stream,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -133,13 +121,10 @@ def test_max_tokens_with_temperature(api_client, request, stream):
     """Test max tokens with temperature."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Write a short line.'
-        }],
+        "messages": [{"role": "user", "content": "Write a short line."}],
         "max_completion_tokens": 100,
         "temperature": 0.8,
-        "stream": stream
+        "stream": stream,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -164,13 +149,10 @@ def test_max_tokens_with_stop(api_client, request, stream):
     """Test max tokens with stop."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Write a short line.'
-        }],
+        "messages": [{"role": "user", "content": "Write a short line."}],
         "max_completion_tokens": 200,
-        "stop": ['response'],
-        "stream": stream
+        "stop": ["response"],
+        "stream": stream,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)

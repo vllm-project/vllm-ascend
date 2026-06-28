@@ -31,12 +31,9 @@ def test_n_default_value(api_client, request, stream):
     """Test n default value."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Say hello.'
-        }],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "stream": stream,
-        "max_tokens": 10
+        "max_tokens": 10,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -68,13 +65,10 @@ def test_n_explicit_one(api_client, request, stream):
     """Test n explicit one."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Say hello.'
-        }],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "n": 1,
         "stream": stream,
-        "max_tokens": 10
+        "max_tokens": 10,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -106,14 +100,11 @@ def test_n_two_with_temperature(api_client, request, stream):
     """Test n two with temperature."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Say hello.'
-        }],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "n": 2,
         "temperature": 0.8,
         "stream": stream,
-        "max_tokens": 10
+        "max_tokens": 10,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -147,14 +138,11 @@ def test_n_multiple_values(api_client, request, stream, n_value):
     """Test n multiple values."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Say hello.'
-        }],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "n": n_value,
         "temperature": 0.9,
         "stream": stream,
-        "max_tokens": 10
+        "max_tokens": 10,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -187,13 +175,10 @@ def test_n_null_uses_default(api_client, request, stream):
     """Test n null uses default."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Say hello.'
-        }],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "n": None,
         "stream": stream,
-        "max_tokens": 10
+        "max_tokens": 10,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -225,14 +210,11 @@ def test_n_one_with_greedy_sampling(api_client, request, stream):
     """Test n one with greedy sampling."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": 'Say hello.'
-        }],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "n": 1,
         "temperature": 0,
         "stream": stream,
-        "max_tokens": 10
+        "max_tokens": 10,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
