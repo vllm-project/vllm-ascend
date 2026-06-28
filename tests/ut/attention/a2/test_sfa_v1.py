@@ -267,6 +267,32 @@ class TestAscendSFAPrologV3(TestBase):
         self.assertFalse(mock_prolog.call_args.kwargs["query_norm_flag"])
         self.assertIsNone(result[3])
 
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
+    def test_prolog_v3_gathers_flashcomm_hidden_states(self, mock_all_gather):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.enable_sp = True
+        impl.enable_dsa_cp = False
+        hidden_states = torch.randn(2, 8)
+        gathered_hidden_states = torch.randn(32, 8)
+        mock_all_gather.return_value = gathered_hidden_states
+
+        result = impl._gather_prolog_v3_hidden_states(hidden_states, need_gather_q_kv=True)
+
+        self.assertIs(result, gathered_hidden_states)
+        mock_all_gather.assert_called_once_with(hidden_states.contiguous(), True)
+
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
+    def test_prolog_v3_keeps_dsa_cp_hidden_states_local(self, mock_all_gather):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.enable_sp = True
+        impl.enable_dsa_cp = True
+        hidden_states = torch.randn(2, 8)
+
+        result = impl._gather_prolog_v3_hidden_states(hidden_states, need_gather_q_kv=True)
+
+        self.assertIs(result, hidden_states)
+        mock_all_gather.assert_not_called()
+
 
 class TestAscendSFAMetadata(TestBase):
     def test_ascend_sfa_metadata_default(self):
