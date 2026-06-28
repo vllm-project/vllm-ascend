@@ -34,6 +34,7 @@ from vllm_ascend.attention.utils import (
     transdata,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.core.kv_cache_interface import SFA_QSFA_TILE_SIZE, get_sfa_qsfa_packed_head_dim
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
 from vllm_ascend.distributed.utils import all_gather_async
@@ -514,14 +515,45 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self.vllm_config = get_current_vllm_config()
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        self.is_kv_producer = kv_transfer_config is not None and kv_transfer_config.is_kv_producer
+        self.is_kv_producer_only = (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_producer
+            and not kv_transfer_config.is_kv_consumer
+        )
 
         # The MLAPO operator fuses the pre-processing steps on Q/K/V in MLA into a single operator
         # NOTE: it imposes a limit on the number of input tokens and conflicts with FlashComm
         self.enable_mlapo = ascend_config.enable_mlapo
         self.enable_sfa_prolog_v3 = ascend_config.enable_sfa_prolog_v3
+        enable_sfa_qsfa = getattr(ascend_config, "enable_sfa_kv_quant_sparse_attention", False)
+        enable_sfa_qsfa = enable_sfa_qsfa if isinstance(enable_sfa_qsfa, bool) else False
+        self.enable_sfa_kv_quant_sparse_attention = (
+            enable_sfa_qsfa
+            and (self.enable_sfa_prolog_v3 or self.is_kv_producer_only)
+            and get_ascend_device_type() != AscendDeviceType.A5
+        )
+        if self.enable_sfa_kv_quant_sparse_attention:
+            self.enable_mlapo = False
+        if enable_sfa_qsfa and not self.enable_sfa_prolog_v3 and not self.is_kv_producer_only:
+            logger.warning_once("SFA KV-quant sparse attention requires SFA mla_prolog_v3 and is disabled.")
+        if enable_sfa_qsfa and get_ascend_device_type() == AscendDeviceType.A5:
+            logger.warning_once("SFA KV-quant sparse attention currently targets int8 KV cache and is disabled on A5.")
+        self.sfa_qsfa_tile_size = SFA_QSFA_TILE_SIZE
+        self.sfa_qsfa_packed_kv_head_dim = (
+            get_sfa_qsfa_packed_head_dim(
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                self.sfa_qsfa_tile_size,
+            )
+            if self.enable_sfa_kv_quant_sparse_attention
+            else 0
+        )
+        self.sfa_qsfa_k_nope_clip_alpha: torch.Tensor | None = None
 
         self.local_num_heads = self.num_heads
-        self.vllm_config = get_current_vllm_config()
         self.layer_name = kwargs.get("layer_name")
         hf_config = self.vllm_config.model_config.hf_config
         hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
@@ -531,9 +563,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             "use_index_cache",
         ) or _has_shared_indexer_layers(config_candidates)
         self.use_index_cache = self.skip_topk or self.index_cache_enabled
-        self.is_kv_producer = (
-            self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
-        )
         self.has_indexer = self.indexer is not None
         if not self.has_indexer and not self.skip_topk:
             raise ValueError(
@@ -667,29 +696,24 @@ class AscendSFAImpl(MLAAttentionImpl):
             elif self.enable_dsa_cp_with_o_proj_tp:
                 self._init_o_proj_tp_full_params()
 
-        if self.enable_sfa_prolog_v3:
+        if self.enable_sfa_prolog_v3 or self.enable_sfa_kv_quant_sparse_attention:
             self.enable_mlapo = False
-            reasons = []
-            if self.fused_qkv_a_proj is None or not self._is_w8a8_dynamic_linear(self.fused_qkv_a_proj):
-                reasons.append(
-                    "Currently SFA mla_prolog_v3 only supports W8A8 dynamic quantization for fused_qkv_a_proj."
-                )
-            if self.q_proj is None or not self._is_w8a8_dynamic_linear(self.q_proj):
-                reasons.append("Currently SFA mla_prolog_v3 only supports W8A8 dynamic quantization for q_proj.")
-            if self.kv_a_layernorm is None or self.q_a_layernorm is None:
-                reasons.append("SFA mla_prolog_v3 requires q_a_layernorm and kv_a_layernorm.")
-            if getattr(self.q_proj, "_chunk_size", 0):
-                reasons.append("SFA mla_prolog_v3 does not support chunked q_proj weights yet.")
+            # P-only workers do not execute Prolog, but their cache schema must
+            # use the same per-layer capability gate as the D worker.
+            reasons = self._get_sfa_prolog_v3_unsupported_reasons()
             if reasons:
                 self.enable_sfa_prolog_v3 = False
+                self.enable_sfa_kv_quant_sparse_attention = False
+                self.sfa_qsfa_packed_kv_head_dim = 0
                 for msg in reasons:
                     logger.warning_once(
-                        f"{msg} Disable SFA mla_prolog_v3 for layer {self.layer_name}; "
-                        "fallback to original sparse attention."
+                        f"{msg} Disable SFA mla_prolog_v3 and packed KV cache for layer "
+                        f"{self.layer_name}; fallback to original sparse attention."
                     )
-            else:
+            elif self.enable_sfa_prolog_v3:
                 self._process_weights_for_fused_prolog_v3()
-        elif self.enable_mlapo:
+
+        if not self.enable_sfa_prolog_v3 and self.enable_mlapo:
             quant_method = getattr(
                 getattr(self.fused_qkv_a_proj, "quant_method", None),
                 "quant_method",
@@ -744,6 +768,20 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = getattr(getattr(layer, "quant_method", None), "quant_method", None)
         return isinstance(quant_method, AscendW8A8DynamicLinearMethod)
 
+    def _get_sfa_prolog_v3_unsupported_reasons(self) -> list[str]:
+        reasons = []
+        if self.fused_qkv_a_proj is None or not self._is_w8a8_dynamic_linear(self.fused_qkv_a_proj):
+            reasons.append(
+                "Currently SFA mla_prolog_v3 only supports W8A8 dynamic quantization for fused_qkv_a_proj."
+            )
+        if self.q_proj is None or not self._is_w8a8_dynamic_linear(self.q_proj):
+            reasons.append("Currently SFA mla_prolog_v3 only supports W8A8 dynamic quantization for q_proj.")
+        if self.kv_a_layernorm is None or self.q_a_layernorm is None:
+            reasons.append("SFA mla_prolog_v3 requires q_a_layernorm and kv_a_layernorm.")
+        if getattr(self.q_proj, "_chunk_size", 0):
+            reasons.append("SFA mla_prolog_v3 does not support chunked q_proj weights yet.")
+        return reasons
+
     def _process_weights_for_fused_prolog_v3(self) -> None:
         assert self.fused_qkv_a_proj is not None
         assert self.q_proj is not None
@@ -762,6 +800,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.dequant_scale_w_dq = q_a_proj_deq_scl.view(1, -1).to(torch.float)
         self.dequant_scale_w_dkv_kr = kv_a_proj_deq_scl.view(1, -1).to(torch.float)
         self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.view(1, -1).to(torch.float)
+        if self.enable_sfa_kv_quant_sparse_attention:
+            self.sfa_qsfa_k_nope_clip_alpha = torch.ones(
+                1,
+                dtype=torch.float32,
+                device=self.weight_dq.device,
+            )
 
     # Processing the input parameters for MLAPO by reordering and transposing
     # QKV(and part of Q) weight, applying RoPE-related dimension transformations,
@@ -1055,6 +1099,39 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _get_full_kv(self, k, attn_metadata):
         return k
 
+    def _pack_sfa_qsfa_kv(self, k_nope: torch.Tensor, k_pe: torch.Tensor) -> torch.Tensor:
+        prefix_shape = k_nope.shape[:-1]
+        quantized_k_nope, dequant_scale = torch_npu.npu_dynamic_quant(
+            k_nope.contiguous().view(-1, self.sfa_qsfa_tile_size),
+            dst_type=torch.int8,
+        )
+        quantized_k_nope = quantized_k_nope.view(*prefix_shape, self.kv_lora_rank)
+        dequant_scale = dequant_scale.to(torch.float32).view(*prefix_shape, -1)
+        packed_kv = torch.cat(
+            [
+                quantized_k_nope,
+                k_pe.contiguous().view(torch.int8),
+                dequant_scale.contiguous().view(torch.int8),
+            ],
+            dim=-1,
+        )
+        assert packed_kv.shape[-1] == self.sfa_qsfa_packed_kv_head_dim
+        return packed_kv
+
+    def _write_sfa_qsfa_cache(
+        self,
+        packed_kv: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        slots: torch.Tensor,
+    ) -> None:
+        packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
+        assert packed_kv.shape[-1] == packed_head_dim
+        torch_npu.npu_scatter_nd_update_(
+            kv_cache[0].view(-1, packed_head_dim),
+            slots.view(-1, 1),
+            packed_kv.view(-1, packed_head_dim),
+        )
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -1070,6 +1147,25 @@ class AscendSFAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA"
+
+        if self.enable_sfa_kv_quant_sparse_attention:
+            assert self.kv_a_layernorm is not None
+            k_nope_input, k_pe_input = kv_no_split.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim],
+                dim=-1,
+            )
+            k_nope, _ = torch_npu.npu_rms_norm(
+                k_nope_input,
+                self.kv_a_layernorm.weight,
+                epsilon=self.kv_a_layernorm.variance_epsilon,
+            )
+            k_pe = self.rope_single(k_pe_input.view(B, N, -1), cos, sin).view(B, N, S, -1)
+            packed_kv = self._pack_sfa_qsfa_kv(k_nope, k_pe).view(B, N, -1)
+            if self.enable_dsa_cp:
+                empty_k_pe = packed_kv.new_empty((B, N, 0))
+                return empty_k_pe, packed_kv, None
+            self._write_sfa_qsfa_cache(packed_kv, kv_cache, slots)
+            return None, None
 
         if self.enable_dsa_cp:
             if self.use_a5_sparse_c8_indexer:
@@ -1222,6 +1318,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             "qc_qr_scale": 1.0,
             "kc_scale": 1.0,
         }
+        if self.enable_sfa_kv_quant_sparse_attention:
+            prolog_kwargs.update(
+                {
+                    "kv_cache_quant_mode": 3,
+                    "ckvkr_repo_mode": 1,
+                    "quant_scale_repo_mode": 1,
+                    "tile_size": self.sfa_qsfa_tile_size,
+                    "k_nope_clip_alpha": self.sfa_qsfa_k_nope_clip_alpha,
+                }
+            )
         cache_index = slot_mapping.view(-1).to(torch.int64) if cache_mode == "PA_BSND" else None
         ql_nope, q_pe, _, q_c, q_c_scale = DeviceOperator.execute_sfa_mla_prolog_v3(
             self,
@@ -1477,6 +1583,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             AscendAttentionState.SpecDecoding,
         }
 
+        # Decode/Spec metadata can also be synthesized while capturing graphs on
+        # a CP-configured P instance. Its weights and token layout remain CP-sharded.
         use_sfa_prolog_v3 = (
             self.enable_sfa_prolog_v3
             and not self.enable_dsa_cp
@@ -1570,7 +1678,27 @@ class AscendSFAImpl(MLAAttentionImpl):
                 assert k_nope is not None
                 async_op = self.enable_dsa_cp_with_layer_shard or full_gather_o_proj_enabled
                 # support all_gather kv async for communication calculation overlap
-                if not self.has_indexer:
+                if self.enable_sfa_kv_quant_sparse_attention:
+                    fused_kv_no_split, kv_ag_handle = all_gather_async(
+                        k_nope.view(-1, k_nope.shape[-1]),
+                        get_tp_group(),
+                        async_op=async_op,
+                    )
+                    if self.has_indexer:
+                        assert k_li is not None
+                        k_li, kv_ag_handle = all_gather_async(
+                            k_li,
+                            get_tp_group(),
+                            async_op=async_op,
+                        )
+                        if self.use_sparse_c8_indexer:
+                            assert k_li_scale is not None
+                            k_li_scale, kv_ag_handle = all_gather_async(
+                                k_li_scale,
+                                get_tp_group(),
+                                async_op=async_op,
+                            )
+                elif not self.has_indexer:
                     fused_kv_no_split, kv_ag_handle = all_gather_async(
                         torch.cat(
                             [
@@ -1676,7 +1804,15 @@ class AscendSFAImpl(MLAAttentionImpl):
 
                 if kv_cache is not None:
                     assert fused_kv_no_split is not None
-                    if not self.has_indexer:
+                    if self.enable_sfa_kv_quant_sparse_attention:
+                        self._write_sfa_qsfa_cache(
+                            fused_kv_no_split[: attn_metadata.num_actual_tokens],
+                            kv_cache,
+                            slot_mapping[: attn_metadata.num_actual_tokens],
+                        )
+                        k_pe = None
+                        k_nope = None
+                    elif not self.has_indexer:
                         k_pe, k_nope = fused_kv_no_split.split(
                             [self.qk_rope_head_dim, self.kv_lora_rank],
                             dim=-1,
@@ -1699,7 +1835,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             [self.qk_rope_head_dim, self.kv_lora_rank],
                             dim=-1,
                         )
-                    if not self.use_a5_sparse_c8_indexer:
+                    if not self.use_a5_sparse_c8_indexer and not self.enable_sfa_kv_quant_sparse_attention:
                         assert k_pe is not None
                         assert k_nope is not None
                         k_nope = k_nope.view(k_nope.shape[0], 1, -1)
@@ -1765,8 +1901,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
 
-            if self.is_kv_producer:
-                attn_metadata.reshape_cache_event.record()
+        if kv_cache is not None and self.is_kv_producer:
+            attn_metadata.reshape_cache_event.record()
 
         if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
             topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start

@@ -107,6 +107,7 @@ class TestAscendConfig(TestBase):
                 "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "VLLM_ASCEND_ENABLE_SFA_PROLOG_V3": "1",
+                "VLLM_ASCEND_ENABLE_SFA_KV_QUANT_SPARSE_ATTENTION": "1",
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
                 "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "2",
                 "MSMONITOR_USE_DAEMON": "1",
@@ -120,6 +121,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.enable_fused_mc2, 2)
         self.assertFalse(ascend_config.enable_mlapo)
         self.assertTrue(ascend_config.enable_sfa_prolog_v3)
+        self.assertTrue(ascend_config.enable_sfa_kv_quant_sparse_attention)
         self.assertTrue(ascend_config.enable_flashcomm1)
         self.assertEqual(ascend_config.enable_flashcomm2_parallel_size, 2)
         self.assertTrue(ascend_config.msmonitor_use_daemon)
@@ -134,6 +136,12 @@ class TestAscendConfig(TestBase):
             "AscendConfig.enable_sfa_prolog_v3 falls back to environment variable "
             "VLLM_ASCEND_ENABLE_SFA_PROLOG_V3 with value True. Please use additional_config.enable_sfa_prolog_v3 "
             "instead, because VLLM_ASCEND_ENABLE_SFA_PROLOG_V3 will be removed in the next release."
+        )
+        mock_info_once.assert_any_call(
+            "AscendConfig.enable_sfa_kv_quant_sparse_attention falls back to environment variable "
+            "VLLM_ASCEND_ENABLE_SFA_KV_QUANT_SPARSE_ATTENTION with value True. Please use "
+            "additional_config.enable_sfa_kv_quant_sparse_attention instead, because "
+            "VLLM_ASCEND_ENABLE_SFA_KV_QUANT_SPARSE_ATTENTION will be removed in the next release."
         )
         mock_info_once.assert_any_call(
             "AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 2. "
@@ -166,6 +174,7 @@ class TestAscendConfig(TestBase):
             "enable_fused_mc2": 0,
             "enable_mlapo": True,
             "enable_sfa_prolog_v3": True,
+            "enable_sfa_kv_quant_sparse_attention": True,
             "enable_flashcomm1": False,
             "enable_flashcomm2_parallel_size": 0,
             "msmonitor_use_daemon": False,
@@ -179,6 +188,7 @@ class TestAscendConfig(TestBase):
                 "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "VLLM_ASCEND_ENABLE_SFA_PROLOG_V3": "0",
+                "VLLM_ASCEND_ENABLE_SFA_KV_QUANT_SPARSE_ATTENTION": "0",
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
                 "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "2",
                 "MSMONITOR_USE_DAEMON": "1",
@@ -192,6 +202,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.enable_fused_mc2, 0)
         self.assertTrue(ascend_config.enable_mlapo)
         self.assertTrue(ascend_config.enable_sfa_prolog_v3)
+        self.assertTrue(ascend_config.enable_sfa_kv_quant_sparse_attention)
         self.assertFalse(ascend_config.enable_flashcomm1)
         self.assertEqual(ascend_config.enable_flashcomm2_parallel_size, 0)
         self.assertFalse(ascend_config.msmonitor_use_daemon)
@@ -200,6 +211,9 @@ class TestAscendConfig(TestBase):
         mock_info_once.assert_any_call("AscendConfig.enable_mlapo is set from additional_config with value True.")
         mock_info_once.assert_any_call(
             "AscendConfig.enable_sfa_prolog_v3 is set from additional_config with value True."
+        )
+        mock_info_once.assert_any_call(
+            "AscendConfig.enable_sfa_kv_quant_sparse_attention is set from additional_config with value True."
         )
         mock_info_once.assert_any_call("AscendConfig.weight_nz_mode is set from additional_config with value 1.")
 

@@ -186,6 +186,12 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_SFA_PROLOG_V3",
             ascend_envs.VLLM_ASCEND_ENABLE_SFA_PROLOG_V3,
         )
+        self.enable_sfa_kv_quant_sparse_attention = self._get_config_value(
+            additional_config,
+            "enable_sfa_kv_quant_sparse_attention",
+            "VLLM_ASCEND_ENABLE_SFA_KV_QUANT_SPARSE_ATTENTION",
+            ascend_envs.VLLM_ASCEND_ENABLE_SFA_KV_QUANT_SPARSE_ATTENTION,
+        )
         self.enable_flashcomm2_parallel_size = self._get_config_value(
             additional_config,
             "enable_flashcomm2_parallel_size",

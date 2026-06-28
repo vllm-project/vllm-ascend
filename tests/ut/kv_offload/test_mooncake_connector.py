@@ -74,6 +74,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     group_concurrent_contiguous,
     split_if_not_byte_contiguous,
     string_to_int64_hash,
+    validate_mla_cache_layout,
     zmq_ctx,
 )
 
@@ -729,6 +730,28 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(call_args[3], [1024, 1024])
         mock_get_meta.assert_not_called()
 
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_kv_cache_skips_zero_sized_placeholder(self, mock_get_meta):
+        req = dict(self.test_req)
+        req["local_block_ids"] = [[1, 2]]
+        req["remote_block_ids"] = [[3, 4]]
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0, 0x2000]]
+            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0, 0x4000]]}
+            self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1, 1, 1]]}
+            self.thread.block_len_per_addr = [[1024, 0, 512]]
+            self.thread.block_stride_per_addr = [[1024, 0, 512]]
+            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[1024, 0, 512]]
+
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        call_args, _ = self.engine.batch_transfer_sync_read.call_args
+        self.assertEqual(call_args[1], [0x1000 + 1024, 0x2000 + 512])
+        self.assertEqual(call_args[2], [0x3000 + 3 * 1024, 0x4000 + 3 * 512])
+        self.assertEqual(call_args[3], [2 * 1024, 2 * 512])
+        mock_get_meta.assert_not_called()
+
     def test_append_mamba_transfer_meta_uses_block_stride_for_block_offsets(self):
         src_list: list[int] = []
         dst_list: list[int] = []
@@ -808,7 +831,12 @@ class TestMetadataHandling(unittest.TestCase):
             mock_send.assert_called_once_with(mock_socket, self.thread.encoder.encode((GET_META_MSG, "")), "host1:5555")
             mock_recv.assert_called_once_with(mock_socket, self.thread.remote_poller, "host1:5555")
             self.assertEqual(self.thread.kv_caches_base_addr["remote_engine"][5555], [[0x3000], [0x4000]])
+            self.assertEqual(self.thread.remote_block_len_per_addr["remote_engine"][5555], [[1024]])
             self.assertEqual(self.thread.remote_block_stride_per_addr["remote_engine"][5555], [[1024]])
+
+    def test_rejects_incompatible_mla_cache_layout(self):
+        with self.assertRaisesRegex(RuntimeError, "Incompatible MLA KV cache layouts"):
+            validate_mla_cache_layout(78, [131072, 16384, 32768], [83968, 0, 32768])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_send")
     @patch(

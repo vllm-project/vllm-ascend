@@ -11,6 +11,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -354,6 +355,17 @@ class AscendSFACPImpl(AscendSFAImpl):
     def _execute_sparse_flash_attention(
         self, ql_nope, q_pe, kv, key_rope, block_table, topk_indices, actual_seq_lengths_query, actual_seq_lengths_key
     ):
+        if self.enable_sfa_kv_quant_sparse_attention:
+            return DeviceOperator.execute_kv_quant_sparse_flash_attention(
+                self,
+                ql_nope,
+                q_pe,
+                kv,
+                block_table,
+                topk_indices,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
         attn_output, _, _ = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=kv,
@@ -565,9 +577,17 @@ class AscendSFACPImpl(AscendSFAImpl):
         kv_c_k_pe = torch.index_select(kv_c_k_pe, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)
         kv_c_normed, k_pe = kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         slot_mapping = attn_metadata.slot_mapping
-        torch_npu._npu_reshape_and_cache(
-            key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_indices=slot_mapping
-        )
+        if self.enable_sfa_kv_quant_sparse_attention:
+            packed_kv = self._pack_sfa_qsfa_kv(kv_c_normed, k_pe)
+            self._write_sfa_qsfa_cache(packed_kv, kv_cache, slot_mapping)
+        else:
+            torch_npu._npu_reshape_and_cache(
+                key=kv_c_normed,
+                value=k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_indices=slot_mapping,
+            )
         return None, None
 
     def _get_full_kv(self, k, attn_metadata: M):

@@ -483,6 +483,18 @@ class BaseDeviceAdaptor:
         kv = kv_cache[0]
         key_rope = kv_cache[1]
 
+        if getattr(sfa_impl, "enable_sfa_kv_quant_sparse_attention", False):
+            return BaseDeviceAdaptor.execute_kv_quant_sparse_flash_attention(
+                sfa_impl,
+                ql_nope,
+                q_pe,
+                kv,
+                block_table,
+                topk_indices,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
+
         attn_output, _, _ = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=kv,
@@ -501,6 +513,39 @@ class BaseDeviceAdaptor:
             attention_mode=2,
         )
         return attn_output
+
+    @staticmethod
+    def execute_kv_quant_sparse_flash_attention(
+        sfa_impl,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv: torch.Tensor,
+        block_table: torch.Tensor,
+        topk_indices: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+    ) -> torch.Tensor:
+        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        return torch_npu.npu_kv_quant_sparse_flash_attention(
+            query=query,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=sfa_impl.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+            attention_mode=2,
+            quant_scale_repo_mode=1,
+            tile_size=sfa_impl.sfa_qsfa_tile_size,
+            key_quant_mode=2,
+            value_quant_mode=2,
+            rope_head_dim=sfa_impl.qk_rope_head_dim,
+        )
 
     @staticmethod
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
@@ -1565,52 +1610,29 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ) -> torch.Tensor:
-        block_table = attn_metadata.block_table
         kv = kv_cache[0]
-        key_rope = kv_cache[1]
 
         if kv.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-            query = torch.cat([ql_nope, q_pe], dim=-1)
-
-            attn_output = torch_npu.npu_kv_quant_sparse_flash_attention(
-                query=query,
-                key=kv,
-                value=kv,
-                sparse_indices=topk_indices,
-                scale_value=sfa_impl.scale,
-                sparse_block_size=1,
-                block_table=block_table,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_kv=actual_seq_lengths_key,
-                layout_query="TND",
-                layout_kv="PA_BSND",
-                sparse_mode=3,
-                attention_mode=2,
-                quant_scale_repo_mode=1,
-                tile_size=128,
-                key_quant_mode=2,
-                value_quant_mode=2,
-                rope_head_dim=64,
+            return BaseDeviceAdaptor.execute_kv_quant_sparse_flash_attention(
+                sfa_impl,
+                ql_nope,
+                q_pe,
+                kv,
+                attn_metadata.block_table,
+                topk_indices,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
             )
-        else:
-            attn_output, _, _ = torch_npu.npu_sparse_flash_attention(
-                query=ql_nope,
-                key=kv,
-                value=kv,
-                sparse_indices=topk_indices,
-                scale_value=sfa_impl.scale,
-                sparse_block_size=1,
-                block_table=block_table,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_kv=actual_seq_lengths_key,
-                query_rope=q_pe,
-                key_rope=key_rope,
-                layout_query="TND",
-                layout_kv="PA_BSND",
-                sparse_mode=3,
-                attention_mode=2,
-            )
-        return attn_output
+        return BaseDeviceAdaptor.execute_sparse_flash_attention_process(
+            sfa_impl,
+            ql_nope,
+            q_pe,
+            kv_cache,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        )
 
     @staticmethod
     def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
