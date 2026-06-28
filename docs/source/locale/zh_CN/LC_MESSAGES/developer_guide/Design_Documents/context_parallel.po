@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"POT-Creation-Date: 2026-06-28 04:51+0000\n"
 "PO-Revision-Date: 2026-04-09 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -25,9 +25,9 @@ msgstr "上下文并行（CP）"
 
 #: ../../source/developer_guide/Design_Documents/context_parallel.md:3
 msgid ""
-"TL;DR PCP accelerates prefill via sequence splitting. DCP eliminates KV "
+"TL;DR: PCP accelerates prefill via sequence splitting. DCP eliminates KV "
 "cache redundancy."
-msgstr "TL;DR PCP 通过序列切分加速预填充。DCP 消除 KV 缓存冗余。"
+msgstr "TL;DR：PCP 通过序列切分加速预填充。DCP 消除 KV 缓存冗余。"
 
 #: ../../source/developer_guide/Design_Documents/context_parallel.md:5
 msgid "![ContextParallel](../../assets/cp/overview.png)"

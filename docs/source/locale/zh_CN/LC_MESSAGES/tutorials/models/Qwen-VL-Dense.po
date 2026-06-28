@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-06 02:14+0000\n"
+"POT-Creation-Date: 2026-06-28 04:51+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -204,24 +204,24 @@ msgstr ""
 "系列修改为合适的值。"
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:329
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:416
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:415
 msgid "If your service start successfully, you can see the info shown below:"
 msgstr "如果服务启动成功，您将看到如下所示的信息："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:337
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:424
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:423
 msgid "Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示词查询模型："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:354
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:441
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:440
 msgid ""
 "If you query the server successfully, you can see the info shown below "
 "(client):"
 msgstr "如果查询服务器成功，您将看到如下所示的信息（客户端）："
 
 #: ../../source/tutorials/models/Qwen-VL-Dense.md:360
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:447
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:446
 msgid "Logs of the vllm server:"
 msgstr "vLLM 服务器日志："
 
@@ -229,43 +229,43 @@ msgstr "vLLM 服务器日志："
 msgid "Run docker container to start the vLLM server on multi-NPU:"
 msgstr "运行 Docker 容器在多 NPU 上启动 vLLM 服务器："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:413
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
 msgid ""
 "Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-32B-"
 "Instruct model's max_model_len (128000) is larger than the maximum number"
 " of tokens that can be stored in KV cache. This will differ with "
-"different NPU series base on the on-chip memory size. Please modify the "
+"different NPU series based on the on-chip memory size. Please modify the "
 "value according to a suitable value for your NPU series."
 msgstr ""
 "添加 `--max_model_len` 选项以避免 Qwen3-VL-32B-Instruct 模型的 "
 "max_model_len（128000）大于 KV 缓存可存储的最大 token 数而导致的 ValueError。不同 NPU "
 "系列基于片上内存大小会有所不同。请根据您的 NPU 系列修改为合适的值。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:462
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:461
 msgid "Accuracy Evaluation"
 msgstr "精度评估"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:464
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:463
 msgid "Using Language Model Evaluation Harness"
 msgstr "使用 Language Model Evaluation Harness"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:466
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:465
 msgid ""
 "The accuracy of some models is already within our CI monitoring scope, "
 "including:"
 msgstr "以下模型的精度已在我们的 CI 监控范围内："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:468
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:467
 msgid "`Qwen3-VL-8B-Instruct`"
 msgstr "`Qwen3-VL-8B-Instruct`"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:470
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:469
 msgid ""
 "As an example, take the `mmmu_val` dataset as a test dataset, and run "
 "accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode."
 msgstr "以 `mmmu_val` 数据集为例，以离线模式运行 `Qwen3-VL-8B-Instruct` 的精度评估。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:472
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:471
 msgid ""
 "Refer to [Using "
 "lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more "
@@ -274,113 +274,113 @@ msgstr ""
 "有关 `lm_eval` 安装的更多详细信息，请参考[使用 lm_eval "
 "进行精度评估](../../developer_guide/evaluation/using_lm_eval.md)。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:478
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:477
 msgid "Run `lm_eval` to execute the accuracy evaluation."
 msgstr "运行 `lm_eval` 执行精度评估。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:491
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:490
 msgid ""
 "After execution, you can get the result, here is the result of `Qwen3-VL-"
 "8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only."
 msgstr "执行后即可获得结果，以下是 `Qwen3-VL-8B-Instruct` 在 `vllm-ascend:0.11.0rc3` 上的结果，仅供参考。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "Tasks"
 msgstr "任务"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "Version"
 msgstr "版本"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "Filter"
 msgstr "过滤器"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "n-shot"
 msgstr "n-shot"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "Metric"
 msgstr "指标"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "Value"
 msgstr "值"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "Stderr"
 msgstr "标准误差"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "mmmu_val"
 msgstr "mmmu_val"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "0"
 msgstr "0"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "none"
 msgstr "无"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "acc"
 msgstr "准确率"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "↑"
 msgstr "↑"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "0.5389"
 msgstr "0.5389"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "±"
 msgstr "±"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:412
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:411
 msgid "0.0159"
 msgstr "0.0159"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:497
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:496
 msgid "Performance"
 msgstr "性能"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:499
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:498
 msgid "Using vLLM Benchmark"
 msgstr "使用 vLLM 基准测试"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:501
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:500
 msgid ""
 "Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
 "for more details."
 msgstr "更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:503
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:502
 msgid "There are three `vllm bench` subcommands:"
 msgstr "`vllm bench` 包含三个子命令："
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:505
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:504
 msgid "`latency`: Benchmark the latency of a single batch of requests."
 msgstr "`latency`：基准测试单批次请求的延迟。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:506
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:505
 msgid "`serve`: Benchmark the online serving throughput."
 msgstr "`serve`：基准测试在线服务的吞吐量。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:507
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:506
 msgid "`throughput`: Benchmark offline inference throughput."
 msgstr "`throughput`：基准测试离线推理的吞吐量。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:509
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:508
 msgid ""
 "The performance evaluation must be conducted in an online mode. Take the "
 "`serve` as an example. Run the code as follows."
 msgstr "性能评估必须在在线模式下进行。以 `serve` 为例，运行如下代码。"
 
-#: ../../source/tutorials/models/Qwen-VL-Dense.md:515
+#: ../../source/tutorials/models/Qwen-VL-Dense.md:514
 msgid ""
 "After about several minutes, you can get the performance evaluation "
 "result."

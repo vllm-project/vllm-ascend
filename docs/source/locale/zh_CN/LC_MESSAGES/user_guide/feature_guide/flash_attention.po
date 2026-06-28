@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-22 04:30+0000\n"
+"POT-Creation-Date: 2026-06-28 04:51+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -24,7 +24,9 @@ msgid ""
 " the [flash-attention-npu repository](https://github.com/MinghuasLab"
 "/flash-attention-npu) for more details."
 msgstr ""
-"Ascend上的Flash Attention 3目前处于测试阶段。FA3所需的`flash_attn_npu`包已在GitHub上开源。请参考[flash-attention-npu仓库](https://github.com/MinghuasLab/flash-attention-npu)获取更多详情。"
+"Ascend上的Flash Attention 3目前处于测试阶段。FA3所需的`flash_attn_npu`包已在GitHub上开源。请参考"
+"[flash-attention-npu仓库](https://github.com/MinghuasLab/flash-attention-"
+"npu)获取更多详情。"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:8
 msgid ""
@@ -205,7 +207,9 @@ msgid ""
 "Install the `flash_attn_npu` wheel package refer to: "
 "<https://github.com/MinghuasLab/flash-attention-"
 "npu/blob/main/README.md#installation>."
-msgstr "安装`flash_attn_npu` wheel包，请参考：<https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>。"
+msgstr ""
+"安装`flash_attn_npu` wheel包，请参考：<https://github.com/MinghuasLab/flash-"
+"attention-npu/blob/main/README.md#installation>。"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:58
 msgid "Enabling Flash Attention 3"
@@ -328,9 +332,10 @@ msgid "**Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`"
 msgstr "**Qwen3 (MoE)**：`Qwen/Qwen3-30B-A3B`"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:153
+#, fuzzy
 msgid ""
 "Other models have not been tested yet and will be supported in the future"
-" if not supported after been tested."
+" if not supported after being tested."
 msgstr "其他模型尚未测试，未来将在测试后根据结果决定是否支持。"
 
 #: ../../source/user_guide/feature_guide/flash_attention.md:155
