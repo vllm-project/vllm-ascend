@@ -1,1 +1,1 @@
-# Role 角色参数测试模块
+# Check: response behavior is valid

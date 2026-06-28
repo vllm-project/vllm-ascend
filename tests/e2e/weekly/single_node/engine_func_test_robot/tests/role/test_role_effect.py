@@ -1,64 +1,61 @@
 import re
 import json
-import pytest_check as check
 from ...utility import request_helper as helper
 from ...utility import assertion
 
 
 def test_role_system_instruction_follow(api_client, request):
-    """system角色指令影响输出行为"""
+    """Test role system instruction follow."""
     request_body = {
         "model": "auto",
         "messages": [
             {
                 "role": "system",
-                "content": "请用JSON格式回答所有问题。"
+                "content": 'Hello.'
             },
             {
                 "role": "user",
-                "content": "请告诉我你的名字。"
+                "content": 'Hello.'
             }
         ],
         "stream": False,
         "max_tokens": 10240
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点1：状态码200
+    # Check: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：返回内容有效
+    # Check: response behavior is valid
     content = response.json()["choices"][0]["message"]["content"]
-    check.is_not_none(content, "返回内容为None")
-    check.is_true(len(content) > 0, "返回内容为空")
+    assert content is not None, 'response should be valid'
+    assert len(content) > 0, 'response should be valid'
 
-    # 校验点3：内容应该为有效的JSON格式
+    # Check: response behavior is valid
     json_str = re.sub(r"\s*<think>[\s\S]*?</think>\s*", "", content)
     json_str = re.search(r"(\{.*\})\s*(?:$|`|```)$", json_str, re.S)
-    check.is_true(json_str, "response content未匹配到JSON格式")
+    assert json_str, 'response should be valid'
     if json_str:
-        check.is_true(json.loads(json_str.group(1)), "system指令未被遵循，返回内容非有效的JSON格式")
+        assert json.loads(json_str.group(1)), 'response'
 
 
 def test_role_long_conversation_pruning(api_client, request):
-    """超长对话历史，模型应该能处理或截断"""
-    # 构建20轮对话历史
-    messages = [{"role": "system", "content": "你是一个耐心的助手。"}]
+    """Test role long conversation pruning."""
+    # Check: response behavior is valid
+    messages = [{"role": "system", "content": 'You are a helpful assistant.'}]
     for i in range(20):
         messages.append({
             "role": "user",
-            "content": f"这是第{i+1}个问题。"
+            "content": f"Conversation turn {i + 1}"
         })
         messages.append({
             "role": "assistant",
-            "content": f"这是第{i+1}个回答。"
+            "content": f"Conversation turn {i + 1}"
         })
     messages.append({
         "role": "user",
-        "content": "请问这是第几轮对话？"
+        "content": 'Hello.'
     })
 
     request_body = {
@@ -68,14 +65,12 @@ def test_role_long_conversation_pruning(api_client, request):
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点1：状态码200（即使被截断也应该返回）
+    # Check: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：返回内容有效
+    # Check: response behavior is valid
     content = response.json()["choices"][0]["message"]["content"]
-    check.is_not_none(content, "返回内容为None")
-    check.is_true(len(content) > 0, "返回内容为空")
+    assert content is not None, 'response should be valid'
+    assert len(content) > 0, 'response should be valid'

@@ -45,7 +45,7 @@ def test_top_p_boundary_negative_small(api_client, stream):
     """A small negative top_p value should return error code 400."""
     request_body = {
         "model": "auto",
-        "messages": [{"role": "user", "content": "Please answer briefly."}],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "top_p": -0.0001,
         "stream": stream,
         "max_tokens": 50,
@@ -62,7 +62,7 @@ def test_top_p_boundary_just_above_one(api_client, stream):
     """A top_p value just above 1.0 should return error code 400."""
     request_body = {
         "model": "auto",
-        "messages": [{"role": "user", "content": "Please answer briefly."}],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "top_p": 1.0001,
         "stream": stream,
         "max_tokens": 50,
@@ -79,7 +79,7 @@ def test_top_p_boundary_precision_decimal(api_client, stream):
     """A high-precision top_p value below 1.0 should respond normally."""
     request_body = {
         "model": "auto",
-        "messages": [{"role": "user", "content": "Please answer briefly."}],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "top_p": 0.999999,
         "stream": stream,
         "max_tokens": 50,
@@ -96,7 +96,7 @@ def test_top_p_without_explicit_setting(api_client, stream):
     """top_p is omitted; the default sampling behavior should respond normally."""
     request_body = {
         "model": "auto",
-        "messages": [{"role": "user", "content": "Please answer briefly."}],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "stream": stream,
         "max_tokens": 50,
     }
@@ -112,7 +112,7 @@ def test_top_p_boundary_very_small_positive(api_client, stream):
     """A very small positive top_p value should respond normally."""
     request_body = {
         "model": "auto",
-        "messages": [{"role": "user", "content": "Please answer briefly."}],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "top_p": 0.0001,
         "stream": stream,
         "max_tokens": 50,

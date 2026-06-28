@@ -4,333 +4,305 @@ from ...utility import assertion
 
 
 def test_repetition_penalty_less_than_one_non_stream(api_client, request):
-    """非流式：repetition_penalty<1.0（如0.9），可以正常响应"""
+    """Test repetition penalty less than one non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": 0.9,
         "stream": False,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点1：状态码200
+    # Check: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：finish_reason为stop或length
+    # Check: finish_reason is valid
     finish_reason = response.json()["choices"][0]["finish_reason"]
     assertion.assert_finish_reason_valid(finish_reason)
 
 
 def test_repetition_penalty_less_than_one_stream(api_client, request):
-    """流式：repetition_penalty<1.0，可以正常响应"""
+    """Test repetition penalty less than one stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": 0.9,
         "stream": True,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点1：状态码200
+    # Check: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check: streaming response contains [DONE]
     assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：finish_reason为stop或length
+    # Check: finish_reason is valid
     finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     assertion.assert_finish_reason_valid(finish_reason)
 
 
 def test_repetition_penalty_zero_non_stream(api_client, request):
-    """非流式：repetition_penalty=0，应该返回400错误"""
+    """Test repetition penalty zero non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": 0.0,
         "stream": False,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：状态码400，错误码400
+    # Check: status code and error code are 400
     assertion.assert_status_code_400(response)
     assertion.assert_error_code_400(response)
 
 
 def test_repetition_penalty_zero_stream(api_client, request):
-    """流式：repetition_penalty=0，应该返回错误码400"""
+    """Test repetition penalty zero stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": 0.0,
         "stream": True,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_repetition_penalty_negative_non_stream(api_client, request):
-    """非流式：repetition_penalty为负数，应该返回400错误"""
+    """Test repetition penalty negative non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": -1.0,
         "stream": False,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：状态码400，错误码400
+    # Check: status code and error code are 400
     assertion.assert_status_code_400(response)
     assertion.assert_error_code_400(response)
 
 
 def test_repetition_penalty_negative_stream(api_client, request):
-    """流式：repetition_penalty为负数，应该返回错误码400"""
+    """Test repetition penalty negative stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": -1.0,
         "stream": True,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_repetition_penalty_string_non_stream(api_client, request):
-    """非流式：repetition_penalty为字符串整型，应该正常响应"""
+    """Test repetition penalty string non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": "1",
         "stream": False,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点1：状态码200
+    # Check: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：finish_reason为stop或length
+    # Check: finish_reason is valid
     finish_reason = response.json()["choices"][0]["finish_reason"]
     assertion.assert_finish_reason_valid(finish_reason)
 
 
 def test_repetition_penalty_string_stream(api_client, request):
-    """流式：repetition_penalty为字符串整型，应该正常响应"""
+    """Test repetition penalty string stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": "1",
         "stream": True,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点1：状态码200
+    # Check: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check: streaming response contains [DONE]
     assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：finish_reason为stop或length
+    # Check: finish_reason is valid
     finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     assertion.assert_finish_reason_valid(finish_reason)
 
 
 def test_repetition_penalty_null_non_stream(api_client, request):
-    """非流式：repetition_penalty为null，应该正常响应"""
+    """Test repetition penalty null non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": None,
         "stream": False,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点1：状态码200
+    # Check: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：finish_reason为stop或length
+    # Check: finish_reason is valid
     finish_reason = response.json()["choices"][0]["finish_reason"]
     assertion.assert_finish_reason_valid(finish_reason)
 
 
 def test_repetition_penalty_null_stream(api_client, request):
-    """流式：repetition_penalty为null，应该正常响应"""
+    """Test repetition penalty null stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": None,
         "stream": True,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点1：状态码200
+    # Check: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点2：流式响应包含[DONE]
+    # Check: streaming response contains [DONE]
     assertion.assert_stream_has_done(response.text)
 
-    # 校验点3：finish_reason为stop或length
+    # Check: finish_reason is valid
     finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     assertion.assert_finish_reason_valid(finish_reason)
 
 
 def test_repetition_penalty_array_non_stream(api_client, request):
-    """非流式：repetition_penalty为数组类型，应该返回400错误"""
+    """Test repetition penalty array non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": [1.0, 1.2],
         "stream": False,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：状态码400，错误码400
+    # Check: status code and error code are 400
     assertion.assert_status_code_400(response)
     assertion.assert_error_code_400(response)
 
 
 def test_repetition_penalty_array_stream(api_client, request):
-    """流式：repetition_penalty为数组类型，应该返回400错误"""
+    """Test repetition penalty array stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": [1.0, 1.2],
         "stream": True,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：状态码400，错误码400
+    # Check: status code and error code are 400
     assertion.assert_status_code_400(response)
     assertion.assert_error_code_400(response)
 
 
 def test_repetition_penalty_object_non_stream(api_client, request):
-    """非流式：repetition_penalty为对象类型，应该返回400错误"""
+    """Test repetition penalty object non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": {"value": 1.2},
         "stream": False,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：状态码400，错误码400
+    # Check: status code and error code are 400
     assertion.assert_status_code_400(response)
     assertion.assert_error_code_400(response)
 
 
 def test_repetition_penalty_object_stream(api_client, request):
-    """流式：repetition_penalty为对象类型，应该返回400错误"""
+    """Test repetition penalty object stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'List fruit names.'
         }],
         "repetition_penalty": {"value": 1.2},
         "stream": True,
         "max_tokens": 50
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：状态码400，错误码400
+    # Check: status code and error code are 400
     assertion.assert_status_code_400(response)
     assertion.assert_error_code_400(response)

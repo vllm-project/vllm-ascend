@@ -9,7 +9,7 @@ TOOLS_DEFINITION = [
         "type": "function",
         "function": {
             "name": "get_weather",
-            "description": "获取天气信息",
+            "description": 'Get weather information.',
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -23,7 +23,7 @@ TOOLS_DEFINITION = [
         "type": "function",
         "function": {
             "name": "get_time",
-            "description": "获取当前时间",
+            "description": 'City name.',
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -37,18 +37,12 @@ TOOLS_DEFINITION = [
 
 
 def _validate_tool_calls_structure(response, stream, expected_tools=None):
-    """校验tool_calls响应结构的通用函数（用于null值测试）
-    
-    Args:
-        response: HTTP响应对象
-        stream: 是否流式响应
-        expected_tools: 期望的工具名称列表，默认为["get_weather", "get_time"]
-    """
+    """Test  validate tool calls structure."""
     if expected_tools is None:
         expected_tools = ["get_weather", "get_time"]
     
     if stream:
-        # 流式响应校验
+        # Check: response behavior is valid
         assertion.assert_stream_has_done(response.text)
         
         tool_calls_found = False
@@ -62,21 +56,24 @@ def _validate_tool_calls_structure(response, stream, expected_tools=None):
                     if delta.get("tool_calls"):
                         tool_calls_found = True
                         for tc in delta.get("tool_calls", []):
-                            assert "index" in tc, "流式tool_calls应包含index字段"
+                            assert "index" in tc, 'response'
                             if tc.get("id"):
-                                assert tc.get("type") == "function", "tool_calls类型应为function"
+                                assert tc.get("type") == "function", 'response'
                             if tc.get("function"):
                                 func = tc.get("function", {})
                                 if func.get("name"):
-                                    assert func.get("name") in expected_tools,                                         f"函数名应为{expected_tools}之一，实际为{func.get('name')}"
+                                    assert func.get("name") in expected_tools, (
+                                        f"Function name should be one of {expected_tools}, "
+                                        f"got {func.get('name')}"
+                                    )
                     if choices[0].get("finish_reason") == "tool_calls":
                         finish_reason_tool_calls = True
         
-        # 如果有 tool_calls，finish_reason 应为 tool_calls
+        # Check: finish_reason is valid
         if tool_calls_found:
-            assert finish_reason_tool_calls, "流式响应有tool_calls时finish_reason应为tool_calls"
+            assert finish_reason_tool_calls, 'response'
     else:
-        # 非流式响应校验
+        # Check: response behavior is valid
         response_json = response.json()
         choices = response_json.get("choices", [])
         if choices:
@@ -84,116 +81,113 @@ def _validate_tool_calls_structure(response, stream, expected_tools=None):
             message = choice.get("message", {})
             
             if message.get("tool_calls") or choice.get("finish_reason") == "tool_calls":
-                assert choice.get("finish_reason") == "tool_calls",                     f"finish_reason应为tool_calls，实际为{choice.get('finish_reason')}"
+                assert choice.get("finish_reason") == "tool_calls", (
+                    f"finish_reason should be tool_calls, got {choice.get('finish_reason')}"
+                )
                 
                 tool_calls = message.get("tool_calls", [])
                 if tool_calls:
                     for tc in tool_calls:
-                        assert "id" in tc, "tool_call应包含id字段"
-                        assert tc.get("type") == "function", "tool_call类型应为function"
-                        assert "function" in tc, "tool_call应包含function字段"
+                        assert "id" in tc, 'response'
+                        assert tc.get("type") == "function", 'response'
+                        assert "function" in tc, 'response'
                         func = tc.get("function", {})
-                        assert "name" in func, "function应包含name字段"
-                        assert "arguments" in func, "function应包含arguments字段"
-                        assert func.get("name") in expected_tools,                             f"函数名应为{expected_tools}之一，实际为{func.get('name')}"
+                        assert "name" in func, "function should contain name"
+                        assert "arguments" in func, 'response'
+                        assert func.get("name") in expected_tools, (
+                            f"Function name should be one of {expected_tools}, "
+                            f"got {func.get('name')}"
+                        )
                         args = json.loads(func.get("arguments", "{}"))
-                        assert isinstance(args, dict), "arguments解析后应为dict"
+                        assert isinstance(args, dict), 'response'
 
 def test_parallel_tool_calls_string_value_non_stream(api_client, request):
-    """非流式：parallel_tool_calls为字符串类型，应返回400错误"""
+    """Test parallel tool calls string value non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": "true",  # 字符串类型，应为布尔类型
+        "parallel_tool_calls": "true",  # Check: response behavior is valid
         "stream": False,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_string_value_stream(api_client, request):
-    """流式：parallel_tool_calls为字符串类型，http status code:200, response_body返回400错误码"""
+    """Test parallel tool calls string value stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": "false",  # 字符串类型
+        "parallel_tool_calls": "false",  # Check: response behavior is valid
         "stream": True,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_integer_value_non_stream(api_client, request):
-    """非流式：parallel_tool_calls为整数类型，应返回400错误"""
+    """Test parallel tool calls integer value non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": 1,  # 整数类型
+        "parallel_tool_calls": 1,  # Check: response behavior is valid
         "stream": False,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_integer_value_stream(api_client, request):
-    """流式：parallel_tool_calls为整数类型，http status code:200, response_body返回400错误码"""
+    """Test parallel tool calls integer value stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": 0,  # 整数类型
+        "parallel_tool_calls": 0,  # Check: response behavior is valid
         "stream": True,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_null_value_non_stream(api_client, request):
-    """非流式：parallel_tool_calls为null，应正常响应（null等同于默认值True）"""
+    """Test parallel tool calls null value non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
         "parallel_tool_calls": None,
@@ -201,32 +195,30 @@ def test_parallel_tool_calls_null_value_non_stream(api_client, request):
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：状态码200
+    # Check: status code is 200
     assertion.assert_status_code_200(response)
 
-    # 校验点：finish_reason为stop或length或tool_calls
+    # Check: finish_reason is valid
     response_json = response.json()
     choices = response_json.get("choices", [])
     if choices:
         finish_reason = choices[0].get("finish_reason")
         if finish_reason == "tool_calls":
-            # 如果有tool_calls，校验结构
+            # Check: tool_calls structure is valid
             _validate_tool_calls_structure(response, stream=False)
         else:
             assertion.assert_finish_reason_valid(finish_reason)
 
 
 def test_parallel_tool_calls_null_value_stream(api_client, request):
-    """流式：parallel_tool_calls为null，应正常响应"""
+    """Test parallel tool calls null value stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
         "parallel_tool_calls": None,
@@ -234,190 +226,172 @@ def test_parallel_tool_calls_null_value_stream(api_client, request):
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：finish_reason为stop或length或tool_calls
+    # Check: finish_reason is valid
     finish_reason = assertion.assert_stream_single_finish_reason(response.text)
     if finish_reason == "tool_calls":
-        # 如果有tool_calls，校验结构
+        # Check: tool_calls structure is valid
         _validate_tool_calls_structure(response, stream=True)
     else:
         assertion.assert_finish_reason_valid(finish_reason)
 
 
 def test_parallel_tool_calls_array_value_non_stream(api_client, request):
-    """非流式：parallel_tool_calls为数组类型，应返回400错误"""
+    """Test parallel tool calls array value non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": [True],  # 数组类型
+        "parallel_tool_calls": [True],  # Check: response behavior is valid
         "stream": False,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_array_value_stream(api_client, request):
-    """流式：parallel_tool_calls为数组类型，http status code:200, response_body返回400错误码"""
+    """Test parallel tool calls array value stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": [],  # 空数组
+        "parallel_tool_calls": [],  # Check: response behavior is valid
         "stream": True,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_object_value_non_stream(api_client, request):
-    """非流式：parallel_tool_calls为对象类型，应返回400错误"""
+    """Test parallel tool calls object value non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": {"enabled": True},  # 对象类型
+        "parallel_tool_calls": {"enabled": True},  # Check: response behavior is valid
         "stream": False,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_object_value_stream(api_client, request):
-    """流式：parallel_tool_calls为对象类型，http status code:200, response_body返回400错误码"""
+    """Test parallel tool calls object value stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": {},  # 空对象
+        "parallel_tool_calls": {},  # Check: response behavior is valid
         "stream": True,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_float_value_non_stream(api_client, request):
-    """非流式：parallel_tool_calls为浮点数类型，应返回400错误"""
+    """Test parallel tool calls float value non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": 1.0,  # 浮点数类型
+        "parallel_tool_calls": 1.0,  # Check: response behavior is valid
         "stream": False,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_float_value_stream(api_client, request):
-    """流式：parallel_tool_calls为浮点数类型，http status code:200, response_body返回400错误码"""
+    """Test parallel tool calls float value stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": 0.5,  # 浮点数类型
+        "parallel_tool_calls": 0.5,  # Check: response behavior is valid
         "stream": True,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_empty_string_non_stream(api_client, request):
-    """非流式：parallel_tool_calls为空字符串，应返回400错误"""
+    """Test parallel tool calls empty string non stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": "",  # 空字符串
+        "parallel_tool_calls": "",  # Check: response behavior is valid
         "stream": False,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)
 
 
 def test_parallel_tool_calls_empty_string_stream(api_client, request):
-    """流式：parallel_tool_calls为空字符串，http status code:200, response_body返回400错误码"""
+    """Test parallel tool calls empty string stream."""
     request_body = {
         "model": "auto",
         "messages": [{
             "role": "user",
-            "content": "你好"
+            "content": 'What is the weather?'
         }],
         "tools": TOOLS_DEFINITION,
-        "parallel_tool_calls": "",  # 空字符串
+        "parallel_tool_calls": "",  # Check: response behavior is valid
         "stream": True,
         "max_tokens": 512
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：错误码400
+    # Check: status code and error code are 400
     assertion.assert_error_code_400(response)

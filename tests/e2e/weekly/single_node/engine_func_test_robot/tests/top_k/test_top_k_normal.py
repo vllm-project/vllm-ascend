@@ -16,7 +16,7 @@ def test_top_k_normal_values(api_client, stream, top_k):
     """top_k is within the normal range; the request should respond normally."""
     request_body = {
         "model": "auto",
-        "messages": [{"role": "user", "content": "Please answer briefly."}],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "top_k": top_k,
         "stream": stream,
         "max_tokens": 100,
@@ -69,7 +69,7 @@ def test_top_k_disable_with_minus_one(api_client, stream):
     """top_k=-1 disables top-k filtering; the request should respond normally."""
     request_body = {
         "model": "auto",
-        "messages": [{"role": "user", "content": "Please answer briefly."}],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "top_k": -1,
         "stream": stream,
         "max_tokens": 50,

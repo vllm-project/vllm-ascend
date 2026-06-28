@@ -122,7 +122,7 @@ def test_top_p_without_setting(api_client, stream):
     """top_p is omitted; the default sampling behavior should respond normally."""
     request_body = {
         "model": "auto",
-        "messages": [{"role": "user", "content": "Please answer briefly."}],
+        "messages": [{"role": "user", "content": "Say hello."}],
         "stream": stream,
         "max_tokens": 50,
     }

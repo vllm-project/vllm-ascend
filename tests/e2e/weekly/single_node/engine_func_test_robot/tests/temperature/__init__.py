@@ -1,1 +1,1 @@
-# Temperature 温度参数测试模块
+# Check: response behavior is valid

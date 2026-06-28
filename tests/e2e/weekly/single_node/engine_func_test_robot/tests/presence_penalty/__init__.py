@@ -1,1 +1,1 @@
-# Presence Penalty 存在惩罚参数测试模块
+# Check: response behavior is valid
