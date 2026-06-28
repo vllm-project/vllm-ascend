@@ -1,10 +1,13 @@
 import pytest
-from ...utility import request_helper as helper
-from ...utility import assertion
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
-@pytest.mark.parametrize("presence_penalty", [-2.0, -1.0, 0.0, 0.5, 1.0, 1.5, 2.0], 
+@pytest.mark.parametrize("presence_penalty", [-2.0, -1.0, 0.0, 0.5, 1.0, 1.5, 2.0],
                          ids=["pp-2.0", "pp-1.0", "pp0", "pp0.5", "pp1.0", "pp1.5", "pp2.0"])
 def test_presence_penalty_normal_values(api_client, request, stream, presence_penalty):
     """Test presence penalty normal values."""

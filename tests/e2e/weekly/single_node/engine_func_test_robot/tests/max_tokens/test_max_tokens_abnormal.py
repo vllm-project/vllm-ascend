@@ -1,6 +1,9 @@
 import pytest
-from ...utility import request_helper as helper
-from ...utility import assertion
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
 def test_max_tokens_zero_non_stream(api_client, request):
@@ -207,6 +210,3 @@ def test_max_tokens_boolean_stream(api_client, request):
         assertion.assert_stream_has_done(response.text)
         finish_reason = assertion.assert_stream_single_finish_reason(response.text)
         assertion.assert_finish_reason_valid(finish_reason)
-
-
-

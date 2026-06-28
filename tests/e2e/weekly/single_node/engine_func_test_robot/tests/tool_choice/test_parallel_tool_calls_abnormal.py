@@ -1,8 +1,11 @@
-import pytest
 import json
-from ...utility import request_helper as helper
-from ...utility import assertion
 
+import pytest
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 TOOLS_DEFINITION = [
     {
@@ -34,17 +37,15 @@ TOOLS_DEFINITION = [
 ]
 
 
-
-
 def _validate_tool_calls_structure(response, stream, expected_tools=None):
     """Test  validate tool calls structure."""
     if expected_tools is None:
         expected_tools = ["get_weather", "get_time"]
-    
+
     if stream:
         # Check: response behavior is valid
         assertion.assert_stream_has_done(response.text)
-        
+
         tool_calls_found = False
         finish_reason_tool_calls = False
         for line in response.text.strip().split("\n"):
@@ -68,7 +69,7 @@ def _validate_tool_calls_structure(response, stream, expected_tools=None):
                                     )
                     if choices[0].get("finish_reason") == "tool_calls":
                         finish_reason_tool_calls = True
-        
+
         # Check: finish_reason is valid
         if tool_calls_found:
             assert finish_reason_tool_calls, 'response'
@@ -79,12 +80,12 @@ def _validate_tool_calls_structure(response, stream, expected_tools=None):
         if choices:
             choice = choices[0]
             message = choice.get("message", {})
-            
+
             if message.get("tool_calls") or choice.get("finish_reason") == "tool_calls":
                 assert choice.get("finish_reason") == "tool_calls", (
                     f"finish_reason should be tool_calls, got {choice.get('finish_reason')}"
                 )
-                
+
                 tool_calls = message.get("tool_calls", [])
                 if tool_calls:
                     for tc in tool_calls:
@@ -100,6 +101,7 @@ def _validate_tool_calls_structure(response, stream, expected_tools=None):
                         )
                         args = json.loads(func.get("arguments", "{}"))
                         assert isinstance(args, dict), 'response'
+
 
 def test_parallel_tool_calls_string_value_non_stream(api_client, request):
     """Test parallel tool calls string value non stream."""

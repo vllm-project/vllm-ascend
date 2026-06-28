@@ -1,8 +1,11 @@
-import pytest
 import json
-from ...utility import request_helper as helper
-from ...utility import assertion
 
+import pytest
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 # Check: response behavior is valid
 TOOLS_DEFINITION = [
@@ -55,16 +58,15 @@ TOOLS_DEFINITION = [
 ]
 
 
-
 def _validate_tool_calls_response(response, stream, expected_tools=None):
     """Test  validate tool calls response."""
     if expected_tools is None:
         expected_tools = ["get_weather", "get_time"]
-    
+
     if stream:
         # Check: response behavior is valid
         assertion.assert_stream_has_done(response.text)
-        
+
         tool_calls_found = False
         finish_reason_tool_calls = False
         for line in response.text.strip().split("\n"):
@@ -86,7 +88,7 @@ def _validate_tool_calls_response(response, stream, expected_tools=None):
                                         f"Function name should be one of {expected_tools}, got {func.get('name')}"
                     if choices[0].get("finish_reason") == "tool_calls":
                         finish_reason_tool_calls = True
-        
+
         assert tool_calls_found, 'response'
         assert finish_reason_tool_calls, 'response'
     else:
@@ -96,14 +98,14 @@ def _validate_tool_calls_response(response, stream, expected_tools=None):
         if choices:
             choice = choices[0]
             message = choice.get("message", {})
-            
+
             if message.get("tool_calls") or choice.get("finish_reason") == "tool_calls":
                 assert choice.get("finish_reason") == "tool_calls", \
                     f"finish_reason should be tool_calls, got {choice.get('finish_reason')}"
-                
+
                 tool_calls = message.get("tool_calls", [])
                 assert len(tool_calls) >= 1, 'response'
-                
+
                 for tc in tool_calls:
                     assert "id" in tc, 'response'
                     assert tc.get("type") == "function", 'response'
@@ -138,7 +140,7 @@ def _validate_no_tool_calls(response, stream):
     if stream:
         # Check: response behavior is valid
         assertion.assert_stream_has_done(response.text)
-        
+
         for line in response.text.strip().split("\n"):
             if line.startswith("data: ") and "[DONE]" not in line:
                 chunk = json.loads(line[6:])
@@ -176,11 +178,11 @@ def _validate_tool_calls_with_stop_finish_reason(response, stream, expected_tool
     """Test  validate tool calls with stop finish reason."""
     if expected_tools is None:
         expected_tools = ["get_weather"]
-    
+
     if stream:
         # Check: response behavior is valid
         assertion.assert_stream_has_done(response.text)
-        
+
         tool_calls_found = False
         finish_reason_stop = False
         for line in response.text.strip().split("\n"):
@@ -206,7 +208,7 @@ def _validate_tool_calls_with_stop_finish_reason(response, stream, expected_tool
                         assert finish_reason == "stop", \
                             f"Named-function tool_choice should finish with stop, got {finish_reason}"
                         finish_reason_stop = True
-        
+
         assert tool_calls_found, 'response'
         assert finish_reason_stop, 'response'
     else:
@@ -216,11 +218,11 @@ def _validate_tool_calls_with_stop_finish_reason(response, stream, expected_tool
         if choices:
             choice = choices[0]
             message = choice.get("message", {})
-            
+
             if message.get("tool_calls"):
                 tool_calls = message.get("tool_calls", [])
                 assert len(tool_calls) >= 1, 'response'
-                
+
                 for tc in tool_calls:
                     assert "id" in tc, 'response'
                     assert tc.get("type") == "function", 'response'
@@ -232,12 +234,11 @@ def _validate_tool_calls_with_stop_finish_reason(response, stream, expected_tool
                         f"Function name should be one of {expected_tools}, got {func.get('name')}"
                     args = json.loads(func.get("arguments", "{}"))
                     assert isinstance(args, dict), 'response'
-                
+
                 # Check: finish_reason is valid
                 finish_reason = choice.get("finish_reason")
                 assert finish_reason == "stop", \
                     f"Named-function tool_choice should finish with stop, got {finish_reason}"
-
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -317,7 +318,6 @@ def test_parallel_tool_calls_default_value(api_client, request, stream):
 
     # Check: response behavior is valid
     _validate_tool_calls_response(response, stream, expected_tools=["get_weather", "get_time"])
-
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])

@@ -1,6 +1,9 @@
 import pytest
-from ...utility import request_helper as helper
-from ...utility import assertion
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
 def test_chat_stream_context_within_limit(api_client, request):
@@ -13,25 +16,22 @@ def test_chat_stream_context_within_limit(api_client, request):
 
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": text * repeat_count
-        }],
+        "messages": [{"role": "user", "content": text * repeat_count}],
         "stream": True,
-        "max_tokens": 51200000
+        "max_tokens": 51200000,
     }
 
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
 
     # Check: status code is 200
-    assertion.assert_status_code_200(response, 'response')
+    assertion.assert_status_code_200(response, "response")
 
     # Check: streaming response contains [DONE]
-    assertion.assert_stream_has_done(response.text, 'response')
+    assertion.assert_stream_has_done(response.text, "response")
 
     # Check: finish_reason is valid
-    finish_reason = assertion.assert_stream_single_finish_reason(response.text, 'response')
-    assertion.assert_finish_reason_valid(finish_reason, 'response')
+    finish_reason = assertion.assert_stream_single_finish_reason(response.text, "response")
+    assertion.assert_finish_reason_valid(finish_reason, "response")
 
 
 def test_chat_non_stream_context_within_limit(api_client, request):
@@ -44,14 +44,10 @@ def test_chat_non_stream_context_within_limit(api_client, request):
 
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": text * repeat_count
-        }],
+        "messages": [{"role": "user", "content": text * repeat_count}],
         "stream": False,
-        "max_tokens": 51200000
+        "max_tokens": 51200000,
     }
-
 
     for i in range(10):
         response = helper.send_request(api_client, "/v1/chat/completions", request_body)
@@ -72,24 +68,19 @@ def test_completions_stream_context_within_limit(api_client, request):
     max_length = int(request.config.getoption("--maxModelLength"))
     repeat_count = max_length // 5
 
-    request_body = {
-        "model": "auto",
-        "prompt": text * repeat_count,
-        "stream": True,
-        "max_tokens": 51200000
-    }
+    request_body = {"model": "auto", "prompt": text * repeat_count, "stream": True, "max_tokens": 51200000}
 
     response = helper.send_request(api_client, "/v1/completions", request_body)
 
     # Check: status code is 200
-    assertion.assert_status_code_200(response, 'response')
+    assertion.assert_status_code_200(response, "response")
 
     # Check: streaming response contains [DONE]
-    assertion.assert_stream_has_done(response.text, 'response')
+    assertion.assert_stream_has_done(response.text, "response")
 
     # Check: finish_reason is valid
-    finish_reason = assertion.assert_stream_single_finish_reason(response.text, 'response')
-    assertion.assert_finish_reason_valid(finish_reason, 'response')
+    finish_reason = assertion.assert_stream_single_finish_reason(response.text, "response")
+    assertion.assert_finish_reason_valid(finish_reason, "response")
 
 
 def test_completions_non_stream_context_within_limit(api_client, request):
@@ -100,13 +91,7 @@ def test_completions_non_stream_context_within_limit(api_client, request):
     max_length = int(request.config.getoption("--maxModelLength"))
     repeat_count = max_length // 5
 
-    request_body = {
-        "model": "auto",
-        "prompt": text * repeat_count,
-        "stream": False,
-        "max_tokens": 51200000
-    }
-
+    request_body = {"model": "auto", "prompt": text * repeat_count, "stream": False, "max_tokens": 51200000}
 
     for i in range(1):
         response = helper.send_request(api_client, "/v1/completions", request_body)

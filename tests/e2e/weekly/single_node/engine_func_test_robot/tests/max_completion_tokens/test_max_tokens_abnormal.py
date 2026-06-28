@@ -1,6 +1,9 @@
 import pytest
-from ...utility import request_helper as helper
-from ...utility import assertion
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
 def test_max_tokens_zero_non_stream(api_client, request):

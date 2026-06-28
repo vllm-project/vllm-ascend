@@ -1,10 +1,13 @@
 import pytest
-from ...utility import request_helper as helper
-from ...utility import assertion
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
-@pytest.mark.parametrize("frequency_penalty", [-2.0, -1.0, 0.0, 0.5, 1.0, 1.5, 2.0], 
+@pytest.mark.parametrize("frequency_penalty", [-2.0, -1.0, 0.0, 0.5, 1.0, 1.5, 2.0],
                          ids=["fp-2.0", "fp-1.0", "fp0", "fp0.5", "fp1.0", "fp1.5", "fp2.0"])
 def test_frequency_penalty_normal_values(api_client, request, stream, frequency_penalty):
     """Test frequency penalty normal values."""

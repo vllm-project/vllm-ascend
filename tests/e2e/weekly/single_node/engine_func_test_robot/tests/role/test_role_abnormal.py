@@ -1,6 +1,9 @@
 import pytest
-from ...utility import request_helper as helper
-from ...utility import assertion
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
 def test_role_invalid_value_non_stream(api_client, request):
@@ -50,7 +53,7 @@ def test_role_invalid_value_stream(api_client, request):
         assertion.assert_error_code_400(response)
     else:
         assertion.assert_status_code_200(response)
-        import re
+        import regex as re
         match = re.search(r'\"code\"\s?:\s?(\d+)', response.text, re.M)
         if match and int(match.group(1)) == 400:
             assertion.assert_error_code_400(response)
@@ -190,7 +193,7 @@ def test_role_integer_stream(api_client, request):
         assertion.assert_error_code_400(response)
     else:
         assertion.assert_status_code_200(response)
-        import re
+        import regex as re
         match = re.search(r'\"code\"\s?:\s?(\d+)', response.text, re.M)
         if match and int(match.group(1)) == 400:
             assertion.assert_error_code_400(response)
@@ -246,7 +249,7 @@ def test_role_empty_string_stream(api_client, request):
         assertion.assert_error_code_400(response)
     else:
         assertion.assert_status_code_200(response)
-        import re
+        import regex as re
         match = re.search(r'\"code\"\s?:\s?(\d+)', response.text, re.M)
         if match and int(match.group(1)) == 400:
             assertion.assert_error_code_400(response)
@@ -302,7 +305,7 @@ def test_role_case_sensitive_user_stream(api_client, request):
         assertion.assert_error_code_400(response)
     else:
         assertion.assert_status_code_200(response)
-        import re
+        import regex as re
         match = re.search(r'\"code\"\s?:\s?(\d+)', response.text, re.M)
         if match and int(match.group(1)) == 400:
             assertion.assert_error_code_400(response)
@@ -358,7 +361,7 @@ def test_role_case_sensitive_system_stream(api_client, request):
         assertion.assert_error_code_400(response)
     else:
         assertion.assert_status_code_200(response)
-        import re
+        import regex as re
         match = re.search(r'\"code\"\s?:\s?(\d+)', response.text, re.M)
         if match and int(match.group(1)) == 400:
             assertion.assert_error_code_400(response)

@@ -1,8 +1,11 @@
-import pytest
 import json
-from ...utility import request_helper as helper
-from ...utility import assertion
 
+import pytest
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 TOOLS_DEFINITION = [
     {
@@ -39,7 +42,7 @@ def _validate_tool_calls_count(response, stream, max_count):
     if stream:
         # Check: response behavior is valid
         assertion.assert_stream_has_done(response.text)
-        
+
         tool_call_indices = set()
         finish_reason_tool_calls = False
         for line in response.text.strip().split("\n"):
@@ -54,7 +57,7 @@ def _validate_tool_calls_count(response, stream, max_count):
                                 tool_call_indices.add(tc.get("index"))
                     if choices[0].get("finish_reason") == "tool_calls":
                         finish_reason_tool_calls = True
-        
+
         # Check: tool_calls structure is valid
         if tool_call_indices:
             assert len(tool_call_indices) <= max_count, (

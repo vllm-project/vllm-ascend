@@ -1,10 +1,13 @@
 import pytest
-from ...utility import request_helper as helper
-from ...utility import assertion
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
-@pytest.mark.parametrize("repetition_penalty", [1.0, 1.05, 1.1, 1.2, 1.5, 2.0], 
+@pytest.mark.parametrize("repetition_penalty", [1.0, 1.05, 1.1, 1.2, 1.5, 2.0],
                          ids=["rp1.0", "rp1.05", "rp1.1", "rp1.2", "rp1.5", "rp2.0"])
 def test_repetition_penalty_normal_values(api_client, request, stream, repetition_penalty):
     """Test repetition penalty normal values."""

@@ -1,7 +1,10 @@
-import re
 import pytest
-from ...utility import request_helper as helper
-from ...utility import assertion
+import regex as re
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
 def test_chat_stream_context_exceed(api_client, request):
@@ -14,14 +17,10 @@ def test_chat_stream_context_exceed(api_client, request):
 
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": text * repeat_count
-        }],
+        "messages": [{"role": "user", "content": text * repeat_count}],
         "stream": True,
-        "max_tokens": 512
+        "max_tokens": 512,
     }
-
 
     # Check: response behavior is valid
     for i in range(10):
@@ -34,10 +33,8 @@ def test_chat_stream_context_exceed(api_client, request):
         if engine_type == "vllm" and engine_arch == "single":
             assertion.assert_status_code_400(response, f"vllm single-node streaming request #{i + 1}")
             assert not re.search(
-                r'^data:\s?\[DONE\](?:\n|$)', response.text, re.M
-            ), (
-                f"vllm single-node streaming response #{i + 1} should not contain DONE"
-            )
+                r"^data:\s?\[DONE\](?:\n|$)", response.text, re.M
+            ), f"vllm single-node streaming response #{i + 1} should not contain DONE"
         else:
             assertion.assert_status_code_200(response, f"request #{i + 1}")
             assertion.assert_stream_has_done(response.text, f"streaming request #{i + 1}")
@@ -55,15 +52,11 @@ def test_chat_non_stream_context_exceed(api_client, request):
 
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": text * repeat_count
-        }],
+        "messages": [{"role": "user", "content": text * repeat_count}],
         "stream": False,
         "max_tokens": 512,
-        "stop": ["Input:"]
+        "stop": ["Input:"],
     }
-
 
     # Check: response behavior is valid
     for i in range(10):
@@ -87,9 +80,8 @@ def test_completions_stream_context_exceed(api_client, request):
         "prompt": text * repeat_count,
         "stream": True,
         "max_tokens": 512,
-        "stop": ["Input:"]
+        "stop": ["Input:"],
     }
-
 
     # Check: response behavior is valid
     for i in range(10):
@@ -102,10 +94,8 @@ def test_completions_stream_context_exceed(api_client, request):
         if engine_type == "vllm" and engine_arch == "single":
             assertion.assert_status_code_400(response, f"vllm single-node streaming request #{i + 1}")
             assert not re.search(
-                r'^data:\s?\[DONE\](?:\n|$)', response.text, re.M
-            ), (
-                f"vllm single-node streaming response #{i + 1} should not contain DONE"
-            )
+                r"^data:\s?\[DONE\](?:\n|$)", response.text, re.M
+            ), f"vllm single-node streaming response #{i + 1} should not contain DONE"
         else:
             assertion.assert_status_code_200(response, f"request #{i + 1}")
             assertion.assert_stream_has_done(response.text, f"streaming request #{i + 1}")
@@ -126,9 +116,8 @@ def test_completions_non_stream_context_exceed(api_client, request):
         "prompt": text * repeat_count,
         "stream": False,
         "max_tokens": 512,
-        "stop": ["Input:"]
+        "stop": ["Input:"],
     }
-
 
     # Check: response behavior is valid
     for i in range(10):

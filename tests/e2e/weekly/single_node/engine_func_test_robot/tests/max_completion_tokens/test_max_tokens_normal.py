@@ -1,7 +1,9 @@
-import random
 import pytest
-from ...utility import request_helper as helper
-from ...utility import assertion
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
@@ -186,6 +188,3 @@ def test_max_tokens_with_stop(api_client, request, stream):
     else:
         finish_reason = response.json()["choices"][0]["finish_reason"]
     assertion.assert_finish_reason_valid(finish_reason)
-
-
-

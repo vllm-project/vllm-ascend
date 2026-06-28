@@ -1,7 +1,11 @@
-import re
 import json
-from ...utility import request_helper as helper
-from ...utility import assertion
+
+import regex as re
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
 def test_role_system_instruction_follow(api_client, request):
