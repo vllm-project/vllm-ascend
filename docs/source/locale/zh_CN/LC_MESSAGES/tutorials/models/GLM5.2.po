@@ -1,0 +1,463 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-22 05:29+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/GLM5.2.md:1
+msgid "GLM-5.2"
+msgstr "GLM-5.2"
+
+#: ../../source/tutorials/models/GLM5.2.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/GLM5.2.md:5
+msgid ""
+"[GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) use a Mixture-of-"
+"Experts (MoE) architecture and targets complex systems engineering and "
+"long-horizon agentic tasks."
+msgstr ""
+"[GLM-5.2](https://huggingface.co/zai-org/GLM-5.2)采用混合专家(MoE)架构，面向复杂系统工程和长周期智能体任务。"
+
+#: ../../source/tutorials/models/GLM5.2.md:7
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node and multi-node deployment, accuracy and "
+"performance evaluation."
+msgstr ""
+"本文档将展示该模型的主要验证步骤，包括支持特性、特性配置、环境准备、单节点和多节点部署、精度及性能评估。"
+
+#: ../../source/tutorials/models/GLM5.2.md:9
+msgid "Supported Features"
+msgstr "支持特性"
+
+#: ../../source/tutorials/models/GLM5.2.md:11
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参考[支持特性](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性矩阵。"
+
+#: ../../source/tutorials/models/GLM5.2.md:13
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"the feature's configuration."
+msgstr ""
+"请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性配置。"
+
+#: ../../source/tutorials/models/GLM5.2.md:15
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/GLM5.2.md:17
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/GLM5.2.md:19
+msgid ""
+"`GLM-5.2`(BF16 version)require 2 Atlas 800 A3 (128G × 8) node or 4 Atlas "
+"800 A2 (64G × 8) node.: [Download model "
+"weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2)."
+msgstr ""
+"`GLM-5.2`(BF16版本)需要2个Atlas 800 A3 (128G × 8)节点或4个Atlas 800 A2 (64G × 8)节点：[下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2)。"
+
+#: ../../source/tutorials/models/GLM5.2.md:20
+msgid ""
+"`GLM-5.2-w8a8`: require 1 Atlas 800 A3 (128G × 8) node or 2 Atlas 800 A2 "
+"(64G × 8) node.[Download model weight](https://www.modelscope.cn/models"
+"/Eco-Tech/GLM-5.2-w8a8)."
+msgstr ""
+"`GLM-5.2-w8a8`：需要1个Atlas 800 A3 (128G × 8)节点或2个Atlas 800 A2 (64G × 8)节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8)。"
+
+#: ../../source/tutorials/models/GLM5.2.md:21
+msgid ""
+"You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to "
+"quantify the model naively."
+msgstr ""
+"您可以使用[msmodelslim](https://gitcode.com/Ascend/msmodelslim)对模型进行朴素量化。"
+
+#: ../../source/tutorials/models/GLM5.2.md:23
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr ""
+"建议将模型权重下载到多节点共享目录中，例如`/root/.cache/`"
+
+#: ../../source/tutorials/models/GLM5.2.md:25
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/GLM5.2.md:27
+msgid "You can use our official docker image to run GLM-5 directly."
+msgstr "您可以使用官方Docker镜像直接运行GLM-5。"
+
+#: ../../source/tutorials/models/GLM5.2.md
+msgid "A3 series"
+msgstr "A3系列"
+
+#: ../../source/tutorials/models/GLM5.2.md:36
+#: ../../source/tutorials/models/GLM5.2.md:83
+msgid "Start the docker image on your each node."
+msgstr "在每个节点上启动Docker镜像。"
+
+#: ../../source/tutorials/models/GLM5.2.md
+msgid "A2 series"
+msgstr "A2系列"
+
+#: ../../source/tutorials/models/GLM5.2.md:116
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr "如需部署多节点环境，需要在每个节点上配置环境。"
+
+#: ../../source/tutorials/models/GLM5.2.md:118
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/GLM5.2.md:120
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/GLM5.2.md:122
+msgid ""
+"Quantized model `glm-5.2-w8a8` can be deployed on 1 Atlas 800 A3 (64G × "
+"16) ."
+msgstr "量化模型`glm-5.2-w8a8`可部署在1个Atlas 800 A3 (64G × 16)上。"
+
+#: ../../source/tutorials/models/GLM5.2.md:124
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+#: ../../source/tutorials/models/GLM5.2.md:157
+msgid "**Notice:** The parameters are explained as follows:"
+msgstr "**注意：**参数说明如下："
+
+#: ../../source/tutorials/models/GLM5.2.md:160
+msgid ""
+"For single-node deployment, we recommend using `dp2tp8` and turn off "
+"expert parallel in low-latency scenarios."
+msgstr "对于单节点部署，建议在低延迟场景下使用`dp2tp8`并关闭专家并行。"
+
+#: ../../source/tutorials/models/GLM5.2.md:162
+msgid "Multi-node Deployment"
+msgstr "多节点部署"
+
+#: ../../source/tutorials/models/GLM5.2.md:164
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../../installation.md#verify-multi-node-communication)."
+msgstr "如需部署多节点环境，需按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+
+#: ../../source/tutorials/models/GLM5.2.md:173
+msgid "`glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A3 (64G × 16)."
+msgstr "`glm-5.2-w8a8`：可部署在2个Atlas 800 A3 (64G × 16)上。"
+
+#: ../../source/tutorials/models/GLM5.2.md:175
+msgid "Run the following scripts on two nodes respectively."
+msgstr "分别在两个节点上运行以下脚本。"
+
+#: ../../source/tutorials/models/GLM5.2.md:177
+#: ../../source/tutorials/models/GLM5.2.md:285
+msgid "**node 0**"
+msgstr "**节点0**"
+
+#: ../../source/tutorials/models/GLM5.2.md:227
+#: ../../source/tutorials/models/GLM5.2.md:342
+msgid "**node 1**"
+msgstr "**节点1**"
+
+#: ../../source/tutorials/models/GLM5.2.md:283
+msgid "`glm-5.2-w8a8`: can be deployed on 2 Atlas 800 A2 (64G × 32)."
+msgstr "`glm-5.2-w8a8`：可部署在2个Atlas 800 A2 (64G × 32)上。"
+
+#: ../../source/tutorials/models/GLM5.2.md:403
+msgid "Co-located Deployment on 4 Nodes (200k context)"
+msgstr "4节点共置部署(200k上下文)"
+
+#: ../../source/tutorials/models/GLM5.2.md:405
+msgid ""
+"In a co-located (mixed) deployment, prefill and decode run together on "
+"the same nodes, in contrast to the disaggregated setup below. The "
+"following templates deploy `GLM-5.2` across 4 nodes with `DP4 TP8` "
+"(`data-parallel-size-local=1` per node), a 200k context window, and MTP "
+"(`num_speculative_tokens=5`). Node 0 hosts the API server and is the DP "
+"master; Node 1 to Node 3 run with `--headless`. Prefix caching is "
+"disabled (`--no-enable-prefix-caching`) in this configuration. All IPs, "
+"NIC names, ports and weight paths are placeholders."
+msgstr ""
+"在共置(混合)部署中，prefill和decode在同一节点上运行，与下文分离式部署不同。以下模板在4个节点上部署`GLM-5.2`，采用`DP4 TP8`(每节点`data-parallel-size-local=1`)、200k上下文窗口和MTP(`num_speculative_tokens=5`)。节点0托管API服务器并作为DP主节点；节点1至节点3以`--headless`运行。此配置中禁用前缀缓存(`--no-enable-prefix-caching`)。所有IP、网卡名称、端口和权重路径均为占位符。"
+
+#: ../../source/tutorials/models/GLM5.2.md:407
+msgid "**Node 0** (API server / DP master):"
+msgstr "**节点0**(API服务器/DP主节点)："
+
+#: ../../source/tutorials/models/GLM5.2.md:464
+msgid "**Node 1** (headless, `--data-parallel-start-rank 1`):"
+msgstr "**节点1**(无头模式，`--data-parallel-start-rank 1`)："
+
+#: ../../source/tutorials/models/GLM5.2.md:523
+msgid ""
+"Node 2 and Node 3 use the same script as Node 1, with `--data-parallel-"
+"start-rank` set to `2` and `3` respectively (and `node0_ip` pointing to "
+"Node 0)."
+msgstr ""
+"节点2和节点3使用与节点1相同的脚本，`--data-parallel-start-rank`分别设置为`2`和`3`(且`node0_ip`指向节点0)。"
+
+#: ../../source/tutorials/models/GLM5.2.md:525
+msgid "Prefill-Decode Disaggregation"
+msgstr "Prefill-Decode分离"
+
+#: ../../source/tutorials/models/GLM5.2.md:527
+msgid ""
+"We'd like to show the deployment guide of `GLM-5` on multi-node "
+"environment with 1P1D for better performance."
+msgstr "我们将展示`GLM-5`在多节点环境下采用1P1D以获得更好性能的部署指南。"
+
+#: ../../source/tutorials/models/GLM5.2.md:529
+msgid ""
+"Prefill-Decode disaggregation can be deployed on 4 Atlas 800 A3 (64G × "
+"32)."
+msgstr "Prefill-Decode分离可部署在4个Atlas 800 A3 (64G × 32)上。"
+
+#: ../../source/tutorials/models/GLM5.2.md:531
+msgid "Before you start, please"
+msgstr "开始前，请"
+
+#: ../../source/tutorials/models/GLM5.2.md:533
+msgid "prepare the script `launch_online_dp.py` on each node:"
+msgstr "在每个节点上准备脚本`launch_online_dp.py`："
+
+#: ../../source/tutorials/models/GLM5.2.md:636
+msgid "prepare the script `run_dp_template.sh` on each node."
+msgstr "在每个节点上准备脚本`run_dp_template.sh`。"
+
+#: ../../source/tutorials/models/GLM5.2.md:638
+msgid ""
+"To support a 200k context window on the stage of prefill, the parameter "
+"`\"layer_sharding\": [\"q_b_proj\"]` needs to be added to "
+"`--additional_config` on each prefill node."
+msgstr "为在prefill阶段支持200k上下文窗口，需要在每个prefill节点的`--additional_config`中添加参数`\"layer_sharding\": [\"q_b_proj\"]`。"
+
+#: ../../source/tutorials/models/GLM5.2.md:639
+#: ../../source/tutorials/models/GLM5.2.md:920
+msgid "Prefill node 0"
+msgstr "Prefill节点0"
+
+#: ../../source/tutorials/models/GLM5.2.md:709
+#: ../../source/tutorials/models/GLM5.2.md:927
+msgid "Prefill node 1"
+msgstr "Prefill节点1"
+
+#: ../../source/tutorials/models/GLM5.2.md:778
+#: ../../source/tutorials/models/GLM5.2.md:934
+msgid "Decode node 0"
+msgstr "Decode节点0"
+
+#: ../../source/tutorials/models/GLM5.2.md:848
+#: ../../source/tutorials/models/GLM5.2.md:941
+msgid "Decode node 1"
+msgstr "Decode节点1"
+
+#: ../../source/tutorials/models/GLM5.2.md:918
+msgid ""
+"Once the preparation is done, you can start the server with the following"
+" command on each node:"
+msgstr "准备工作完成后，可在每个节点上使用以下命令启动服务器："
+
+#: ../../source/tutorials/models/GLM5.2.md:948
+#: ../../source/tutorials/models/GLM5.2.md:1173
+msgid ""
+"To set up request forwarding, run the following script on any machine. "
+"You can get the proxy program in the repository's examples: "
+"[load_balance_proxy_server_example.py](https://github.com/vllm-project"
+"/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+"要设置请求转发，请在任意机器上运行以下脚本。您可以在仓库的examples目录中获取代理程序：[load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+
+#: ../../source/tutorials/models/GLM5.2.md:976
+msgid "Deployment on 8 Atlas 800 A2"
+msgstr "在8个Atlas 800 A2上部署"
+
+#: ../../source/tutorials/models/GLM5.2.md:978
+msgid ""
+"On Atlas 800 A2, where each node exposes 8 cards, the same global P/D "
+"topology (Prefill `DP4 TP8`, Decode `DP8 TP4`) is split across 8 nodes: 4"
+" prefill nodes hosting 1 DP rank each (8 cards per rank), and 4 decode "
+"nodes hosting 2 DP ranks each (4 cards per rank). The "
+"`launch_online_dp.py` above is reused as-is. The prefill side enables "
+"FlashComm1 and DSA CP; the decode side enables MLAPO and `DYNAMIC_EPLB` "
+"with a `FULL_DECODE_ONLY` graph. Both sides enable prefix caching and MTP"
+" (`num_speculative_tokens=3`). All IPs, NIC names, ports and weight paths"
+" below are placeholders."
+msgstr ""
+"在Atlas 800 A2上，每个节点暴露8张卡，相同的全局P/D拓扑(Prefill `DP4 TP8`，Decode `DP8 TP4`)分布在8个节点上：4个prefill节点各托管1个DP rank(每rank 8卡)，4个decode节点各托管2个DP rank(每rank 4卡)。上述`launch_online_dp.py`保持不变直接复用。Prefill端启用FlashComm1和DSA CP；Decode端启用MLAPO和带`FULL_DECODE_ONLY`图的`DYNAMIC_EPLB`。两端均启用前缀缓存和MTP(`num_speculative_tokens=3`)。以下所有IP、网卡名称、端口和权重路径均为占位符。"
+
+#: ../../source/tutorials/models/GLM5.2.md:980
+msgid "`run_dp_template.sh` for the prefill nodes:"
+msgstr "prefill节点的`run_dp_template.sh`："
+
+#: ../../source/tutorials/models/GLM5.2.md:1065
+msgid "`run_dp_template.sh` for the decode nodes:"
+msgstr "decode节点的`run_dp_template.sh`："
+
+#: ../../source/tutorials/models/GLM5.2.md:1151
+msgid ""
+"Once the preparation is done, start the server with the following "
+"commands:"
+msgstr "准备工作完成后，使用以下命令启动服务器："
+
+#: ../../source/tutorials/models/GLM5.2.md:1153
+msgid ""
+"Prefill nodes — run on `$node_p0_ip`, `$node_p1_ip`, `$node_p2_ip`, "
+"`$node_p3_ip` with `--dp-rank-start` `0/1/2/3`:"
+msgstr ""
+"Prefill节点 — 在`$node_p0_ip`、`$node_p1_ip`、`$node_p2_ip`、`$node_p3_ip`上运行，`--dp-rank-start`分别为`0/1/2/3`："
+
+#: ../../source/tutorials/models/GLM5.2.md:1162
+msgid ""
+"Decode nodes — run on `$node_d0_ip`, `$node_d1_ip`, `$node_d2_ip`, "
+"`$node_d3_ip` with `--dp-rank-start` `0/2/4/6`:"
+msgstr ""
+"Decode节点 — 在`$node_d0_ip`、`$node_d1_ip`、`$node_d2_ip`、`$node_d3_ip`上运行，`--dp-rank-start`分别为`0/2/4/6`："
+
+#: ../../source/tutorials/models/GLM5.2.md:1171
+msgid ""
+"For request forwarding on this 8-node A2 layout, use 4 prefiller hosts (1"
+" endpoint each) and 4 decoder hosts (2 endpoints each) in the Request "
+"Forwarding command below."
+msgstr "对于此8节点A2布局的请求转发，在下面的请求转发命令中使用4个prefiller主机(各1个端点)和4个decoder主机(各2个端点)。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1204
+msgid "**Notice:**"
+msgstr "**注意：**"
+
+#: ../../source/tutorials/models/GLM5.2.md:1206
+msgid "Some configurations for optimization are shown below:"
+msgstr "以下是一些用于优化的配置："
+
+#: ../../source/tutorials/models/GLM5.2.md:1208
+msgid ""
+"`VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce "
+"communication and computation overhead on prefill node. With FlashComm "
+"enabled, layer_sharding list cannot include o_proj as an element."
+msgstr ""
+"`VLLM_ASCEND_ENABLE_FLASHCOMM1`：启用FlashComm优化以减少prefill节点上的通信和计算开销。启用FlashComm后，layer_sharding列表不能包含o_proj作为元素。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1209
+msgid ""
+"`VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: "
+"dispatch_gmm_combine_decode and dispatch_ffn_combine operator."
+msgstr ""
+"`VLLM_ASCEND_ENABLE_FUSED_MC2`：启用以下融合算子：dispatch_gmm_combine_decode和dispatch_ffn_combine算子。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1211
+msgid ""
+"Please refer to the following python file for further explanation and "
+"restrictions of the environment variables above: "
+"[envs.py](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/vllm_ascend/envs.py)"
+msgstr ""
+"请参考以下Python文件了解上述环境变量的详细说明和限制："
+"[envs.py](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/vllm_ascend/envs.py)"
+
+#: ../../source/tutorials/models/GLM5.2.md:1213
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/GLM5.2.md:1215
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示查询模型："
+
+#: ../../source/tutorials/models/GLM5.2.md:1228
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/models/GLM5.2.md:1230
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1232
+#: ../../source/tutorials/models/GLM5.2.md:1244
+msgid "Using AISBench"
+msgstr "使用AISBench"
+
+#: ../../source/tutorials/models/GLM5.2.md:1234
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details."
+msgstr "详情请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1236
+msgid "After execution, you can get the result."
+msgstr "执行后可获取结果。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1238
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用Language Model Evaluation Harness"
+
+#: ../../source/tutorials/models/GLM5.2.md:1240
+msgid "Not tested yet."
+msgstr "尚未测试。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1242
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/GLM5.2.md:1246
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr "详情请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1248
+msgid "Using vLLM Benchmark"
+msgstr "使用vLLM Benchmark"
+
+#: ../../source/tutorials/models/GLM5.2.md:1250
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) "
+"for more details."
+msgstr "更多详情请参考[vllm benchmark](https://docs.vllm.ai/en/latest/contributing/)。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1252
+msgid ""
+"**Notice:** `max-model-len` and `max-num-seqs` need to be set according "
+"to the actual usage scenario. For other settings, please refer to the "
+"**[Deployment](#deployment)** chapter."
+msgstr ""
+"**注意：** `max-model-len`和`max-num-seqs`需要根据实际使用场景设置。其他设置请参考**[部署](#deployment)**章节。"
+
+#: ../../source/tutorials/models/GLM5.2.md:1255
+msgid "FAQ"
+msgstr "常见问题"
+
+#: ../../source/tutorials/models/GLM5.2.md:1257
+msgid "**Q: How to enable function calling for GLM-5.2?**"
+msgstr "**问：如何为GLM-5.2启用函数调用？**"
+
+#: ../../source/tutorials/models/GLM5.2.md:1259
+msgid "A: Please add following configurations in vLLM startup command"
+msgstr "答：请在vLLM启动命令中添加以下配置"

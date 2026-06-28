@@ -25,7 +25,15 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
+        mock_vllm_config.device_config = MagicMock()
+        mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
+        mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+        mock_vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_vllm_config.parallel_config.pipeline_parallel_size = 1
+        mock_vllm_config.parallel_config.context_parallel_size = 1
+        mock_vllm_config.parallel_config.decode_context_parallel_size = 1
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.scheduler_config.max_num_seqs = None
@@ -667,6 +675,77 @@ class TestNPUPlatform(TestBase):
 
         with pytest.raises(ValueError, match="layer_sharding can only be enabled in PD-disaggregated's P node"):
             self.platform._validate_layer_sharding_config(vllm_config)
+
+    def test_validate_parallel_config_rejects_pcp_plus_dp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+
+        with pytest.raises(ValueError, match="PCP \(Prefill Context Parallelism\) and DP \(Data Parallelism\)"):
+            self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_parallel_config_accepts_dp_only(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+
+        self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_parallel_config_accepts_pcp_only(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+
+        self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_parallel_config_accepts_neither(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+
+        self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_accepts_prefill_producer(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=True, kv_role="kv_producer")
+
+        self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_accepts_decode_dp_mtp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=False, kv_role="kv_consumer")
+
+        self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_rejects_decode_pp_mtp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=False, kv_role="kv_consumer")
+
+        with pytest.raises(ValueError, match=r"PP\+MTP.*P nodes.*D nodes.*pipeline_parallel_size=1"):
+            self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_rejects_non_pd_pp_mtp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = None
+
+        with pytest.raises(ValueError, match=r"PP\+MTP.*PD-disaggregated P nodes"):
+            self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_allows_non_mtp_spec_decode(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="eagle")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = None
+
+        self.platform._validate_pd_pp_mtp_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

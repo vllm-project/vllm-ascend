@@ -12,10 +12,9 @@ quantization
 sleep_mode
 structured_output
 lora
-eplb_swift_balancer
+expert_parallelism_load_balancer
 netloader
 rfork
-Multi_Token_Prediction
 dynamic_batch
 epd_disaggregation
 kv_pool

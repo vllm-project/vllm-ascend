@@ -4,7 +4,9 @@
 
 vLLM-Ascend supports Dynamic Chunked Pipeline Parallel (CPP) for optimizing prefill performance in Pipeline Parallelism scenarios. This guide demonstrates deployment with DeepSeek-V3.1 on 1 Atlas 800T A3 server (64G × 16).
 
-For configuration details, see the [Feature Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md). For design details, see the [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md).
+For configuration details, see the [Feature Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md).
+
+For design details, see the [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md).
 
 ## Environment Preparation
 
@@ -110,6 +112,8 @@ vllm serve /mnt/weight/DeepSeek-V3.1-w8a8 \
 - `profiling_chunk_config.enabled`: Enables Dynamic Chunked Pipeline Parallel
 - `profiling_chunk_config.smooth_factor`:  Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more
 - `profiling_chunk_config.min_chunk`: Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`
+- `profiling_chunk_config.need_timing`: Enable/disable Online Calibration
+- `profiling_chunk_config.max_fit_chunk`: Number of chunk-time data for Online Calibration. Should be more when profiling failed
 
 For configuration details, see the [Feature Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md).
 
