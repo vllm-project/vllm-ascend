@@ -1250,6 +1250,17 @@ class AscendSFAImpl(MLAAttentionImpl):
         k_pe = kv_cache[1] if cache_mode == "TND" else None
         return hidden_states, ql_nope, q_pe, q_c, k_nope, k_pe
 
+    def _gather_prolog_v3_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        need_gather_q_kv: bool,
+    ) -> torch.Tensor:
+        if self.enable_sp and not self.enable_dsa_cp and getattr(self, "pcp_size", 1) == 1:
+            return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states.contiguous(), need_gather_q_kv
+            )
+        return hidden_states
+
     def _sfa_preprocess_with_prolog_v3_tnd_cache(
         self,
         hidden_states: torch.Tensor,
@@ -1702,6 +1713,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         precomputed_c8_query = None
 
         if self.enable_sfa_prolog_v3:
+            hidden_states = self._gather_prolog_v3_hidden_states(hidden_states, need_gather_q_kv)
             if self.enable_dsa_cp or getattr(self, "pcp_size", 1) > 1:
                 hidden_states, ql_nope, q_pe, q_c, k_nope, k_pe = self._sfa_preprocess_with_prolog_v3_tnd_cache(
                     hidden_states=hidden_states,
