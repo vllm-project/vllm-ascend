@@ -31,11 +31,11 @@ def test_role_system_instruction_follow(api_client, request):
     assert len(content) > 0, "response should be valid"
 
     # Check: response behavior is valid
-    json_str = re.sub(r"\s*<think>[\s\S]*?</think>\s*", "", content)
-    json_str = re.search(r"(\{.*\})\s*(?:$|`|```)$", json_str, re.S)
-    assert json_str, "response should be valid"
-    if json_str:
-        assert json.loads(json_str.group(1)), "response"
+    json_content = re.sub(r"\s*<think>[\s\S]*?</think>\s*", "", content)
+    json_match = re.search(r"(\{.*\})\s*(?:$|`|```)$", json_content, re.S)
+    assert json_match, "response should be valid"
+    if json_match:
+        assert json.loads(json_match.group(1)), "response"
 
 
 def test_role_long_conversation_pruning(api_client, request):
