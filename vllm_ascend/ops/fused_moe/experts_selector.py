@@ -40,8 +40,10 @@ def _disable_fused_moe_gating_renorm() -> None:
 
 
 def _is_renorm_unsupported_error(exc: BaseException) -> bool:
-    msg = str(exc)
-    return "MoeGatingTopK" in msg and "renorm" in msg
+    # Normalize so we tolerate casing/underscore variants across CANN
+    # releases (e.g. "MoeGatingTopK", "moe_gating_top_k", "MoeGatingTopk").
+    msg = str(exc).lower().replace("_", "")
+    return "moegatingtopk" in msg and "renorm" in msg
 
 
 def select_experts(
