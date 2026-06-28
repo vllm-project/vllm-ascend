@@ -110,6 +110,22 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable DSpark speculative decoding (paper arxiv:2606.19348).
+    # When enabled together with --speculative-config method="dspark", the DSv4 MTP
+    # layers attach a low-rank Markov head (markov_w1/markov_w2) and a confidence
+    # head loaded from DSpark checkpoints (e.g. deepseek-ai/DeepSeek-V4-Flash-DSpark).
+    # Default off so non-DSpark checkpoints keep loading without unmapped-weight errors.
+    "VLLM_ASCEND_ENABLE_DSPARK": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DSPARK", "0"))),
+    # DSpark per-position confidence threshold (paper §3.2). When > 0, draft
+    # positions whose confidence-head score falls below this value get their
+    # draft token replaced by an invalid id (-1) so the verify pass treats
+    # them as rejected. Default 0.0 means "no truncation" — the full draft
+    # block always goes through verify, which is the M1/M2 behavior. The M3
+    # hardware-aware scheduler will replace this with throughput-aware
+    # dynamic truncation; this env knob is the M2 hook for offline tuning.
+    "VLLM_ASCEND_DSPARK_CONFIDENCE_THRESHOLD": lambda: float(
+        os.getenv("VLLM_ASCEND_DSPARK_CONFIDENCE_THRESHOLD", "0.0")
+    ),
 }
 
 # end-env-vars-definition

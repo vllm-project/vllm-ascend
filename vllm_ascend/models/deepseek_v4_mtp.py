@@ -22,6 +22,7 @@ from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_dsa_cp
 
@@ -31,6 +32,12 @@ from .deepseek_v4 import (
     DeepseekV4MoE,
     get_spec_layer_idx_from_weight_name,
 )
+
+# DSpark (paper arxiv:2606.19348). Defaults match deepseek-ai/DeepSeek-V4-Flash-DSpark
+# `inference/config.json`. Only used when `envs.VLLM_ASCEND_ENABLE_DSPARK` is on.
+DSPARK_DEFAULT_BLOCK_SIZE = 5
+DSPARK_DEFAULT_MARKOV_RANK = 256
+DSPARK_DEFAULT_N_MTP_LAYERS = 3
 
 
 class SharedHead(nn.Module):
@@ -53,8 +60,81 @@ class SharedHead(nn.Module):
         return self.norm(hidden_states)
 
 
+class DSparkMarkovHead(nn.Module):
+    """DSpark Markov head (paper arxiv:2606.19348, §3.1).
+
+    Low-rank token-dependent bias: ``markov_w2(markov_w1(prev_token))`` injected
+    into the parallel backbone logits to add intra-block dependency without
+    paying the latency of a full autoregressive head.
+
+    Weight names in the open-source ``deepseek-ai/DeepSeek-V4-Flash-DSpark``
+    checkpoint: ``markov_head.markov_w1.weight`` (``[vocab, rank]``) and
+    ``markov_head.markov_w2.weight`` (``[vocab, rank]``).
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        markov_rank: int,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.markov_w1 = VocabParallelEmbedding(vocab_size, markov_rank)
+        self.markov_w2 = ParallelLMHead(
+            vocab_size,
+            markov_rank,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "markov_w2"),
+        )
+
+    def forward(self, token_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one Markov step.
+
+        Returns ``(logits_bias, markov_embed)``:
+          * ``logits_bias`` (``[*, vocab]``): the per-token bias to be added onto
+            the parallel backbone logits at the SAME draft position.
+          * ``markov_embed`` (``[*, markov_rank]``): the unprojected low-rank
+            embedding consumed by ``DSparkConfidenceHead`` after the full draft
+            block is sampled.
+
+        Per ``inference/model.py``:
+            embed = markov_w1(token_ids)
+            logits = markov_w2(embed)         # full_logits=True
+            return logits, embed
+        """
+        markov_embed = self.markov_w1(token_ids)
+        # ``markov_w2`` is a ``ParallelLMHead``: it owns the projection weight
+        # ``[vocab, markov_rank]`` but does NOT execute the matmul on its own
+        # (vLLM routes the head through a ``LogitsProcessor``). Use the
+        # underlying ``weight`` directly so this returns a plain ``[*, vocab]``
+        # bias tensor that the caller can ``add_()`` onto sampler logits.
+        logits_bias = torch.nn.functional.linear(markov_embed, self.markov_w2.weight)
+        return logits_bias, markov_embed
+
+
+class DSparkConfidenceHead(nn.Module):
+    """DSpark confidence head (paper arxiv:2606.19348, §3.2).
+
+    Predicts per-position acceptance probability from ``concat(hidden, markov_embed)``.
+    Kept in fp32 because the checkpoint stores ``proj`` in fp32 (per
+    ``inference/model.py`` comment) and the confidence score needs full precision
+    for the downstream prefix scheduler in M2.
+
+    Weight name in checkpoint: ``confidence_head.proj.weight`` (``[1, hidden+rank]``).
+    """
+
+    def __init__(self, input_dim: int) -> None:
+        super().__init__()
+        self.proj = nn.Linear(input_dim, 1, bias=False, dtype=torch.float32)
+
+    def forward(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([hidden, markov_embed], dim=-1)
+        return self.proj(x.float()).squeeze(-1)
+
+
 class DeepSeekMultiTokenPredictorLayer(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str, is_last_mtp_layer: bool = False) -> None:
         super().__init__()
 
         config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -103,6 +183,69 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         self.norm_eps = config.rms_norm_eps
 
+        # DSpark (paper arxiv:2606.19348): attach Markov head + Confidence head
+        # only to the LAST MTP stage. They are silent placeholders unless the
+        # DSpark proposer runs the markov sample loop in forward (M1.5).
+        # The checkpoint stores these weights at `mtp.<last_stage>.markov_head.*`
+        # and `mtp.<last_stage>.confidence_head.proj.weight`.
+        self.is_dspark_last_layer = bool(envs.VLLM_ASCEND_ENABLE_DSPARK) and is_last_mtp_layer
+        if self.is_dspark_last_layer:
+            self.dspark_block_size = int(getattr(config, "dspark_block_size", DSPARK_DEFAULT_BLOCK_SIZE))
+            self.dspark_markov_rank = int(getattr(config, "dspark_markov_rank", DSPARK_DEFAULT_MARKOV_RANK))
+            self.markov_head = DSparkMarkovHead(
+                vocab_size=config.vocab_size,
+                markov_rank=self.dspark_markov_rank,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "markov_head"),
+            )
+            self.confidence_head = DSparkConfidenceHead(
+                input_dim=config.hidden_size + self.dspark_markov_rank,
+            )
+        else:
+            self.markov_head = None
+            self.confidence_head = None
+
+    def apply_dspark_markov_bias(
+        self,
+        logits: torch.Tensor,
+        prev_token_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Apply one DSpark Markov step on top of backbone-produced logits.
+
+        Used by ``DSparkProposer`` (M1.6) inside its serial sample loop. The
+        proposer calls this once per draft position with the token sampled at
+        the previous position, and the returned ``markov_embed`` is collected
+        across the draft block to feed the confidence head once the block is
+        complete.
+
+        Returns ``(biased_logits, markov_embed)``. When this layer is not the
+        DSpark last-stage layer (i.e. ``markov_head is None``), returns the
+        ``logits`` untouched and ``markov_embed=None``.
+
+        Note: this is a pure helper. The forward path (``self.forward``) is
+        unchanged so non-DSpark workloads keep byte-for-byte parity.
+        """
+        if self.markov_head is None:
+            return logits, None
+        logits_bias, markov_embed = self.markov_head(prev_token_ids)
+        return logits + logits_bias, markov_embed
+
+    def compute_dspark_confidence(
+        self,
+        hidden_states: torch.Tensor,
+        markov_embeds: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Compute per-position acceptance scores for a completed draft block.
+
+        ``hidden_states`` is the per-position backbone hidden  ``[bsz, block_size, dim]``;
+        ``markov_embeds`` is the stacked Markov embeddings  ``[bsz, block_size, rank]``
+        accumulated across the serial sample loop. Returns ``None`` when this
+        layer is not the DSpark last-stage layer.
+        """
+        if self.confidence_head is None:
+            return None
+        return self.confidence_head(hidden_states, markov_embeds)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -143,11 +286,24 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
+        # DSpark checkpoints ship with 3 MTP layers but some HF root config.json
+        # files still report num_nextn_predict_layers=1 for legacy transformers
+        # compatibility. When DSpark is enabled, honor `dspark_n_mtp_layers`
+        # (config field or fallback to 3) so the layer ModuleDict matches the
+        # checkpoint's `mtp.[0,1,2].*` weight layout.
+        if envs.VLLM_ASCEND_ENABLE_DSPARK:
+            dspark_n = int(getattr(config, "dspark_n_mtp_layers", DSPARK_DEFAULT_N_MTP_LAYERS))
+            if dspark_n > self.num_mtp_layers:
+                self.num_mtp_layers = dspark_n
         # to map the exact layer index from weights
 
         self.layers = torch.nn.ModuleDict(
             {
-                str(idx): DeepSeekMultiTokenPredictorLayer(vllm_config, f"{prefix}.{idx}")
+                str(idx): DeepSeekMultiTokenPredictorLayer(
+                    vllm_config,
+                    f"{prefix}.{idx}",
+                    is_last_mtp_layer=(idx == self.num_mtp_layers - 1),
+                )
                 for idx in range(
                     0,
                     self.num_mtp_layers,
@@ -291,13 +447,23 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
 
-            assert "mtp.0." in name
+            # Multi-MTP-stage checkpoints (DSpark: mtp.0/mtp.1/mtp.2) route to
+            # the corresponding `model.layers.<spec_layer>.*` slot. The shared
+            # embedding lives only at mtp.0 in legacy ckpts; DSpark keeps the
+            # same convention.
+            mtp_prefix = f"mtp.{spec_layer}."
+            assert mtp_prefix in name, f"unexpected MTP weight name without {mtp_prefix} prefix: {name}"
+            target_layer_prefix = f"model.layers.{spec_layer}."
             if ".emb.tok_emb." in name:
-                name = name.replace("mtp.0.", "model.")
+                name = name.replace(mtp_prefix, "model.")
+            elif ".markov_head." in name or ".confidence_head." in name:
+                # DSpark heads live on the last MTP stage; map to the layer-level
+                # module (no `.mtp_block.` indirection).
+                name = name.replace(mtp_prefix, target_layer_prefix)
             elif self.no_mtp_block_in_name(name):
-                name = name.replace("mtp.0.", "model.layers.0.")
+                name = name.replace(mtp_prefix, target_layer_prefix)
             else:
-                name = name.replace("mtp.0.", "model.layers.0.mtp_block.")
+                name = name.replace(mtp_prefix, f"{target_layer_prefix}mtp_block.")
 
             if ".w1." in name:
                 name = name.replace(".w1.", ".gate_proj.")
