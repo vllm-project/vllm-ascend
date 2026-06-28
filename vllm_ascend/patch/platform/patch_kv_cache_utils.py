@@ -2,6 +2,7 @@ from collections import defaultdict
 
 import vllm
 from vllm.config import VllmConfig
+from vllm_ascend import envs
 from vllm.v1.core.kv_cache_utils import (create_kv_cache_group_specs,
                                          get_num_blocks, get_uniform_page_size,
                                          may_override_num_blocks,
@@ -40,6 +41,37 @@ def check_uniform_page_size(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     return len(page_sizes) == 1
 
 
+def _has_ascend_kv_cache_spec(
+        kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+    """Use Ascend grouping for Ascend-only KV specs unknown to upstream.
+
+    DSv4 A3 uses Compress*AttentionSpec classes from
+    vllm_ascend.core.kv_cache_spec. Upstream
+    UniformTypeKVCacheSpecs.is_uniform_type raises NotImplementedError for
+    those classes before the Ascend grouping code can handle them.
+    """
+    return any(type(spec).__module__ == "vllm_ascend.core.kv_cache_spec"
+               for spec in kv_cache_spec.values())
+
+
+def _get_dsv4_host_kv_budget() -> tuple[str, int] | None:
+    family = envs.VLLM_ASCEND_DSV4_HOST_KV_FAMILY
+    host_bytes = envs.VLLM_ASCEND_DSV4_HOST_KV_BYTES
+    if not family or host_bytes is None or host_bytes <= 0:
+        return None
+    return family, int(host_bytes)
+
+
+def _is_host_backed_spec(spec: KVCacheSpec, family: str) -> bool:
+    return family == "c128" and getattr(spec, "compress_ratio", None) == 128
+
+
+def _blocks_for_budget(budget_bytes: int, bytes_per_block: int) -> float:
+    if bytes_per_block <= 0:
+        return float("inf")
+    return budget_bytes // bytes_per_block
+
+
 def get_kv_cache_groups(
         vllm_config: VllmConfig,
         kv_cache_spec: dict[str, KVCacheSpec]) -> list[KVCacheGroupSpec]:
@@ -54,7 +86,8 @@ def get_kv_cache_groups(
         The generated KVCacheGroups
     """
 
-    if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+    if (vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            and not _has_ascend_kv_cache_spec(kv_cache_spec)):
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
     # kv cache group spec with multi groups and same block size without share hybrid blocks
@@ -92,10 +125,25 @@ def get_kv_cache_config_from_groups(
         # Special case: all layers have the same type of KV cache but with
         # different hidden size. Allocate different amount of memory for each
         # layer based on its hidden size.
-        num_blocks = (available_memory //
-                      kv_cache_groups[0].kv_cache_spec.page_size_bytes)
-        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
+        host_kv_budget = _get_dsv4_host_kv_budget()
+        if host_kv_budget is None:
+            num_blocks = (available_memory //
+                          kv_cache_groups[0].kv_cache_spec.page_size_bytes)
+        else:
+            family, host_bytes = host_kv_budget
+            hbm_bytes_per_block = 0
+            host_bytes_per_block = 0
+            for layer_spec in per_layer_specs.values():
+                if _is_host_backed_spec(layer_spec, family):
+                    host_bytes_per_block += layer_spec.page_size_bytes
+                else:
+                    hbm_bytes_per_block += layer_spec.page_size_bytes
+            num_blocks = int(min(
+                _blocks_for_budget(available_memory, hbm_bytes_per_block),
+                _blocks_for_budget(host_bytes, host_bytes_per_block),
+            ))
+        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         kv_cache_tensors = [
             KVCacheTensor(
                 size=per_layer_specs[layer_name].page_size_bytes * num_blocks,
@@ -106,12 +154,30 @@ def get_kv_cache_config_from_groups(
         # Special case: there are multiple groups of KV cache, and the block
         # size of them keeps the same. We will still have `num_layers` memory
         # pools, this means the memory pools won't be shared across the groups.
-        total_page_size_bytes = 0
-        for kv_cache_group in kv_cache_groups:
-            num_layers = len(kv_cache_group.layer_names)
-            page_size = kv_cache_group.kv_cache_spec.page_size_bytes
-            total_page_size_bytes += page_size * num_layers
-        num_blocks = available_memory // total_page_size_bytes
+        host_kv_budget = _get_dsv4_host_kv_budget()
+        if host_kv_budget is None:
+            total_page_size_bytes = 0
+            for kv_cache_group in kv_cache_groups:
+                num_layers = len(kv_cache_group.layer_names)
+                page_size = kv_cache_group.kv_cache_spec.page_size_bytes
+                total_page_size_bytes += page_size * num_layers
+            num_blocks = available_memory // total_page_size_bytes
+        else:
+            family, host_bytes = host_kv_budget
+            hbm_bytes_per_block = 0
+            host_bytes_per_block = 0
+            for kv_cache_group in kv_cache_groups:
+                num_layers = len(kv_cache_group.layer_names)
+                page_size = kv_cache_group.kv_cache_spec.page_size_bytes
+                total_bytes = page_size * num_layers
+                if _is_host_backed_spec(kv_cache_group.kv_cache_spec, family):
+                    host_bytes_per_block += total_bytes
+                else:
+                    hbm_bytes_per_block += total_bytes
+            num_blocks = int(min(
+                _blocks_for_budget(available_memory, hbm_bytes_per_block),
+                _blocks_for_budget(host_bytes, host_bytes_per_block),
+            ))
         # TODO(zxr): DONT use magic number
         num_blocks = num_blocks // 128 * 128
         assert num_blocks > 0

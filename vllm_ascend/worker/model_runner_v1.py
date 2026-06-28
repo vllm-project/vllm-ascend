@@ -19,6 +19,7 @@
 
 import ctypes
 import math
+import os
 import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -78,12 +79,14 @@ from vllm.v1.worker.gpu_model_runner import (AsyncGPUModelRunnerOutput,
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (AscendDSAMetadata,
                                           AscendDSAMetadataBuilder)
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          using_paged_attention)
+from vllm_ascend.kv_offload.shmem_host import _acl_malloc_host, _make_host_tensor
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
@@ -2098,6 +2101,27 @@ class NPUModelRunner(GPUModelRunner):
             invalid_req_indices,
         )
 
+    def __del__(self):
+        allocations = getattr(self, "_host_kv_allocations", None)
+        if not allocations:
+            return
+        try:
+            libacl = ctypes.CDLL("libascendcl.so")
+            libacl.aclrtHostUnregister.argtypes = [ctypes.c_void_p]
+            libacl.aclrtHostUnregister.restype = ctypes.c_int
+            libacl.aclrtFreeHost.argtypes = [ctypes.c_void_p]
+            libacl.aclrtFreeHost.restype = ctypes.c_int
+            for host_ptr, _size in allocations:
+                ptr = ctypes.c_void_p(host_ptr)
+                try:
+                    libacl.aclrtHostUnregister(ptr)
+                finally:
+                    libacl.aclrtFreeHost(ptr)
+        except Exception:
+            pass
+        finally:
+            allocations.clear()
+
     def _build_dummy_attn_metadata(
         self,
         with_prefill: bool,
@@ -2607,8 +2631,18 @@ class NPUModelRunner(GPUModelRunner):
 
         if has_kv_transfer_group():
             if self.use_compress:
-                get_kv_transfer_group().register_kv_caches(
-                    kv_caches, kv_states)
+                if os.environ.get("VLLM_ASCEND_KV_HOST_SIDE") == "1":
+                    kv_transfer_group = get_kv_transfer_group()
+                    connector_worker = getattr(kv_transfer_group,
+                                               "connector_worker", None)
+                    if connector_worker is not None and hasattr(
+                            connector_worker, "_register_handlers"):
+                        connector_worker._register_handlers(kv_caches, {})
+                    else:
+                        kv_transfer_group.register_kv_caches(kv_caches)
+                else:
+                    get_kv_transfer_group().register_kv_caches(
+                        kv_caches, kv_states)
             else:
                 get_kv_transfer_group().register_kv_caches(kv_caches)
 
@@ -2783,6 +2817,17 @@ class NPUModelRunner(GPUModelRunner):
                                               Optional[torch.Tensor]]] = {}
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
+        host_kv_family = envs.VLLM_ASCEND_DSV4_HOST_KV_FAMILY
+        host_kv_budget = envs.VLLM_ASCEND_DSV4_HOST_KV_BYTES
+        host_kv_enabled = (
+            host_kv_family == "c128"
+            and host_kv_budget is not None
+            and host_kv_budget > 0
+            and self.vllm_config.kv_transfer_config is None
+        )
+        host_kv_used = 0
+        if not hasattr(self, "_host_kv_allocations"):
+            self._host_kv_allocations = []
 
         def _get_aligned_tensor(size: torch.Size,
                                 dtype: torch.dtype,
@@ -2794,6 +2839,19 @@ class NPUModelRunner(GPUModelRunner):
             aligned_tensor = self._align_memory(original_tensor,
                                                 alignment)[:tensor_size]
             return aligned_tensor.view(dtype).view(size)
+
+        def _get_host_mapped_int8_tensor(size_bytes: int) -> torch.Tensor:
+            nonlocal host_kv_used
+            if host_kv_budget is not None and host_kv_used + size_bytes > host_kv_budget:
+                raise RuntimeError(
+                    f"DSv4 host-backed KV exceeded budget: requested={host_kv_used + size_bytes}, "
+                    f"budget={host_kv_budget}."
+                )
+            host_ptr, dev_ptr = _acl_malloc_host(size_bytes)
+            self._host_kv_allocations.append((host_ptr, size_bytes))
+            host_kv_used += size_bytes
+            return _make_host_tensor(dev_ptr, (size_bytes,), torch.int8,
+                                     self.device, size_bytes)
 
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
@@ -2860,7 +2918,12 @@ class NPUModelRunner(GPUModelRunner):
                             indexer_scale_tensor)
 
                     elif exact_layer_id % 2 != 0:
-                        if self.vllm_config.kv_transfer_config is None:
+                        # ponytail: DSv4 C128 currently maps to odd exact_layer_id;
+                        # switch this branch to spec-based routing if layer ordering changes.
+                        if host_kv_enabled:
+                            c128_kv_tensor = _get_host_mapped_int8_tensor(
+                                kv_cache_tensor.size)
+                        elif self.vllm_config.kv_transfer_config is None:
                             c128_kv_tensor = torch.zeros(
                                 kv_cache_tensor.size,
                                 dtype=torch.int8,
