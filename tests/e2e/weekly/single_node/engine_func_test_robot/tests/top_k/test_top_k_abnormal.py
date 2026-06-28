@@ -1,309 +1,127 @@
 import pytest
-from ...utility import request_helper as helper
-from ...utility import assertion
+
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import assertion
+from tests.e2e.weekly.single_node.engine_func_test_robot.utility import (
+    request_helper as helper,
+)
 
 
-def test_top_k_zero_non_stream(api_client, request):
-    """非流式：top_k=0为有效值，应该正常响应"""
-    request_body = {
-        "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
-        "top_k": 0,
-        "stream": False,
-        "max_tokens": 50
-    }
-
-    helper.attach_request_body(request_body)
-    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
-
-    # 校验点：状态码200
+def _assert_success_response(response, stream):
     assertion.assert_status_code_200(response)
 
-    # 校验点：finish_reason为stop或length
-    finish_reason = response.json()["choices"][0]["finish_reason"]
+    if stream:
+        assertion.assert_stream_has_done(response.text)
+        finish_reason = assertion.assert_stream_single_finish_reason(response.text)
+    else:
+        finish_reason = response.json()["choices"][0]["finish_reason"]
     assertion.assert_finish_reason_valid(finish_reason)
 
 
-def test_top_k_zero_stream(api_client, request):
-    """流式：top_k=0为有效值，应该正常响应"""
-    request_body = {
-        "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
-        "top_k": 0,
-        "stream": True,
-        "max_tokens": 50
-    }
-
-    helper.attach_request_body(request_body)
-    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
-
-    # 校验点：状态码200
-    assertion.assert_status_code_200(response)
-
-    # 校验点：流式响应包含[DONE]
-    assertion.assert_stream_has_done(response.text)
-
-    # 校验点：finish_reason为stop或length
-    finish_reason = assertion.assert_stream_single_finish_reason(response.text)
-    assertion.assert_finish_reason_valid(finish_reason)
-
-
-def test_top_k_negative_not_minus_one_non_stream(api_client, request):
-    """非流式：top_k为小于-1的负数，应该返回400错误"""
-    request_body = {
-        "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
-        "top_k": -5,
-        "stream": False,
-        "max_tokens": 50
-    }
-
-    helper.attach_request_body(request_body)
-    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
-
-    # 校验点：状态码400，错误码400
-    assertion.assert_status_code_400(response)
-    assertion.assert_error_code_400(response)
-
-
-def test_top_k_negative_not_minus_one_stream(api_client, request):
-    """流式：top_k为小于-1的负数，pd架构状态码200+错误码400，single架构状态码400"""
-    request_body = {
-        "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
-        "top_k": -5,
-        "stream": True,
-        "max_tokens": 50
-    }
-
-    helper.attach_request_body(request_body)
-    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
-
-    # 校验点：根据引擎架构判断状态码，错误码均为400
-    engine_arch = request.config.getoption("--engineArchitecture")
-    if engine_arch == "pd":
+def _assert_error_code_400_response(response, request, stream):
+    if stream and request.config.getoption("--engineArchitecture") == "pd":
         assertion.assert_status_code_200(response)
-    else:  # single
+    else:
         assertion.assert_status_code_400(response)
     assertion.assert_error_code_400(response)
 
 
-def test_top_k_exceed_vocab_size_non_stream(api_client, request):
-    """非流式：top_k超过词表大小（如999999999），请求可以接受但会被钳制到词表大小"""
+@pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
+def test_top_k_zero(api_client, stream):
+    """top_k=0 is accepted by the engine and should respond normally."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
+        "messages": [{"role": "user", "content": "Please answer briefly."}],
+        "top_k": 0,
+        "stream": stream,
+        "max_tokens": 50,
+    }
+
+    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
+
+    # Check: request succeeds and finish_reason is valid
+    _assert_success_response(response, stream)
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
+def test_top_k_negative_not_minus_one(api_client, request, stream):
+    """A negative top_k value other than -1 should return error code 400."""
+    request_body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "Please answer briefly."}],
+        "top_k": -5,
+        "stream": stream,
+        "max_tokens": 50,
+    }
+
+    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
+
+    # Check: status behavior differs by architecture, but error code is 400
+    _assert_error_code_400_response(response, request, stream)
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
+def test_top_k_exceed_vocab_size(api_client, stream):
+    """A top_k value above vocab size should be accepted and clamped by the engine."""
+    request_body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "Please answer briefly."}],
         "top_k": 999999999,
-        "stream": False,
-        "max_tokens": 50
+        "stream": stream,
+        "max_tokens": 50,
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：状态码200（超大值通常会被截断到vocab_size）
-    assertion.assert_status_code_200(response)
-
-    # 验证finish_reason有效
-    finish_reason = response.json()["choices"][0]["finish_reason"]
-    assertion.assert_finish_reason_valid(finish_reason)
+    # Check: request succeeds and finish_reason is valid
+    _assert_success_response(response, stream)
 
 
-def test_top_k_exceed_vocab_size_stream(api_client, request):
-    """流式：top_k超过词表大小（如999999999），请求可以接受但会被钳制到词表大小"""
+@pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
+def test_top_k_float(api_client, request, stream):
+    """A float top_k value should return error code 400."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
-        "top_k": 999999999,
-        "stream": True,
-        "max_tokens": 50
-    }
-
-    helper.attach_request_body(request_body)
-    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
-
-    # 校验点：状态码200，流式响应包含[DONE]
-    assertion.assert_status_code_200(response)
-    assertion.assert_stream_has_done(response.text)
-
-    # 验证finish_reason有效
-    finish_reason = assertion.assert_stream_single_finish_reason(response.text)
-    assertion.assert_finish_reason_valid(finish_reason)
-
-
-def test_top_k_float_non_stream(api_client, request):
-    """非流式：top_k为浮点数类型，应该返回400错误"""
-    request_body = {
-        "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
+        "messages": [{"role": "user", "content": "Please answer briefly."}],
         "top_k": 10.5,
-        "stream": False,
-        "max_tokens": 50
+        "stream": stream,
+        "max_tokens": 50,
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点：状态码400，错误码400
-    assertion.assert_status_code_400(response)
-    assertion.assert_error_code_400(response)
+    # Check: status behavior differs by architecture, but error code is 400
+    _assert_error_code_400_response(response, request, stream)
 
 
-def test_top_k_float_stream(api_client, request):
-    """流式：top_k为浮点数类型，pd架构状态码200+错误码400，single架构状态码400"""
+@pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
+def test_top_k_string(api_client, stream):
+    """A numeric string top_k value should be accepted by the engine."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
-        "top_k": 10.5,
-        "stream": True,
-        "max_tokens": 50
-    }
-
-    helper.attach_request_body(request_body)
-    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
-
-    # 校验点：根据引擎架构判断状态码，错误码均为400
-    engine_arch = request.config.getoption("--engineArchitecture")
-    if engine_arch == "pd":
-        assertion.assert_status_code_200(response)
-    else:  # single
-        assertion.assert_status_code_400(response)
-    assertion.assert_error_code_400(response)
-
-
-def test_top_k_string_non_stream(api_client, request):
-    """非流式：top_k为字符串数值，应该正常响应"""
-    request_body = {
-        "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
+        "messages": [{"role": "user", "content": "Please answer briefly."}],
         "top_k": "50",
-        "stream": False,
-        "max_tokens": 50
+        "stream": stream,
+        "max_tokens": 50,
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点1：状态码200
-    assertion.assert_status_code_200(response)
-
-    # 校验点2：finish_reason为stop或length
-    finish_reason = response.json()["choices"][0]["finish_reason"]
-    assertion.assert_finish_reason_valid(finish_reason)
+    # Check: request succeeds and finish_reason is valid
+    _assert_success_response(response, stream)
 
 
-def test_top_k_string_stream(api_client, request):
-    """流式：top_k为字符串数值，应该正常响应"""
+@pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
+def test_top_k_null(api_client, stream):
+    """top_k=null should be accepted by the engine."""
     request_body = {
         "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
-        "top_k": "50",
-        "stream": True,
-        "max_tokens": 50
-    }
-
-    helper.attach_request_body(request_body)
-    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
-
-    # 校验点1：状态码200
-    assertion.assert_status_code_200(response)
-
-    # 校验点2：流式响应包含[DONE]
-    assertion.assert_stream_has_done(response.text)
-
-    # 校验点3：finish_reason为stop或length
-    finish_reason = assertion.assert_stream_single_finish_reason(response.text)
-    assertion.assert_finish_reason_valid(finish_reason)
-
-
-def test_top_k_null_non_stream(api_client, request):
-    """非流式：top_k为null，应该正常响应"""
-    request_body = {
-        "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
+        "messages": [{"role": "user", "content": "Please answer briefly."}],
         "top_k": None,
-        "stream": False,
-        "max_tokens": 50
+        "stream": stream,
+        "max_tokens": 50,
     }
 
-    helper.attach_request_body(request_body)
     response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
 
-    # 校验点1：状态码200
-    assertion.assert_status_code_200(response)
-
-    # 校验点2：finish_reason为stop或length
-    finish_reason = response.json()["choices"][0]["finish_reason"]
-    assertion.assert_finish_reason_valid(finish_reason)
-
-
-def test_top_k_null_stream(api_client, request):
-    """流式：top_k为null，应该正常响应"""
-    request_body = {
-        "model": "auto",
-        "messages": [{
-            "role": "user",
-            "content": "今天天气怎么样"
-        }],
-        "top_k": None,
-        "stream": True,
-        "max_tokens": 50
-    }
-
-    helper.attach_request_body(request_body)
-    response = helper.send_request(api_client, "/v1/chat/completions", request_body)
-    helper.attach_response_body(response)
-
-    # 校验点1：状态码200
-    assertion.assert_status_code_200(response)
-
-    # 校验点2：流式响应包含[DONE]
-    assertion.assert_stream_has_done(response.text)
-
-    # 校验点3：finish_reason为stop或length
-    finish_reason = assertion.assert_stream_single_finish_reason(response.text)
-    assertion.assert_finish_reason_valid(finish_reason)
+    # Check: request succeeds and finish_reason is valid
+    _assert_success_response(response, stream)
