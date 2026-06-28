@@ -60,6 +60,67 @@ class TestAscendSFABackend(TestBase):
 
 
 class TestAscendSFAPrologV3(TestBase):
+    @patch("vllm_ascend.attention.sfa_v1.get_tp_group")
+    @patch("vllm_ascend.attention.sfa_v1.all_gather_async")
+    def test_dsa_cp_all_gather_skips_missing_indexer(self, mock_all_gather, mock_get_tp_group):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = False
+        impl.use_sparse_c8_indexer = False
+
+        k_pe = torch.randn(2, 1, 16)
+        k_nope = torch.randn(2, 1, 128)
+        gathered = torch.randn(4, 144)
+        handle = MagicMock()
+        mock_all_gather.return_value = (gathered, handle)
+
+        fused_kv, k_li, k_li_scale, handles = impl._start_dsa_cp_kv_all_gather(
+            k_pe=k_pe,
+            k_nope=k_nope,
+            k_li=None,
+            k_li_scale=None,
+            async_op=True,
+        )
+
+        self.assertIs(fused_kv, gathered)
+        self.assertIsNone(k_li)
+        self.assertIsNone(k_li_scale)
+        self.assertEqual(handles, [handle])
+        gather_input = mock_all_gather.call_args.args[0]
+        self.assertEqual(gather_input.shape, (2, 144))
+        mock_all_gather.assert_called_once_with(
+            gather_input,
+            mock_get_tp_group.return_value,
+            async_op=True,
+        )
+
+        impl.enable_dsa_cp_with_layer_shard = False
+        impl.qk_rope_head_dim = 16
+        impl.kv_lora_rank = 128
+        key_cache = torch.empty(1)
+        value_cache = torch.empty(1)
+        slot_mapping = torch.arange(4)
+        attn_metadata = SimpleNamespace(num_actual_tokens=4)
+
+        with patch("vllm_ascend.attention.sfa_v1.DeviceOperator.reshape_and_cache") as mock_reshape_and_cache:
+            result_k_li, o_proj_handle = impl._finish_dsa_cp_kv_all_gather(
+                fused_kv_no_split=fused_kv,
+                k_li=k_li,
+                handles=handles,
+                kv_cache=(key_cache, value_cache, torch.empty(0)),
+                slot_mapping=slot_mapping,
+                attn_metadata=attn_metadata,
+                full_gather_o_proj_enabled=False,
+            )
+
+        self.assertIsNone(result_k_li)
+        self.assertIsNone(o_proj_handle)
+        handle.wait.assert_called_once()
+        cache_kwargs = mock_reshape_and_cache.call_args.kwargs
+        self.assertEqual(cache_kwargs["key"].shape, (4, 1, 128))
+        self.assertEqual(cache_kwargs["value"].shape, (4, 1, 16))
+        self.assertIs(cache_kwargs["key_cache"], key_cache)
+        self.assertIs(cache_kwargs["value_cache"], value_cache)
+
     def test_indexer_reuses_query_precomputed_during_all_gather(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         expected = torch.zeros(2, 1, dtype=torch.int32)
