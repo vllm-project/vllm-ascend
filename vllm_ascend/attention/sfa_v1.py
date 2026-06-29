@@ -29,6 +29,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     enable_cp,
+    enable_dcp_replicate_k,
     maybe_save_kv_layer_to_connector,
     trans_rope_weight,
     transdata,
@@ -110,6 +111,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
+        if enable_dcp_replicate_k():
+            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
+
+            return  AscendSFADCPMetadataBuilder
         if enable_cp():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPMetadataBuilder
 
@@ -128,6 +133,10 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
+        if enable_dcp_replicate_k():
+            from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
+
+            return AscendSFADCPImpl
         if enable_cp():
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFACPImpl
 
@@ -138,6 +147,11 @@ class AscendSFABackend(AttentionBackend):
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
 
+@dataclass
+class DCPContext:
+    slot_mapping: torch.Tensor
+    block_table: torch.Tensor
+    seq_len: torch.Tensor
 
 @dataclass
 class DSACPContext:
@@ -182,6 +196,7 @@ class AscendSFAMetadata:
     attn_mask: torch.Tensor = None
     # chunked prefill by default if no attn_states passed
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
+    dcp_context: DCPContext | None = None
     dsa_cp_context: DSACPContext | None = None
     reshape_cache_event: torch.npu.Event = None
     sfa_cp_metadata: AscendPCPMetadata | None = None
@@ -276,6 +291,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs,
     ) -> AscendSFAMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
         return self._build(common_attn_metadata, draft_index=None)
@@ -1318,6 +1334,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             actual_seq_lengths_query = attn_metadata.cum_query_lens
             actual_seq_lengths_key = attn_metadata.seq_lens
+        # dcp may override slot_mapping for key_cache and value_cache
+        slot_mapping_kv = attn_metadata.dcp_context.slot_mapping if attn_metadata.dcp_context is not None else attn_metadata.slot_mapping
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
@@ -1393,7 +1411,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata
                 )
             else:
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, attn_metadata)
+                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_kv, attn_metadata)
 
             if self.enable_dsa_cp:
                 assert k_pe is not None
@@ -1592,7 +1610,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     else:
                         torch_npu.npu_scatter_nd_update_(
                             kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
-                            slot_mapping.view(-1, 1),
+                            slot_mapping_kv.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
 
