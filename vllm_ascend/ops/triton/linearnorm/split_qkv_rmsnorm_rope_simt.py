@@ -133,47 +133,52 @@ def split_qkv_rmsnorm_rope_simt_kernel(
 
         values_tmp = tl.zeros((batch_size_per_iter_per_vec, q_head_num, ROPE_DIM), dtype=tl.bfloat16)
         x1 = extract_slice(
-            normalized_values_tmp, (0, 0, 0), (batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM), (1, 1, 1)
+            normalized_values_tmp,
+            offsets=(0, 0, 0),
+            sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
+            strides=(1, 1, 1),
         )
         x2 = extract_slice(
             normalized_values_tmp,
-            (0, 0, HALF_ROPE_DIM),
-            (batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
-            (1, 1, 1),
+            offsets=(0, 0, HALF_ROPE_DIM),
+            sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
+            strides=(1, 1, 1),
         )
         values_tmp = insert_slice(
             values_tmp,
             x1 * cos - x2 * sin,
-            (0, 0, 0),
-            (batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
-            (1, 1, 1),
+            offsets=(0, 0, 0),
+            sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
+            strides=(1, 1, 1),
         )
         values_tmp = insert_slice(
             values_tmp,
             x2 * cos + x1 * sin,
-            (0, 0, HALF_ROPE_DIM),
-            (batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
-            (1, 1, 1),
+            offsets=(0, 0, HALF_ROPE_DIM),
+            sizes=(batch_size_per_iter_per_vec, q_head_num, HALF_ROPE_DIM),
+            strides=(1, 1, 1),
         )
 
         q_output_idx = output_q_nblk_idx[None, :] + batch_indices[:, None] * q_hidden_size
-        out_mask = mmask[:, None] & output_q_nmask[None, :]
+        mask = mmask[:, None] & output_q_nmask[None, :]
         if IS_PARTIAL_ROPE:
             normalized_values_tmp = insert_slice(
                 normalized_values_tmp,
                 values_tmp,
-                (0, 0, 0),
-                (batch_size_per_iter_per_vec, q_head_num, ROPE_DIM),
-                (1, 1, 1),
+                offsets=(0, 0, 0),
+                sizes=(batch_size_per_iter_per_vec, q_head_num, ROPE_DIM),
+                strides=(1, 1, 1),
             )
             tl.store(
                 q_gm_ptr + q_output_idx,
                 normalized_values_tmp.reshape(batch_size_per_iter_per_vec, q_hidden_size),
-                mask=out_mask,
+                mask=mask,
             )
         else:
             tl.store(
-                q_gm_ptr + q_output_idx, values_tmp.reshape(batch_size_per_iter_per_vec, q_hidden_size), mask=out_mask
+                q_gm_ptr + q_output_idx,
+                values_tmp.reshape(batch_size_per_iter_per_vec, q_hidden_size),
+                mask=mask,
             )
 
         normalized_values_tmp1 = extract_slice(
@@ -189,49 +194,52 @@ def split_qkv_rmsnorm_rope_simt_kernel(
 
         values_tmp2 = tl.zeros((batch_size_per_iter_per_vec, kv_head_num, ROPE_DIM), dtype=tl.bfloat16)
         x1 = extract_slice(
-            normalized_values_tmp1, (0, 0, 0), (batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM), (1, 1, 1)
+            normalized_values_tmp1,
+            offsets=(0, 0, 0),
+            sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
+            strides=(1, 1, 1),
         )
         x2 = extract_slice(
             normalized_values_tmp1,
-            (0, 0, HALF_ROPE_DIM),
-            (batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
-            (1, 1, 1),
+            offsets=(0, 0, HALF_ROPE_DIM),
+            sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
+            strides=(1, 1, 1),
         )
         values_tmp2 = insert_slice(
             values_tmp2,
             x1 * cos - x2 * sin,
-            (0, 0, 0),
-            (batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
-            (1, 1, 1),
+            offsets=(0, 0, 0),
+            sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
+            strides=(1, 1, 1),
         )
         values_tmp2 = insert_slice(
             values_tmp2,
             x2 * cos + x1 * sin,
-            (0, 0, HALF_ROPE_DIM),
-            (batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
-            (1, 1, 1),
+            offsets=(0, 0, HALF_ROPE_DIM),
+            sizes=(batch_size_per_iter_per_vec, kv_head_num, HALF_ROPE_DIM),
+            strides=(1, 1, 1),
         )
 
         kv_output_idx = output_kv_nblk_idx[None, :] + batch_indices[:, None] * kv_hidden_size
-        out_mask = mmask[:, None] & output_kv_nmask[None, :]
+        mask = mmask[:, None] & output_kv_nmask[None, :]
         if IS_PARTIAL_ROPE:
             normalized_values_tmp1 = insert_slice(
                 normalized_values_tmp1,
                 values_tmp2,
-                (0, 0, 0),
-                (batch_size_per_iter_per_vec, kv_head_num, ROPE_DIM),
-                (1, 1, 1),
+                offsets=(0, 0, 0),
+                sizes=(batch_size_per_iter_per_vec, kv_head_num, ROPE_DIM),
+                strides=(1, 1, 1),
             )
             tl.store(
                 k_gm_ptr + kv_output_idx,
                 normalized_values_tmp1.reshape(batch_size_per_iter_per_vec, kv_hidden_size),
-                mask=out_mask,
+                mask=mask,
             )
         else:
             tl.store(
                 k_gm_ptr + kv_output_idx,
                 values_tmp2.reshape(batch_size_per_iter_per_vec, kv_hidden_size),
-                mask=out_mask,
+                mask=mask,
             )
 
     for iter in tl.range(tl.cdiv(end - start, v_batch_size_per_iter_per_vec)):
