@@ -1324,9 +1324,6 @@ constexpr int64_t HC_PRE_HC_LIMIT = 4;
 constexpr int64_t HC_PRE_D_LIMIT = 4096;
 constexpr int64_t HC_PRE_D_LIMIT_EXTEND = 7168;
 constexpr int64_t HC_PRE_MIX_HC_LIMIT = 24;
-constexpr int64_t HC_PRE_FUSION_BASE_BS = 8192;
-constexpr int64_t HC_PRE_FUSION_SPLIT_K_MAX_BS = 512;
-constexpr const char* ASCEND_950_PREFIX = "Ascend950";
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_output_tensor(const at::Tensor& x, int64_t hc_mult)
 {
@@ -1412,29 +1409,6 @@ void check_hc_pre_shape_and_dtype(
     TORCH_CHECK(hc_base.dtype() == at::kFloat, "hc_base's dtype should be FLOAT32.");
 }
 
-int64_t get_hc_pre_batch_size(const at::Tensor& x)
-{
-    if (x.dim() == 4) {
-        return x.size(0) * x.size(1);
-    }
-    return x.size(0);
-}
-
-bool is_ascend950()
-{
-    static const char* soc_name = aclrtGetSocName();
-    return soc_name != nullptr && std::string(soc_name).find(ASCEND_950_PREFIX) == 0;
-}
-
-bool should_use_hc_pre_fusion(const at::Tensor& x)
-{
-    if (!is_ascend950()) {
-        return true;
-    }
-    auto bs = get_hc_pre_batch_size(x);
-    return bs <= HC_PRE_FUSION_SPLIT_K_MAX_BS || bs % HC_PRE_FUSION_BASE_BS == 0;
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> run_hc_pre_composite(
     const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
     int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
@@ -1489,9 +1463,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v2_npu(
     int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
 {
     check_hc_pre_shape_and_dtype(x, hc_fn, hc_scale, hc_base, hc_mult);
-    if (!should_use_hc_pre_fusion(x)) {
-        return run_hc_pre_composite(x, hc_fn, hc_scale, hc_base, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps);
-    }
     return run_hc_pre_fusion(x, hc_fn, hc_scale, hc_base, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps);
 }
 

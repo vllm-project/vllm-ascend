@@ -9,7 +9,9 @@ torch_npu.npu.config.allow_internal_format = True
 enable_custom_op()
 
 HC_MULT = 4
-HIDDEN_SIZE = 4096
+DSV4_FLASH_HIDDEN_SIZE = 4096
+HIDDEN_SIZE = DSV4_FLASH_HIDDEN_SIZE
+EXTENDED_HIDDEN_SIZE = 7168
 MIX_HC = 24
 HC_SINKHORN_ITERS = 20
 NORM_EPS = 1e-6
@@ -18,11 +20,12 @@ HC_EPS = 1e-6
 
 def _make_hc_pre_inputs(shape: tuple[int, ...]):
     torch.manual_seed(1024)
+    hidden_size = shape[-1]
     x = torch.randn(shape, dtype=torch.bfloat16, device="npu")
     hc_fn = (
         torch.randn(
             MIX_HC,
-            HC_MULT * HIDDEN_SIZE,
+            HC_MULT * hidden_size,
             dtype=torch.float32,
             device="npu",
         )
@@ -60,6 +63,22 @@ def test_npu_hc_pre_v1_v2_bf16_3d_input():
 @torch.inference_mode()
 def test_npu_hc_pre_v1_v2_bf16_4d_input():
     _compare_hc_pre_outputs((1, 2, HC_MULT, HIDDEN_SIZE))
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@torch.inference_mode()
+def test_npu_hc_pre_v1_v2_bf16_dsv4_flash_hidden_size():
+    _compare_hc_pre_outputs((4, HC_MULT, DSV4_FLASH_HIDDEN_SIZE))
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@torch.inference_mode()
+def test_npu_hc_pre_v1_v2_bf16_extended_hidden_size():
+    _compare_hc_pre_outputs((2, HC_MULT, EXTENDED_HIDDEN_SIZE))
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

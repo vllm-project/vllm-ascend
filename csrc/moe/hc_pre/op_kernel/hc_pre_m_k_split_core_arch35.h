@@ -283,8 +283,8 @@ public:
         pipe->InitBuffer(
             yQue, 2, tilingData->stage2RowFactor * RoundUp<T>(tilingData->dFactor) * sizeof(T));
         pipe->InitBuffer(postQue, 2, tilingData->stage2RowFactor * tilingData->hcMultAlign * sizeof(float));
-        pipe->InitBuffer(
-            combFragQue, 2, tilingData->stage2RowFactor * tilingData->hcMult * tilingData->hcMultAlign * sizeof(float));
+        pipe->InitBuffer(combFragQue, DOUBLE_BUFFER,
+            tilingData->stage2RowFactor * tilingData->hcMult * tilingData->hcMult * sizeof(float));
 
         // TBuf
         pipe->InitBuffer(hcBaseBuf0, tilingData->hcMultAlign * sizeof(float));
@@ -314,7 +314,7 @@ public:
 
             CopyIn(hcBaseGm, hcBase0Local, 1, tilingData->hcMult);
             CopyIn(hcBaseGm[tilingData->hcMult], hcBase1Local, 1, tilingData->hcMult);
-            CopyIn(hcBaseGm[tilingData->hcMult * 2], hcBase2Local, tilingData->hcMult, tilingData->hcMult);
+            CopyIn(hcBaseGm[tilingData->hcMult * 2], hcBase2Local, 1, tilingData->hcMult * tilingData->hcMult);
             event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
             SetFlag<HardEvent::MTE2_V>(eventId);
             WaitFlag<HardEvent::MTE2_V>(eventId);
@@ -372,14 +372,17 @@ public:
 
                 // combFrag
                 combFragLocal = combFragQue.AllocTensor<float>();
-                VFProcessCombFragRLessVLUseFourUnfold(
+                VFProcessCombFragPacked(
                     combFragLocal, mixesLocal[tilingData->hcMult * 2], hcBase2Local, hcScaleGm.GetValue(2), tilingData->hcEps,
-                    tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMult, tilingData->hcMix);
+                    tilingData->iterTimes - 1, curRowFactor, tilingData->hcMult, tilingData->hcMix);
                 rmsAndmmQue.FreeTensor(rmsAndmmLocal);
 
                 combFragQue.EnQue(combFragLocal);
                 combFragLocal = combFragQue.DeQue<float>();
-                CopyOut(combFragLocal, combFragGm[curBlockIdx * tilingData->rowOfFormerBlock * tilingData->hcMult * tilingData->hcMult + rowOuterIdx * tilingData->stage2RowFactor * tilingData->hcMult * tilingData->hcMult], curRowFactor * tilingData->hcMult, tilingData->hcMult);
+                int64_t combLen = tilingData->hcMult * tilingData->hcMult;
+                int64_t combOutOffset = (curBlockIdx * tilingData->rowOfFormerBlock +
+                                         rowOuterIdx * tilingData->stage2RowFactor) * combLen;
+                CopyOut(combFragLocal, combFragGm[combOutOffset], curRowFactor, combLen);
                 combFragQue.FreeTensor(combFragLocal);
             }
         }
@@ -420,9 +423,6 @@ private:
     LocalTensor<float> hcBase1Local;
     LocalTensor<float> hcBase2Local;
 };
-
-
-
 } // namespace HCPreSinkhorn
 
 #endif
