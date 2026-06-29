@@ -332,15 +332,39 @@ class AscendConfig:
         if enable_c8_quant is not True:
             return
 
+        if not cls._uses_gqa_backend(vllm_config):
+            return
+
         if not cls._uses_mooncake_connector(kv_transfer_config):
             return
 
         raise ValueError(
-            "MooncakeConnector does not support C8 KV cache quantization on KV consumer nodes. "
+            "MooncakeConnector does not support C8 KV cache quantization on GQA KV consumer nodes. "
             "The producer keeps KV cache in bf16 while the consumer allocates int8 KV cache, so raw "
             "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
             "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
         )
+
+    @classmethod
+    def _uses_gqa_backend(cls, vllm_config: "VllmConfig") -> bool:
+        model_config = getattr(vllm_config, "model_config", None)
+        if model_config is None:
+            return False
+
+        if getattr(model_config, "is_deepseek_mla", False) or getattr(model_config, "use_mla", False):
+            return False
+
+        model_arch_config = getattr(model_config, "model_arch_config", None)
+        total_num_attention_heads = getattr(model_arch_config, "total_num_attention_heads", None)
+        get_total_num_kv_heads = getattr(model_config, "get_total_num_kv_heads", None)
+        if total_num_attention_heads is None or not callable(get_total_num_kv_heads):
+            return False
+
+        total_num_kv_heads = get_total_num_kv_heads()
+        if total_num_kv_heads is None:
+            return False
+
+        return total_num_attention_heads != total_num_kv_heads
 
     @classmethod
     def _uses_mooncake_connector(cls, kv_transfer_config: Any) -> bool:
