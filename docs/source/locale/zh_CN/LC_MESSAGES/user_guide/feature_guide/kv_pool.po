@@ -76,8 +76,8 @@ msgid "vLLM-Ascend：main branch"
 msgstr "vLLM-Ascend：main 分支"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:17
-msgid "mooncake：>= 0.3.9"
-msgstr "mooncake：>= 0.3.9"
+msgid "mooncake：>= 0.3.11.post1"
+msgstr "mooncake：>= 0.3.11.post1"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:19
 msgid "KV Pool Parameter Description"
@@ -294,9 +294,9 @@ msgstr "800 I/T A3 系列"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid ""
-"HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= "
+"HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11.post1<br>CANN >= "
 "9.0.0<br>LingQu Computing Network >= 1.5"
-msgstr "HDK >= 26.0<br>或 HDK >= 25.5 且 mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu 计算网络 >= 1.5"
+msgstr "HDK >= 26.0<br>或 HDK >= 25.5 且 mooncake >= v0.3.11.post1<br>CANN >= 9.0.0<br>LingQu 计算网络 >= 1.5"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "`export ASCEND_ENABLE_USE_FABRIC_MEM=1`"
@@ -534,8 +534,8 @@ msgid "Enable MooncakeStore SSD Offload with Embedded Real Client Mode"
 msgstr "使用嵌入式真实客户端模式启用 MooncakeStore SSD 卸载"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:430
-msgid "Requires mooncake >= v0.3.11."
-msgstr "此功能需要 mooncake >= v0.3.11。"
+msgid "Requires mooncake >= v0.3.11.post1."
+msgstr "此功能需要 mooncake >= v0.3.11.post1。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:432
 msgid "Start the master"
@@ -1272,8 +1272,8 @@ msgstr ""
 #~ msgid "Embedded Real Client Mode（Mooncake ssd-offload.md Step 3A）"
 #~ msgstr "嵌入式真实客户端模式（Mooncake ssd-offload.md 步骤 3A）"
 
-#~ msgid "mooncake >= v0.3.11"
-#~ msgstr "mooncake >= v0.3.11"
+#~ msgid "mooncake >= v0.3.11.post1"
+#~ msgstr "mooncake >= v0.3.11.post1"
 
 #~ msgid "Set `true` to enable SSD offload."
 #~ msgstr "设置为 `true` 以启用 SSD 卸载。"
