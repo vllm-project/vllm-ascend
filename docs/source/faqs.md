@@ -289,3 +289,21 @@ Generally, when your server hits KV cache limits, vLLM tries to free KV cache of
 - When launching a vLLM server, you will see logs like `GPU KV cache size: 66340 tokens` and `Maximum concurrency for 16,384 tokens per request: 4.05`. These are estimated KV cache capacity for a single DP group. You can adjust the overall request traffic according to this.
 
 Preemption cannot be avoided completely since KV cache usage always has a limit. But there are methods to reduce the chances of preemption. As is suggested in [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption), the core strategy is to increase available KV cache. For example, one can increase `--gpu-memory-utilization` or decrease `--max-num-seqs` && `--max-num-batched-tokens`.
+
+### 23. How do I choose between single-node and multi-node deployment?
+
+Single-node deployment is recommended when the model fits within the memory of a single node's NPUs. For models like Qwen3-32B (BF16), which requires 4 × 64G cards, multi-NPU within a single node (TP) is sufficient. Multi-node deployment is only needed when the total NPU count exceeds a single node's capacity.
+
+### 24. What quantization method should I use?
+
+- **BF16**: Best accuracy, highest memory footprint. Use for accuracy-critical applications or when memory is sufficient.
+- **W8A8**: Good balance of accuracy and memory reduction. Use for large models (e.g., 32B) on memory-constrained hardware.
+- **W4A8/W4A4**: Maximum memory reduction. Suitable for deploying larger models on smaller hardware configurations, with some accuracy trade-off.
+
+### 25. When should I enable FlashComm_v1?
+
+Enable FlashComm_v1 (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`) when using Tensor Parallelism (TP ≥ 2) with high concurrency. It is threshold-protected and will not activate in low-concurrency scenarios where it could degrade performance.
+
+### 26. What is the difference between FIA and PA operators for attention?
+
+FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
