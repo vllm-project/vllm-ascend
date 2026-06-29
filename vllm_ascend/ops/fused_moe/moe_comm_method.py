@@ -26,7 +26,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.distributed.parallel_state import get_mc2_group, get_mega_group
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -50,10 +50,17 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+_MEGA_MOE_DISPATCH_QUANT_MODE_None = 0
+_MEGA_MOE_DISPATCH_QUANT_MODE_INT = 2
 _MEGA_MOE_DISPATCH_QUANT_MODE_MX = 4
 _MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E5M2 = 23
 _MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E4M3FN = 24
 
+
+def _is_mega_moe_supported(fused_experts_input: MoEFusedExpertsInput) -> bool:
+    if fused_experts_input.quant.is_mxfp:
+        return True
+    return fused_experts_input.quant.quant_type in (QuantType.NONE, QuantType.W8A8, QuantType.W4A8)
 
 def _get_dispatch_quant_out_type(dtype: torch.dtype | None) -> int:
     if dtype == torch.float8_e5m2:
@@ -288,20 +295,6 @@ class FusedMC2CommImpl(MoECommMethod):
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
-        global mega_moe_symm_buffer
-        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
-            if mega_moe_symm_buffer is None:
-                mega_moe_symm_buffer = get_symm_buffer_for_mega_moe(
-                    group=get_mc2_group().device_group,
-                    num_experts=self.moe_config.num_experts,
-                    num_max_tokens_per_rank=0,
-                    num_topk=self.moe_config.experts_per_token,
-                    hidden=self.moe_config.hidden_dim,
-                    intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
-                    max_recv_token_num=65536 * 3,
-                    dispatch_quant_mode=_MEGA_MOE_DISPATCH_QUANT_MODE_MX,
-                    dispatch_quant_out_type=_MEGA_MOE_DISPATCH_QUANT_OUT_TYPE_E4M3FN,
-                )
 
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
@@ -312,13 +305,83 @@ class FusedMC2CommImpl(MoECommMethod):
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
+    def _get_mega_buffer(self, fused_experts_input: MoEFusedExpertsInput):
+        assert not (fused_experts_input.weights.w1 is None or fused_experts_input.weights.w2 is None), (
+            "w1 and w2 cannot be None for mega_moe."
+        )
+
+        _dispatch_quant_mode = None
+        _dispatch_quant_out_type = None
+        if not fused_experts_input.quant.is_quant:
+            assert (fused_experts_input.weights.w1_scale is None 
+                and fused_experts_input.weights.w2_scale is None
+                and fused_experts_input.weights.w1_bias is None
+                and fused_experts_input.weights.w2_bias is None), (
+                "w1 scale, w2 scale, w1 bias, w2 bias must be None for A16W16 mega_moe."
+            )
+
+            _dispatch_quant_mode = _MEGA_MOE_DISPATCH_QUANT_MODE_None
+            _dispatch_quant_out_type = None
+
+        elif fused_experts_input.quant.is_mxfp:
+            assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
+                "w1 scale and w2 scale can not be None for MXFP mega_moe."
+            )
+            assert (fused_experts_input.weights.w1_bias is None and fused_experts_input.weights.w2_bias is None), (
+                "w1 bias and w2 bias must be None for MXFP mega_moe."
+            )
+            assert fused_experts_input.quant.mxfp is not None, "mxfp params are required for MXFP mega_moe."
+
+            _dispatch_quant_mode = _MEGA_MOE_DISPATCH_QUANT_MODE_MX
+            _dispatch_quant_out_type = _get_dispatch_quant_out_type(
+                fused_experts_input.quant.mxfp.act_quant_type
+            )
+        
+        elif fused_experts_input.quant.quant_type == QuantType.W8A8:
+            assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
+                "w1 scale and w2 scale can not be None for W8A8 INT mega_moe."
+            )
+            assert (fused_experts_input.weights.w1_bias is None and fused_experts_input.weights.w2_bias is None), (
+                "w1 bias and w2 bias must be None for W8A8 INT mega_moe."
+            )
+
+            _dispatch_quant_mode.dispatch_quant_mode = _MEGA_MOE_DISPATCH_QUANT_MODE_INT
+            _dispatch_quant_out_type.dispatch_quant_out_type = torch.int8
+
+        elif fused_experts_input.quant.quant_type == QuantType.W4A8:
+            assert (fused_experts_input.weights.w1_scale is not None 
+                and fused_experts_input.weights.w2_scale is not None
+                and fused_experts_input.weights.w1_bias is not None
+                and fused_experts_input.weights.w2_bias is not None), (
+                "w1 scale, w2 scale, w1 bias, w2 bias can not be None for W4A8 mega_moe."
+            )            
+
+            _dispatch_quant_mode.dispatch_quant_mode = _MEGA_MOE_DISPATCH_QUANT_MODE_INT
+            _dispatch_quant_out_type.dispatch_quant_out_type = torch.int8
+        
+        else:
+            raise AssertionError(f"this experts input quant type is not supported yet.")
+
+        global mega_moe_symm_buffer
+
+        mega_moe_symm_buffer = get_symm_buffer_for_mega_moe(
+            group=get_mega_group().device_group,
+            num_experts=self.moe_config.num_experts,
+            num_max_tokens_per_rank=0,
+            num_topk=self.moe_config.experts_per_token,
+            hidden=self.moe_config.hidden_dim,
+            intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
+            dispatch_quant_mode=_dispatch_quant_mode,
+            ispatch_quant_out_type=_dispatch_quant_out_type,
+        )
+
     def fused_experts(
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
-        assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
-            "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
-        )
+        # assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
+            # "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
+        # )
 
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
@@ -331,29 +394,22 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
-            if fused_experts_input.quant.is_mxfp:
-                assert fused_experts_input.quant.mxfp is not None, "mxfp params are required for MXFP mega_moe."
-
+            if _is_mega_moe_supported(fused_experts_input):
                 global mega_moe_symm_buffer
-
-                assert mega_moe_symm_buffer is not None, "mega_moe_symm_buffer should be initialized."
-                mega_moe_symm_buffer.dispatch_quant_out_type = _get_dispatch_quant_out_type(
-                    fused_experts_input.quant.mxfp.act_quant_type
-                )
-                w1 = fused_experts_input.weights.w1
-                w2 = fused_experts_input.weights.w2
-                w1_scale = fused_experts_input.weights.w1_scale
-                w2_scale = fused_experts_input.weights.w2_scale
+                if mega_moe_symm_buffer is None:
+                    self._get_mega_buffer(fused_experts_input)
 
                 out, expert_tokens = mega_moe(
                     x=fused_experts_input.hidden_states,
                     topk_ids=topk_ids,
                     topk_weights=fused_experts_input.topk_weights,
-                    l1_weights=w1 if isinstance(w1, list) else [w1],
-                    l2_weights=w2 if isinstance(w2, list) else [w2],
+                    l1_weights=fused_experts_input.weights.w1,
+                    l2_weights=fused_experts_input.weights.w2,
                     sym_buffer=mega_moe_symm_buffer,
-                    l1_weights_sf=w1_scale if isinstance(w1_scale, list) else [w1_scale],
-                    l2_weights_sf=w2_scale if isinstance(w2_scale, list) else [w2_scale],
+                    l1_weights_sf=fused_experts_input.weights.w1_scale,
+                    l2_weights_sf=fused_experts_input.weights.w2_scale,
+                    l1_bias=fused_experts_input.weights.w1_bias,
+                    l2_bias=fused_experts_input.weights.w2_bias,
                 )
 
             else:

@@ -5,6 +5,8 @@ from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group, get_
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable
 
+_MEGA: GroupCoordinator | None = None
+
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
 
@@ -94,6 +96,9 @@ def init_ascend_model_parallel(
 
     global _MC2
     _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
+
+    global _MEGA
+    _MEGA = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mega")
 
     if get_ascend_config().eplb_config.dynamic_eplb:
         global _DYNAMIC_EPLB
@@ -227,13 +232,16 @@ def init_ascend_model_parallel(
 
 
 def model_parallel_initialized():
-    return _MC2 is not None
+    return _MC2 is not None and _MEGA is not None
 
 
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, "mc2 group is not initialized"
     return _MC2
 
+def get_mega_group() -> GroupCoordinator:
+    assert _MEGA is not None, "mc2 group is not initialized"
+    return _MEGA
 
 def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, "mlp group is not initialized"
@@ -289,6 +297,11 @@ def destroy_ascend_model_parallel():
     if _MC2:
         _MC2.destroy()
     _MC2 = None
+
+    global _MEGA
+    if _MEGA:
+        _MEGA.destroy()
+    _MEGA = None
 
     global _MLP_TP
     if _MLP_TP:
