@@ -85,7 +85,7 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 Start the docker image on your each node.
 
-::::
+:::::{tab-set}
 ::::{tab-item} A3 series
 :sync: A3
 
@@ -600,6 +600,7 @@ python load_balance_proxy_server_example.py \
 ```
 
 :::{note}
+
 - [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
 - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 :::
@@ -780,7 +781,7 @@ After several minutes, you will get the performance evaluation result.
 | Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On |
 | Long Context | Single-Node | 16 | 8 | 1 | none | On | On | Off |
 
-> For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment) 
+> For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment)
 
 <u>Single-node PD Hybrid — High Throughput:</u>
 
@@ -950,4 +951,4 @@ Expert Parallelism (EP) should always be enabled for Qwen3-235B-A22B (an MoE mod
 
 ### Q: How do I choose between Context Parallelism and PD Disaggregation?
 
-Context Parallelism (CP) splits the KV cache of a single request across multiple NPUs, suitable for long context scenarios on a single node. PD Disaggregation separates Prefill and Decode across nodes, suitable for high-throughput serving with many concurrent requests. 
+Context Parallelism (CP) splits the KV cache of a single request across multiple NPUs, suitable for long context scenarios on a single node. PD Disaggregation separates Prefill and Decode across nodes, suitable for high-throughput serving with many concurrent requests.

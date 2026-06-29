@@ -63,7 +63,7 @@ docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 Start the docker image on your each node.
 
-::::
+:::::{tab-set}
 ::::{tab-item} A3 series
 :sync: A3
 
@@ -270,6 +270,7 @@ vllm serve your_model_path \
 ```
 
 :::{note}
+
 - [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
 - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 :::
@@ -456,7 +457,7 @@ After several minutes, you will get the performance evaluation result.
 | Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Low Latency | Single-Node | 8 | 8 | 1 | Off | Off | On |
 
-For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment) 
+For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment)
 
 <u>High Throughput Configuration:</u>
 
