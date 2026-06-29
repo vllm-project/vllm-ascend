@@ -36,10 +36,24 @@ import sys
 import types
 from unittest.mock import MagicMock
 
+
+def _is_npu_routed_ut_invocation() -> bool:
+    npu_dir_names = {"a2", "a2_2", "a3_2", "a3_4", "310p"}
+    for arg in sys.argv[1:]:
+        path = arg.split("::", 1)[0].replace("\\", "/")
+        if path.startswith("tests/ut/") and any(part in npu_dir_names for part in path.split("/")):
+            return True
+    return False
+
+
 try:
     # Note: do not import torch here for cpu env, which will lead to circle import error.
-    subprocess.run(["npu-smi", "info"], capture_output=True, check=True)
+    subprocess.run(["npu-smi", "info"], capture_output=True, check=True, timeout=5)
     _npu_available = True
+except subprocess.TimeoutExpired as e:
+    if _is_npu_routed_ut_invocation():
+        raise RuntimeError("npu-smi info timed out while running NPU-routed UTs.") from e
+    _npu_available = False
 except (subprocess.CalledProcessError, FileNotFoundError):
     _npu_available = False
 
@@ -85,7 +99,7 @@ if not _npu_available:
     torch.version.cann = None
     torch.distributed.is_hccl_available = MagicMock(return_value=True)
 
-import pytest
+import pytest  # noqa: E402
 
 mooncake_engine = types.ModuleType("mooncake.engine")
 mooncake_engine.__spec__ = importlib.util.spec_from_loader("mooncake.engine", loader=None)
