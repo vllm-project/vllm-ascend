@@ -25,7 +25,10 @@ from vllm_ascend.utils import is_310p, vllm_version_is
 # compatibility path we keep v2 main-only. With v0.23.0 installed this flag is
 # False, so none of the patch_v2.* / routed-experts-capture patches below are
 # imported and the v2 worker stays dormant (the release uses the v1 runner).
-_V2_MODEL_RUNNER_SUPPORTED = not vllm_version_is("0.23.0")
+if vllm_version_is("0.23.0"):
+    _V2_MODEL_RUNNER_SUPPORTED = False
+else:
+    _V2_MODEL_RUNNER_SUPPORTED = True
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -63,6 +66,9 @@ import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
+
+if not vllm_version_is("0.23.0"):
+    import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
 if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa

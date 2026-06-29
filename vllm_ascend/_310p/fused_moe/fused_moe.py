@@ -19,10 +19,10 @@ from collections.abc import Callable
 import torch
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     FusedExpertsResult,
@@ -30,10 +30,24 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
+
+if vllm_version_is("0.23.0"):
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE as _LegacyFusedMoEBase
+    from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+else:
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
+
+    try:
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE as _LegacyFusedMoEBase
+    except ImportError:
+        _LegacyFusedMoEBase = torch.nn.Module
+
+    if not isinstance(_LegacyFusedMoEBase, type):
+        _LegacyFusedMoEBase = torch.nn.Module
 
 
 class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
@@ -126,8 +140,55 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         return final_hidden_states
 
 
-class AscendFusedMoE310(FusedMoE):
+if not vllm_version_is("0.23.0"):
+
+    class AscendMoERunner310(AscendMoERunner):
+        def __init__(
+            self,
+            layer_name,
+            moe_config,
+            router,
+            routed_experts,
+            enable_dbo=False,
+            gate=None,
+            shared_experts=None,
+            shared_expert_gate=None,
+            routed_input_transform=None,
+            routed_output_transform=None,
+            routed_scaling_factor=1,
+            tid2eid=None,
+            n_shared_experts: int = 0,
+        ):
+            super().__init__(
+                layer_name,
+                moe_config,
+                router,
+                routed_experts,
+                enable_dbo,
+                gate,
+                shared_experts,
+                shared_expert_gate,
+                routed_input_transform,
+                routed_output_transform,
+                routed_scaling_factor,
+                tid2eid,
+                n_shared_experts,
+            )
+
+            if routed_experts.quant_config is None:
+                routed_experts.quant_method = AscendUnquantizedFusedMoEMethod310(self.moe_config)
+                self.quant_type = self._get_quant_type()
+
+            self.multistream_overlap_gate = False
+            self.shared_multistream_overlap_gate = False
+            self.multistream_overlap_shared_expert = False
+            _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
+
+
+class AscendFusedMoE310(_LegacyFusedMoEBase):
     def __init__(self, *args, **kwargs):
+        if _LegacyFusedMoEBase is torch.nn.Module:
+            raise RuntimeError("AscendFusedMoE310 is only kept for the legacy FusedMoE class API.")
         super().__init__(*args, **kwargs)
 
         self._routed_input_transform = kwargs.get("routed_input_transform")
@@ -174,18 +235,28 @@ class AscendFusedMoE310(FusedMoE):
 
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
 
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-
-        self.runner = AscendMoERunner(
-            self.layer_name,
-            self.moe_config,
-            self.router,
-            self._routed_input_transform,
-            kwargs.pop("gate", None),
-            kwargs.pop("shared_experts", None),
-            self.quant_method,
-            self.vllm_config.parallel_config.enable_dbo,
-        )
+        if vllm_version_is("0.23.0"):
+            self.runner = AscendMoERunner(
+                self.layer_name,
+                self.moe_config,
+                self.router,
+                self._routed_input_transform,
+                kwargs.pop("gate", None),
+                kwargs.pop("shared_experts", None),
+                self.quant_method,
+                self.vllm_config.parallel_config.enable_dbo,
+            )
+        else:
+            self.runner = AscendMoERunner310(
+                self.layer_name,
+                self.moe_config,
+                self.router,
+                self._routed_input_transform,
+                kwargs.pop("gate", None),
+                kwargs.pop("shared_experts", None),
+                self.quant_method,
+                self.vllm_config.parallel_config.enable_dbo,
+            )
 
     @property
     def is_internal_router(self) -> bool:

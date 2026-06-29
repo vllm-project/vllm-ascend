@@ -160,6 +160,7 @@ from vllm_ascend.utils import (
     set_potential_max_tokens,
     set_weight_prefetch_method,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -3886,16 +3887,26 @@ class NPUModelRunner(GPUModelRunner):
             self.init_routed_experts_capturer()
 
     def _bind_routed_experts_capturer(self, capturer=None) -> None:
-        # Upstream binds via ``module.router.set_capture_fn(...)`` on
-        # FusedMoE layers whose router is a ``BaseRouter``. Ascend's
-        # ``select_experts`` does not go through ``BaseRouter``, so the
-        # upstream hook never fires. Instead, stash the capturer as a
-        # plain attribute on every FusedMoE layer; ``apply()`` reads it
-        # back on the hot path.
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-        for module in self.compilation_config.static_forward_context.values():
-            if isinstance(module, FusedMoE):
-                module._ascend_routed_experts_capturer = capturer
+        if vllm_version_is("0.23.0"):
+            # Upstream binds via ``module.router.set_capture_fn(...)`` on
+            # FusedMoE layers whose router is a ``BaseRouter``. Ascend's
+            # ``select_experts`` does not go through ``BaseRouter``, so the
+            # upstream hook never fires. Instead, stash the capturer as a
+            # plain attribute on every FusedMoE layer; ``apply()`` reads it
+            # back on the hot path.
+            from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+            for module in self.compilation_config.static_forward_context.values():
+                if isinstance(module, FusedMoE):
+                    module._ascend_routed_experts_capturer = capturer
+        else:
+            # test_qwen3_moe_routing_replay
+            from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+
+            for module in self.compilation_config.static_forward_context.values():
+                if isinstance(module, AscendMoERunner):
+                    module._ascend_routed_experts_capturer = capturer
+                    module.routed_experts._ascend_routed_experts_capturer = capturer
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
