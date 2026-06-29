@@ -208,6 +208,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
 Atlas 800I A2/A3:
+
 Qwen3-32B-W8A8:
 
 ```bash
@@ -232,6 +233,7 @@ vllm serve your_model_path \
 ```
 
 Atlas 800I A2/A3：
+
 Qwen3-32B-W4A4:
 
 ```bash
@@ -437,7 +439,7 @@ After several minutes, you will get the performance evaluation result.
 
 ### 9.1 Recommended Configurations
 
-> **Important**: The configurations provided in this section are validated in specific test environments and are **not** guaranteed to be globally optimal. Actual performance depends on factors such as input/output length distribution, request rate, prefix cache hit rate, hardware configuration, and precision requirements. It is strongly recommended to use the following as a starting point and refer to [Section 9.2](#92-tuning-guidelines) for tuning based on your own workload.
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
 #### Table 1: Scenario Overview
 
@@ -543,7 +545,7 @@ vllm serve your_model_path \
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
