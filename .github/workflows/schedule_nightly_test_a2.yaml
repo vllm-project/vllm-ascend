@@ -25,7 +25,7 @@ on:
       vllm_ascend_branch:
         description: 'Branch to test'
         required: true
-        default: 'releases/v0.22.1rc'
+        default: 'main'
         type: string
       test_cases:
         description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
 import vllm.envs as envs_vllm
@@ -20,6 +21,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
@@ -27,8 +29,10 @@ from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinea
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
+    get_potential_max_tokens,
     npu_stream_switch,
     olora_tp_enable,
+    oproj_tp_enable,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -1514,6 +1518,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Attention impls are not walked by vllm's process_weights_after_loading
+        # dispatcher (only LinearMethodBase subclasses are). OTP buffers are
+        # allocated lazily on the first _forward_o_proj call, which always runs
+        # before ACL graph capture (profiling run triggers it).
         pass
 
     # TODO: cast to bfloat16 to speed up
@@ -1535,6 +1543,115 @@ class AscendDSAImpl(DSAAttentionImpl):
             x = x_rot.reshape(1, num_tokens, -1, rotary_dim)
         return x
 
+    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        num_tokens = o_proj_input.shape[0]
+        group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
+        o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
+        # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
+        # + quantized batch matmul). Preserve it as-is: it predates and is
+        # orthogonal to the OTP / olora_tp paths below, so it must win first.
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            o = o_proj_input
+            o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+            o = torch_npu.npu_transpose_quant_batchmatmul(
+                o,
+                self.wo_a.weight,
+                dtype=torch.bfloat16,
+                bias=None,
+                group_sizes=(0, 0, 32),
+                x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            )
+            o = o.reshape(num_tokens, -1)
+            output[...] = self.wo_b(o)
+        elif oproj_tp_enable():
+            oproj_group = get_otp_group()
+            oproj_tp_size = oproj_group.world_size
+            if self.n_local_groups % oproj_tp_size != 0:
+                raise ValueError(
+                    "n_local_groups must be divisible by "
+                    f"oproj_tensor_parallel_size, got {self.n_local_groups} "
+                    f"and {oproj_tp_size}."
+                )
+
+            groups_per_rank = self.n_local_groups // oproj_tp_size
+
+            o_proj_input = o_proj_input.view(num_tokens, oproj_tp_size, groups_per_rank, group_hidden_dim)
+            # Pad to a static exchange size so the all_to_all / reduce_scatter
+            # shapes are identical across all ACL graph buckets — variable
+            # shapes desync the HCCL communicator during graph replay.
+            # potential_max_tokens is computed once in the model runner __init__,
+            # so reading it here is a cheap global lookup.
+            exchange_num_tokens = get_potential_max_tokens()
+            if exchange_num_tokens < num_tokens:
+                raise ValueError(
+                    "oproj static exchange capacity must cover local tokens, "
+                    f"got {exchange_num_tokens} and {num_tokens}."
+                )
+            # Lazily allocate static send/recv buffers on first call. The
+            # profiling run hits this path before ACL graph capture, so the
+            # buffers exist and keep a stable device address across all later
+            # capture/replay cycles (graph replay requires the same address
+            # that was recorded at capture; new_zeros per call would desync
+            # the HCCL operator).
+            if not hasattr(self, "_oproj_send_buf"):
+                buf_shape = (oproj_tp_size, exchange_num_tokens, groups_per_rank, group_hidden_dim)
+                self._oproj_send_buf = torch.zeros(buf_shape, dtype=o_proj_input.dtype, device=o_proj_input.device)
+                self._oproj_recv_buf = torch.empty_like(self._oproj_send_buf)
+            send = self._oproj_send_buf
+            recv = self._oproj_recv_buf
+            # In-place fill into the address-stable buffer: zero the padding
+            # tail, then copy the real tokens.
+            send.zero_()
+            send[:, :num_tokens].copy_(o_proj_input.transpose(1, 0))
+            dist.all_to_all_single(recv.view(-1), send.view(-1), group=oproj_group.device_group)
+            o_proj_input = recv.view(oproj_tp_size * exchange_num_tokens, groups_per_rank, group_hidden_dim)
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self.wo_a.weight,
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+            o_proj_input = o_proj_input.reshape(oproj_tp_size * exchange_num_tokens, -1)
+            o_proj_output = self.wo_b(o_proj_input)
+            # reduce_scatter via a raw dist collective into an address-stable
+            # static buffer. oproj_group.reduce_scatter is a list-based wrapper
+            # that allocates per call, which desyncs the HCCL operator recorded
+            # at capture during ACL graph replay — the same reason all_to_all
+            # and the embedding TP path use raw dist + static buffers.
+            if not hasattr(self, "_oproj_rs_out_buf"):
+                self._oproj_rs_out_buf = torch.empty(
+                    (exchange_num_tokens, o_proj_output.shape[-1]),
+                    dtype=o_proj_output.dtype,
+                    device=o_proj_output.device,
+                )
+            dist.reduce_scatter_tensor(self._oproj_rs_out_buf, o_proj_output, group=oproj_group.device_group)
+            output[...] = self._oproj_rs_out_buf[:num_tokens]
+        elif olora_tp_enable():
+            o_proj_input = self.wo_a(o_proj_input)
+            output[...] = self.wo_b(o_proj_input)
+        else:
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self.wo_a.weight,
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+            o_proj_input = o_proj_input.reshape(num_tokens, -1)
+            output[...] = self.wo_b(o_proj_input)
+        return output
+
     def forward(  # type: ignore[override]
         self,
         layer_name,
@@ -1545,11 +1662,20 @@ class AscendDSAImpl(DSAAttentionImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+        output_padded = output
+        forward_context = get_forward_context()
+        o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
         if attn_metadata is None:
-            return output.fill_(0)
+            # Profiling run: run o_proj on zero input so HCCL collectives are
+            # captured by the ACL graph.  Non-OTP just zeros the output.
+            if oproj_tp_enable():
+                o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+                self._forward_o_proj(o_proj_input, output)
+            else:
+                output.fill_(0)
+            return output
         if not isinstance(attn_metadata, list):
             attn_metadata = [attn_metadata]
-        output_padded = output
         # Process for Flash Comm V1
         has_prefill = attn_metadata[0].num_prefills > 0
         has_decode = attn_metadata[0].num_decodes > 0
@@ -1561,8 +1687,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         prefill_hidden_states = hidden_states[decode_tokens:actual_tokens]
         decode_hidden_states = hidden_states[:decode_tokens]
 
-        forward_context = get_forward_context()
-        o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         if has_prefill:
@@ -1586,7 +1710,6 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
-        num_tokens = o_proj_input.shape[0]
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input.unsqueeze(1),
@@ -1597,42 +1720,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         )
 
         # o
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            o = o_proj_input.view(num_tokens, self.n_local_groups, -1)
-            o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-            o = torch_npu.npu_transpose_quant_batchmatmul(
-                o,
-                self.wo_a.weight,
-                dtype=torch.bfloat16,
-                bias=None,
-                group_sizes=(0, 0, 32),
-                x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-            )
-            o = o.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o)
-        else:
-            o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, -1)
-            if olora_tp_enable():
-                o_proj_input = self.wo_a(o_proj_input)
-            else:
-                # wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
-                # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
-                    self.wo_a.weight,
-                    bias=None,
-                    scale=None,
-                    perm_x1=(1, 0, 2),
-                    perm_x2=(0, 1, 2),
-                    perm_y=(1, 0, 2),
-                    batch_split_factor=1,
-                )
-                o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o_proj_input)
+        self._forward_o_proj(o_proj_input, output)
 
         return output_padded
 

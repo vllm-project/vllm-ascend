@@ -38,7 +38,7 @@ The symbols used have the following meanings:
 | Weight nz | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | 🟠 | ✅ | ✅ | ✅ |
 
 - <sup>1</sup> Only dcp supports dp while pcp does not support dp.
-- <sup>2</sup> Falshcomm is only enabled on the prefill stage.
+- <sup>2</sup> Flashcomm is only enabled on the prefill stage.
 - <sup>3</sup> Layer sharding is only enabled on the prefill stage.
 - <sup>4</sup> Lmhead TP is only enabled in the pure dp scenarios.
 - <sup>5</sup> MLAPO is only supported on the decode stage.
