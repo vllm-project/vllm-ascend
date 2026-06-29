@@ -233,6 +233,7 @@ The performance result is:
 ### 9.1 Recommended Configurations
 
 > **Note**:
+>
 > - The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 >
 > - Qwen3-Next does not support TP>=16 now. Since this model has 16 query heads but only 2 key and value heads, GQA degenerates into MHA when TP >= 16. However, the FIA operator currently fails to function in MHA scenarios with a head dimension of 256 (which is the case for this model).
