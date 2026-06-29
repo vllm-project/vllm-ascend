@@ -318,7 +318,9 @@ curl http://localhost:8000/v1/chat/completions \
     ]
 }'
 ```
+
 The output should resemble the following.
+
 ```
 {
   "id": "chatcmpl-8f3a1c2e4b5d4f7a9c0e1d2b3a4f5e6d",
