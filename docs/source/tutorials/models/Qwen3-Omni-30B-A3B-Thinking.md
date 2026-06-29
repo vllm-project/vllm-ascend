@@ -90,17 +90,6 @@ docker run \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /usr/local/sbin:/usr/local/sbin \
-    -v /home:/home \
-    -v /data:/data \
-    -v /tmp:/tmp \
-    -v /mnt:/mnt \
-    -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
-    -v /root:/host_root \
     -it -d $IMAGE bash
 ```
 
@@ -135,17 +124,6 @@ docker run \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /usr/local/sbin:/usr/local/sbin \
-    -v /home:/home \
-    -v /data:/data \
-    -v /tmp:/tmp \
-    -v /mnt:/mnt \
-    -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
-    -v /root:/host_root \
     -it -d $IMAGE bash
 ```
 
