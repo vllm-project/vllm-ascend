@@ -533,17 +533,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
-  "kv_port": "36000",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
+  "kv_port": "36000"
   }'
 ```
 
@@ -591,17 +581,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
-  "kv_port": "36100",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
+  "kv_port": "36100"
   }'
 ```
 
@@ -649,17 +629,7 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
-  "kv_port": "36200",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
+  "kv_port": "36200"
   }'
 
 ::::
@@ -706,23 +676,15 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
-  "kv_port": "36200",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
+  "kv_port": "36200"
   }'
 ```
 
 ::::
 
 :::::
+
+Mooncake infers each service instance's local PD topology from `--data-parallel-size`, `--tensor-parallel-size`, `--pipeline-parallel-size`, and `kv_role`. For the non-layerwise example above, prefiller nodes run with `dp_size=2,tp_size=8` and decoder nodes run with `dp_size=32,tp_size=1`; the prefiller response carries remote topology metadata to the decoder, so `kv_connector_extra_config.prefill/decode.dp_size/tp_size` is not required.
 
 ### Start the service
 

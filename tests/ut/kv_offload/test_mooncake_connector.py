@@ -14,6 +14,7 @@ import msgspec
 import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.request import RequestStatus
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -883,6 +884,8 @@ class TestMooncakeConnectorMetadata(unittest.TestCase):
                 "remote_pcp_size": 1,
                 "remote_dcp_size": 1,
                 "remote_ptp_size": 2,
+                "remote_dp_size": 3,
+                "remote_pp_size": 1,
             },
         )
 
@@ -895,6 +898,8 @@ class TestMooncakeConnectorMetadata(unittest.TestCase):
         self.assertEqual(req_meta.remote_host, "localhost")
         self.assertEqual(req_meta.remote_port, 5000)
         self.assertEqual(req_meta.remote_ptp_size, 2)
+        self.assertEqual(req_meta.remote_dp_size, 3)
+        self.assertEqual(req_meta.remote_pp_size, 1)
 
 
 class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
@@ -1183,6 +1188,25 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         delay_free, params = self.scheduler.request_finished(request, [1, 2, 3])
         self.assertFalse(delay_free)
         self.assertIsNone(params)
+
+    def test_request_finished_returns_remote_topology_metadata(self):
+        self.scheduler.group_transfer_info = [
+            types.SimpleNamespace(tokens_per_block=16, blocks_per_window=0, is_state_group=False)
+        ]
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=list(range(32)),
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+
+        delay_free, params = self.scheduler.request_finished(request, ([10, 11],))
+
+        self.assertTrue(delay_free)
+        assert params is not None
+        self.assertEqual(params["remote_ptp_size"], self.config.parallel_config.tensor_parallel_size)
+        self.assertEqual(params["remote_dp_size"], self.config.parallel_config.data_parallel_size)
+        self.assertEqual(params["remote_pp_size"], self.config.parallel_config.pipeline_parallel_size)
 
     def test_get_transfer_block_ids_trims_attention_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
@@ -1518,6 +1542,95 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertIsNone(worker.kv_send_thread)
         self.assertIsNotNone(worker.kv_recv_thread)
 
+    def test_infer_pd_topology_without_legacy_config_for_producer(self):
+        self.vllm_config.kv_transfer_config.kv_role = "kv_producer"
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda _k, d: d
+        self.vllm_config.parallel_config.data_parallel_size = 4
+        self.vllm_config.parallel_config.data_parallel_size_local = 2
+
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
+        self.assertEqual(worker._prefill_tp_size, self.vllm_config.parallel_config.tensor_parallel_size)
+        self.assertEqual(worker._prefill_dp_size, self.vllm_config.parallel_config.data_parallel_size)
+        self.assertEqual(worker._decode_tp_size, self.vllm_config.parallel_config.tensor_parallel_size)
+        self.assertEqual(worker._decode_dp_size, self.vllm_config.parallel_config.data_parallel_size)
+
+    def test_infer_pd_topology_without_legacy_config_for_consumer(self):
+        self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda _k, d: d
+        self.vllm_config.parallel_config.data_parallel_size = 8
+        self.vllm_config.parallel_config.data_parallel_size_local = 4
+
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
+        self.assertEqual(worker._decode_tp_size, self.vllm_config.parallel_config.tensor_parallel_size)
+        self.assertEqual(worker._decode_dp_size, self.vllm_config.parallel_config.data_parallel_size)
+        self.assertEqual(worker._prefill_tp_size, self.vllm_config.parallel_config.tensor_parallel_size)
+        self.assertEqual(worker._prefill_dp_size, self.vllm_config.parallel_config.data_parallel_size)
+
+    def test_incomplete_legacy_pd_topology_raises_clear_error(self):
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: {
+            "prefill": {"tp_size": 2},
+            "decode": {"tp_size": 2, "dp_size": 1},
+        }.get(k, d)
+
+        with self.assertRaisesRegex(ValueError, "Incomplete legacy kv_connector_extra_config PD topology"):
+            MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
+    def test_remote_prefill_tp_from_request_metadata_without_legacy_config(self):
+        self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda _k, d: d
+        self.vllm_config.parallel_config.tensor_parallel_size = 4
+        self.vllm_config.model_config.hf_text_config.num_key_value_heads = 4
+        self.vllm_config.model_config.is_deepseek_mla = False
+
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker.tp_num_need_pulls = 1
+        worker.use_sparse = False
+
+        remote_ranks = worker._get_remote_ranks_for_req("test", prefill_tp_size=8)
+
+        self.assertEqual(len(remote_ranks), 4)
+        self.assertTrue(all(len(ranks) == 1 for ranks in remote_ranks))
+        self.assertTrue(all(0 <= ranks[0] < 8 for ranks in remote_ranks))
+        self.assertEqual(len({ranks[0] for ranks in remote_ranks}), 4)
+
+    def test_remote_prefill_tp_smaller_than_decode_tp_raises(self):
+        self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda _k, d: d
+        self.vllm_config.parallel_config.tensor_parallel_size = 4
+
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker.use_sparse = False
+
+        with self.assertRaisesRegex(ValueError, "prefill_tp_size: 2 must be greater than or equal"):
+            worker._get_remote_ranks_for_req("test", prefill_tp_size=2)
+
+    def test_remote_port_send_num_covers_unpulled_prefill_ranks_for_unequal_tp(self):
+        self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda _k, d: d
+        self.vllm_config.parallel_config.tensor_parallel_size = 4
+        self.vllm_config.model_config.hf_text_config.num_key_value_heads = 4
+        self.vllm_config.model_config.is_deepseek_mla = False
+
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker.use_sparse = False
+
+        remote_port_send_num = worker._get_remote_port_send_num_for_req(
+            "test",
+            remote_base_port=30000,
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping={},
+            prefill_tp_size=8,
+            prefill_pp_size=1,
+            remote_pcp_size=1,
+        )
+
+        self.assertEqual(set(remote_port_send_num), set(range(30000, 30008)))
+        send_counts = [info["num"] for info in remote_port_send_num.values()]
+        self.assertEqual(send_counts.count(1), 4)
+        self.assertEqual(send_counts.count(0), 4)
+
     def test_register_kv_caches_mla_case(self):
         self.vllm_config.model_config.is_deepseek_mla = True
         mla_caches = {"model.layers.0.self_attn": make_cpu_kv_cache(kv_heads=1)}
@@ -1660,6 +1773,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             meta.remote_pcp_size = remote_pcp_size
             meta.remote_dcp_size = remote_dcp_size
             meta.remote_ptp_size = remote_ptp_size
+            meta.remote_pp_size = None
             meta.remote_port = remote_port
             meta.remote_block_ids = (remote_block_ids,)
             meta.local_block_ids = (local_block_ids,)
@@ -1669,9 +1783,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             meta.remote_host = "localhost"
             meta.remote_multi_nodes_meta_mapping = {}
 
-            remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = worker._get_kv_split_metadata(
-                "0", cast(ReqMeta, meta)
-            )
+            (
+                remote_handshake_port_list,
+                local_block_ids_list,
+                remote_block_ids_list,
+                _remote_port_send_num,
+            ) = worker._get_kv_split_metadata("0", cast(ReqMeta, meta))
 
             return (
                 remote_handshake_port_list,
@@ -1897,6 +2014,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 remote_pcp_size=case["remote_pcp_size"],
                                 remote_dcp_size=case["remote_dcp_size"],
                                 remote_ptp_size=case["prefill_tp_size"],
+                                remote_pp_size=case["prefill_pp_size"],
                                 remote_port=30000,
                                 remote_block_ids=case["remote_block_ids"],
                                 local_block_ids=case["local_block_ids"],
@@ -1907,7 +2025,9 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 remote_multi_nodes_meta_mapping={},
                             )
 
-                            ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_pd", meta)
+                            ports, local_ids, remote_ids, remote_port_send_num = worker._get_kv_split_metadata(
+                                "req_pd", meta
+                            )
                             group_pulls = worker._get_group_pulls_metadata(
                                 "req_pd", ports, case["prefill_tp_size"], 30000
                             )
@@ -1918,6 +2038,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 sum(len(ids[0]) for ids in local_ids),
                                 case["num_external_blocks"] // (case["pcp_size"] * case["dcp_size"]),
                             )
+                            self.assertTrue(remote_port_send_num)
                             self._assert_group_pull_finish_flags(ports, group_pulls, {0, 1})
 
     def test_pd_disaggregated_hybrid_prefix_tp_and_pp_unequal(self):
@@ -1962,6 +2083,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     remote_pcp_size=1,
                     remote_dcp_size=1,
                     remote_ptp_size=4,
+                    remote_pp_size=2,
                     remote_port=31000,
                     remote_block_ids=([50, 51, 52], [60, 61, 62]),
                     local_block_ids=([70, 71], [80, 81, 82]),
@@ -1972,12 +2094,15 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     remote_multi_nodes_meta_mapping={},
                 )
 
-                ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid", cast(ReqMeta, meta))
+                ports, local_ids, remote_ids, remote_port_send_num = worker._get_kv_split_metadata(
+                    "req_hybrid", cast(ReqMeta, meta)
+                )
                 group_pulls = worker._get_group_pulls_metadata("req_hybrid", ports, 4, 31000)
 
                 self.assertEqual(local_ids, [meta.local_block_ids])
                 self.assertEqual(remote_ids, [meta.remote_block_ids])
                 self.assertGreater(len(ports[0]), 1)
+                self.assertTrue(remote_port_send_num)
                 self._assert_hybrid_group_pull_finish_flags(
                     ports,
                     group_pulls,
@@ -2033,6 +2158,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     remote_pcp_size=2,
                     remote_dcp_size=1,
                     remote_ptp_size=4,
+                    remote_pp_size=1,
                     remote_port=31000,
                     remote_block_ids=([50, 51, 52, 53], [60, 61, 62, 63]),
                     local_block_ids=([70, 71, 72, 73], [80, 81, 82, 83]),
@@ -2043,14 +2169,16 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     remote_multi_nodes_meta_mapping={},
                 )
 
-                ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid_pcp", cast(ReqMeta, meta))
+                ports, local_ids, remote_ids, remote_port_send_num = worker._get_kv_split_metadata(
+                    "req_hybrid_pcp", cast(ReqMeta, meta)
+                )
                 group_pulls = worker._get_group_pulls_metadata("req_hybrid_pcp", ports, 4, 31000)
 
                 self.assertEqual(len(ports), 2)
                 self.assertEqual([len(ids[0]) for ids in local_ids], [2, 2])
                 self.assertEqual([ids[1] for ids in local_ids], [[], [80, 81, 82, 83]])
                 self.assertEqual([ids[1] for ids in remote_ids], [[], [60, 61, 62, 63]])
-                self.assertTrue(worker.remote_port_send_num[meta.remote_engine_id])
+                self.assertTrue(remote_port_send_num)
                 self._assert_hybrid_group_pull_finish_flags(
                     ports,
                     group_pulls,

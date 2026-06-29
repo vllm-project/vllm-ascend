@@ -172,17 +172,7 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_producer",
-  "kv_port": "30000",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 1,
-                    "tp_size": 1
-             },
-             "decode": {
-                    "dp_size": 1,
-                    "tp_size": 1
-             }
-      }
+  "kv_port": "30000"
   }'
 ```
 
@@ -213,23 +203,15 @@ vllm serve /model/Qwen2.5-VL-7B-Instruct  \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
-  "kv_port": "30100",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 1,
-                    "tp_size": 1
-             },
-             "decode": {
-                    "dp_size": 1,
-                    "tp_size": 1
-             }
-      }
+  "kv_port": "30100"
   }'
 ```
 
 ::::
 
 :::::
+
+Mooncake infers the local PD topology from the vLLM launch parameters. Use `kv_role="kv_producer"` on prefiller nodes and `kv_role="kv_consumer"` on decoder nodes; `--tensor-parallel-size`, `--data-parallel-size`, and `--pipeline-parallel-size` provide the local topology values. The prefiller response carries remote topology metadata to the decoder, so `kv_connector_extra_config.prefill/decode.dp_size/tp_size` is not required.
 
 If you want to run "2P1D", please set ASCEND_RT_VISIBLE_DEVICES and port to different values for each P process.
 
