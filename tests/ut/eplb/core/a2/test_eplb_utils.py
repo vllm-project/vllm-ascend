@@ -43,12 +43,6 @@ class TestAscendConfig(unittest.TestCase):
         else:
             from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-            # vLLM PR #41184 made `intermediate_size` a required field of
-            # FusedMoEConfig and derives `intermediate_size_per_partition =
-            # intermediate_size // tp_size` in __post_init__. It also changed
-            # `activation` from a string to MoEActivation, whose `is_gated` property
-            # is read during __post_init__. tp_size=2 here, so intermediate_size=10
-            # yields intermediate_size_per_partition=5.
             moe_config = FusedMoEConfig(
                 num_experts=8,
                 experts_per_token=8,

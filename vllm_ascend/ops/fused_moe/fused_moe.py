@@ -992,6 +992,7 @@ else:
                 )
 
             self.quant_type = self._get_quant_type()
+            # Can be removed after vllm fixes the issue.
             if self._needs_routed_expert_parameter_aliases():
                 self._register_routed_expert_parameter_aliases()
 
@@ -1146,9 +1147,6 @@ else:
             return quant_type
 
         def _register_routed_expert_parameter_aliases(self) -> None:
-            # test_gpt_oss_distributed_tp2
-            # test_qwen3_moe_routing_replay[Qwen/Qwen3.5-35B-A3B]
-            # test_multimodal_reasoning_pp_full_decode_only
             alias_names = []
             for name, param in self.routed_experts.named_parameters(recurse=False):
                 alias_param = torch.nn.Parameter(param.data, requires_grad=param.requires_grad)
