@@ -104,15 +104,22 @@ class VllmEplbAdaptor:
             self.log2phy_map_per_layer[local_idx] = layer.get_log2phy_map()
 
     def init_buffer_tensor(self, num_buffer_tensor):
+        buffer_tensor_shapes: dict[Any, list[torch.Size]] = dict()
         for local_idx, _ in enumerate(self.moe_layers):
             expert_weight_key = self.expert_weight_key_per_layer[local_idx]
-            if expert_weight_key in self.buffer_tensor_list:
-                continue
             expert_weight_names = EPLB_EXPERT_WEIGHT_NAMES[expert_weight_key]
+            expert_tensors = [self.param_dict[f"{local_idx}.{name}"][0] for name in expert_weight_names]
+            expert_tensor_shapes = [tensor.shape for tensor in expert_tensors]
+            if expert_weight_key in self.buffer_tensor_list:
+                assert expert_tensor_shapes == buffer_tensor_shapes[expert_weight_key], (
+                    f"EPLB expert weight shapes mismatch for {expert_weight_key}: "
+                    f"expected {buffer_tensor_shapes[expert_weight_key]}, got {expert_tensor_shapes}"
+                )
+                continue
+            buffer_tensor_shapes[expert_weight_key] = expert_tensor_shapes
             self.buffer_tensor_list[expert_weight_key] = [[] for _ in range(num_buffer_tensor)]
             for buffer_id in range(num_buffer_tensor):
-                for name in expert_weight_names:
-                    expert_tensor = self.param_dict[f"{local_idx}.{name}"][0]
+                for expert_tensor in expert_tensors:
                     buffer_tensor = torch.empty_like(expert_tensor)
                     self.buffer_tensor_list[expert_weight_key][buffer_id].append(buffer_tensor)
 

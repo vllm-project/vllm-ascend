@@ -152,6 +152,36 @@ class TestVllmAdaptor(unittest.TestCase):
         self.assertEqual(len(adaptor.expert_param_per_layer[0][0]), len(EPLB_EXPERT_WEIGHT_NAMES[w8a8_key]))
         self.assertEqual(len(adaptor.expert_param_per_layer[1][0]), len(EPLB_EXPERT_WEIGHT_NAMES[mxfp8_key]))
 
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_reused_buffer_requires_same_expert_weight_shape(self, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.enable_fused_mc2 = 0
+        mock_get_config.return_value = mock_config
+
+        VllmEplbAdaptor._registered_moe_layers = []
+        num_local_experts = 2
+        for weight_shape in [(2, 2), (3, 2)]:
+            layer = MagicMock()
+            layer.local_num_experts = num_local_experts
+            layer.ep_rank = 0
+            layer.quant_type = QuantType.W8A8
+            layer.w13_weight_list = [torch.randn(*weight_shape) for _ in range(num_local_experts)]
+            layer.w2_weight_list = [torch.randn(2, 2) for _ in range(num_local_experts)]
+            layer.w13_weight_scale_fp32_list = [torch.randn(1) for _ in range(num_local_experts)]
+            layer.w2_weight_scale_list = [torch.randn(1) for _ in range(num_local_experts)]
+            layer.moe_load = torch.zeros(num_local_experts)
+            layer.global_expert_map = torch.arange(num_local_experts * 4).reshape(num_local_experts, 4)
+            layer.get_log2phy_map.return_value = torch.arange(4)
+            VllmEplbAdaptor.register_layer(layer)
+
+        model = MagicMock()
+        model.quant_config = MagicMock()
+        model.config.first_k_dense_replace = 0
+        del model.language_model
+
+        with self.assertRaisesRegex(AssertionError, "EPLB expert weight shapes mismatch"):
+            VllmEplbAdaptor(model)
+
     def tearDown(self):
         self.mock_rank.stop()
         self.mock_size.stop()
