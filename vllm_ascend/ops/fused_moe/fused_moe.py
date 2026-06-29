@@ -57,6 +57,7 @@ from vllm_ascend.utils import (
 class FusedMoEResult:
     routed_out: torch.Tensor
     before_dispatch_evt: torch.npu.Event | None = None
+    before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
 
 
@@ -64,6 +65,7 @@ class FusedMoEResult:
 class FusedMoEEvents:
     before_routed_experts: torch.npu.Event
     before_dispatch: torch.npu.Event | None = field(default=None)
+    before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
 
 
@@ -559,6 +561,7 @@ class AscendFusedMoE(FusedMoE):
             return FusedMoEResult(
                 routed_out=routed_out,
                 before_dispatch_evt=fused_experts_results.before_dispatch_evt,
+                before_gmm2_evt=fused_experts_results.before_gmm2_evt,
                 before_combine_evt=fused_experts_results.before_combine_evt,
             )
         else:
@@ -693,14 +696,65 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap_shared_expert):
             # Ensure the shared experts wait for hidden_states to be ready.
             torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
-            # Execute the gate projection and activation concurrently with the
-            # dispatch communication.
-            maybe_wait_event(fused_moe_evts.before_dispatch)
-            part1_out = self._shared_experts_part1(hidden_states)
-            # Execute the down projection concurrently with the combine
-            # communication.
-            maybe_wait_event(fused_moe_evts.before_combine)
-            shared_out = self._shared_experts_part2(hidden_states, part1_out)
+            # Stage 1: input dynamic_quant (vec) -- runs right after the original
+            # wait(before_routed_experts) above, overlapping with prepare.
+            original_dtype = hidden_states.dtype
+            has_quantized_up = hasattr(self._shared_experts.gate_up_proj, "weight_scale")
+            has_quantized_down = hasattr(self._shared_experts.down_proj, "weight_scale")
+
+            if has_quantized_up:
+                quantized_x, pertoken_scale_x = torch_npu.npu_dynamic_quant(hidden_states)
+                # squeeze handling consistent with AscendW8A8DynamicLinearMethod.apply()
+                if pertoken_scale_x.dim() == 2:
+                    quantized_x = quantized_x.squeeze(dim=1)
+                    pertoken_scale_x = pertoken_scale_x.squeeze(dim=1)
+
+                # Stage 2: gate_up_proj matmul (cube)
+                # Does NOT wait for before_dispatch; stage1->stage2 run back-to-back
+                # (consistent with the 0.20.2rc1 non-internal-router mode). Launching
+                # QuantMatmul early reduces cube contention with GroupGmmSwigluQuant.
+                gate_up_out = torch_npu.npu_quant_matmul(
+                    quantized_x,
+                    self._shared_experts.gate_up_proj.weight,
+                    self._shared_experts.gate_up_proj.weight_scale,
+                    pertoken_scale=pertoken_scale_x,
+                    bias=None,
+                    output_dtype=original_dtype,
+                )
+            else:
+                gate_up_out, _ = self._shared_experts.gate_up_proj(hidden_states)  # type: ignore
+
+            # Stage 3: SwiGLU + dynamic_quant (vec)
+            # Wait for before_gmm2 to overlap with gmm2 (vec vs cube).
+            maybe_wait_event(fused_moe_evts.before_gmm2)
+            shared_act = self._shared_experts.act_fn(gate_up_out)  # type: ignore
+
+            if has_quantized_down:
+                quantized_act, pertoken_scale_act = torch_npu.npu_dynamic_quant(shared_act)
+                # squeeze handling, consistent with stage 1 and apply().
+                if pertoken_scale_act.dim() == 2:
+                    quantized_act = quantized_act.squeeze(dim=1)
+                    pertoken_scale_act = pertoken_scale_act.squeeze(dim=1)
+
+                # Stage 4: down_proj matmul (cube)
+                # Wait for before_combine to overlap with combine (cube vs comm).
+                maybe_wait_event(fused_moe_evts.before_combine)
+                shared_out = torch_npu.npu_quant_matmul(
+                    quantized_act,
+                    self._shared_experts.down_proj.weight,
+                    self._shared_experts.down_proj.weight_scale,
+                    pertoken_scale=pertoken_scale_act,
+                    bias=None,
+                    output_dtype=original_dtype,
+                )
+            else:
+                maybe_wait_event(fused_moe_evts.before_combine)
+                shared_out, _ = self._shared_experts.down_proj(shared_act)  # type: ignore
+
+            # Qwen3-Next gating (not used by DeepSeek V3.1, kept for compatibility).
+            if hasattr(self._shared_experts, "expert_gate") and self._shared_experts.expert_gate is not None:
+                gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
+                shared_out = F.sigmoid(gate_out) * shared_out
 
         # Make sure the default stream waits for the shared experts stream to
         # finish.
@@ -745,6 +799,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                 FusedMoEEvents(
                     before_routed_experts=before_routed_experts,
                     before_dispatch=fused_moe_results.before_dispatch_evt,
+                    before_gmm2=fused_moe_results.before_gmm2_evt,
                     before_combine=fused_moe_results.before_combine_evt,
                 ),
             )
