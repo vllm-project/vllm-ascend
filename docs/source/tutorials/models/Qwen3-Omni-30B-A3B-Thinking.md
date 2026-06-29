@@ -16,7 +16,7 @@ Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user
 
 ## 3 Prerequisites
 
-### 3.1 Model Weight
+### Model Weight
 
 The following model variants are available. It is recommended to download the model weight to a shared directory accessible to all nodes.
 
@@ -43,7 +43,7 @@ Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model struc
 
 ### 4.1 Docker Image Installation
 
-You can use the official all-in-one Docker image for Qwen3 MoE models.
+You can use the official all-in-one Docker image for Qwen3-Omni MoE models.
 
 **Docker Pull:**
 
@@ -217,112 +217,64 @@ Required to avoid HcclAllreduce failures caused by the default FFTS+ mode's stre
 export HCCL_OP_EXPANSION_MODE="AIV"
 ```
 
-## 5 Deployment
+## 5 Online Service Deployment
 
-### 5.1 Single-node Deployment
+PS:Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
 
-#### 5.1.1 Offline Inference on Multi-NPU
+### Single-Node Online Deployment
 
-Run the following script to execute offline inference on multi-NPU:
+Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-Omni-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
 
-```python
-import gc
-import torch
-import os
-from vllm import LLM, SamplingParams
-from vllm.distributed.parallel_state import (
-    destroy_distributed_environment,
-    destroy_model_parallel
-)
-from modelscope import Qwen3OmniMoeProcessor
-from qwen_omni_utils import process_mm_info
+> The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
-os.environ["HCCL_BUFFSIZE"] = "1024"
-
-def clean_up():
-    """Clean up distributed resources and NPU memory"""
-    destroy_model_parallel()
-    destroy_distributed_environment()
-    gc.collect()  # Garbage collection to free up memory
-    torch.npu.empty_cache()
-
-
-def main():
-    MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Thinking"
-    llm = LLM(
-        model=MODEL_PATH,
-        tensor_parallel_size=2,
-        enable_expert_parallel=True,
-        distributed_executor_backend="mp",
-        limit_mm_per_prompt={'image': 5, 'video': 2, 'audio': 3},
-        max_model_len=32768,
-    )
-
-    sampling_params = SamplingParams(
-        temperature=0.6,
-        top_p=0.95,
-        top_k=20,
-        max_tokens=16384,
-    )
-
-    processor = Qwen3OmniMoeProcessor.from_pretrained(MODEL_PATH)
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "video", "video": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"},
-                {"type": "text", "text": "What can you see and hear? Answer in one sentence."}
-            ]
-        }
-    ]
-
-    text = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
-    # 'use_audio_in_video = True' requires equal number of audio and video items, including audio from the video. 
-    audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
-
-    inputs = {
-        "prompt": text,
-        "multi_modal_data": {},
-        "mm_processor_kwargs": {"use_audio_in_video": True}
-    }
-    if images is not None:
-        inputs['multi_modal_data']['image'] = images
-    if videos is not None:
-        inputs['multi_modal_data']['video'] = videos
-    if audios is not None:
-        inputs['multi_modal_data']['audio'] = audios
-
-    outputs = llm.generate([inputs], sampling_params=sampling_params)
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
-    del llm
-    clean_up()
-
-
-if __name__ == "__main__":
-    main()
-```
-
-#### 5.1.2 Online Inference on Multi-NPU
-
-Run the following script to start the vLLM server on Multi-NPU:
-For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 1, and for 32 GB of memory, tensor-parallel-size should be at least 2.
+**Atlas 800I A2/A3:**
 
 ```bash
-export HCCL_BUFFSIZE=512
-export HCCL_OP_EXPANSION_MODE=AIV
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve your_model_path \
+    --served-model-name qwen3-omni \
+    --trust-remote-code \
+    --max-num-seqs 100 \
+    --max-model-len 40960 \
+    --max-num-batched-tokens 16384 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --quantization ascend \
+    --distributed_executor_backend "mp" \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --gpu-memory-utilization 0.95 \
+    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --port 8000 
 ```
 
-```bash
-vllm serve Qwen/Qwen3-Omni-30B-A3B-Thinking --tensor-parallel-size 2 --enable_expert_parallel
-```
+:::{note}
+
+- `ASCEND_RT_VISIBLE_DEVICES`: must be set to the NPU chip IDs allocated to your environment (e.g., `0,1,2,3` for 4 chips).
+- `--port`: adjust to avoid conflicts with other services running on the same machine.
+- `--no-enable-prefix-caching`: disabled by default as prefix caching effectiveness for this model on Ascend NPUs has not been fully characterized. You can try enabling it to evaluate the cache hit rate for your workload.
+- `--quantization ascend`: required for W8A8 quantized models. Remove this parameter when using BF16 weights.
+
+:::
+
+:::{tip}
+For parameter details, refer to:
+
+- [vLLM CLI documentation](https://docs.vllm.ai/en/stable/cli/) — standard serve parameters (`--host`, `--port`, `--max-model-len`, etc.)
+- [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.)
+- [Additional Configuration](../../user_guide/configuration/additional_config.md) — `--additional-config` format and options
+:::
+
+**Service Verification:**
+
+After the service is started, verify it is running by sending a prompt. Refer to [Section 6](#6-functional-verification) for a usage example.
 
 ## 6 Functional Verification
 
@@ -333,7 +285,7 @@ curl http://localhost:8000/v1/chat/completions \
 -X POST \
 -H "Content-Type: application/json" \
 -d '{
-    "model": "Qwen/Qwen3-Omni-30B-A3B-Thinking",
+    "model": "qwen3-omni",
     "messages": [
         {
             "role": "user",
@@ -402,7 +354,7 @@ The output should resemble the following.
 
 Here are accuracy evaluation methods.
 
-### 7.1 Using EvalScope
+### Using EvalScope
 
 As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 
@@ -438,7 +390,7 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
 
 ## 8 Performance
 
-### 8.1 Using vLLM Benchmark  
+### Using vLLM Benchmark  
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
 Refer to vllm benchmark for more details.
@@ -492,4 +444,148 @@ Median ITL (ms):                         96.10
 P99 ITL (ms):                            176.02
 ==================================================
 ```
-## 9 FAQ
+
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+#### Table 1: Scenario Overview
+
+| Scenario        | Deployment Mode   | *Total NPUs      | Weight Version | Key Considerations                                               |
+| --------------- | ----------------- | ---------------- | -------------- | ---------------------------------------------------------------- |
+| High Throughput | Single-Node (TP1) | 1 (A3)<br>2 (A2) | W8A8           | Single-card deployment maximizes concurrent request processing   |
+| Low Latency     | Single-Node (TP4) | 2 (A3)<br>4 (A2) | W8A8           | Multi-card TP reduces per-token latency with expert parallelism  |
+| Long Context    | Single-Node (TP4) | 2 (A3)<br>4 (A2) | W8A8           | Reduces concurrent sequences to accommodate longer max-model-len |
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. On Atlas 800I A3, each NPU contains two dies (chips), so TP4 requires 4 chips = 2 NPUs.
+
+#### Table 2: Detailed Node Configuration
+
+| Scenario        | NPUs   | TP  | max-model-len | max-num-seqs | FUSED_MC2 | EP  | hf-overrides |
+| --------------- | ------ | --- | ------------- | ------------ | --------- | --- | ------------ |
+| High Throughput | 1 (A3) | 1   | 37364         | 100          | Off       | Off | -            |
+| Low Latency     | 2 (A3) | 4   | 37364         | 100          | Off       | On  | -            |
+| Long Context    | 2 (A3) | 4   | 131072        | 14           | Off       | On  | YaRN         |
+
+> For detailed parameter descriptions, please refer to the deployment examples in Section 5.
+
+**Low Latency Configuration:**
+
+```shell
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve your_model_path \
+    --served-model-name qwen3-omni \
+    --trust-remote-code \
+    --max-num-seqs 100 \
+    --max-model-len 37364 \
+    --max-num-batched-tokens 16384 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --distributed_executor_backend "mp" \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --gpu-memory-utilization 0.95 \
+    --port 8000 \
+    --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
+```
+
+:::{tip}
+Example AISBench settings for this configuration:
+
+- `request_rate`: 0
+- `batch_size`: 32
+- Input/Output length: 2048/2048 or 3500/1500
+:::
+
+**High Throughput Configuration:**
+
+```shell
+export ASCEND_RT_VISIBLE_DEVICES=0
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve your_model_path \
+    --served-model-name qwen3-omni \
+    --trust-remote-code \
+    --max-num-seqs 100 \
+    --max-model-len 37364 \
+    --max-num-batched-tokens 16384 \
+    --tensor-parallel-size 1 \
+    --distributed_executor_backend "mp" \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"weight_nz_mode": 2}' \
+    --gpu-memory-utilization 0.95 \
+    --port 8000 \
+    --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
+```
+
+:::{tip}
+Example AISBench settings for this configuration:
+
+- `request_rate`: 0
+- `batch_size`: 32
+- Input/Output length: 2048/2048 or 3500/1500
+:::
+
+**Long Context Configuration:**
+
+```shell
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+vllm serve your_model_path \
+    --served-model-name qwen3-omni \
+    --trust-remote-code \
+    --max-num-seqs 14 \
+    --max-model-len 131072 \
+    --max-num-batched-tokens 16384 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --distributed_executor_backend "mp" \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --quantization ascend \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --gpu-memory-utilization 0.95 \
+    --port 8000 \
+    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}}'
+```
+
+:::{tip}
+Example AISBench settings for this configuration:
+
+- `request_rate`: 0
+- `batch_size`: 32
+- Input/Output length: 65536/1024 or 131072/1024
+:::
+
+### 9.2 Tuning Guidelines
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+## 10 FAQ
+
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers model-specific issues.
