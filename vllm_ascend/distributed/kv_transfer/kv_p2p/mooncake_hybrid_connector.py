@@ -68,137 +68,6 @@ GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 
 
-class KVRecvDebugStats:
-    def __init__(self, name: str):
-        self.name = name
-        self.enabled = os.environ.get("VLLM_ASCEND_KV_RECV_DEBUG_STATS", "0") == "1"
-        self.summary_interval = max(1, int(os.environ.get("VLLM_ASCEND_KV_RECV_DEBUG_INTERVAL", "100")))
-        self.lock = threading.Lock()
-        self.active_handlers = 0
-        self.count = 0
-        self.queue_ms: list[float] = []
-        self.dispatch_wait_ms: list[float] = []
-        self.handle_ms: list[float] = []
-        self.lifecycle_ms: list[float] = []
-        self.active_at_start: list[int] = []
-
-    @staticmethod
-    def _percentile(values: list[float], pct: float) -> float:
-        if not values:
-            return 0.0
-        sorted_values = sorted(values)
-        index = min(len(sorted_values) - 1, max(0, math.ceil(len(sorted_values) * pct / 100) - 1))
-        return sorted_values[index]
-
-    @staticmethod
-    def _avg(values: list[float]) -> float:
-        return sum(values) / len(values) if values else 0.0
-
-    def dequeued(self, req_meta: dict[str, Any]) -> None:
-        if not self.enabled:
-            return
-        now = time.perf_counter()
-        enqueue_time = req_meta.get("debug_enqueue_time", now)
-        req_meta["debug_dequeue_time"] = now
-        req_meta["debug_queue_wait_ms"] = (now - enqueue_time) * 1000
-
-    def begin(self, req_meta: dict[str, Any]) -> int:
-        if not self.enabled:
-            return 0
-        now = time.perf_counter()
-        dequeue_time = req_meta.get("debug_dequeue_time", now)
-        req_meta["debug_handle_start_time"] = now
-        req_meta["debug_dispatch_wait_ms"] = (now - dequeue_time) * 1000
-        with self.lock:
-            self.active_handlers += 1
-            active_count = self.active_handlers
-        return active_count
-
-    def end(self, req_meta: dict[str, Any], active_count: int) -> None:
-        if not self.enabled:
-            return
-        now = time.perf_counter()
-        handle_start_time = req_meta.get("debug_handle_start_time", now)
-        enqueue_time = req_meta.get("debug_enqueue_time", handle_start_time)
-        queue_wait_ms = req_meta.get("debug_queue_wait_ms", 0.0)
-        dispatch_wait_ms = req_meta.get("debug_dispatch_wait_ms", 0.0)
-        handle_ms = (now - handle_start_time) * 1000
-        lifecycle_ms = (now - enqueue_time) * 1000
-        with self.lock:
-            self.active_handlers = max(0, self.active_handlers - 1)
-            self.count += 1
-            self.queue_ms.append(queue_wait_ms)
-            self.dispatch_wait_ms.append(dispatch_wait_ms)
-            self.handle_ms.append(handle_ms)
-            self.lifecycle_ms.append(lifecycle_ms)
-            self.active_at_start.append(active_count)
-            count = self.count
-            should_log_summary = count % self.summary_interval == 0
-
-        logger.info(
-            "KV_RECV_DEBUG_EVENT name=%s request_id=%s remote_request_id=%s "
-            "queue_ms=%.3f dispatch_wait_ms=%.3f handle_ms=%.3f lifecycle_ms=%.3f active_at_start=%d",
-            self.name,
-            req_meta.get("request_id"),
-            req_meta.get("remote_request_id"),
-            queue_wait_ms,
-            dispatch_wait_ms,
-            handle_ms,
-            lifecycle_ms,
-            active_count,
-        )
-        if should_log_summary:
-            self.log_summary()
-
-    def log_summary(self) -> None:
-        if not self.enabled:
-            return
-        with self.lock:
-            count = self.count
-            queue_ms = list(self.queue_ms)
-            dispatch_wait_ms = list(self.dispatch_wait_ms)
-            handle_ms = list(self.handle_ms)
-            lifecycle_ms = list(self.lifecycle_ms)
-            active_at_start = list(self.active_at_start)
-        active_hist_items = []
-        for value in sorted(set(active_at_start)):
-            active_hist_items.append(f"{value}:{active_at_start.count(value)}")
-        active_hist = ",".join(active_hist_items)
-        logger.info(
-            "KV_RECV_DEBUG_SUMMARY name=%s count=%d "
-            "queue_avg_ms=%.3f queue_p50_ms=%.3f queue_p90_ms=%.3f queue_p99_ms=%.3f queue_max_ms=%.3f "
-            "dispatch_avg_ms=%.3f dispatch_p50_ms=%.3f dispatch_p90_ms=%.3f dispatch_p99_ms=%.3f dispatch_max_ms=%.3f "
-            "handle_avg_ms=%.3f handle_p50_ms=%.3f handle_p90_ms=%.3f handle_p99_ms=%.3f handle_max_ms=%.3f "
-            "lifecycle_avg_ms=%.3f lifecycle_p50_ms=%.3f lifecycle_p90_ms=%.3f "
-            "lifecycle_p99_ms=%.3f lifecycle_max_ms=%.3f "
-            "active_max=%d active_hist=%s",
-            self.name,
-            count,
-            self._avg(queue_ms),
-            self._percentile(queue_ms, 50),
-            self._percentile(queue_ms, 90),
-            self._percentile(queue_ms, 99),
-            max(queue_ms, default=0.0),
-            self._avg(dispatch_wait_ms),
-            self._percentile(dispatch_wait_ms, 50),
-            self._percentile(dispatch_wait_ms, 90),
-            self._percentile(dispatch_wait_ms, 99),
-            max(dispatch_wait_ms, default=0.0),
-            self._avg(handle_ms),
-            self._percentile(handle_ms, 50),
-            self._percentile(handle_ms, 90),
-            self._percentile(handle_ms, 99),
-            max(handle_ms, default=0.0),
-            self._avg(lifecycle_ms),
-            self._percentile(lifecycle_ms, 50),
-            self._percentile(lifecycle_ms, 90),
-            self._percentile(lifecycle_ms, 99),
-            max(lifecycle_ms, default=0.0),
-            max(active_at_start, default=0),
-            active_hist,
-        )
-
-
 # A busy peer can otherwise keep a global executor worker forever when the
 # number of peers is larger than max_workers. Yield after a small FIFO batch so
 # other peers already waiting in the global executor queue can make progress.
@@ -540,7 +409,6 @@ class KVCacheRecvingThread(threading.Thread):
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         self.executor = ThreadPoolExecutor(max_workers=32)
-        self.debug_stats = KVRecvDebugStats(f"{self.local_engine_id}:{self.local_handshake_port}")
         self.peer_request_queues: defaultdict[tuple[str, int], deque[dict[str, Any]]] = defaultdict(deque)
         self.active_peer_request_handlers: set[tuple[str, int]] = set()
         self.peer_request_queues_lock = threading.Lock()
@@ -616,7 +484,6 @@ class KVCacheRecvingThread(threading.Thread):
                 "offset": offset,
                 "tp_num_need_pulls": tp_num_need_pulls,
                 "remote_port_send_num": remote_port_send_num,
-                "debug_enqueue_time": time.perf_counter(),
                 "all_task_done": all_task_done,
             }
         )
@@ -639,7 +506,6 @@ class KVCacheRecvingThread(threading.Thread):
                     logger.warning("Received a None request. ")
                     self.request_queue.task_done()
                     continue
-                self.debug_stats.dequeued(request_data)
                 self._submit_request(request_data)
             except Exception as e:
                 logger.error("Error in KVCacheTransferThread. error=%s. ", e)
@@ -720,7 +586,6 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port = req_meta["remote_handshake_port"]
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
-        debug_active_count = self.debug_stats.begin(req_meta)
 
         try:
             logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
@@ -732,7 +597,6 @@ class KVCacheRecvingThread(threading.Thread):
         except Exception:
             logger.exception("Failed to transfer KV cache for request %s.", remote_request_id)
         finally:
-            self.debug_stats.end(req_meta, debug_active_count)
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if self._mark_request_task_done(request_id, all_task_done):
                 if len(req_meta["local_block_ids"]) > 0:
