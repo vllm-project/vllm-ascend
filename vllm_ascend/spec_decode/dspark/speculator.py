@@ -83,53 +83,109 @@ class AscendDsparkSpeculator(AscendDflashProposer):
 
     # --- Sample path (Markov-biased; replaces DFlash's parallel sample) ----
 
-    def _sample_with_markov(
+    # --- Markov serial sample loop (port of vllm #46995 speculator.py L143) -
+
+    def _sample_sequential(
         self,
+        num_reqs: int,
         head_hidden: torch.Tensor,
         anchor_tokens: torch.Tensor,
+        sample_indices: torch.Tensor | None = None,
+        temperature: torch.Tensor | None = None,
+        seeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """N-step Markov sample loop over backbone head_hidden.
 
+        Direct port of upstream vllm #46995 ``DSparkSpeculator._sample_sequential``
+        with two NPU-side adjustments:
+
+          1. No ``gumbel_sample``/``draft_logits`` plumbing — probabilistic
+             drafting uses ``torch.multinomial`` (the upstream version's
+             Gumbel-based path has a known correctness issue per #46995 Known
+             Issues; greedy is the safer default for M1).
+          2. ``sample_indices`` is optional. When provided, ``head_hidden`` is
+             treated as a flat ``[num_tokens, dim]`` buffer and indexed; when
+             omitted, ``head_hidden`` is assumed to be already
+             ``[num_reqs * N, dim]`` in (req, step) order.
+
         Args:
-          head_hidden: pre-norm head hidden, shape [num_reqs * N, dim].
-          anchor_tokens: per-request bonus token, shape [num_reqs].
+          num_reqs:      number of active requests in this draft step.
+          head_hidden:   pre-norm head hidden, either ``[T, dim]`` (with
+                         ``sample_indices``) or ``[num_reqs*N, dim]``.
+          anchor_tokens: per-request bonus token from the previous verification
+                         round, shape ``[num_reqs]``. Mirrors the upstream
+                         persistent ``self._anchor_idx`` lookup.
+          sample_indices: optional flat indices into ``head_hidden`` selecting
+                         the ``[num_reqs * N]`` sample positions in (req, step)
+                         order.
+          temperature:   per-request sampling temperature, shape ``[num_reqs]``.
+                         If None or all-greedy, this path uses ``argmax``.
+          seeds:         per-request RNG seed for probabilistic sampling.
 
         Returns:
-          draft_token_ids: shape [num_reqs, N].
+          draft_token_ids of shape ``[num_reqs, N]``.
 
-        Mirrors upstream PR #46995 speculator.py L143-183. For each step i:
-          base_logits[i] = compute_logits(head_hidden[i])
-          markov_embed_i = markov_embed(prev_token)
-          biased_i        = base_logits[i] + markov_bias(markov_embed_i)
-          next_token_i    = sample(biased_i)
-          prev_token      = next_token_i
+        Implements paper §3.1 (Markov bias loop), equation 5:
+          B(x_{k-1}, ·) = W1[x_{k-1}] · W2
+          logits_k      = U_k + B(x_{k-1}, ·)
+          x_k           = sample(softmax(logits_k))
+
+        Sets ``self.last_confidence`` (per-position acceptance scores) for the
+        M2/M3 prefix scheduler hook-up after the block is complete.
         """
-        assert self._dspark_model is not None, "_sample_with_markov called before model load."
+        assert self._dspark_model is not None, "_sample_sequential called before model load."
         model = self._dspark_model
         n_spec = self.num_speculative_tokens
-        num_reqs = anchor_tokens.shape[0]
         num_sample = num_reqs * n_spec
 
-        sample_hidden = head_hidden[:num_sample]
+        # Gather the per-(req, step) hidden states.
+        if sample_indices is not None:
+            sample_hidden = head_hidden[sample_indices[:num_sample]]
+        else:
+            sample_hidden = head_hidden[:num_sample]
+
+        # Backbone logits U_k for all N positions, computed in one matmul.
         base_logits = model.compute_logits(sample_hidden)
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
 
-        draft_tokens = torch.empty((num_reqs, n_spec), dtype=torch.int64, device=head_hidden.device)
+        # Greedy path when no temperature provided or all temperatures are 0.
+        is_greedy = temperature is None or temperature.numel() == 0 or bool((temperature == 0).all().item())
+
+        draft_tokens = torch.empty(
+            (num_reqs, n_spec),
+            dtype=torch.int64,
+            device=head_hidden.device,
+        )
         prev = anchor_tokens
         self._markov_embeds_buffer = []
 
         for i in range(n_spec):
+            # Sequential Markov bias: the bias for position i depends on the
+            # token sampled at position i-1.
             markov_embed = model.markov_embed(prev)
             self._markov_embeds_buffer.append(markov_embed)
             bias = model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
-            next_tok = logits_i.argmax(dim=-1)  # M1: greedy; probabilistic later.
+
+            if is_greedy:
+                next_tok = logits_i.argmax(dim=-1)
+            else:
+                # Probabilistic sampling — apply per-request temperature and
+                # multinomial-sample. Gumbel is intentionally skipped per
+                # upstream #46995 Known Issues (probabilistic correctness bug).
+                temp = temperature.view(-1, 1).to(logits_i.dtype)
+                scaled = logits_i / temp.clamp_min(1e-5)
+                probs = torch.softmax(scaled, dim=-1)
+                next_tok = torch.multinomial(probs, num_samples=1).squeeze(-1)
+
             draft_tokens[:, i] = next_tok
             prev = next_tok
 
-        # Compute confidence for the M2/M3 prefix scheduler hook-up.
-        markov_embeds = torch.stack(self._markov_embeds_buffer, dim=1)  # [num_reqs, n_spec, rank]
+        # Per-block confidence for the M2/M3 prefix scheduler. Empty / failure
+        # paths log and set ``last_confidence = None`` so downstream callers
+        # can treat None as "no truncation".
+        markov_embeds = torch.stack(self._markov_embeds_buffer, dim=1)  # [num_reqs, N, rank]
         hidden_for_conf = sample_hidden.view(num_reqs, n_spec, -1)
         try:
             self.last_confidence = model.compute_confidence(hidden_for_conf, markov_embeds)

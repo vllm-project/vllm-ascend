@@ -116,5 +116,102 @@ class TestDSparkRemapName(unittest.TestCase):
             self.assertIsNone(self._remap(src), msg=src)
 
 
+class TestDSparkSequentialSample(unittest.TestCase):
+    """Lightweight contract test for ``_sample_sequential`` math.
+
+    We exercise the loop body directly with stub model hooks so we don't need
+    a real DSpark checkpoint or NPU device. Verifies:
+
+    * Loop produces ``[num_reqs, N]`` tokens.
+    * Step k's input ``prev`` token equals step k-1's sampled output (the
+      sequential dependency that defines DSpark's "semi-autoregressive"
+      property — paper §3.1).
+    * Markov bias from step k-1's sample affects step k's logits (otherwise
+      the head wouldn't have any inter-token signal).
+    * Greedy path returns argmax(base_logits + bias) exactly.
+    """
+
+    def setUp(self):
+        from vllm_ascend.spec_decode.dspark.speculator import AscendDsparkSpeculator
+
+        # We construct an instance via ``__new__`` to bypass the full DFlash
+        # __init__ chain (which needs a real VllmConfig).
+        self._cls = AscendDsparkSpeculator
+
+    def test_sample_sequential_greedy_argmax_with_bias(self):
+        vocab = 8
+        num_reqs = 2
+        n_spec = 3
+        rank = 4
+        hidden = 5
+
+        spec = self._cls.__new__(self._cls)
+        spec.num_speculative_tokens = n_spec
+        spec._markov_embeds_buffer = []
+        spec.last_confidence = None
+
+        # Build a stub draft model whose embed / bias / compute_logits /
+        # compute_confidence we control deterministically.
+        torch.manual_seed(0)
+        base_logits_per_pos = torch.randn(num_reqs * n_spec, vocab)
+        markov_w1_lookup = torch.randn(vocab, rank)
+        markov_w2 = torch.randn(rank, vocab)
+
+        class StubModel:
+            def __init__(self):
+                self.bias_calls = []
+                self.embed_calls = []
+
+            def compute_logits(self, h):
+                # h shape is [num_reqs * n_spec, hidden] — we ignore content
+                # and return our deterministic logits.
+                return base_logits_per_pos
+
+            def markov_embed(self, tok):
+                self.embed_calls.append(tok.clone())
+                return markov_w1_lookup[tok]
+
+            def markov_bias(self, embed):
+                self.bias_calls.append(embed.clone())
+                return embed @ markov_w2
+
+            def compute_confidence(self, hidden, markov_embeds):
+                # Return per-position score = 0.5 regardless.
+                return torch.full((hidden.shape[0], hidden.shape[1]), 0.5, dtype=torch.float32)
+
+        spec._dspark_model = StubModel()
+
+        head_hidden = torch.randn(num_reqs * n_spec, hidden)
+        anchor_tokens = torch.tensor([3, 5], dtype=torch.int64)
+        draft = spec._sample_sequential(
+            num_reqs=num_reqs,
+            head_hidden=head_hidden,
+            anchor_tokens=anchor_tokens,
+        )
+
+        # Shape contract.
+        self.assertEqual(draft.shape, (num_reqs, n_spec))
+        self.assertEqual(draft.dtype, torch.int64)
+
+        # Step 0 prev token must equal anchor; subsequent prev = previous step's sample.
+        self.assertTrue(torch.equal(spec._dspark_model.embed_calls[0], anchor_tokens))
+        for k in range(1, n_spec):
+            self.assertTrue(torch.equal(spec._dspark_model.embed_calls[k], draft[:, k - 1]))
+
+        # Greedy path: step k's sample MUST equal argmax(base_logits[k] + bias_k).
+        base_view = base_logits_per_pos.view(num_reqs, n_spec, vocab)
+        prev = anchor_tokens
+        for k in range(n_spec):
+            embed_k = markov_w1_lookup[prev]
+            bias_k = embed_k @ markov_w2
+            expected = (base_view[:, k] + bias_k).argmax(dim=-1)
+            self.assertTrue(torch.equal(draft[:, k], expected), msg=f"step {k}")
+            prev = draft[:, k]
+
+        # Confidence was computed.
+        self.assertIsNotNone(spec.last_confidence)
+        self.assertEqual(spec.last_confidence.shape, (num_reqs, n_spec))
+
+
 if __name__ == "__main__":
     unittest.main()
