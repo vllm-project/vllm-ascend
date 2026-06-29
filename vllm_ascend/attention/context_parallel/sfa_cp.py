@@ -657,6 +657,11 @@ class AscendSFADCPImpl(AscendSFAImpl):
         self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
     ):
         assert attn_metadata.dcp_context is not None
+        dcp_size = get_decode_context_model_parallel_world_size()
+        if dcp_size > 1:
+            local_num_heads = ql_nope.shape[1]
+            ql_nope = get_dcp_group().all_gather(ql_nope.contiguous(), dim=1)
+            q_pe = get_dcp_group().all_gather(q_pe.contiguous(), dim=1)
         kv = kv_cache[0]
         key_rope = kv_cache[1]
         sfa_output, softmax_max, softmax_sum = torch.ops._C_ascend.npu_sparse_flash_attention(
