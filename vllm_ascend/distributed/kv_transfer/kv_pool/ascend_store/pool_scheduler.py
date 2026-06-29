@@ -789,10 +789,10 @@ class KVPoolScheduler:
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
     ) -> ReqMeta | None:
-       # Chunked-prefill increments (prompt not yet fully computed) are always
+        # Chunked-prefill increments (prompt not yet fully computed) are always
         # saved; only decode increments are gated by save_decode_cache.
         req_tuple = self._unfinished_requests.get(req_id)
-        is_decoding = req_tuple is not None and req_tuple[0].num_computed_tokens >= req_tuple[0].num_prompt_tokens 
+        is_decoding = req_tuple is not None and req_tuple[0].num_computed_tokens >= req_tuple[0].num_prompt_tokens
         if is_decoding and not self.save_decode_cache:
             return None
         request_tracker = self._request_trackers.get(req_id)
