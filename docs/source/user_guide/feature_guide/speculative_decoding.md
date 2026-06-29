@@ -237,7 +237,7 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
                 speculative_config={
                     "method": "extract_hidden_states",
                     "num_speculative_tokens": 1,
-                    "draft_model_config": {
+                    "draft_model": {
                         "hf_config": {
                             # Layer indices to extract hidden states from
                             "eagle_aux_hidden_state_layer_ids": [2, 18, 34],
