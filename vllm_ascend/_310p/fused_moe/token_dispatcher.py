@@ -86,7 +86,7 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
                 restore_shape=restore_shape,
             ),
         )
-        
+
     def token_combine(self, hidden_states, combine_metadata, bias=None):
         final_hidden_states = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
