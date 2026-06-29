@@ -18,11 +18,14 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 16) node:
+require 1 Atlas 800I A2 (64G × 1) node or 1 Atlas 800 A3 (64G × 1) node:
 
 - `Qwen3-VL-2B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
 - `Qwen3-VL-4B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
 - `Qwen3-VL-8B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+
+require 1 Atlas 800I A2 (64G × 2) node or 1 Atlas 800 A3 (64G × 2) node:
+
 - `Qwen3-VL-32B-Instruct`:  [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -62,13 +65,37 @@ After a successful docker run, you can verify the running container service by e
 
 ### 4.2 Source Code Installation
 
-If you don't want to use the docker image as above, you can also build all from source:
+If you prefer not to use the Docker image, you can build from source. Install vLLM from source first:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+1. Clone and install vLLM:
 
-If you want to deploy multi-node environment, you need to set up environment on each node.
+   ```bash
+   git clone https://github.com/vllm-project/vllm.git
+   cd vllm
+   pip install -e .
+   ```
 
-To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
+2. Clone and install the vLLM-Ascend repository:
+
+   ```bash
+   git clone https://github.com/vllm-project/vllm-ascend.git
+   cd vllm-ascend
+   pip install -e .
+   ```
+
+**Installation Verification:**
+
+```bash
+pip show vllm vllm-ascend
+```
+
+Expected result: The version information for both packages is displayed, confirming a successful installation.
+
+:::{note}
+If deploying a multi-node environment, set up the environment on each node.
+:::
+
+For more details, please refer to the [Installation Guide](../../installation.md).
 
 ## 5 Online Service Deployment
 
@@ -189,19 +216,19 @@ After about several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(16K context)|Single-Node Mixed|2 (A3)|Qwen3-VL-8B-Instruct|Use tp2 for high-resolution text inputs|
-|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
-|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
-|Multimodal<br>(1080P)|Single-Node Mixed|2 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution visual inputs|
+|High Throughput<br>(16K context)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|Use tp2 for high-resolution text inputs|
+|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
+|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
+|Multimodal<br>(1080P)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution visual inputs|
 
 #### Table 2: Detailed Node Configuration
 
-|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
-|--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput / Low Latency (16K)|Server / Single Machine|2|2|1|~16K|3|
-|Long Context (128K, no cache)|Server / Single Machine|2|2|1|128K|3|
-|Long Context (128K, with cache)|Server / Single Machine|2|2|1|128K|3|
-|Multimodal (1080P)|Server / Single Machine|2|2|1|~16K|3|
+|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num||Weight Version
+|--------|-------------|-----|--|--|-------------------|--------------------|---|
+|High Throughput / Low Latency (16K)|Server / Single Machine|1|1|1|~16K|3|Qwen3-VL-8B-Instruct|
+|Long Context (128K, no cache)|Server / Single Machine|1|1|1|128K|3|Qwen3-VL-8B-Instruct|
+|Long Context (128K, with cache)|Server / Single Machine|1|1|1|128K|3|Qwen3-VL-8B-Instruct|
+|Multimodal (1080P)|Server / Single Machine|1|1|1|~16K|3|Qwen3-VL-8B-Instruct|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 

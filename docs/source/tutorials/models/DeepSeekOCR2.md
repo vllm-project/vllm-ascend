@@ -198,7 +198,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 ## 7 Accuracy Evaluation
 
-Here is an accuracy evaluation methods.
+Here is an accuracy evaluation method.
 
 ### Using AISBench
 
