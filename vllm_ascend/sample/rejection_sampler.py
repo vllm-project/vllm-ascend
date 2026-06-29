@@ -418,6 +418,8 @@ def rejection_sample(
     else:
         ori_target_probs = None
 
+    ori_target_probs = None
+
     # Create output buffer.
     output_token_ids = torch.empty(
         (batch_size, max_spec_len + 1),
