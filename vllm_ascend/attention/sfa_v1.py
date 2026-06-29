@@ -151,7 +151,7 @@ class AscendSFABackend(AttentionBackend):
 class DCPContext:
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
-    seq_len: torch.Tensor
+    seq_lens: torch.Tensor
 
 @dataclass
 class DSACPContext:
@@ -1334,8 +1334,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             actual_seq_lengths_query = attn_metadata.cum_query_lens
             actual_seq_lengths_key = attn_metadata.seq_lens
-        # dcp may override slot_mapping for key_cache and value_cache
-        slot_mapping_kv = attn_metadata.dcp_context.slot_mapping if attn_metadata.dcp_context is not None else attn_metadata.slot_mapping
+        # DCP replicate-k stores LI cache with the full/no-CP metadata, while
+        # SFA KV remains stored with the DCP-sharded slot mapping.
+        slot_mapping_sfa = (
+            attn_metadata.dcp_context.slot_mapping
+            if attn_metadata.dcp_context is not None
+            else attn_metadata.slot_mapping
+        )
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
@@ -1411,7 +1416,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata
                 )
             else:
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_kv, attn_metadata)
+                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_sfa, attn_metadata)
 
             if self.enable_dsa_cp:
                 assert k_pe is not None
@@ -1610,7 +1615,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     else:
                         torch_npu.npu_scatter_nd_update_(
                             kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
-                            slot_mapping_kv.view(-1, 1),
+                            slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
 
