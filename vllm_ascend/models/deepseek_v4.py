@@ -83,7 +83,11 @@ from vllm_ascend.utils import (
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
+    vllm_version_is,
 )
+
+if not vllm_version_is("0.23.0"):
+    from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 
 
 def _get_ascend_dsa_backend():
@@ -1273,15 +1277,26 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
-            self.model,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
-            num_redundant_experts=0,
-        )
+        if vllm_version_is("0.23.0"):
+            return FusedMoE.make_expert_params_mapping(
+                self.model,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
+                num_redundant_experts=0,
+            )
+        else:
+            return fused_moe_make_expert_params_mapping(
+                self.model,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
+                num_redundant_experts=0,
+            )
 
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,
@@ -1299,15 +1314,26 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            self.model,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
-            num_redundant_experts=self.num_redundant_experts,
-        )
+        if vllm_version_is("0.23.0"):
+            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                self.model,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
+                num_redundant_experts=self.num_redundant_experts,
+            )
+        else:
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
+                self.model,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
+                num_redundant_experts=self.num_redundant_experts,
+            )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
