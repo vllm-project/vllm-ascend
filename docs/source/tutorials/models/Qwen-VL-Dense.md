@@ -1,12 +1,12 @@
-# DeepSeek-OCR-2
+# Qwen-VL-Dense(Qwen3-VL-2B/4B/8B/32B)
 
 ## 1 Introduction
 
-DeepSeekOCR2 is a model to investigate the role of vision encoders from an LLM-centric viewpoint.
+The Qwen-VL(Vision-Language)series from Alibaba Cloud comprises a family of powerful Large Vision-Language Models (LVLMs) designed for comprehensive multimodal understanding. They accept images, text, and bounding boxes as input, and output text and detection boxes, enabling advanced functions like image detection, multi-modal dialogue, and multi-image reasoning.
 
-The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0` and can stably run in v0.16.0 and later version.
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, NPU deployment, accuracy and performance evaluation.
 
-This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, accuracy and performance evaluation.
+This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, showcasing the `Qwen3-VL-8B-Instruct` model as an example for single NPU and multi-NPU deployment.
 
 ## 2 Supported Features
 
@@ -18,212 +18,193 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-OCR-2`: [Download model weight](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2).
+require 1 Atlas 800I A2 (64G × 1) node or 1 Atlas 800 A3 (64G × 1) node:
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+- `Qwen3-VL-2B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
+- `Qwen3-VL-4B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
+- `Qwen3-VL-8B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 
-### 3.2 Verify Multi-node Communication
+require 1 Atlas 800I A2 (64G × 2) node or 1 Atlas 800 A3 (64G × 2) node:
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+- `Qwen3-VL-32B-Instruct`:  [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
+
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-You can use our official docker image to run `DeepSeek-OCR-2` directly.
-
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-:::::{tab-set}
-:sync-group: install
+**A3 series**
 
-::::{tab-item} A2 series
-:sync: A2
+Start the docker image on each node.
 
-```{code-block} bash
-   :substitutions:
+``` bash
+# Update the vllm-ascend image
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-export NAME=vllm-ascend
-
-# Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
 docker run --rm \
---name $NAME \
---net=host \
+--name vllm-ascend \
 --shm-size=1g \
 --device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
 --device /dev/hisi_hdc \
 -v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
 -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
+-p 8000:8000 \
 -it $IMAGE bash
 ```
 
-::::
-::::{tab-item} A3 series
-:sync: A3
+After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
-```{code-block} bash
-   :substitutions:
+### 4.2 Source Code Installation
 
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-export NAME=vllm-ascend
+If you prefer not to use the Docker image, you can build from source. Install vLLM from source first:
 
-# Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
-docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
+1. Clone and install vLLM:
+
+   ```bash
+   git clone https://github.com/vllm-project/vllm.git
+   cd vllm
+   pip install -e .
+   ```
+
+2. Clone and install the vLLM-Ascend repository:
+
+   ```bash
+   git clone https://github.com/vllm-project/vllm-ascend.git
+   cd vllm-ascend
+   pip install -e .
+   ```
+
+**Installation Verification:**
+
+```bash
+pip show vllm vllm-ascend
 ```
 
-::::
-:::::
+Expected result: The version information for both packages is displayed, confirming a successful installation.
 
-If you want to deploy multi-node environment, you need to set up environment on each node.
+:::{note}
+If deploying a multi-node environment, set up the environment on each node.
+:::
+
+For more details, please refer to the [Installation Guide](../../installation.md).
 
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
-- `DeepSeek-OCR-2` can be deployed on 1 Atlas 800 A2.
+Run docker container to start the vLLM server on single-NPU:
 
-Run the following script to execute online inference.
-
-```shell
-#!/bin/sh
-
-export VLLM_USE_V1=1
-export VLLM_ASCEND_ENABLE_NZ=0
-export TOKENIZERS_PARALLELISM=false
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export TASK_QUEUE_ENABLE=1
-export TOKENIZERS_PARALLELISM=false
-
-vllm serve /root/.cache/DeepSeek-OCR-2 \
-    --served-model-name deepseekocr2 \
-    --trust-remote-code \
-    --tensor-parallel-size 1  \
-    --port 1055 \
-    --max_model_len 8192 \
-    --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.8 \
-    --allowed-local-media-path / \
-    --additional-config '{
-      "enable_cpu_binding": true,
-      "multistream_overlap_shared_expert": true,
-      "ascend_compilation_config": {"fuse_qknorm_rope": false}
-    }' \
-    --mm-processor-cache-gb 0
+``` bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
+--dtype bfloat16 \
+--max_model_len 16384 \
+--max-num-batched-tokens 16384
 ```
 
-**Notice:**
-The parameters are explained as follows:
+Key Parameter Descriptions:
 
-- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request.
-- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-
-### 5.2 Multi-node Deployment
-
-Single-node deployment is recommended.
-
-### 5.3 Prefill-Decode Disaggregation
-
-We don't need to Prefill-Decode disaggregation
-
-## 6 Functional Verification
+- Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-8B-Instruct model's max seq len (256000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series based on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
 
 If your service start successfully, you can see the info shown below:
 
 ```bash
-INFO:     Started server process [87471]
+INFO:     Started server process [2736]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
+## 6 Functional Verification
+
 Once your server is started, you can query the model with input prompts:
 
-```shell
-curl http://<node0_ip>:<port>/v1/completions \
+```bash
+curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "deepseekocr2",
-        "prompt": "The future of AI is",
-        "max_completion_tokens": 50,
-        "temperature": 0
+    "model": "Qwen/Qwen3-VL-8B-Instruct",
+    "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
+        {"type": "text", "text": "What is the text in the illustration?"}
+    ]}
+    ]
     }'
+```
+
+Expected Result:
+
+The service returns HTTP 200 OK.
+
+```bash
+{"id":"chatcmpl-d3270d4a16cb4b98936f71ee3016451f","object":"chat.completion","created":1764924127,"model":"Qwen/Qwen3-VL-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"The text in the illustration is: **TONGYI Qwen**","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":107,"total_tokens":123,"completion_tokens":16,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
 ```
 
 ## 7 Accuracy Evaluation
 
-Here is an accuracy evaluation method.
+Here is one accuracy evaluation method.
 
-### Using AISBench
+### Using Language Model Evaluation Harness
 
-1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
+The accuracy of some models is already within our CI monitoring scope, including:
 
-2. After execution, you can get the result, here is the result of `DeepSeek-OCR-2` for reference only.
+- `Qwen3-VL-8B-Instruct`
 
-| dataset | version | metric | mode | vllm-api-general-chat | note |
-|----- | ----- | ----- | ----- | -----| ----- |
-| textvqa | - | accuracy | gen | 50.28 | 1 Atlas 800 A2 |
-| ominidocbench | - | accuracy | gen | 66.86 | 1 Atlas 800 A2 |
+As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode.
+
+1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
+
+    ```shell
+    pip install lm_eval
+    ```
+
+2. Run `lm_eval` to execute the accuracy evaluation.
+
+    ```shell
+    lm_eval \
+        --model vllm-vlm \
+        --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
+        --tasks mmmu_val \
+        --batch_size 32 \
+        --apply_chat_template \
+        --trust_remote_code \
+        --output_path ./results
+    ```
+
+3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
+
+    |  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
+    |---------|------:|------|-----:|------|---|-----:|---|-----:|
+    |mmmu_val |      0|none  |      |acc   |↑  |0.5389|±  |0.0159|
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### Using vLLM Benchmark
 
-Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-The performance result is:  
+There are three `vllm bench` subcommands:
 
-**Hardware**: A2-313T, 1 node
+- `latency`: Benchmark the latency of a single batch of requests.
+- `serve`: Benchmark the online serving throughput.
+- `throughput`: Benchmark offline inference throughput.
 
-**Input/Output**: 1080P/256
+The performance evaluation must be conducted in an online mode. Take the `serve` as an example. Run the code as follows.
 
-**Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each card is 864 TPS (Token Per Second).
+```shell
+vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+```
+
+After about several minutes, you can get the performance evaluation result.
 
 ## 9 Performance Tuning
 
@@ -233,11 +214,26 @@ The performance result is:
 
 #### Table 1: Scenario Overview
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
-
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|Multimodal<br>(1080P)|Single-Node Mixed|16 (A3)|deepseekocr2|dp1 tp1 for high-resolution visual inputs|
+|High Throughput<br>(16K context)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|Use tp2 for high-resolution text inputs|
+|Long Context<br>(128K, no prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
+|Long Context<br>(128K, with prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
+|Multimodal<br>(1080P)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution visual inputs|
+
+#### Table 2: Detailed Node Configuration
+
+|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num||Weight Version
+|--------|-------------|-----|--|--|-------------------|--------------------|---|
+|High Throughput / Low Latency (16K)|Server / Single Machine|1|1|1|~16K|3|Qwen3-VL-8B-Instruct|
+|Long Context (128K, no cache)|Server / Single Machine|1|1|1|128K|3|Qwen3-VL-8B-Instruct|
+|Long Context (128K, with cache)|Server / Single Machine|1|1|1|128K|3|Qwen3-VL-8B-Instruct|
+|Multimodal (1080P)|Server / Single Machine|1|1|1|~16K|3|Qwen3-VL-8B-Instruct|
+
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+
+**Notice:**
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
 
 ### 9.2 Tuning Guidelines
 
@@ -249,10 +245,4 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
-- **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
-
-  A: Clean up old processes and restart: `pkill -f vLLM*`.
-
-- **Q: How to handle OOM or unstable startup?**
-
-  A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce concurrency and load-testing pressure (e.g., `max-concurrency` / `num-prompts`).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html);
