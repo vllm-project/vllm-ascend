@@ -4732,7 +4732,7 @@ class NPUModelRunner(GPUModelRunner):
                             dsa_k_cache = raw_dsa_k_tensor.view(self.c8_k_cache_dtype).view(dsa_k_cache_shape)
                             # dsa_k_scale
                             dsa_k_scale_cache_shape = (
-                                num_blocks,
+                                num_blocks * current_kv_cache_spec.sfa_dcp_replicate_k_size,
                                 current_kv_cache_spec.block_size,
                                 current_kv_cache_spec.num_kv_heads,
                                 1,
