@@ -1183,8 +1183,7 @@ def _compute_potential_max_tokens(vllm_config) -> int:
 
 # potential_max_tokens is computed once in the model runner __init__ and reused by
 # both the skip-allreduce decision and the o_proj static-exchange buffer sizing, so
-# neither path recomputes it. Mirrors the _mc2_tokens_capacity set/get pattern in
-# ascend_forward_context.py.
+# neither path recomputes it.
 _potential_max_tokens: int | None = None
 
 
