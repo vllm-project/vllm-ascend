@@ -173,15 +173,17 @@ class KVRecvDebugStats:
             handle_ms = list(self.handle_ms)
             lifecycle_ms = list(self.lifecycle_ms)
             active_at_start = list(self.active_at_start)
-        active_hist = ",".join(
-            f"{value}:{active_at_start.count(value)}" for value in sorted(set(active_at_start))
-        )
+        active_hist_items = []
+        for value in sorted(set(active_at_start)):
+            active_hist_items.append(f"{value}:{active_at_start.count(value)}")
+        active_hist = ",".join(active_hist_items)
         logger.info(
             "KV_RECV_DEBUG_SUMMARY name=%s count=%d "
             "queue_avg_ms=%.3f queue_p50_ms=%.3f queue_p90_ms=%.3f queue_p99_ms=%.3f queue_max_ms=%.3f "
             "dispatch_avg_ms=%.3f dispatch_p50_ms=%.3f dispatch_p90_ms=%.3f dispatch_p99_ms=%.3f dispatch_max_ms=%.3f "
             "handle_avg_ms=%.3f handle_p50_ms=%.3f handle_p90_ms=%.3f handle_p99_ms=%.3f handle_max_ms=%.3f "
-            "lifecycle_avg_ms=%.3f lifecycle_p50_ms=%.3f lifecycle_p90_ms=%.3f lifecycle_p99_ms=%.3f lifecycle_max_ms=%.3f "
+            "lifecycle_avg_ms=%.3f lifecycle_p50_ms=%.3f lifecycle_p90_ms=%.3f "
+            "lifecycle_p99_ms=%.3f lifecycle_max_ms=%.3f "
             "active_max=%d active_hist=%s",
             self.name,
             count,
@@ -208,6 +210,8 @@ class KVRecvDebugStats:
             max(active_at_start, default=0),
             active_hist,
         )
+
+
 # A busy peer can otherwise keep a global executor worker forever when the
 # number of peers is larger than max_workers. Yield after a small FIFO batch so
 # other peers already waiting in the global executor queue can make progress.
