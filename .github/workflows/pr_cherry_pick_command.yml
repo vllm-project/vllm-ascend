@@ -19,7 +19,11 @@ name: Handle /cherry-pick Command
 
 on:
   repository_dispatch:
-    types: [cherry-command]
+    types: [cherry-pick-command]
+
+defaults:
+  run:
+    shell: bash -el {0}
 
 permissions:
   contents: write
