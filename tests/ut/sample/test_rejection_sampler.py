@@ -695,13 +695,15 @@ class TestEntropyVerify(TestBase):
 
         Verifies cumulative-product acceptance with entropy-adjusted threshold
         across two requests. All ori_target_probs rows are valid distributions
-        summing to 1.0.
+        summing to 1.0. cu_num_draft_tokens is cumulative: req0 ends at index 2,
+        req1 ends at index 3 (1 draft token).
         """
         batch_size = 2
         max_spec_len = 3
         output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
 
-        cu_num_draft_tokens = torch.tensor([2, 1])
+        # Cumulative: req0 has 2 tokens (ends at 2), req1 has 1 token (ends at 3)
+        cu_num_draft_tokens = torch.tensor([2, 3])
         draft_token_ids = torch.tensor([1, 0, 2])
         draft_probs = torch.tensor(
             [
