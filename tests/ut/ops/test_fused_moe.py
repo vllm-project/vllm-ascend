@@ -638,7 +638,7 @@ class TestAscendFusedMoE:
         )
         moe_comm_method = MagicMock()
         moe_comm_method.prepare.return_value = prepare_output
-        moe_comm_method.finalize.side_effect = lambda hidden_states, **_: (hidden_states + 2)
+        moe_comm_method.finalize.side_effect = lambda hidden_states, **_: hidden_states + 2
         before_dispatch_evt = MagicMock()
         before_combine_evt = MagicMock()
         layer.quant_method.apply.return_value = FusedExpertsResult(
@@ -652,7 +652,12 @@ class TestAscendFusedMoE:
         monkeypatch.setattr(
             fused_moe_module,
             "_EXTRA_CTX",
-            SimpleNamespace(in_profile_run=True, moe_comm_method=moe_comm_method, flash_comm_v1_enabled=True),
+            SimpleNamespace(
+                in_profile_run=True,
+                moe_comm_method=moe_comm_method,
+                flash_comm_v1_enabled=True,
+                eplb_heat_collection_status=True,
+            ),
         )
 
         result = layer.forward_impl(hidden_states, router_logits, return_with_event=return_with_event)
@@ -713,7 +718,7 @@ class TestAscendFusedMoE:
             mc2_mask=None,
             padded_hidden_states_shape=None,
         )
-        moe_comm_method.finalize.side_effect = lambda hidden_states, **_: (hidden_states)
+        moe_comm_method.finalize.side_effect = lambda hidden_states, **_: hidden_states
         layer.quant_method.apply.return_value = FusedExpertsResult(
             routed_out=torch.ones(2, 4),
             expert_tokens=torch.tensor([4, 6]),
@@ -723,7 +728,12 @@ class TestAscendFusedMoE:
         monkeypatch.setattr(
             fused_moe_module,
             "_EXTRA_CTX",
-            SimpleNamespace(in_profile_run=False, moe_comm_method=moe_comm_method, flash_comm_v1_enabled=False),
+            SimpleNamespace(
+                in_profile_run=False,
+                moe_comm_method=moe_comm_method,
+                flash_comm_v1_enabled=False,
+                eplb_heat_collection_status=True,
+            ),
         )
 
         layer.forward_impl(torch.zeros(2, 4), torch.zeros(2, 2))

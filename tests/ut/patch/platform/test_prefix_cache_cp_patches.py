@@ -331,7 +331,7 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         MagicMock(),
     )
 
-    manager = AscendMambaManager(
+    manager_kwargs = dict(
         kv_cache_spec=mamba_spec,
         block_pool=block_pool,
         enable_caching=True,
@@ -339,5 +339,7 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         dcp_world_size=2,
         pcp_world_size=2,
     )
+    manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
+    manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size

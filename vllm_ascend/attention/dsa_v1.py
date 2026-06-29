@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
 import vllm.envs as envs_vllm
@@ -11,24 +12,27 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
-    attention_calculation_stream,
     get_ascend_device_type,
+    get_potential_max_tokens,
     npu_stream_switch,
     olora_tp_enable,
+    oproj_tp_enable,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -358,7 +362,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def __init__(
         self,
-        kv_cache_spec: MLAAttentionSpec,
+        kv_cache_spec: AscendMLAAttentionSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -425,9 +429,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     raise ImportError("Please install scipy") from e
                 log_dim = math.ceil(math.log2(indexer_head_dim))
                 dim_padded = 2**log_dim
-                AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                    hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                ).to(torch.bfloat16)
+                if self.vllm_config.model_config.enable_sleep_mode:
+                    # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
+                    # sleep/wake does not treat it as KV cache.
+                    from vllm_ascend.device_allocator.camem import CaMemAllocator
+
+                    allocator = CaMemAllocator.get_instance()
+                    with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
+                        AscendDSAMetadataBuilder.hadamard = torch.tensor(
+                            hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
+                        ).to(torch.bfloat16)
+                else:
+                    AscendDSAMetadataBuilder.hadamard = torch.tensor(
+                        hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
+                    ).to(torch.bfloat16)
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.start_pos_decode = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.decode_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
@@ -815,7 +830,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
             sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
         if self.prefill_ratio_to_sas_metadata.get("qli") is None:
-            self.prefill_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
+            self.prefill_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=prefill_query_start_loc[1:].clone(),
                 actual_seq_lengths_key=self.seq_lens[reqs_start:].clone(),
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
@@ -1076,7 +1091,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
         assert self.decode_qli_metadata is not None
         if self.decode_ratio_to_sas_metadata.get("qli") is None:
-            self.decode_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
+            self.decode_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=query_start_loc[1:].clone(),
                 actual_seq_lengths_key=self.seq_lens[: self.num_decodes].clone(),
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
@@ -1123,8 +1138,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def build_for_drafting(
         self,
-        draft_step: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        draft_index: int,
         fast_build: bool = False,
         **kwargs,
     ) -> AscendDSADecodeMetadata:
@@ -1137,19 +1152,19 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if num_prefills:
             cos, sin = get_cos_and_sin_dsa(input_positions)
         else:
-            # disable use_cache, otherwise, draft_step>0 will override draft_step=0
+            # disable use_cache, otherwise, draft_index>0 will override draft_index=0
             # take care of this, if full graph is needed then rope cache is inevitable
             cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.spec_slot_mapping[draft_step - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(  # type: ignore[index]
+        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(  # type: ignore[index]
             slot_mapping, self.block_size
         )
 
         prefill_metadata = None
         if num_prefills > 0:
             prefill_metadata = self.build_prefill_metadata_for_drafting(
-                draft_step=draft_step,
+                draft_index=draft_index,
                 common_attn_metadata=common_attn_metadata,
                 reqs_start=num_decodes,
                 tokens_start=num_decode_tokens,
@@ -1159,7 +1174,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         decode_metadata = None
         if num_decodes > 0:
             decode_metadata = self.build_decode_metadata_for_drafting(
-                draft_step=draft_step,
+                draft_index=draft_index,
                 common_attn_metadata=common_attn_metadata,
                 num_decodes=num_decodes,
                 num_decode_tokens=num_decode_tokens,
@@ -1188,7 +1203,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def build_prefill_metadata_for_drafting(
         self,
-        draft_step: int,
+        draft_index: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         **kwargs,
     ) -> AscendDSAPrefillMetadata:
@@ -1208,7 +1223,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         prefill_input_positions = input_positions[tokens_start:]
         cos, sin = get_cos_and_sin_dsa(prefill_input_positions)
 
-        prefill_slot_mapping = self.spec_slot_mapping[draft_step - 1][tokens_start:num_prefill_tokens]  # type: ignore[index]
+        prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][tokens_start:num_prefill_tokens]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
@@ -1260,7 +1275,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def build_decode_metadata_for_drafting(
         self,
-        draft_step: int,
+        draft_index: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         **kwargs,
     ) -> AscendDSADecodeMetadata:
@@ -1285,11 +1300,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_kv = torch.max(_seq_lens_cpu[:num_decodes]).item()
 
         input_positions = common_attn_metadata.positions[:num_decode_tokens_typed].long()
-        # disable use_cache, otherwise, draft_step>0 will override draft_step=0
+        # disable use_cache, otherwise, draft_index>0 will override draft_index=0
         # take care of this, if full graph is needed then rope cache is inevitable
         cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
 
-        slot_mapping = self.spec_slot_mapping[draft_step - 1][:num_decode_tokens_typed]  # type: ignore[index]
+        slot_mapping = self.spec_slot_mapping[draft_index - 1][:num_decode_tokens_typed]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
@@ -1435,9 +1450,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self.attn_sink = kwargs["attn_sink"]
 
         ascend_config = get_ascend_config()
-        self.multistream_dsa_preprocess = ascend_config.multistream_dsa_preprocess
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
-        self.prefill_comm_compute_overlap = ascend_config.prefill_comm_compute_overlap
         self.vllm_config = get_current_vllm_config()
 
         # indexer param
@@ -1484,51 +1497,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             False,
         )
 
-    def dsa_warmup_with_multistream(self, hidden_states: torch.Tensor) -> None:
-        """
-        Warmup function for DSA profiling run.
-        When dual-stream is enabled, the aux stream runs ops during forward that have never been
-        exercised during profiling. This warmup ensures all aux-stream op patterns are captured
-        for ACL graph compatibility.
-        """
-        if hasattr(self, "multistream_dsv4_dsa_overlap") and self.multistream_dsv4_dsa_overlap:
-            hidden_states_dummy = torch.zeros(
-                1, hidden_states.shape[-1], dtype=hidden_states.dtype, device=hidden_states.device
-            )
-            aux_stream = dsv4_dsa_overlap_stream()
-            e_warmup = torch.npu.current_stream().record_event()
-            with npu_stream_switch(aux_stream, enabled=True):
-                torch.npu.current_stream().wait_event(e_warmup)
-                if hasattr(self.wkv, "weight_scale") and self.wkv.weight.dtype == torch.int8:
-                    kv_q_dummy, kv_s_dummy = torch_npu.npu_dynamic_quant(hidden_states_dummy)
-                    _ = torch_npu.npu_quant_matmul(
-                        kv_q_dummy,
-                        self.wkv.weight,
-                        self.wkv.weight_scale,
-                        pertoken_scale=kv_s_dummy,
-                        output_dtype=hidden_states.dtype,
-                    )
-                else:
-                    _ = self.cv_wkv.quantize(hidden_states_dummy)
-                    _ = self.cv_wkv.matmul(hidden_states_dummy, None)
-                assert self.rope_head_dim is not None
-                kv_dummy = torch.zeros(
-                    1, self.nope_head_dim + self.rope_head_dim, dtype=hidden_states.dtype, device=hidden_states.device
-                )
-                _ = self.kv_norm(kv_dummy)
-
-                # indexer module aux stream ops
-                # Part1 aux: kv_quant + scatter (device-dispatched via DeviceOperator)
-                # In profiling stage, create dummy tensors to ensure ACL graph captures scatter operator.
-                if self.compress_ratio == 4 and self.indexer is not None:
-                    slot_mapping_dummy = torch.zeros(1, dtype=torch.int64, device=hidden_states.device)
-                    DeviceOperator.warmup_indexer_quant_scatter(hidden_states_dummy, slot_mapping_dummy)
-
-                    # Warm up weights_proj on the aux stream.
-                    _ = self.weights_proj(hidden_states_dummy)
-
-            torch.npu.current_stream().wait_stream(aux_stream)
-
     def _get_indexcache_topk_indices(self, num_tokens: int, offset: int = 0) -> torch.Tensor:
         if self.topk_indices_buffer is None:
             raise RuntimeError("IndexCache requires topk_indices_buffer when skip_topk is enabled.")
@@ -1550,6 +1518,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        # Attention impls are not walked by vllm's process_weights_after_loading
+        # dispatcher (only LinearMethodBase subclasses are). OTP buffers are
+        # allocated lazily on the first _forward_o_proj call, which always runs
+        # before ACL graph capture (profiling run triggers it).
         pass
 
     # TODO: cast to bfloat16 to speed up
@@ -1571,86 +1543,15 @@ class AscendDSAImpl(DSAAttentionImpl):
             x = x_rot.reshape(1, num_tokens, -1, rotary_dim)
         return x
 
-    def forward(  # type: ignore[override]
-        self,
-        layer_name,
-        hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: tuple[torch.Tensor, ...] | None,
-        attn_metadata: DSAMetadataList,
-        need_gather_q_kv: bool = False,
-        output: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        assert output is not None, "Output tensor must be provided."
-        if attn_metadata is None:
-            return output.fill_(0)
-        if not isinstance(attn_metadata, list):
-            attn_metadata = [attn_metadata]
-        output_padded = output
-        # Process for Flash Comm V1
-        has_prefill = attn_metadata[0].num_prefills > 0
-        has_decode = attn_metadata[0].num_decodes > 0
-        decode_tokens = attn_metadata[0].num_decode_tokens
-        actual_tokens = attn_metadata[0].num_actual_tokens
-
-        # Delay allgather optimization: when prefill_comm_compute_overlap is
-        # enabled and the batch is pure-prefill, wq_a/wkv can compute on the
-        # local SP partition first, then allgather smaller intermediates.
-        # Mutually exclusive with multistream_dsv4_dsa_overlap (multistream wins).
-        need_prefill_gather = (
-            self.prefill_comm_compute_overlap
-            and not self.multistream_dsv4_dsa_overlap
-            and need_gather_q_kv
-            and has_prefill
-            and not has_decode
-        )
-        if need_prefill_gather:
-            prefill_hidden_states = hidden_states
-            decode_hidden_states = hidden_states[:0]
-        else:
-            # Process for Flash Comm V1
-            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
-            prefill_hidden_states = hidden_states[decode_tokens:actual_tokens]
-            decode_hidden_states = hidden_states[:decode_tokens]
-
-        forward_context = get_forward_context()
-        o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
-        o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
-        assert kv_cache is not None, "kv_cache tensor tuple must be provided."
-        if has_prefill:
-            assert attn_metadata[0].prefill is not None
-            output_prefill = self._forward_prefill(
-                layer_name,
-                prefill_hidden_states,
-                kv_cache,
-                attn_metadata,
-                need_prefill_gather,
-            )  # type: ignore[arg-type]
-            o_proj_input[decode_tokens:actual_tokens] = output_prefill
-            cos = attn_metadata[0].prefill.cos[layer_name]
-            sin = attn_metadata[0].prefill.sin[layer_name]
-
-        if has_decode:
-            assert attn_metadata[0].decode is not None
-            output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
-            o_proj_input[:decode_tokens] = output_decode
-            cos = attn_metadata[0].decode.cos[layer_name]
-            sin = attn_metadata[0].decode.sin[layer_name]
-
-        cos = attn_metadata[0].cos[layer_name]
-        sin = attn_metadata[0].sin[layer_name]
+    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         num_tokens = o_proj_input.shape[0]
-
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            o_proj_input.unsqueeze(1),
-            cos,
-            -sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
-
-        # o
+        group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
+        o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
+        # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
+        # + quantized batch matmul). Preserve it as-is: it predates and is
+        # orthogonal to the OTP / olora_tp paths below, so it must win first.
         if get_ascend_device_type() in {AscendDeviceType.A5}:
-            o = o_proj_input.view(num_tokens, self.n_local_groups, -1)
+            o = o_proj_input
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(
                 o,
@@ -1666,25 +1567,160 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
             o = o.reshape(num_tokens, -1)
             output[...] = self.wo_b(o)
-        else:
-            o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, -1)
-            if olora_tp_enable():
-                o_proj_input = self.wo_a(o_proj_input)
-            else:
-                # wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
-                # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
-                    self.wo_a.weight,
-                    bias=None,
-                    scale=None,
-                    perm_x1=(1, 0, 2),
-                    perm_x2=(0, 1, 2),
-                    perm_y=(1, 0, 2),
-                    batch_split_factor=1,
+        elif oproj_tp_enable():
+            oproj_group = get_otp_group()
+            oproj_tp_size = oproj_group.world_size
+            if self.n_local_groups % oproj_tp_size != 0:
+                raise ValueError(
+                    "n_local_groups must be divisible by "
+                    f"oproj_tensor_parallel_size, got {self.n_local_groups} "
+                    f"and {oproj_tp_size}."
                 )
-                o_proj_input = o_proj_input.reshape(num_tokens, -1)
+
+            groups_per_rank = self.n_local_groups // oproj_tp_size
+
+            o_proj_input = o_proj_input.view(num_tokens, oproj_tp_size, groups_per_rank, group_hidden_dim)
+            # Pad to a static exchange size so the all_to_all / reduce_scatter
+            # shapes are identical across all ACL graph buckets — variable
+            # shapes desync the HCCL communicator during graph replay.
+            # potential_max_tokens is computed once in the model runner __init__,
+            # so reading it here is a cheap global lookup.
+            exchange_num_tokens = get_potential_max_tokens()
+            if exchange_num_tokens < num_tokens:
+                raise ValueError(
+                    "oproj static exchange capacity must cover local tokens, "
+                    f"got {exchange_num_tokens} and {num_tokens}."
+                )
+            # Lazily allocate static send/recv buffers on first call. The
+            # profiling run hits this path before ACL graph capture, so the
+            # buffers exist and keep a stable device address across all later
+            # capture/replay cycles (graph replay requires the same address
+            # that was recorded at capture; new_zeros per call would desync
+            # the HCCL operator).
+            if not hasattr(self, "_oproj_send_buf"):
+                buf_shape = (oproj_tp_size, exchange_num_tokens, groups_per_rank, group_hidden_dim)
+                self._oproj_send_buf = torch.zeros(buf_shape, dtype=o_proj_input.dtype, device=o_proj_input.device)
+                self._oproj_recv_buf = torch.empty_like(self._oproj_send_buf)
+            send = self._oproj_send_buf
+            recv = self._oproj_recv_buf
+            # In-place fill into the address-stable buffer: zero the padding
+            # tail, then copy the real tokens.
+            send.zero_()
+            send[:, :num_tokens].copy_(o_proj_input.transpose(1, 0))
+            dist.all_to_all_single(recv.view(-1), send.view(-1), group=oproj_group.device_group)
+            o_proj_input = recv.view(oproj_tp_size * exchange_num_tokens, groups_per_rank, group_hidden_dim)
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self.wo_a.weight,
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+            o_proj_input = o_proj_input.reshape(oproj_tp_size * exchange_num_tokens, -1)
+            o_proj_output = self.wo_b(o_proj_input)
+            # reduce_scatter via a raw dist collective into an address-stable
+            # static buffer. oproj_group.reduce_scatter is a list-based wrapper
+            # that allocates per call, which desyncs the HCCL operator recorded
+            # at capture during ACL graph replay — the same reason all_to_all
+            # and the embedding TP path use raw dist + static buffers.
+            if not hasattr(self, "_oproj_rs_out_buf"):
+                self._oproj_rs_out_buf = torch.empty(
+                    (exchange_num_tokens, o_proj_output.shape[-1]),
+                    dtype=o_proj_output.dtype,
+                    device=o_proj_output.device,
+                )
+            dist.reduce_scatter_tensor(self._oproj_rs_out_buf, o_proj_output, group=oproj_group.device_group)
+            output[...] = self._oproj_rs_out_buf[:num_tokens]
+        elif olora_tp_enable():
+            o_proj_input = self.wo_a(o_proj_input)
             output[...] = self.wo_b(o_proj_input)
+        else:
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self.wo_a.weight,
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+            o_proj_input = o_proj_input.reshape(num_tokens, -1)
+            output[...] = self.wo_b(o_proj_input)
+        return output
+
+    def forward(  # type: ignore[override]
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,  # query in unified attn
+        kv_cache: tuple[torch.Tensor, ...] | None,
+        attn_metadata: DSAMetadataList,
+        need_gather_q_kv: bool = False,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
+        output_padded = output
+        forward_context = get_forward_context()
+        o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
+        if attn_metadata is None:
+            # Profiling run: run o_proj on zero input so HCCL collectives are
+            # captured by the ACL graph.  Non-OTP just zeros the output.
+            if oproj_tp_enable():
+                o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+                self._forward_o_proj(o_proj_input, output)
+            else:
+                output.fill_(0)
+            return output
+        if not isinstance(attn_metadata, list):
+            attn_metadata = [attn_metadata]
+        # Process for Flash Comm V1
+        has_prefill = attn_metadata[0].num_prefills > 0
+        has_decode = attn_metadata[0].num_decodes > 0
+        decode_tokens = attn_metadata[0].num_decode_tokens
+        actual_tokens = attn_metadata[0].num_actual_tokens
+
+        # Process for Flash Comm V1
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
+        prefill_hidden_states = hidden_states[decode_tokens:actual_tokens]
+        decode_hidden_states = hidden_states[:decode_tokens]
+
+        o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+        assert kv_cache is not None, "kv_cache tensor tuple must be provided."
+        if has_prefill:
+            assert attn_metadata[0].prefill is not None
+            output_prefill = self._forward_prefill(
+                layer_name,
+                prefill_hidden_states,
+                kv_cache,
+                attn_metadata,
+            )  # type: ignore[arg-type]
+            o_proj_input[decode_tokens:actual_tokens] = output_prefill
+            cos = attn_metadata[0].prefill.cos[layer_name]
+            sin = attn_metadata[0].prefill.sin[layer_name]
+
+        if has_decode:
+            assert attn_metadata[0].decode is not None
+            output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
+            o_proj_input[:decode_tokens] = output_decode
+            cos = attn_metadata[0].decode.cos[layer_name]
+            sin = attn_metadata[0].decode.sin[layer_name]
+
+        cos = attn_metadata[0].cos[layer_name]
+        sin = attn_metadata[0].sin[layer_name]
+
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            o_proj_input.unsqueeze(1),
+            cos,
+            -sin,
+            rotary_mode="interleave",
+            partial_slice=[self.nope_head_dim, self.head_dim],
+        )
+
+        # o
+        self._forward_o_proj(o_proj_input, output)
 
         return output_padded
 
@@ -1785,91 +1821,12 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         return q, qr, qr_pertoken_scale
 
-    def _mla_prolog_prefill_overlap(self, hidden_states, cos, sin, swa_kv_cache, slot_mapping):
-        """Delayed allgather + compute-communication overlap for pure prefill.
-
-        hidden_states: [N/tp, dim] local SP partition.
-        Returns: (q, qr, full_hidden_states)
-          - q: [actual_tokens, n_local_heads, head_dim] with RoPE applied
-          - qr: [actual_tokens, q_lora_rank] for indexer
-          - full_hidden_states: [actual_tokens, dim] for compressor
-        """
-        main_stream = torch.npu.current_stream()
-        aux_stream = dsv4_dsa_overlap_stream()
-        num_actual_tokens = cos.shape[0]
-
-        # === Phase 1: q_a_down [main/C] || kv_quant [aux/V] ===
-        q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
-        e_phase1 = main_stream.record_event()
-
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_phase1)
-            kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
-
-        main_stream.wait_stream(aux_stream)
-        q_a_down = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
-        qr = self.q_norm(q_a_down)
-
-        # === Phase 2: allgather(qr) [main/comm] || kv_proj + kv_norm [aux/compute] ===
-        e_phase2 = main_stream.record_event()
-
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_phase2)
-            kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
-            kv = self.kv_norm(kv)
-
-        qr = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(qr, True)
-        qr = qr[:num_actual_tokens]
-        main_stream.wait_stream(aux_stream)
-
-        # === Phase 3: allgather(kv)+allgather(hs) [main/comm] || wq_b+q_rms [aux/compute] ===
-        e_phase3 = main_stream.record_event()
-
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_phase3)
-            q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
-            q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
-            q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
-
-        kv = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv, True)
-        kv = kv[:num_actual_tokens]
-        if self.compress_ratio > 1:
-            full_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True)
-            full_hidden_states = full_hidden_states[:num_actual_tokens]
-        else:
-            full_hidden_states = hidden_states
-
-        main_stream.wait_stream(aux_stream)
-
-        # === Tail: q_rope + kv_rope + scatter (main stream, serial) ===
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
-
-        assert self.rope_head_dim is not None
-        kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            kv.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
-
-        return q, qr, full_hidden_states
-
     def _forward_prefill(
         self,
         layer_name,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
-        need_prefill_gather: bool = False,
     ):
         compress_common_attn_metadata = None
         (compress_kv_cache, swa_kv_cache, state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
@@ -1903,17 +1860,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             q, qr, _ = self._mla_prolog_multistream(
                 hidden_states, cos, sin, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
             )
-        elif need_prefill_gather:
-            # Delayed allgather + compute-communication overlap
-            assert swa_metadata.prefill is not None
-            q, qr, hidden_states = self._mla_prolog_prefill_overlap(
-                hidden_states,
-                cos,
-                sin,
-                swa_kv_cache,
-                swa_prefill_metadata.slot_mapping,
-            )
-            qr_pertoken_scale = None  # noqa: F841
         else:
             # mlaprolog
             share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
@@ -2035,7 +1981,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             compressed_sin=compress_sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             with_prefill=True,
-                            qr_pertoken_scale=qr_pertoken_scale,
                         )
                     else:
                         compress_topk_idxs = self.indexer_select_qli(  # original version
@@ -2107,7 +2052,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kvlens = indexer_scale_prefill_metadata.seq_lens
                 block_table = indexer_scale_prefill_metadata.block_table
                 qli_metadata = indexer_scale_prefill_metadata.qli_metadata
-                compress_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+                compress_topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
                     query=q_quant,
                     key=indexer_k_cache,
                     weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
@@ -2230,10 +2175,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             if share_hs_quant:
                 hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
 
-            wait_hidden_state_cal_event = (
-                torch.npu.current_stream().record_event() if self.multistream_dsa_preprocess else None
-            )
-
             # q
             if _is_w8a8_dynamic(self.wq_b):
                 if share_hs_quant:
@@ -2284,43 +2225,32 @@ class AscendDSAImpl(DSAAttentionImpl):
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
 
-            with npu_stream_switch(attention_calculation_stream(), enabled=self.multistream_dsa_preprocess):
-                if wait_hidden_state_cal_event:
-                    torch.npu.current_stream().wait_event(wait_hidden_state_cal_event)
-
-                # win kv & tok_dis
-                if share_hs_quant:
-                    kv = torch_npu.npu_quant_matmul(
-                        hs_int8,
-                        self.wkv.weight,
-                        self.wkv.weight_scale,
-                        pertoken_scale=hs_pertoken_scale,
-                        bias=self.wkv.bias,
-                        output_dtype=hidden_states.dtype,
-                    )
-                else:
-                    kv = self.wkv(hidden_states)
-                kv = self.kv_norm(kv)
-                assert self.rope_head_dim is not None
-                kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-
-                torch.ops._C_ascend.inplace_partial_rotary_mul(
-                    kv.unsqueeze(1),
-                    cos,
-                    sin,
-                    rotary_mode="interleave",
-                    partial_slice=[self.nope_head_dim, self.head_dim],
+            # win kv & tok_dis
+            if share_hs_quant:
+                kv = torch_npu.npu_quant_matmul(
+                    hs_int8,
+                    self.wkv.weight,
+                    self.wkv.weight_scale,
+                    pertoken_scale=hs_pertoken_scale,
+                    bias=self.wkv.bias,
+                    output_dtype=hidden_states.dtype,
                 )
+            else:
+                kv = self.wkv(hidden_states)
+            kv = self.kv_norm(kv)
+            assert self.rope_head_dim is not None
+            kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
-                # swa exec kv
-                DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_decode_metadata.slot_mapping)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
+            )
 
-                wait_attention_cal_event = (
-                    torch.npu.current_stream().record_event() if self.multistream_dsa_preprocess else None
-                )
-
-            if wait_attention_cal_event:
-                torch.npu.current_stream().wait_event(wait_attention_cal_event)
+            # swa exec kv
+            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_decode_metadata.slot_mapping)
 
         if self.compress_ratio > 1:
             compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)
@@ -2415,7 +2345,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kvlens = indexer_scale_decode_metadata.seq_lens
                 block_table = indexer_scale_decode_metadata.block_table
                 qli_metadata = indexer_scale_decode_metadata.qli_metadata
-                compress_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+                compress_topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
                     query=q_quant,
                     key=indexer_k_cache,
                     weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
@@ -2680,7 +2610,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             block_table = indexer_kv_scale_metadata.decode.block_table
             qli_metadata = indexer_kv_scale_metadata.decode.qli_metadata
 
-        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
+        topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
             query=q,
             key=indexer_k_cache,
             weights=DeviceOperator.prepare_dsa_indexer_weights(weights),

@@ -25,7 +25,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, swiglustep_and_mul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -422,10 +422,12 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    if activation == "swigluoai":
+    act_name = getattr(activation, "value", activation)
+
+    if act_name == "swigluoai":
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
-    elif activation == "swigluoai_uninterleave":
+    elif act_name == "swigluoai_uninterleave":
         gate_up_out = torch_npu.npu_clipped_swiglu(
             gate_up_out,
             alpha=swiglu_alpha,
@@ -433,6 +435,15 @@ def unquant_apply_mlp(
             bias=swiglu_beta,
             interleaved=False,
         )
+    elif act_name == "swiglustep":
+        limit = swiglu_limit if swiglu_limit > 0 else 7.0
+        gate_up_out = swiglustep_and_mul(gate_up_out, limit=limit)
+    elif act_name == "gelu":
+        gate, up = gate_up_out.chunk(2, dim=-1)
+        gate_up_out = torch.nn.functional.gelu(gate) * up
+    elif act_name == "gelu_tanh":
+        gate, up = gate_up_out.chunk(2, dim=-1)
+        gate_up_out = torch.nn.functional.gelu(gate, approximate="tanh") * up
     else:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
@@ -497,7 +508,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         )
 
     assert w1_scale is not None and w2_scale is not None
-    act_quant_type = torch.float8_e4m3fn
+    act_quant_type = torch.int8 if mlp_compute_input.quant.is_int_quant else torch.float8_e4m3fn
     weight_quant_type = torch.float8_e4m3fn
     scale_type = None
     per_token_scale_type = None
