@@ -27,11 +27,6 @@ from pytest_mock import MockerFixture
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
-from vllm_ascend.ops.fused_moe.fused_moe import (
-    AscendFusedMoE,
-    AscendMoERunner,
-    AscendUnquantizedFusedMoEMethod,
-)
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
@@ -40,9 +35,21 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEWeights,
 )
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, adapt_patch
+from vllm_ascend.utils import AscendDeviceType, adapt_patch, vllm_version_is
 
-adapt_patch(True)
+if vllm_version_is("0.23.0"):
+    from vllm_ascend.ops.fused_moe.fused_moe import (
+        AscendFusedMoE,
+        AscendMoERunner,
+        AscendUnquantizedFusedMoEMethod,
+    )
+
+    adapt_patch(True)
+else:
+    pytest.skip(
+        "Legacy AscendFusedMoE UTs are only for vLLM 0.23.0.",
+        allow_module_level=True,
+    )
 
 
 def mock_ep_and_mc2_group(mocker):
