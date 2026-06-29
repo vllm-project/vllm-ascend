@@ -144,39 +144,25 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 7. File: platform/patch_chat_usage_accounting.py**
+# ** 7. File: platform/patch_minimax_usage_accounting.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.reasoning.minimax_m2_reasoning_parser`
 #    Why:
-#       Chat usage accounting needs to report
+#       MiniMax-M2 reasoning usage accounting needs to report
 #       `completion_tokens_details.reasoning_tokens` for both streaming and
 #       non-streaming chat completions.
 #    How：
-#       Extend `UsageInfo` and update chat usage construction to count reasoning
-#       tokens from raw output token ids when the active reasoning parser
-#       supports token counting.
+#       Monkey-patch MiniMax reasoning token counters, extend `UsageInfo`, and
+#       update chat usage construction to count reasoning tokens from raw output
+#       token ids.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/37955
 #    Future Plan:
 #       Remove this patch once the runtime vLLM version contains the upstream
-#       reasoning usage-accounting support.
+#       MiniMax usage-accounting fix.
 #
-# ** 7a. File: platform/patch_minimax_usage_accounting.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.reasoning.minimax_m2_reasoning_parser`
-#    Why:
-#       MiniMax-M2 reasoning parsers need token-count support for the generic
-#       chat usage-accounting wrapper.
-#    How：
-#       Monkey-patch MiniMax reasoning token counters so usage accounting can
-#       derive reasoning-token counts from raw output token ids.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37955
-#    Future Plan:
-#       Remove this patch once the runtime vLLM version contains the upstream
-#       MiniMax reasoning-token counting fix.
-#
-# ** 7b. File: platform/patch_glm_tool_call_streaming.py**
+# ** 7a. File: platform/patch_glm_tool_call_streaming.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
 #    Why:
@@ -196,7 +182,7 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM tool-call final chunk fixes.
 #
-# ** 7c. File: platform/patch_glm47_tool_call_parser.py**
+# ** 7b. File: platform/patch_glm47_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tool_parsers.glm47_moe_tool_parser.Glm47MoeModelToolParser`
 #    Why:
@@ -214,7 +200,7 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM47 inline zero-argument streaming parser fix.
 #
-# ** 7d. File: platform/patch_anthropic_system_message.py**
+# ** 7c. File: platform/patch_anthropic_system_message.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.anthropic.protocol.AnthropicMessage`
 #      `vllm.entrypoints.anthropic.serving.AnthropicServingMessages`
