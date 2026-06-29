@@ -138,16 +138,31 @@ class AscendDsparkSpeculator(AscendDflashProposer):
             self.last_confidence = None
         return draft_tokens
 
-    # --- Public propose entry --------------------------------------------
+    # --- Public propose entry (model_runner calls _propose, not propose) -
 
     @torch.inference_mode()
-    def propose(self, *args, **kwargs):
-        """Reset per-block state then delegate to base.
+    def _propose(self, *args, **kwargs):
+        """Reset per-block state, then run the parent's parallel backbone.
 
-        TODO (next sprint): override the full propose() to honour the
-        anchor-as-first-prediction layout + drive _sample_with_markov in
-        place of DFlash's parallel sample.
+        M1 framework: DFlash parallel backbone borrowed verbatim from
+        ``AscendDflashProposer._propose``. The Markov bias / serial sample
+        loop hook (``_sample_with_markov``) is still **not wired** into the
+        actual sample call site inside the parent's _propose. The follow-up
+        sprint will replace the parent's ``_sample_from_logits`` invocation
+        with the Markov loop so the returned tokens carry intra-block
+        dependency.
+
+        For now this method is identical to DFlash's propose path with the
+        DSpark draft model loaded — the architecture is in place but the
+        signature Markov-bias step does not yet fire.
         """
         self._markov_embeds_buffer = []
         self.last_confidence = None
-        return super().propose(*args, **kwargs)
+        draft_token_ids = super()._propose(*args, **kwargs)
+        logger.warning_once(
+            "AscendDsparkSpeculator._propose: Markov sample loop NOT wired "
+            "yet (sprint follow-up). Returned draft tokens match DFlash "
+            "parallel sampling without the intra-block Markov bias; "
+            "confidence head inactive."
+        )
+        return draft_token_ids
