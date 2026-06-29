@@ -119,7 +119,7 @@ Startup Command:
 ```bash
 #!/bin/sh
 export VLLM_USE_MODELSCOPE=True
-export MODEL_PATH="PaddlePaddle/PaddleOCR-VL-0.9B"
+export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
 export TASK_QUEUE_ENABLE=1
 export CPU_AFFINITY_CONF=1
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
@@ -143,7 +143,7 @@ vllm serve ${MODEL_PATH} \
 ```bash
 #!/bin/sh
 export VLLM_USE_MODELSCOPE=True
-export MODEL_PATH="PaddlePaddle/PaddleOCR-VL-0.9B"
+export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
 export TASK_QUEUE_ENABLE=1
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
