@@ -6,7 +6,7 @@ Qwen3-30B-A3B is a Mixture-of-Experts (MoE) model in the Qwen3 series, featuring
 
 This document will demonstrate the main validation steps for Qwen3-30B-A3B in the vLLM-Ascend environment, including supported features, environment preparation, single-node deployment, as well as accuracy and performance evaluation.
 
-The Qwen3-30B-A3B model is first supported in v0.8.4rc2. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use v0.21.0 or a later version.
+The Qwen3-30B-A3B model is first supported in v0.8.4rc2. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
@@ -20,11 +20,11 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 The following model variants are available. It is recommended to download the model weight to a shared directory accessible to all nodes.
 
-| Model | Hardware Requirement | Download |
-|-------|---------------------|----------|
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)<br>Ascend 950 (112GB, 1 card) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) |
-| Qwen3-30B-A3B-W8A8 | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
-| Eagle3 Draft Model | NA | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3) |
+| Model                | Hardware Requirement                                                                             | Download                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)<br>Ascend 950 (112GB, 1 card) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
+| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
+| Eagle3 Draft Model   | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -370,11 +370,11 @@ ais_bench --models vllm_api_general_chat --datasets gsm8k_gen_4_shot_cot_str --m
 
 The following table lists the `--datasets` parameter for each evaluation dataset:
 
-| Dataset | `--datasets` Parameter |
-|---------|------------------------|
-| GSM8K | `gsm8k_gen_4_shot_cot_str` |
-| GPQA-Diamond | `gpqa_gen_0_shot_cot_chat_prompt` |
-| AIME 2024 | `aime2024_gen_0_shot_str` |
+| Dataset       | `--datasets` Parameter               |
+| ------------- | ------------------------------------ |
+| GSM8K         | `gsm8k_gen_4_shot_cot_str`           |
+| GPQA-Diamond  | `gpqa_gen_0_shot_cot_chat_prompt`    |
+| AIME 2024     | `aime2024_gen_0_shot_str`            |
 | LiveCodeBench | `livecodebench_0_shot_chat_v4_v5_v6` |
 
 > The `--models` parameter value corresponds to the configuration file name (e.g., `vllm_api_general_chat` for `vllm_api_general_chat.py`). Adjust `max_out_len`, `batch_size`, and dataset tasks based on your scenario.
@@ -391,12 +391,12 @@ vLLM-Ascend also supports the following evaluation tools:
 
 **Accuracy Results (Atlas 800I A3, vLLM-Ascend v0.21.0, W8A8):**
 
-| Dataset | Metric | Score |
-|---------|--------|-------|
-| GSM8K | accuracy (4-shot CoT) | 92.87% |
-| GPQA-Diamond | accuracy (0-shot CoT) | 60.10% |
-| LiveCodeBench | pass@1 (0-shot) | 60.05% |
-| AIME 2024 | accuracy (0-shot) | 76.67% |
+| Dataset       | Metric                | Score  |
+| ------------- | --------------------- | ------ |
+| GSM8K         | accuracy (4-shot CoT) | 92.87% |
+| GPQA-Diamond  | accuracy (0-shot CoT) | 60.10% |
+| LiveCodeBench | pass@1 (0-shot)       | 60.05% |
+| AIME 2024     | accuracy (0-shot)     | 76.67% |
 
 ## 8 Performance Evaluation
 
@@ -491,21 +491,21 @@ vllm bench serve \
 
 #### Table 1: Scenario Overview
 
-| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
-|----------|----------------|-------------|----------------|------------------------|
-| High Throughput | Single-Node (TP1) | 1 (A3)<br>2 (A2) | W8A8 | Single-card deployment maximizes concurrent request processing |
-| Low Latency | Single-Node (TP4) | 2 (A3)<br>4 (A2) | W8A8 | Multi-card TP reduces per-token latency with expert parallelism |
-| Long Context | Single-Node (TP4) | 2 (A3)<br>4 (A2) | W8A8 | Reduces concurrent sequences to accommodate longer max-model-len |
+| Scenario        | Deployment Mode   | *Total NPUs      | Weight Version | Key Considerations                                               |
+| --------------- | ----------------- | ---------------- | -------------- | ---------------------------------------------------------------- |
+| High Throughput | Single-Node (TP1) | 1 (A3)<br>2 (A2) | W8A8           | Single-card deployment maximizes concurrent request processing   |
+| Low Latency     | Single-Node (TP4) | 2 (A3)<br>4 (A2) | W8A8           | Multi-card TP reduces per-token latency with expert parallelism  |
+| Long Context    | Single-Node (TP4) | 2 (A3)<br>4 (A2) | W8A8           | Reduces concurrent sequences to accommodate longer max-model-len |
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. On Atlas 800I A3, each NPU contains two dies (chips), so TP4 requires 4 chips = 2 NPUs.
 
 #### Table 2: Detailed Node Configuration
 
-| Scenario | NPUs | TP | max-model-len | max-num-seqs | FUSED_MC2 | EP | hf-overrides |
-|----------|------|----|---------------|--------------|-----------|-----|--------------|
-| High Throughput | 1 (A3) | 1 | 37364 | 100 | Off | Off | - |
-| Low Latency | 2 (A3) | 4 | 37364 | 100 | Off | On | - |
-| Long Context | 2 (A3) | 4 | 131072 | 14 | Off | On | YaRN |
+| Scenario        | NPUs   | TP  | max-model-len | max-num-seqs | FUSED_MC2 | EP  | hf-overrides |
+| --------------- | ------ | --- | ------------- | ------------ | --------- | --- | ------------ |
+| High Throughput | 1 (A3) | 1   | 37364         | 100          | Off       | Off | -            |
+| Low Latency     | 2 (A3) | 4   | 37364         | 100          | Off       | On  | -            |
+| Long Context    | 2 (A3) | 4   | 131072        | 14           | Off       | On  | YaRN         |
 
 > For detailed parameter descriptions, please refer to the deployment examples in Section 5.
 

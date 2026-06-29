@@ -6,7 +6,7 @@ Qwen3-Coder-30B-A3B is a Mixture-of-Experts (MoE) model in the Qwen3 Coder serie
 
 This document will demonstrate the main validation steps for Qwen3-Coder-30B-A3B in the vLLM-Ascend environment, including supported features, environment preparation, single-node deployment, as well as accuracy and performance evaluation.
 
-The Qwen3-Coder-30B-A3B model is first supported in **v0.10.0rc1**. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use v0.21.0 or a later version.
+The Qwen3-Coder-30B-A3B model is first supported in **v0.10.0rc1**. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
