@@ -1543,7 +1543,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     elif self.use_a5_sparse_c8_indexer:
                         torch_npu.npu_scatter_nd_update_(
                             kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
-                            slot_mapping[: attn_metadata.num_actual_tokens].view(-1, 1),
+                            slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
                             fused_kv_no_split[: attn_metadata.num_actual_tokens],
                         )
                         k_pe = None
@@ -1563,7 +1563,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             value=k_pe[: attn_metadata.num_actual_tokens],
                             key_cache=kv_cache[0],
                             value_cache=kv_cache[1],
-                            slot_mapping=slot_mapping[: attn_metadata.num_actual_tokens],
+                            slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
                         )
 
             if self.has_indexer:
