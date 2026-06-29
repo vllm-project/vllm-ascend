@@ -18,6 +18,7 @@
 name: E2E
 
 on:
+  workflow_dispatch:
   pull_request:
     types:
       - opened
