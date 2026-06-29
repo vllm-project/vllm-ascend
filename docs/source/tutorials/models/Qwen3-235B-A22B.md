@@ -6,7 +6,7 @@ Qwen3 is the latest generation of large language models in Qwen series, offering
 
 This document will demonstrate the main validation steps for Qwen3-235B-A22B in the vLLM-Ascend environment, including supported features, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-The Qwen3-235B-A22B model is first supported in **v0.8.4rc2**. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use v0.21.0 or a later version.
+The Qwen3-235B-A22B model is first supported in **v0.8.4rc2**. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
@@ -24,7 +24,7 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A5 (112G × 8), 1 Atlas 800I A3 (64G × 16), 1 Atlas 800I A2 (64G × 8)| [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
+| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A3 (64G × 16), 1 Atlas 800I A2 (64G × 8)| [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
 
 **Quantized Version (Pre-converted):**
 
@@ -229,7 +229,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 **Start the server:**
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
-Atlas 800I A2/A3/A5:
+Atlas 800I A2/A3:
 
 ```shell
 export VLLM_USE_MODELSCOPE=True
@@ -261,17 +261,9 @@ vllm serve your_model_path \
 ```
 
 :::{note}
-
-<<<<<<< HEAD
 - [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
 - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 :::
-=======
-- [Qwen3-235B-A22B](https://huggingface.co/Qwen/Qwen3-235B-A22B#processing-long-texts) originally only supports 40960 context(max_position_embeddings). If you want to use it and its related quantization weights to run long seqs (such as 128k context), it is required to use yarn rope-scaling technique.
-    - For vLLM version same as or new than `v0.12.0`, use parameter: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \`.
-    - For vLLM version below `v0.12.0`, use parameter: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \`.
-  If you are using weights like [Qwen3-235B-A22B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) which originally supports long contexts, there is no need to add this parameter.
->>>>>>> upstream/main
 
 **Service Verification:**
 
@@ -283,11 +275,7 @@ If the service starts successfully, the following startup log will be displayed:
 (APIServer pid=<pid>) INFO:     Application startup complete.
 ```
 
-<<<<<<< HEAD
 ### 5.2 Multi-Node PD Separation Deployment
-=======
-Assume you have Atlas 800 A3 (64G*16) nodes (or 2* A2), and want to deploy the `Qwen3-VL-235B-A22B` model across multiple nodes.
->>>>>>> upstream/main
 
 PD (Prefill-Decode) separation splits the Prefill and Decode phases across different nodes for better throughput. The following example shows the parameter configuration for a three-node A3 PD disaggregation scenario (one Prefill node + two Decode nodes):
 

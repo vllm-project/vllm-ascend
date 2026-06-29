@@ -6,7 +6,7 @@ Qwen3 is the latest generation of large language models in Qwen series, offering
 
 This document will demonstrate the main validation steps for Qwen3 Dense models in the vLLM-Ascend environment, including supported features, environment preparation, model quantization, single-node and multi-node deployment, as well as accuracy and performance evaluation. By tailoring service-level configurations to fit different use cases, you can ensure optimal performance across various scenarios.
 
-The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, W4A8 quantization is supported since v0.9.1rc2, and W4A4 is supported since v0.11.0rc1. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use v0.21.0 or a later version.
+The Qwen3 Dense models are first supported in v0.8.4rc2. W8A8 quantization was first supported in v0.8.4rc2, W4A8 quantization is supported since v0.9.1rc2, and W4A4 is supported since v0.11.0rc1. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
@@ -29,7 +29,7 @@ The following model variants are available. It is recommended to download the mo
 | Qwen3-4B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
 | Qwen3-8B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
 | Qwen3-14B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
-| Qwen3-32B | 1 Atlas 800I A5 (112G × 8), 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
+| Qwen3-32B | 1 Atlas 800I A3 (64G × 16) or 1 Atlas 800I A2 (64G × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
 
 **Quantized Versions:**
 
@@ -207,7 +207,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 **Start the server:**
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
-Atlas 800I A2/A3/A5:
+Atlas 800I A2/A3:
 Qwen3-32B-W8A8:
 
 ```bash
