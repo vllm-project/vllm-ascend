@@ -578,3 +578,95 @@ class AscendSFACPImpl(AscendSFAImpl):
             k = get_pcp_group().all_gather(k.contiguous(), 0)
             k = torch.index_select(k, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)
             return k
+
+
+class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        self.dcp_size = get_decode_context_model_parallel_world_size()
+        self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
+        assert self.pcp_size == 0, "AscendSFADCPMetadataBuilder only support DCP, please use AscendSFACP for PCP."
+        
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+        **kwargs,
+    ) -> AscendSFAMetadata:
+        metadata = super.build(
+            self, 
+            common_prefix_len: int,
+            common_attn_metadata: AscendCommonAttentionMetadata,
+            fast_build: bool = False,
+        )
+        slot_mapping = kwargs.get("slot_mapping_no_cp")
+        block_table = kwargs.get("block_table_no_cp")
+        num_computed_tokens_of_pcp_dcp = common_attn_metadata.prefill_context_parallel_metadata.num_computed_tokens_of_pcp_dcp
+        local_num_computed_tokens = torch.tensor(num_computed_tokens_of_pcp_dcp).to(self.device).to(dtype=torch.int32)[:, self.pcp_rank, self.dcp_rank]
+        metadata.dcp_context = DCPContext(
+            slot_mapping = slot_mapping,
+            block_table = block_table,
+            seq_lens = local_num_computed_tokens,
+        )
+            
+    
+class AscendSFADCPImpl(AscendSFAImpl):
+    def forward(
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,  # query in unified attn
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: M,
+        need_gather_q_kv: bool = False,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        self.dcp_context = dcp_context
+        return super.forward(
+            self,
+            layer_name,
+            hidden_states: torch.Tensor,  # query in unified attn
+            kv_cache: tuple[torch.Tensor, ...],
+            attn_metadata: M,
+            need_gather_q_kv: bool = False,
+            output: torch.Tensor | None = None,
+        )
+    
+    def _execute_sparse_flash_attention_process(
+        self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+    ):
+        sfa_output, softmax_max, softmax_sum = torch.ops._C_ascend.npu_sparse_flash_attention(
+            query=ql_nope,
+            key=kv,
+            value=kv,
+            sparse_indices=topk_indices,
+            scale_value=self.scale,
+            sparse_block_size=1,
+            block_table=self.dcp_context.block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=self.dcp_context.seq_lens,
+            query_rope=q_pe,
+            key_rope=key_rope,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+            attention_mode=2,
+            return_softmax_lse=True,
+        )
+        output_dtype = sfa_output.dtype
+        # SFA returns softmax max/sum separately. Convert them to LSE so the
+        # existing CP merge helper can combine local-KV partial outputs.
+        softmax_lse = softmax_max.to(torch.float32) + torch.log(softmax_sum.to(torch.float32))
+        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
+        attn_out_lse = _process_attn_out_lse(sfa_output.to(torch.float32), softmax_lse)
+        output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
+        return output.to(output_dtype)
