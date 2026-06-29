@@ -25,46 +25,6 @@ def _cdiv(x: int, y: int) -> int:
 
 
 @triton.jit
-def _build_chunk_counts_kernel(
-    cu_seqlens_ptr,
-    chunk_counts_ptr,
-    num_seqs,
-    chunk_size,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < num_seqs
-
-    bos = tl.load(cu_seqlens_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    eos = tl.load(cu_seqlens_ptr + offsets + 1, mask=mask, other=0).to(tl.int32)
-    seq_lens = eos - bos
-    chunk_counts = (seq_lens + chunk_size - 1) // chunk_size
-
-    tl.store(chunk_counts_ptr + offsets, chunk_counts, mask=mask)
-
-
-@triton.jit
-def _build_chunk_offsets_kernel(
-    chunk_counts_ptr,
-    out_offsets_ptr,
-    num_seqs,
-    ADD_ONE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets <= num_seqs
-    prefix = tl.zeros([BLOCK_SIZE], dtype=tl.int32)
-
-    for seq_idx in range(0, num_seqs):
-        chunk_count = tl.load(chunk_counts_ptr + seq_idx, mask=seq_idx < num_seqs, other=0).to(tl.int32)
-        prefix += tl.where(mask & (offsets > seq_idx), chunk_count + ADD_ONE, 0)
-
-    tl.store(out_offsets_ptr + offsets, prefix.to(out_offsets_ptr.dtype.element_ty), mask=mask)
-
-
-@triton.jit
 def _build_final_chunk_indices_kernel(
     update_chunk_offsets_ptr,
     out_final_chunk_indices_ptr,

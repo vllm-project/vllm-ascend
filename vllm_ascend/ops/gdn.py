@@ -51,31 +51,14 @@ def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
 
 
 def _check_and_get_host_args(attn_metadata, field_name: str, sub_field_name: str):
-    if (fallback_meta := getattr(attn_metadata, field_name, None)) is None:
-        raise RuntimeError(f"Expected attn_metadata.{field_name}.{sub_field_name} for Ascend GDN fallback path.")
-    return fallback_meta
-
-
-def _check_and_get_runtime_prefill_args(attn_metadata, field_name: str):
-    value = getattr(attn_metadata, field_name, None)
-    if value is None:
-        raise RuntimeError(f"Expected attn_metadata.{field_name} for Ascend GDN prefill path.")
-    return value
+    if (host_meta := getattr(attn_metadata, field_name, None)) is None:
+        raise RuntimeError(f"Expected attn_metadata.{field_name}.{sub_field_name} for Ascend GDN host path.")
+    return host_meta
 
 
 def get_non_spec_causal_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
-    if fallback_meta is None:
-        query_start_loc = _check_and_get_runtime_prefill_args(attn_metadata, "non_spec_query_start_loc")
-        cache_indices = _check_and_get_runtime_prefill_args(attn_metadata, "non_spec_state_indices_tensor")
-        has_initial_state = _check_and_get_runtime_prefill_args(attn_metadata, "has_initial_state")
-        return (
-            to_int64_tuple(query_start_loc),
-            to_int64_tuple(cache_indices),
-            to_int64_tuple(has_initial_state),
-        )
-
-    causal_conv1d_meta = fallback_meta.causal_conv1d
+    prefill_metadata = _check_and_get_host_args(attn_metadata, "non_spec_prefill_metadata", "causal_conv1d")
+    causal_conv1d_meta = prefill_metadata.causal_conv1d
     return (
         to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
         to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
@@ -84,8 +67,8 @@ def get_non_spec_causal_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...]
 
 
 def get_causal_conv1d_update_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_decode_fallback_meta", "causal_conv1d")
-    causal_conv1d_meta = fallback_meta.causal_conv1d
+    host_meta = _check_and_get_host_args(attn_metadata, "non_spec_decode_host_meta", "causal_conv1d")
+    causal_conv1d_meta = host_meta.causal_conv1d
     return (
         to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
         to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
@@ -93,8 +76,8 @@ def get_causal_conv1d_update_host_args(attn_metadata) -> tuple[tuple[int, ...], 
 
 
 def get_spec_causal_conv1d_update_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    fallback_meta = _check_and_get_host_args(attn_metadata, "spec_decode_fallback_meta", "spec_causal_conv1d")
-    causal_conv1d_meta = fallback_meta.spec_causal_conv1d
+    host_meta = _check_and_get_host_args(attn_metadata, "spec_decode_host_meta", "spec_causal_conv1d")
+    causal_conv1d_meta = host_meta.spec_causal_conv1d
 
     return (
         to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
@@ -104,48 +87,51 @@ def get_spec_causal_conv1d_update_host_args(attn_metadata) -> tuple[tuple[int, .
 
 
 def _pad_conv1d_host_args_to_capture(
-    qsl_host: tuple[int, ...],
-    cidx_host: tuple[int, ...],
-    num_accepted_host: tuple[int, ...] | tuple,
+    query_start_loc_host: tuple[int, ...],
+    cache_indices_host: tuple[int, ...],
+    num_accepted_tokens_host: tuple[int, ...] | tuple,
     cap_x_dim0: int,
-    q_per_seq: int,
+    query_tokens_per_sequence: int,
     with_num_accepted: bool,
 ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...] | tuple]:
     """Pad runtime host arguments with dummy requests at the end to align to capture-time x.shape[0].
 
     During capture, ACL Graph records ``cuSeqlen = mixed_qkv.shape[0]`` (= ``cap_x_dim0``),
-    and tiling strictly validates ``qsl[last] == cuSeqlen``.
+    and tiling strictly validates ``query_start_loc[last] == cuSeqlen``.
     Runtime may have fewer requests than capture (e.g., FIA adds a dummy request to query_start_loc,
     but vLLM marks it as non-spec/non-decode, so spec/non_spec_decode host args only cover real requests).
-    This function pads dummy requests at the end with ``q_per_seq`` stride to ensure ``qsl[last] == cap_x_dim0``.
+    This function pads dummy requests at the end with ``query_tokens_per_sequence`` stride to ensure
+    ``query_start_loc[last] == cap_x_dim0``.
     Dummy requests use ``PAD_SLOT_ID`` as cache_index,  and the kernel skips state writeback for them.
     """
-    if not qsl_host:
-        return qsl_host, cidx_host, num_accepted_host
+    if not query_start_loc_host:
+        return query_start_loc_host, cache_indices_host, num_accepted_tokens_host
 
-    expected_seqs = len(qsl_host) - 1
-    cidx_pad = expected_seqs - len(cidx_host)
-    if cidx_pad > 0:
-        cidx_host = tuple(cidx_host) + (PAD_SLOT_ID,) * cidx_pad
+    expected_sequences = len(query_start_loc_host) - 1
+    cache_indices_pad = expected_sequences - len(cache_indices_host)
+    if cache_indices_pad > 0:
+        cache_indices_host = tuple(cache_indices_host) + (PAD_SLOT_ID,) * cache_indices_pad
     if with_num_accepted:
-        nat_pad = expected_seqs - len(num_accepted_host)
-        if nat_pad > 0:
-            num_accepted_host = tuple(num_accepted_host) + (1,) * nat_pad
+        num_accepted_tokens_pad = expected_sequences - len(num_accepted_tokens_host)
+        if num_accepted_tokens_pad > 0:
+            num_accepted_tokens_host = tuple(num_accepted_tokens_host) + (1,) * num_accepted_tokens_pad
 
-    runtime_qsl_last = int(qsl_host[-1])
-    pad_tokens = cap_x_dim0 - runtime_qsl_last
-    if pad_tokens <= 0 or q_per_seq <= 0:
-        return qsl_host, cidx_host, num_accepted_host
-    pad_seqs = pad_tokens // q_per_seq
-    if pad_seqs <= 0:
-        return qsl_host, cidx_host, num_accepted_host
-    # query start loc is cunsum
-    extra_qsl = tuple(runtime_qsl_last + (i + 1) * q_per_seq for i in range(pad_seqs))
-    qsl_host = qsl_host + extra_qsl
-    cidx_host = cidx_host + (PAD_SLOT_ID,) * pad_seqs
+    runtime_query_start_loc_last = int(query_start_loc_host[-1])
+    pad_tokens = cap_x_dim0 - runtime_query_start_loc_last
+    if pad_tokens <= 0 or query_tokens_per_sequence <= 0:
+        return query_start_loc_host, cache_indices_host, num_accepted_tokens_host
+    pad_sequences = pad_tokens // query_tokens_per_sequence
+    if pad_sequences <= 0:
+        return query_start_loc_host, cache_indices_host, num_accepted_tokens_host
+    # query_start_loc is a cumulative sum.
+    extra_query_start_locs = tuple(
+        runtime_query_start_loc_last + (i + 1) * query_tokens_per_sequence for i in range(pad_sequences)
+    )
+    query_start_loc_host = query_start_loc_host + extra_query_start_locs
+    cache_indices_host = cache_indices_host + (PAD_SLOT_ID,) * pad_sequences
     if with_num_accepted:
-        num_accepted_host = tuple(num_accepted_host) + (1,) * pad_seqs
-    return qsl_host, cidx_host, num_accepted_host
+        num_accepted_tokens_host = tuple(num_accepted_tokens_host) + (1,) * pad_sequences
+    return query_start_loc_host, cache_indices_host, num_accepted_tokens_host
 
 
 def update_conv1d_graph_params(
@@ -193,7 +179,7 @@ def update_conv1d_graph_params(
                 _,
                 _,
                 _,
-                q_per_seq,
+                query_tokens_per_sequence,
             ) = param
 
             new_query_start_loc: tuple[int, ...] = ()
@@ -212,13 +198,17 @@ def update_conv1d_graph_params(
 
                 cap_x_dim0 = int(mixed_qkv.size(0))
                 if branch == "spec" and meta.spec_sequence_masks is not None:
-                    qsl_host, cidx_host, num_accepted_host = get_spec_causal_conv1d_update_host_args(meta)
+                    (
+                        query_start_loc_host,
+                        cache_indices_host,
+                        num_accepted_tokens_host,
+                    ) = get_spec_causal_conv1d_update_host_args(meta)
                     new_query_start_loc, new_cache_indices, new_num_accepted = _pad_conv1d_host_args_to_capture(
-                        qsl_host,
-                        cidx_host,
-                        num_accepted_host,
+                        query_start_loc_host,
+                        cache_indices_host,
+                        num_accepted_tokens_host,
                         cap_x_dim0=cap_x_dim0,
-                        q_per_seq=q_per_seq,
+                        query_tokens_per_sequence=query_tokens_per_sequence,
                         with_num_accepted=True,
                     )
                 elif branch == "spec" and meta.spec_sequence_masks is None:
@@ -229,13 +219,16 @@ def update_conv1d_graph_params(
                     # Mark every input row as -1 so the task is a state no-op.
                     new_cache_indices = (-1,) * cap_x_dim0
                 elif branch == "non_spec_decode":
-                    non_sdq_host, non_sd_cidx_host = get_causal_conv1d_update_host_args(meta)
+                    (
+                        non_spec_decode_query_start_loc_host,
+                        non_spec_decode_cache_indices_host,
+                    ) = get_causal_conv1d_update_host_args(meta)
                     new_query_start_loc, new_cache_indices, _ = _pad_conv1d_host_args_to_capture(
-                        non_sdq_host,
-                        non_sd_cidx_host,
+                        non_spec_decode_query_start_loc_host,
+                        non_spec_decode_cache_indices_host,
                         (),
                         cap_x_dim0=cap_x_dim0,
-                        q_per_seq=q_per_seq,
+                        query_tokens_per_sequence=query_tokens_per_sequence,
                         with_num_accepted=False,
                     )
                     new_num_accepted = ()
@@ -260,10 +253,10 @@ def update_conv1d_graph_params(
 
 
 def get_non_spec_chunked_prefill_meta(attn_metadata):
-    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
-    if fallback_meta is None:
+    prefill_metadata = getattr(attn_metadata, "non_spec_prefill_metadata", None)
+    if prefill_metadata is None:
         return None
-    return fallback_meta.chunk
+    return prefill_metadata.chunk
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -394,7 +387,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
-        has_initial_state = attn_metadata.has_initial_state
+        prefill_query_start_loc = attn_metadata.prefill_query_start_loc
+        prefill_state_indices = attn_metadata.prefill_state_indices
+        prefill_has_initial_state = attn_metadata.prefill_has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
         spec_sequence_masks = attn_metadata.spec_sequence_masks
@@ -428,7 +423,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
-            (spec_qsl_host, spec_ci_host, spec_nat_host) = get_spec_causal_conv1d_update_host_args(attn_metadata)
+            (
+                spec_query_start_loc_host,
+                spec_cache_indices_host,
+                spec_num_accepted_tokens_host,
+            ) = get_spec_causal_conv1d_update_host_args(attn_metadata)
             # capturing branch for conv1d update
             if _EXTRA_CTX.capturing:
                 stream = torch_npu.npu.current_stream()
@@ -443,7 +442,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # Used during update to align host args to capture's x.shape[0],
                 # avoiding tiling validation failure when runtime has fewer spec
                 # sequences than capture-time.
-                spec_q_per_seq = int(attn_metadata.spec_state_indices_tensor.size(-1))
+                spec_query_tokens_per_sequence = int(attn_metadata.spec_state_indices_tensor.size(-1))
                 # Store parameter references (use weak_ref for tensors, save host variables as tuples directly)
                 graph_params.conv1d_params[num_actual_tokens].append(
                     (
@@ -457,10 +456,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         1,  # run_mode
                         "spec",
                         self.prefix,
-                        spec_qsl_host,
-                        spec_ci_host,
-                        spec_nat_host,
-                        spec_q_per_seq,
+                        spec_query_start_loc_host,
+                        spec_cache_indices_host,
+                        spec_num_accepted_tokens_host,
+                        spec_query_tokens_per_sequence,
                     )
                 )
 
@@ -471,10 +470,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
                     bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=spec_qsl_host,
-                    cache_indices_opt=spec_ci_host,
+                    query_start_loc_opt=spec_query_start_loc_host,
+                    cache_indices_opt=spec_cache_indices_host,
                     initial_state_mode_opt=(),
-                    num_accepted_tokens_opt=spec_nat_host,
+                    num_accepted_tokens_opt=spec_num_accepted_tokens_host,
                     activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=1,
@@ -491,10 +490,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
                     bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=spec_qsl_host,
-                    cache_indices_opt=spec_ci_host,
+                    query_start_loc_opt=spec_query_start_loc_host,
+                    cache_indices_opt=spec_cache_indices_host,
                     initial_state_mode_opt=(),
-                    num_accepted_tokens_opt=spec_nat_host,
+                    num_accepted_tokens_opt=spec_num_accepted_tokens_host,
                     activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=1,
@@ -547,7 +546,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         elif attn_metadata.num_decodes > 0:
             conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
-            non_spec_qsl_host, non_spec_ci_host = get_causal_conv1d_update_host_args(attn_metadata)
+            (
+                non_spec_query_start_loc_host,
+                non_spec_cache_indices_host,
+            ) = get_causal_conv1d_update_host_args(attn_metadata)
             # graph capture branch
             if _EXTRA_CTX.capturing:
                 stream = torch_npu.npu.current_stream()
@@ -559,7 +561,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
                 output_non_spec = torch.empty_like(mixed_qkv_non_spec)
                 # non_spec_decode has 1 token per request; pad dummy requests with stride=1 during update.
-                non_spec_q_per_seq = 1
+                non_spec_query_tokens_per_sequence = 1
                 # Store parameter references
                 graph_params.conv1d_params[num_actual_tokens].append(
                     (
@@ -573,10 +575,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         1,  # run_mode
                         "non_spec_decode",
                         self.prefix,
-                        non_spec_qsl_host,
-                        non_spec_ci_host,
+                        non_spec_query_start_loc_host,
+                        non_spec_cache_indices_host,
                         [],
-                        non_spec_q_per_seq,
+                        non_spec_query_tokens_per_sequence,
                     )
                 )
 
@@ -587,8 +589,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
                     bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=non_spec_qsl_host,
-                    cache_indices_opt=non_spec_ci_host,
+                    query_start_loc_opt=non_spec_query_start_loc_host,
+                    cache_indices_opt=non_spec_cache_indices_host,
                     initial_state_mode_opt=(),
                     num_accepted_tokens_opt=[],
                     activation_mode=activation_num,
@@ -606,8 +608,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
                     bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=to_int64_tuple(non_spec_query_start_loc[: num_actual_tokens + 1]),
-                    cache_indices_opt=to_int64_tuple(non_spec_state_indices_tensor[:num_actual_tokens]),
+                    query_start_loc_opt=non_spec_query_start_loc_host,
+                    cache_indices_opt=non_spec_cache_indices_host,
                     initial_state_mode_opt=[],
                     num_accepted_tokens_opt=[],
                     activation_mode=activation_num,
@@ -640,6 +642,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             g_non_spec = g
             beta_non_spec = beta
 
+        split_non_spec = (
+            spec_sequence_masks is None and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
+        )
+        num_decode_tokens = attn_metadata.num_decode_tokens
+
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
             cu_seqlens = spec_query_start_loc[: attn_metadata.num_spec_decodes + 1]
@@ -665,10 +672,46 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
-        # 2.2: Process the remaining part
+        # 2.2: Process non-spec-decode part in mixed non-spec batches
+        if split_non_spec:
+            assert mixed_qkv_non_spec is not None
+            assert g_non_spec is not None
+            assert beta_non_spec is not None
+            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(mixed_qkv_non_spec[:num_decode_tokens])
+            cu_seqlens = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
+            actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
+            query_decode = l2norm_fwd(query_decode)
+            key_decode = l2norm_fwd(key_decode)
+            core_attn_out_decode = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+                query=query_decode.squeeze(0),
+                key=key_decode.squeeze(0),
+                value=value_decode.squeeze(0),
+                g=g_non_spec[:, :num_decode_tokens].squeeze(0),
+                beta=beta_non_spec[:, :num_decode_tokens].squeeze(0),
+                state=ssm_state,
+                scale=key_decode.shape[-1] ** -0.5,
+                actual_seq_lengths=actual_seq_lengths,
+                ssm_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_decodes],
+            ).unsqueeze(0)
+        else:
+            core_attn_out_decode = None
+
+        # 2.3: Process the remaining part
         if attn_metadata.num_prefills > 0:
-            initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
-            clear_ssm_states(initial_state, has_initial_state)
+            assert prefill_query_start_loc is not None
+            assert prefill_state_indices is not None
+            assert prefill_has_initial_state is not None
+            assert g_non_spec is not None
+            assert beta_non_spec is not None
+            if split_non_spec:
+                query_non_spec = query_non_spec[:, num_decode_tokens:]
+                key_non_spec = key_non_spec[:, num_decode_tokens:]
+                value_non_spec = value_non_spec[:, num_decode_tokens:]
+                g_non_spec = g_non_spec[:, num_decode_tokens:]
+                beta_non_spec = beta_non_spec[:, num_decode_tokens:]
+
+            initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
+            clear_ssm_states(initial_state, prefill_has_initial_state)
             (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
@@ -677,14 +720,17 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_non_spec,
                 initial_state=initial_state,
                 output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
+                cu_seqlens=prefill_query_start_loc,
                 prebuilt_meta=get_non_spec_chunked_prefill_meta(attn_metadata),
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
-            ssm_state[non_spec_state_indices_tensor] = (
-                last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-            )
+            ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+            if split_non_spec:
+                core_attn_out_non_spec = torch.cat(
+                    [core_attn_out_decode, core_attn_out_non_spec],
+                    dim=1,
+                )
         elif attn_metadata.num_decodes > 0:
             cu_seqlens = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
             actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
