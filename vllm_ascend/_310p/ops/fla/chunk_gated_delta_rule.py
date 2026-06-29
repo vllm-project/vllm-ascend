@@ -20,6 +20,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
+
 CHUNK_SIZE = 64
 
 
@@ -105,8 +107,8 @@ def _torch_chunk_gated_delta_rule_chunked(
     """
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
-        query = F.normalize(query, p=2, dim=-1, eps=1e-6).to(query.dtype)
-        key = F.normalize(key, p=2, dim=-1, eps=1e-6).to(key.dtype)
+        query = l2norm_310p(query)
+        key = l2norm_310p(key)
 
     query, key, value, beta, g = [
         x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
@@ -200,7 +202,7 @@ def _require_ascend_chunk_ops(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor)
 def _maybe_l2norm(x: torch.Tensor, enabled: bool) -> torch.Tensor:
     if not enabled:
         return x
-    return F.normalize(x.to(torch.float32), p=2, dim=-1, eps=1e-6).to(x.dtype)
+    return l2norm_310p(x)
 
 
 def _pad_bthd_to_chunk(

@@ -17,11 +17,24 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
+
+# The v2 model runner is intentionally NOT made compatible with the v0.23.0
+# release. vLLM v0.23.0 and the verified main commit are diverged, and the v2
+# worker patches target main-only APIs; rather than maintain a separate v0.23.0
+# compatibility path we keep v2 main-only. With v0.23.0 installed this flag is
+# False, so none of the patch_v2.* / routed-experts-capture patches below are
+# imported and the v2 worker stays dormant (the release uses the v1 runner).
+if vllm_version_is("0.23.0"):
+    _V2_MODEL_RUNNER_SUPPORTED = False
+else:
+    _V2_MODEL_RUNNER_SUPPORTED = True
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
-    import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+
+    if _V2_MODEL_RUNNER_SUPPORTED:
+        import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa
@@ -51,11 +64,19 @@ import vllm_ascend.patch.worker.patch_draft_quarot  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
+import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 
-import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
-import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+if not vllm_version_is("0.23.0"):
+    import vllm_ascend.patch.worker.patch_fused_moe  # noqa
+
+if _V2_MODEL_RUNNER_SUPPORTED:
+    import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
+
+# only patch routed experts capture in main2main.
+if _V2_MODEL_RUNNER_SUPPORTED:
+    import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

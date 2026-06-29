@@ -106,7 +106,8 @@ benchmarks:
     dataset_path: vllm-ascend/gsm8k
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    num_prompts: 360
     max_out_len: 4096
-    batch_size: 16
+    batch_size: 32
     baseline: 95
     threshold: 5

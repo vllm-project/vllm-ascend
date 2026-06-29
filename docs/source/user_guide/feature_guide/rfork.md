@@ -91,7 +91,7 @@ The following table records models that have been explicitly tested with RFork w
 
 ## Example Commands & Placeholders
 
-> Replace parts in `` `<...>` `` before running.
+> Replace parts in `<...>` before running.
 
 ### 1. Install YuanRong TransferEngine
 

@@ -513,8 +513,8 @@ class NPUPlatform(Platform):
         from vllm.config.compilation import CUDAGraphMode
 
         if ascend_config.xlite_graph_config.enabled:
-            if ascend_config.xlite_graph_config.full_mode:
-                logger.info("ACLGraph is disabled under xlite full mode")
+            if ascend_config.xlite_graph_config.full_mode and vllm_config.speculative_config is None:
+                logger.info("ACLGraph has been disabled when speculation is disabled in xlite full mode")
                 enforce_eager = True
                 model_config.enforce_eager = True
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -1247,3 +1247,9 @@ class NPUPlatform(Platform):
     @classmethod
     def manual_seed_all(cls, seed: int) -> None:
         pass
+
+    @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
+        from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+
+        register_ascend_kv_cache_specs()
