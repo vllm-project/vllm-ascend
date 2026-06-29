@@ -182,55 +182,6 @@ class TestAscendSFAPrologV3(TestBase):
         self.assertFalse(mock_prolog.call_args.kwargs["query_norm_flag"])
         self.assertIsNone(result[3])
 
-    def test_prolog_v3_tnd_allows_missing_query_norm_without_indexer(self):
-        impl = self._make_prolog_impl(has_indexer=False)
-        hidden_states = torch.randn(2, 8)
-        ql_nope = torch.randn(2, 2, 128)
-        q_pe = torch.randn(2, 2, 16)
-        k_nope = torch.randn(2, 1, 128)
-        k_pe = torch.randn(2, 1, 16)
-
-        with patch.object(
-            impl,
-            "_sfa_preprocess_with_prolog_v3",
-            return_value=(hidden_states, ql_nope, q_pe, None, k_nope, k_pe),
-        ):
-            result = impl._sfa_preprocess_with_prolog_v3_tnd_cache(
-                hidden_states,
-                cos=torch.randn(2, 1, 1, 16),
-                sin=torch.randn(2, 1, 1, 16),
-            )
-
-        self.assertIsNone(result[3])
-        self.assertIs(result[4], k_nope)
-        self.assertIs(result[5], k_pe)
-
-    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    def test_sfa_gathers_flashcomm_hidden_states(self, mock_all_gather):
-        impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.enable_sp = True
-        impl.enable_dsa_cp = False
-        hidden_states = torch.randn(2, 8)
-        gathered_hidden_states = torch.randn(32, 8)
-        mock_all_gather.return_value = gathered_hidden_states
-
-        result = impl._maybe_all_gather_hidden_states(hidden_states, need_gather_q_kv=True)
-
-        self.assertIs(result, gathered_hidden_states)
-        mock_all_gather.assert_called_once_with(hidden_states.contiguous(), True)
-
-    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    def test_sfa_keeps_dsa_cp_hidden_states_local(self, mock_all_gather):
-        impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.enable_sp = True
-        impl.enable_dsa_cp = True
-        hidden_states = torch.randn(2, 8)
-
-        result = impl._maybe_all_gather_hidden_states(hidden_states, need_gather_q_kv=True)
-
-        self.assertIs(result, hidden_states)
-        mock_all_gather.assert_not_called()
-
 
 class TestAscendSFAMetadata(TestBase):
     def test_ascend_sfa_metadata_default(self):
