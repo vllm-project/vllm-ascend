@@ -21,19 +21,10 @@ from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.21.0"):
-    from vllm.model_executor.layers.mamba.gdn_linear_attn import (  # type: ignore[import-not-found]
-        GatedDeltaNetAttention,
-    )
-else:
-    from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.triton_utils import triton
-from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
@@ -44,6 +35,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_graph_params,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -60,14 +52,29 @@ def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
 
 def _check_and_get_host_args(attn_metadata, field_name: str, sub_field_name: str):
     if (fallback_meta := getattr(attn_metadata, field_name, None)) is None:
-        raise RuntimeError(
-            f"Expected attn_metadata.{field_name}.{sub_field_name} for patched GDN non-spec prefill path."
-        )
+        raise RuntimeError(f"Expected attn_metadata.{field_name}.{sub_field_name} for Ascend GDN fallback path.")
     return fallback_meta
 
 
+def _check_and_get_runtime_prefill_args(attn_metadata, field_name: str):
+    value = getattr(attn_metadata, field_name, None)
+    if value is None:
+        raise RuntimeError(f"Expected attn_metadata.{field_name} for Ascend GDN prefill path.")
+    return value
+
+
 def get_non_spec_causal_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_prefill_fallback_meta", "causal_conv1d")
+    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is None:
+        query_start_loc = _check_and_get_runtime_prefill_args(attn_metadata, "non_spec_query_start_loc")
+        cache_indices = _check_and_get_runtime_prefill_args(attn_metadata, "non_spec_state_indices_tensor")
+        has_initial_state = _check_and_get_runtime_prefill_args(attn_metadata, "has_initial_state")
+        return (
+            to_int64_tuple(query_start_loc),
+            to_int64_tuple(cache_indices),
+            to_int64_tuple(has_initial_state),
+        )
+
     causal_conv1d_meta = fallback_meta.causal_conv1d
     return (
         to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
@@ -214,6 +221,13 @@ def update_conv1d_graph_params(
                         q_per_seq=q_per_seq,
                         with_num_accepted=True,
                     )
+                elif branch == "spec" and meta.spec_sequence_masks is None:
+                    # The captured graph may contain a spec conv1d task even
+                    # when this DP rank has no runtime spec sequence. Leaving
+                    # cache_indices empty makes the kernel use default
+                    # batch-indexed state writes, which can corrupt conv_state.
+                    # Mark every input row as -1 so the task is a state no-op.
+                    new_cache_indices = (-1,) * cap_x_dim0
                 elif branch == "non_spec_decode":
                     non_sdq_host, non_sd_cidx_host = get_causal_conv1d_update_host_args(meta)
                     new_query_start_loc, new_cache_indices, _ = _pad_conv1d_host_args_to_capture(
@@ -246,7 +260,9 @@ def update_conv1d_graph_params(
 
 
 def get_non_spec_chunked_prefill_meta(attn_metadata):
-    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_prefill_fallback_meta", "chunk")
+    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is None:
+        return None
     return fallback_meta.chunk
 
 
@@ -275,6 +291,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _warmup_prefill_kernels_v0202(self, mixed_qkv: torch.Tensor) -> None:
         return
 
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return AscendGDNAttentionBackend
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -292,10 +311,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             ba, _ = self.in_proj_ba(hidden_states)
             z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
-            if vllm_version_is("0.21.0"):
-                b, a = ba.chunk(2, dim=-1)
-            else:
-                b, a = self.split_ba(ba)
+            b, a = self._split_ba_for_tp(ba)
             b = b.contiguous()
             a = a.contiguous()
         else:
@@ -307,10 +323,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 ba, _ = self.in_proj_ba(hidden_states)
-                if vllm_version_is("0.21.0"):
-                    b, a = ba.chunk(2, dim=-1)
-                else:
-                    b, a = self.split_ba(ba)
+                b, a = self._split_ba_for_tp(ba)
 
                 b = b.contiguous()
                 a = a.contiguous()
@@ -339,24 +352,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        if vllm_version_is("0.21.0"):
-            torch.ops.vllm.gdn_attention_core(
-                mixed_qkv,
-                b,
-                a,
-                core_attn_out,
-                False,
-                self.prefix,
-            )
-        else:
-            torch.ops.vllm.qwen_gdn_attention_core(
-                mixed_qkv,
-                b,
-                a,
-                core_attn_out,
-                False,
-                self.prefix,
-            )
+        torch.ops.vllm.qwen_gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.prefix,
+            False,
+        )
 
         # ============================================================
         # Part 3: Output Projection

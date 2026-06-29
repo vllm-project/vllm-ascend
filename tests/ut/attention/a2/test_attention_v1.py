@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -10,7 +11,31 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
 )
 from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    cache_graph_workspace,
+    needs_layer_aware_fia_graph_replay,
+)
+
+
+class TestAttentionGraphHelpers(TestBase):
+    def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
+        graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
+        candidate_workspace = torch.empty(8)
+
+        result = cache_graph_workspace(graph_params, 1, candidate_workspace, use_max_workspace=False)
+
+        self.assertEqual(result.numel(), 4)
+        self.assertEqual(graph_params.workspaces[1].numel(), 4)
+
+    def test_cache_graph_workspace_updates_to_larger_workspace(self):
+        graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
+        candidate_workspace = torch.empty(8)
+
+        result = cache_graph_workspace(graph_params, 1, candidate_workspace, use_max_workspace=True)
+
+        self.assertEqual(result.numel(), 8)
+        self.assertEqual(graph_params.workspaces[1].numel(), 8)
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -82,6 +107,32 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.assertFalse(result)
 
+    def test_unpadded_preserves_internal_seq_lens_cpu(self):
+        internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 2, 5, 9]),
+            query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
+            seq_lens=torch.tensor([4, 5, 6], dtype=torch.int32),
+            _seq_lens_cpu=internal_seq_lens_cpu,
+            seq_lens_cpu=None,
+            num_computed_tokens_cpu=None,
+            num_reqs=3,
+            num_actual_tokens=9,
+            max_query_len=4,
+            block_table_tensor=torch.zeros((3, 1), dtype=torch.int32),
+            slot_mapping=torch.arange(9, dtype=torch.int32),
+            causal=True,
+            actual_seq_lengths_q=[2, 3, 4],
+            positions=torch.arange(9),
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            max_seq_len=6,
+        )
+
+        unpadded_metadata = common_attn_metadata.unpadded(num_actual_tokens=5, num_actual_reqs=2)
+
+        self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
+        self.assertIsNone(unpadded_metadata.seq_lens_cpu)
+
     @patch("vllm_ascend.attention.attention_v1.AscendMetadata")
     def test_build(self, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
@@ -136,7 +187,15 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
+        self.utils_config_patcher = patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
+        )
         self.config_patcher.start()
+        self.utils_config_patcher.start()
+        needs_layer_aware_fia_graph_replay.cache_clear()
+        self.addCleanup(needs_layer_aware_fia_graph_replay.cache_clear)
+        self.addCleanup(self.utils_config_patcher.stop)
+        self.addCleanup(self.config_patcher.stop)
 
         self.impl = AscendAttentionBackendImpl(
             num_heads=8,

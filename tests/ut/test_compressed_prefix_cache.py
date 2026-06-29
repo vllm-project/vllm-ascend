@@ -65,6 +65,7 @@ def _make_compress_manager(
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=0,
+        scheduler_block_size=block_size,
     )
     return spec, block_pool, manager
 
@@ -103,7 +104,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         kv_cache_group_ids=[0],
         block_pool=block_pool,
         kv_cache_spec=spec,
-        use_eagle=False,
+        drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )[0]
 
@@ -130,7 +131,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         kv_cache_group_ids=[0],
         block_pool=block_pool,
         kv_cache_spec=spec,
-        use_eagle=False,
+        drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )[0]
 

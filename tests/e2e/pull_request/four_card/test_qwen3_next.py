@@ -106,9 +106,10 @@ def test_qwen3_next_distributed_mp_graph_mode_tp4():
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
         tensor_parallel_size=4,
         max_model_len=4096,
-        gpu_memory_utilization=0.7,
+        gpu_memory_utilization=0.8,
         distributed_executor_backend="mp",
         enable_expert_parallel=True,
+        cudagraph_capture_sizes=[1, 2, 8],
         enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
