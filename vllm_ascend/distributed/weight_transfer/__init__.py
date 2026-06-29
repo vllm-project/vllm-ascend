@@ -19,9 +19,14 @@ from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
 
 
 def register_engine():
-    """Register HCCL weight transfer engine as a vLLM plugin."""
+    """Register Ascend weight transfer engines as vLLM plugins."""
     WeightTransferEngineFactory.register_engine(
         "hccl",
         "vllm_ascend.distributed.weight_transfer.hccl_engine",
         "HCCLWeightTransferEngine",
+    )
+    WeightTransferEngineFactory.register_engine(
+        "npu_ipc",
+        "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
+        "NPUIPCWeightTransferEngine",
     )
