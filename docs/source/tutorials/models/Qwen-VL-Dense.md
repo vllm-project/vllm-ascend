@@ -223,7 +223,7 @@ After about several minutes, you can get the performance evaluation result.
 
 #### Table 2: Detailed Node Configuration
 
-|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num||Weight Version
+|Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|Weight Version|
 |--------|-------------|-----|--|--|-------------------|--------------------|---|
 |High Throughput / Low Latency (16K)|Server / Single Machine|1|1|1|~16K|3|Qwen3-VL-8B-Instruct|
 |Long Context (128K, no cache)|Server / Single Machine|1|1|1|128K|3|Qwen3-VL-8B-Instruct|
@@ -245,4 +245,4 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html);
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
