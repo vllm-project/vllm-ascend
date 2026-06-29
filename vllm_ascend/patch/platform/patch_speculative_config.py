@@ -12,8 +12,40 @@ else:
     me_quant = LazyLoader("model_executor", globals(), "vllm.model_executor.layers.quantization")
 
 
+def _is_dspark_v4_checkpoint(hf_config: PretrainedConfig) -> bool:
+    """Detect DSpark V4-Flash / V4-Pro checkpoint by config signature.
+
+    DSpark ckpts inherit the DSv4 ``model_type`` and ``DeepseekV4ForCausalLM``
+    architecture, so we have to look at the DSpark-specific fields that
+    ``inference/config.json`` carries (the HF root ``config.json`` keeps
+    ``num_nextn_predict_layers=1`` for transformers compat). The cheapest
+    signature is ``dspark_block_size`` + ``dspark_target_layer_ids``.
+    """
+    if hf_config.model_type != "deepseek_v4":
+        return False
+    return bool(getattr(hf_config, "dspark_block_size", 0)) and bool(
+        getattr(hf_config, "dspark_target_layer_ids", None)
+    )
+
+
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
     initial_architecture = hf_config.architectures[0]
+    # DSpark routes to a separate draft architecture *before* the generic
+    # deepseek_v4 → deepseek_mtp rewrite, since DSpark is not the serial MTP
+    # path even though weights live under ``mtp.*`` (mirrors upstream PR
+    # vllm#46995). The runtime selects this branch when method="dspark".
+    if hf_config.model_type == "deepseek_v4" and _is_dspark_v4_checkpoint(hf_config):
+        n_predict = (
+            getattr(hf_config, "n_mtp_layers", None) or getattr(hf_config, "num_nextn_predict_layers", None) or 3
+        )
+        hf_config.update(
+            {
+                "model_type": "deepseek_v4_dspark",
+                "n_predict": n_predict,
+                "architectures": ["DSparkDeepseekV4ForCausalLM"],
+            }
+        )
+        return hf_config
     if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "deepseek_v4", "glm_moe_dsa"):
         target_model_type = hf_config.model_type
         hf_config.model_type = "deepseek_mtp"

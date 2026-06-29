@@ -43,6 +43,14 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
         return AscendDflashProposer(vllm_config, device, runner)
+    elif method == "dspark":
+        # DSpark (paper arxiv:2606.19348) is a distinct speculative algorithm —
+        # it intentionally does NOT fall back to the serial MTP path. Mirrors
+        # upstream vllm PR #46995 (benchislett) which routes method="dspark"
+        # to a dedicated DSparkSpeculator subclassing the DFlash machinery.
+        from vllm_ascend.spec_decode.dspark.speculator import AscendDsparkSpeculator
+
+        return AscendDsparkSpeculator(vllm_config, device, runner)
     elif method == "draft_model":
         return AscendDraftModelProposer(vllm_config, device, runner)
     elif method == "extract_hidden_states":
