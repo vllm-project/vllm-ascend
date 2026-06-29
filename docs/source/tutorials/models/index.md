@@ -16,8 +16,6 @@ Qwen3_embedding.md
 Qwen3-VL-Embedding.md
 Qwen3_reranker.md
 Qwen3-VL-Reranker.md
-Qwen3-8B-W4A8.md
-Qwen3-32B-W4A4.md
 Qwen3-Next.md
 Qwen3-Omni-30B-A3B-Thinking.md
 Qwen3.5-27B-Qwen3.6-27B.md
