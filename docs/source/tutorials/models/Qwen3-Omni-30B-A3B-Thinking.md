@@ -284,7 +284,6 @@ If the service starts successfully, the following startup log will be displayed:
 (APIServer pid=<pid>) INFO:     Application startup complete.
 ```
 
-
 ## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts.
@@ -330,7 +329,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 The output should resemble the following.
 
-```
+```bash
 {
   "id": "chatcmpl-8f3a1c2e4b5d4f7a9c0e1d2b3a4f5e6d",
   "object": "chat.completion",
