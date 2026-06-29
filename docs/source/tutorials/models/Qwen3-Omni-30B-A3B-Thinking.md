@@ -370,7 +370,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 
-1. Refer to [Using evalscope](../developer_guide/evaluation/using_evalscope.md) for `evalscope`installation.
+1. Refer to [Using evalscope](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/developer_guide/evaluation/using_evalscope.md) for `evalscope`installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
     ```bash
@@ -602,4 +602,4 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](../../faqs.md). 
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). 
