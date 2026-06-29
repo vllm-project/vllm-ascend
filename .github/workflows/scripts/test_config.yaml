@@ -293,6 +293,7 @@
     - vllm_ascend/ops/layernorm.py
     - vllm_ascend/ops/linear.py
     - vllm_ascend/ops/linear_op.py
+    - vllm_ascend/ops/group_aligned_linear.py
     - vllm_ascend/ops/rotary_embedding.py
     - vllm_ascend/ops/vocab_parallel_embedding.py
     - vllm_ascend/ops/register_custom_ops.py
