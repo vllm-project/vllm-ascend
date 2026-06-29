@@ -55,7 +55,7 @@ export NAME=vllm-ascend
 docker run --rm \
   --name $NAME \
   --net=host \
-  --shm-size=1g \
+  --shm-size=500g \
   --device /dev/davinci0 \
   --device /dev/davinci1 \
   --device /dev/davinci_manager \
