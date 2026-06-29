@@ -137,6 +137,25 @@ def test_collect_paths_and_basic_path_helpers():
 
 
 def test_route_helpers():
+    # Use a controlled runner_mapping that covers all convention directories
+    # documented in test_config.yaml (a2_2, a2, a3_4, a3_2, 310p). The real
+    # config only defines a subset because the corresponding test directories
+    # don't exist in the repo today, but the routing logic supports all of them.
+    select_tests._load_runner_mapping(
+        {
+            "runner_mapping": {
+                "tests/ut/.+/a2_2": {"default": "a2_x2"},
+                "tests/ut/.+/a2": {"default": "a2_x1"},
+                "tests/ut/.+/a3_4": {"default": "a3_x4"},
+                "tests/ut/.+/a3_2": {"default": "a3_x2"},
+                "tests/ut/.+/310p": {"default": "310p_x1"},
+                "tests/e2e/pull_request/one_card": {"default": "a2_x1", "310p": "310p_x1"},
+                "tests/e2e/pull_request/two_card": {"default": "a3_x2"},
+                "tests/e2e/pull_request/four_card": {"default": "a3_x4", "310p": "310p_x4"},
+            }
+        }
+    )
+
     assert select_tests._pytest_node_file_path("tests/e2e/test_x.py::TestCase::test_a") == "tests/e2e/test_x.py"
     assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py") == (2, select_tests.NpuType.A2)
     assert select_tests._route_ut_dir("tests/ut/mod/a2_2/test_x.py::test_case") == (2, select_tests.NpuType.A2)
@@ -265,8 +284,16 @@ def test_dedup_runner_resolution_and_output(tmp_path, monkeypatch, capsys):
             "runner": "cpu-runner",
             "tests": "tests/ut/a.py tests/ut/b.py",
             "image_tag": "cpu-img",
+            "partition": "1-1",
         },
-        {"num_npus": 1, "npu_type": "a2", "runner": "a2-runner", "tests": "e2e.py", "image_tag": "a2-img"},
+        {
+            "num_npus": 1,
+            "npu_type": "a2",
+            "runner": "a2-runner",
+            "tests": "e2e.py",
+            "image_tag": "a2-img",
+            "partition": "1-1",
+        },
     ]
     with pytest.raises(SystemExit):
         select_tests._resolve_to_runners({(2, select_tests.NpuType.A2): ["x"]}, runners)
@@ -340,7 +367,12 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
         },
     ]
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump(config))
+    runner_mapping = {
+        "tests/ut/.+/a2": {"default": "a2_x1"},
+        "tests/e2e/pull_request/one_card": {"default": "a2_x1", "310p": "310p_x1"},
+        "tests/e2e/pull_request/two_card": {"default": "a3_x2"},
+    }
+    _write_two_doc_config(config_path, config, {"runner_mapping": runner_mapping})
     runner_file = tmp_path / "runner_label.json"
     runner_file.write_text(
         json.dumps(
@@ -462,7 +494,8 @@ def test_default_cpu_ut_always_runs(tmp_path, monkeypatch, capsys):
         },
     ]
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump(config))
+    runner_mapping = {"tests/ut/.+/a2": {"default": "a2_x1"}}
+    _write_two_doc_config(config_path, config, {"runner_mapping": runner_mapping})
     runner_file = tmp_path / "runner_label.json"
     runner_file.write_text(
         json.dumps(

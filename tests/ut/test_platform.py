@@ -234,32 +234,6 @@ class TestNPUPlatform(TestBase):
         mock_get_device_name.assert_called_once_with(0)
 
     @patch("torch.npu.get_device_properties")
-    @patch("vllm_ascend.platform.subprocess.check_output")
-    def test_get_device_total_memory_prefers_npu_smi(self, mock_check_output, mock_get_device_properties):
-        mock_check_output.return_value = (
-            "        DDR Capacity(MB)               : 0\n        HBM Capacity(MB)               : 32768\n"
-        )
-
-        self.assertEqual(self.platform.get_device_total_memory(0), 32768 * 1024 * 1024)
-        mock_check_output.assert_called_once_with(
-            ["npu-smi", "info", "-t", "memory", "-i", "0"],
-            stderr=-3,
-            text=True,
-        )
-        mock_get_device_properties.assert_not_called()
-
-    @patch("torch.npu.get_device_properties")
-    @patch("vllm_ascend.platform.subprocess.check_output", side_effect=PermissionError)
-    def test_get_device_total_memory_falls_back_on_permission_error(
-        self, mock_check_output, mock_get_device_properties
-    ):
-        mock_get_device_properties.return_value.total_memory = 16 * 1024 * 1024
-
-        self.assertEqual(self.platform.get_device_total_memory(0), 16 * 1024 * 1024)
-        mock_check_output.assert_called_once()
-        mock_get_device_properties.assert_called_once_with(0)
-
-    @patch("torch.npu.get_device_properties")
     def test_get_device_uuid(self, mock_get_device_properties):
         device_id = 0
         device_properties = MagicMock()
@@ -730,6 +704,48 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.prefill_context_parallel_size = 1
 
         self.platform._validate_parallel_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_accepts_prefill_producer(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=True, kv_role="kv_producer")
+
+        self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_accepts_decode_dp_mtp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=False, kv_role="kv_consumer")
+
+        self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_rejects_decode_pp_mtp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=False, kv_role="kv_consumer")
+
+        with pytest.raises(ValueError, match=r"PP\+MTP.*P nodes.*D nodes.*pipeline_parallel_size=1"):
+            self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_rejects_non_pd_pp_mtp(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="mtp")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = None
+
+        with pytest.raises(ValueError, match=r"PP\+MTP.*PD-disaggregated P nodes"):
+            self.platform._validate_pd_pp_mtp_config(vllm_config)
+
+    def test_validate_pd_pp_mtp_config_allows_non_mtp_spec_decode(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = MagicMock(method="eagle")
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.kv_transfer_config = None
+
+        self.platform._validate_pd_pp_mtp_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

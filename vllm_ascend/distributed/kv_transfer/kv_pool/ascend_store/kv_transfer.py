@@ -476,15 +476,33 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 block_id_list_c,
                 ret,
             )
-            with self._invalid_block_ids_lock:
-                self._invalid_block_ids.update(missing_block_ids)
+            if len(req_meta.block_ids_by_group) == 1:
+                with self._invalid_block_ids_lock:
+                    self._invalid_block_ids.update(missing_block_ids)
+            elif missing_block_ids:
+                logger.error(
+                    "KV load failed for hybrid request %s. "
+                    "Skip invalid-block fallback to avoid scheduler crash. "
+                    "failed_blocks=%s",
+                    req_id,
+                    missing_block_ids,
+                )
         elif ret is None:
             missing_block_ids = record_failed_blocks(
                 block_id_list_c,
                 [1] * len(block_id_list_c),
             )
-            with self._invalid_block_ids_lock:
-                self._invalid_block_ids.update(missing_block_ids)
+            if len(req_meta.block_ids_by_group) == 1:
+                with self._invalid_block_ids_lock:
+                    self._invalid_block_ids.update(missing_block_ids)
+            elif missing_block_ids:
+                logger.error(
+                    "KV load failed for hybrid request %s. "
+                    "Skip invalid-block fallback to avoid scheduler crash. "
+                    "failed_blocks=%s",
+                    req_id,
+                    missing_block_ids,
+                )
         logger.debug(
             "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
             req_id,
