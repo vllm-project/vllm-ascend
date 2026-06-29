@@ -36,6 +36,7 @@ def precompute_rope_cos_sin_kernel(
         out_mask = (batch_off[:, None] < end) & (sin_cos_range[None, :] < ROPE_DIM)
         tl.store(out_cos_sin_gm_ptr + out_offset, sin_cos_val, mask=out_mask)
 
+
 @triton.jit
 def split_qkv_rmsnorm_rope_simt_kernel(
     input_gm_ptr,
@@ -101,7 +102,7 @@ def split_qkv_rmsnorm_rope_simt_kernel(
         cos_sin_offset = base_batch * ROPE_DIM + tl.arange(0, batch_size_per_iter_per_vec * ROPE_DIM)
         cos_sin_value = tl.load(
             cos_sin_precomputed_ptr + cos_sin_offset, mask=cos_sin_offset < (end * ROPE_DIM), other=0.0
-         ).reshape(batch_size_per_iter_per_vec, 1, ROPE_DIM)
+        ).reshape(batch_size_per_iter_per_vec, 1, ROPE_DIM)
 
         cos = extract_slice(
             cos_sin_value, offsets=(0, 0, 0), sizes=(batch_size_per_iter_per_vec, 1, HALF_ROPE_DIM), strides=(1, 1, 1)
