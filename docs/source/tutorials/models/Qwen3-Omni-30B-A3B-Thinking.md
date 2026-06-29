@@ -16,7 +16,7 @@ Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user
 
 ## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
 The following model variants are available. It is recommended to download the model weight to a shared directory accessible to all nodes.
 
@@ -352,6 +352,8 @@ The output should resemble the following.
 
 ```
 
+Expected result: HTTP 200 with a JSON response containing the `choices` field with generated text.
+
 ## 7 Accuracy Evaluation
 
 Here are accuracy evaluation methods.
@@ -360,7 +362,7 @@ Here are accuracy evaluation methods.
 
 As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 
-1. Refer to Using evalscope(<https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip>) for `evalscope`installation.
+1. Refer to [Using evalscope](<https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip>) for `evalscope`installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
     ```bash
