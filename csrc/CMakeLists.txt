@@ -123,6 +123,7 @@ if (BUILD_OPEN_PROJECT)
         include(cmake/obj_func.cmake)
         include(cmake/third_party/abseil-cpp.cmake)
         include(cmake/third_party/ascend_protobuf.cmake)
+        include(cmake/third_party/ops-tensor.cmake)
 
         include(cmake/third_party/makeself-fetch.cmake)
         include(cmake/opbuild.cmake)
