@@ -117,7 +117,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler Side Methods
     ############################################################
 
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
+    def get_num_new_matched_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
