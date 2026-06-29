@@ -190,11 +190,15 @@ class AscendRejectionSampler(RejectionSampler):
                 "logits.shape=%s, logits.dtype=%s, max_spec_len=%d, "
                 "num_total_drafts=%d, num_reqs=%d, "
                 "logprobs_mode=%s(processed=%s), top_k=%s",
-                tuple(logits.shape), logits.dtype, metadata.max_spec_len,
+                tuple(logits.shape),
+                logits.dtype,
+                metadata.max_spec_len,
                 int(metadata.num_draft_tokens.sum().item())
-                if torch.is_tensor(metadata.num_draft_tokens) else sum(metadata.num_draft_tokens),
+                if torch.is_tensor(metadata.num_draft_tokens)
+                else sum(metadata.num_draft_tokens),
                 metadata.cu_num_draft_tokens.shape[0],
-                self.sampler.logprobs_mode, self.is_processed_logprobs_mode,
+                self.sampler.logprobs_mode,
+                self.is_processed_logprobs_mode,
                 self.top_k,
             )
         bonus_logits_indices = metadata.bonus_logits_indices
@@ -260,14 +264,18 @@ class AscendRejectionSampler(RejectionSampler):
             valid_mask = output_token_ids.ne(PLACEHOLDER_TOKEN_ID)
             num_accepted = int(valid_mask.sum().item())
             num_slots = int(output_token_ids.numel())
-            num_total_drafts = (int(metadata.num_draft_tokens.sum().item())
-                                if torch.is_tensor(metadata.num_draft_tokens)
-                                else sum(metadata.num_draft_tokens))
+            num_total_drafts = (
+                int(metadata.num_draft_tokens.sum().item())
+                if torch.is_tensor(metadata.num_draft_tokens)
+                else sum(metadata.num_draft_tokens)
+            )
             logger.debug(
                 "[spec/dfx] rejection_sampler done: "
                 "accepted=%d/%d (slot_fill=%.1f%%), drafted=%d, "
                 "approx_accept_rate=%.1f%%",
-                num_accepted, num_slots, 100.0 * num_accepted / max(num_slots, 1),
+                num_accepted,
+                num_slots,
+                100.0 * num_accepted / max(num_slots, 1),
                 num_total_drafts,
                 100.0 * num_accepted / max(num_total_drafts + output_token_ids.shape[0], 1),
             )

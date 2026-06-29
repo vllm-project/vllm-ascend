@@ -1726,9 +1726,12 @@ class NPUModelRunner(GPUModelRunner):
                 "use_cp=%s, pcp_size=%d",
                 drafter_type,
                 self.speculative_config.method if self.speculative_config else None,
-                self.num_spec_tokens, self.input_batch.num_reqs,
-                num_scheduled_tokens, spec_meta_state,
-                getattr(self, "use_cp", False), getattr(self, "pcp_size", 1),
+                self.num_spec_tokens,
+                self.input_batch.num_reqs,
+                num_scheduled_tokens,
+                spec_meta_state,
+                getattr(self, "use_cp", False),
+                getattr(self, "pcp_size", 1),
             )
 
         if not self.drafter:
@@ -1962,7 +1965,10 @@ class NPUModelRunner(GPUModelRunner):
                     "[spec/dfx] propose_draft post-_propose: "
                     "draft_token_ids.shape=%s, total=%d, placeholder(-1)=%d, "
                     "expected~=batch_size(%d) * k(%d)=%d",
-                    shape_s, tot, ph, self.input_batch.num_reqs,
+                    shape_s,
+                    tot,
+                    ph,
+                    self.input_batch.num_reqs,
                     self.num_spec_tokens,
                     self.input_batch.num_reqs * self.num_spec_tokens,
                 )
