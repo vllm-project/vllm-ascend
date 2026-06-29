@@ -26,8 +26,7 @@ public:
         .AutoContiguous();
     this->Input("x")
         .ParamType(REQUIRED)
-        .DataTypeList({ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT8_E5M2, ge::DT_FLOAT8_E4M3FN,
-                        ge::DT_HIFLOAT8, ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2})
+        .DataTypeList({ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT8_E5M2, ge::DT_FLOAT8_E4M3FN})
         .FormatList({ge::FORMAT_ND})
         .AutoContiguous();
     this->Input("topk_ids")
@@ -42,16 +41,12 @@ public:
         .AutoContiguous();
     this->Input("weight1")
         .ParamType(DYNAMIC)
-        .DataType({ge::DT_BF16, ge::DT_FLOAT16, ge::DT_INT8, ge::DT_INT4, ge::DT_FLOAT8_E5M2, ge::DT_FLOAT8_E4M3FN, 
-                    ge::DT_HIFLOAT8, ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2})
-        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ, ge::FORMAT_ND, ge::FORMAT_ND,
-                    ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+        .DataType({ge::DT_FLOAT8_E5M2, ge::DT_FLOAT8_E4M3FN})
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND});
     this->Input("weight2")
         .ParamType(DYNAMIC)
-        .DataType({ge::DT_BF16, ge::DT_FLOAT16, ge::DT_INT8, ge::DT_INT4, ge::DT_FLOAT8_E5M2, ge::DT_FLOAT8_E4M3FN, 
-                    ge::DT_HIFLOAT8, ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2})
-        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ, ge::FORMAT_ND, ge::FORMAT_ND,
-                    ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+        .DataType({ge::DT_FLOAT8_E5M2, ge::DT_FLOAT8_E4M3FN})
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND});
     this->Input("weight_scales1")
         .ParamType(DYNAMIC)
         .DataTypeList({ge::DT_FLOAT, ge::DT_FLOAT8_E8M0})
