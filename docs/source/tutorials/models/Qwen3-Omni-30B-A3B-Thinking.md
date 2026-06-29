@@ -201,7 +201,7 @@ Expected result: The version information for both packages is displayed, confirm
 If deploying a multi-node environment, set up the environment on each node.
 :::
 
-Please install system dependencies
+Please install system dependencies.
 
 ```bash
 pip install qwen_omni_utils modelscope
