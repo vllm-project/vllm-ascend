@@ -525,5 +525,146 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
         self.assertTrue(get_event.is_set())
 
 
+class TestStoredRequestAccessors(unittest.TestCase):
+    """Thread-safe accessors added for TP-mismatch worker dispatch."""
+
+    def _make_thread(self):
+        store = FakeStore()
+        db = FakeTokenDatabase()
+        return KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
+            group_uses_align_state=[False],
+        )
+
+    def test_is_stored_request(self):
+        t = self._make_thread()
+        self.assertFalse(t.is_stored_request("r1"))
+        t.add_stored_request("r1")
+        self.assertTrue(t.is_stored_request("r1"))
+
+    def test_get_stored_request_count(self):
+        t = self._make_thread()
+        self.assertIsNone(t.get_stored_request_count("r1"))
+        t.add_stored_request("r1")
+        t.add_stored_request("r1")
+        self.assertEqual(t.get_stored_request_count("r1"), 2)
+
+    def test_get_stored_requests_snapshot_is_a_copy(self):
+        t = self._make_thread()
+        t.add_stored_request("r1")
+        t.add_stored_request("r2")
+        snap = t.get_stored_requests_snapshot()
+        self.assertEqual(snap, {"r1": 1, "r2": 1})
+        snap["r3"] = 99
+        # mutating the snapshot must not affect the live state
+        self.assertFalse(t.is_stored_request("r3"))
+
+
+class TestSendingThreadTpMismatchDispatch(unittest.TestCase):
+    def test_dispatches_to_worker_when_tp_mismatch(self):
+        store = FakeStore()
+        db = FakeTokenDatabase()
+        worker = MagicMock()
+        worker.tp_mismatch = True
+        t = KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_consumer",
+            ready_event=threading.Event(),
+            group_uses_align_state=[False],
+            worker=worker,
+        )
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.request_queue.put(req)
+        t._handle_request(req)
+        worker._store_kv_tp_mismatch.assert_called_once_with(req)
+        # Normal store path was not taken.
+        self.assertEqual(len(store.put_calls), 0)
+
+    def test_skips_dispatch_when_worker_none(self):
+        store = FakeStore([0])
+        db = FakeTokenDatabase()
+        t = KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
+            group_uses_align_state=[False],
+            worker=None,
+        )
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(len(store.put_calls), 1)
+
+
+class TestRecvingThreadTpMismatchDispatch(unittest.TestCase):
+    def test_dispatches_to_worker_load_when_tp_mismatch(self):
+        store = FakeStore()
+        db = FakeTokenDatabase()
+        worker = MagicMock()
+        worker.tp_mismatch = True
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+            worker=worker,
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=16, kvpool_cached_tokens=32, can_load=True, token_len=32)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+        )
+        t.request_queue.put(req)
+        t._handle_request(req)
+        worker._load_kv_tp_mismatch.assert_called_once()
+        args = worker._load_kv_tp_mismatch.call_args.args
+        # block_hashes, block_ids_by_group[0], token_len, mask_num
+        self.assertEqual(args[0], req.block_hashes)
+        self.assertEqual(args[1], [0, 1])
+        self.assertEqual(args[2], 32)
+        self.assertEqual(args[3], 16)
+        # Normal get path was not taken.
+        self.assertEqual(len(store.get_calls), 0)
+        # And the request must still be marked finished.
+        self.assertIn("r1", t.get_and_clear_finished_requests())
+
+
 if __name__ == "__main__":
     unittest.main()
