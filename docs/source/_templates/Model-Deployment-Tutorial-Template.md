@@ -24,7 +24,7 @@ This document will demonstrate the primary validation steps for the model, inclu
 
 **Example 3: Version Information**
 
-This document is validated and written based on **vLLM-Ascend v0.13.0**. The current model (XXX) is fully supported in this version, and all **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use v0.13.0 or a later version.
+This document is validated and written based on **vLLM-Ascend v0.13.0**. The current model (XXX) is fully supported in this version, and all **v0.13.0 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 

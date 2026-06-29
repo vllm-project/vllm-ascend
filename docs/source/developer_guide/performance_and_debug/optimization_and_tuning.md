@@ -66,7 +66,7 @@ Make sure your vLLM and vLLM Ascend are installed after your Python configuratio
 
 ## Optimizations
 
-### 1. OS Optimization
+### 1. Memory Allocator Optimization
 
 #### 1.1. jemalloc
 
@@ -156,7 +156,7 @@ Plus, there are more features for performance optimization in specific scenarios
 - `HCCL_RDMA_SL`: Use this var to configure service level of RDMA NIC. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0046.html).
 - `HCCL_BUFFSIZE`: Use this var to control the cache size for sharing data between two NPUs. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html).
 
-### 4. OS Optimization
+### 4. Kernel Optimization
 
 This section describes operating system–level optimizations applied on the host machine (bare metal or Kubernetes node) to improve performance stability, latency, and throughput for inference workloads.
 
