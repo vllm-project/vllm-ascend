@@ -1030,32 +1030,74 @@ class KVCacheRecvingThread(threading.Thread):
                 checksum_group["group_idx"],
                 checksum_group["layer_indices"],
             )
-            target_checksum = mooncake_transfer_dfx.compute_kv_cache_checksum(
-                kv_caches=group_kv_caches,
-                block_groups=checksum_group["grouped_local_block_ids"],
-                tp_num_need_pulls=checksum_group["tp_num_need_pulls"],
-                inner_offset=checksum_group["inner_offset"],
-                block_lens=[],
-            )
             source_checksum_info = source_checksum_infos.get(checksum_group_idx)
             source_checksum = source_checksum_info.get("checksum") if source_checksum_info is not None else None
             source_samples = source_checksum_info.get("samples", []) if source_checksum_info is not None else []
-            checksum_match = (
-                source_checksum is not None
-                and target_checksum is not None
-                and source_checksum.get("digest") == target_checksum.get("digest")
-                and source_checksum.get("bytes") == target_checksum.get("bytes")
-                and source_checksum.get("segments") == target_checksum.get("segments")
-            )
-            target_samples = []
-            if not checksum_match:
-                target_samples = mooncake_transfer_dfx.sample_kv_cache_blocks(
+            try:
+                target_checksum = mooncake_transfer_dfx.compute_kv_cache_checksum(
                     kv_caches=group_kv_caches,
                     block_groups=checksum_group["grouped_local_block_ids"],
                     tp_num_need_pulls=checksum_group["tp_num_need_pulls"],
                     inner_offset=checksum_group["inner_offset"],
                     block_lens=[],
                 )
+            except Exception as err:
+                logger.exception(
+                    "Failed to compute Mooncake target KV checksum for request %s group %s: %s",
+                    remote_request_id,
+                    checksum_group["group_idx"],
+                    err,
+                )
+                target_checksum = {"error": str(err)}
+                mooncake_transfer_dfx.record(
+                    MooncakeDFXRecord(
+                        event=MooncakeDFXEvent.FAILURE,
+                        request_id=req_meta["request_id"],
+                        remote_request_id=remote_request_id,
+                        role="kv_consumer",
+                        reason=MooncakeFailureReason.KV_CONTENT_CHECKSUM_ERROR.value,
+                        details={"error": str(err), "group_idx": checksum_group["group_idx"]},
+                    )
+                )
+            checksum_match = (
+                source_checksum is not None
+                and target_checksum is not None
+                and source_checksum.get("algorithm") == target_checksum.get("algorithm")
+                and source_checksum.get("digest") == target_checksum.get("digest")
+                and source_checksum.get("bytes") == target_checksum.get("bytes")
+                and source_checksum.get("segments") == target_checksum.get("segments")
+            )
+            target_samples = []
+            if not checksum_match:
+                try:
+                    target_samples = mooncake_transfer_dfx.sample_kv_cache_blocks(
+                        kv_caches=group_kv_caches,
+                        block_groups=checksum_group["grouped_local_block_ids"],
+                        tp_num_need_pulls=checksum_group["tp_num_need_pulls"],
+                        inner_offset=checksum_group["inner_offset"],
+                        block_lens=[],
+                    )
+                except Exception as err:
+                    logger.exception(
+                        "Failed to sample Mooncake target KV cache for request %s group %s: %s",
+                        remote_request_id,
+                        checksum_group["group_idx"],
+                        err,
+                    )
+                    mooncake_transfer_dfx.record(
+                        MooncakeDFXRecord(
+                            event=MooncakeDFXEvent.FAILURE,
+                            request_id=req_meta["request_id"],
+                            remote_request_id=remote_request_id,
+                            role="kv_consumer",
+                            reason=MooncakeFailureReason.KV_CONTENT_CHECKSUM_ERROR.value,
+                            details={
+                                "error": str(err),
+                                "group_idx": checksum_group["group_idx"],
+                                "phase": "target_sample",
+                            },
+                        )
+                    )
             mooncake_transfer_dfx.record_kv_content_check(
                 request_id=req_meta["request_id"],
                 remote_request_id=remote_request_id,

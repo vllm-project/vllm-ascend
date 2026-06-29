@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
+import torch
 from vllm.logger import logger
 
 from vllm_ascend import envs as ascend_envs
@@ -341,6 +342,9 @@ class MooncakeTransferDFX:
     def _iter_cache_tensors(kv_caches: Mapping[str, Any]) -> list[Any]:
         cache_tensors: list[Any] = []
         for cache_or_caches in kv_caches.values():
+            if hasattr(cache_or_caches, "data_ptr"):
+                cache_tensors.append(cache_or_caches)
+                continue
             for cache in cache_or_caches:
                 cache_tensors.append(cache)
         return cache_tensors
@@ -348,6 +352,10 @@ class MooncakeTransferDFX:
     @staticmethod
     def _block_nbytes(cache: Any) -> int:
         return int(cache[0].numel() * cache.element_size())
+
+    @staticmethod
+    def _tensor_to_raw_bytes(tensor: Any) -> bytes:
+        return tensor.detach().contiguous().cpu().view(torch.uint8).numpy().tobytes()
 
     @staticmethod
     def _normalize_block_groups(block_groups: Sequence[Any]) -> list[list[int]]:
@@ -381,6 +389,8 @@ class MooncakeTransferDFX:
         normalized_groups = self._normalize_block_groups(block_groups)
         cache_tensors = self._iter_cache_tensors(kv_caches)
         selected_tensors = cache_tensors[cache_start:cache_end]
+        if not selected_tensors:
+            raise ValueError("no KV cache tensors selected for checksum")
         digest = hashlib.sha256()
         total_bytes = 0
         num_segments = 0
@@ -396,7 +406,7 @@ class MooncakeTransferDFX:
             byte_end = byte_start + inner_block_len
             for block_group in normalized_groups:
                 for block_id in block_group:
-                    block_bytes = cache[block_id].detach().contiguous().cpu().numpy().tobytes()
+                    block_bytes = self._tensor_to_raw_bytes(cache[block_id])
                     segment = block_bytes[byte_start:byte_end]
                     digest.update(segment)
                     total_bytes += len(segment)
@@ -447,13 +457,16 @@ class MooncakeTransferDFX:
             byte_end = byte_start + inner_block_len
             for block_id in block_ids:
                 block_tensor = cache[block_id].detach().contiguous().cpu()
-                block_bytes = block_tensor.numpy().tobytes()
+                block_nbytes = int(block_tensor.numel() * block_tensor.element_size())
                 segment_tensor = block_tensor.reshape(-1)
                 element_size = int(block_tensor.element_size())
                 elem_start = byte_start // element_size
                 elem_end = min(byte_end // element_size, segment_tensor.numel())
                 selected_values = segment_tensor[elem_start:elem_end]
-                sample_values = selected_values[:max_values].tolist()
+                try:
+                    sample_values = selected_values[:max_values].tolist()
+                except TypeError:
+                    sample_values = selected_values[:max_values].float().tolist()
                 if hasattr(selected_values, "float") and selected_values.numel() > 0:
                     selected_float = selected_values.float()
                     min_value = float(selected_float.min().item())
@@ -467,7 +480,7 @@ class MooncakeTransferDFX:
                         "block_id": block_id,
                         "dtype": str(block_tensor.dtype),
                         "shape": list(block_tensor.shape),
-                        "byte_range": [byte_start, min(byte_end, len(block_bytes))],
+                        "byte_range": [byte_start, min(byte_end, block_nbytes)],
                         "element_range": [elem_start, elem_end],
                         "numel": int(selected_values.numel()),
                         "values": sample_values,
@@ -497,16 +510,27 @@ class MooncakeTransferDFX:
         match = (
             source_checksum is not None
             and target_checksum is not None
+            and source_checksum.get("algorithm") == target_checksum.get("algorithm")
             and source_checksum.get("digest") == target_checksum.get("digest")
             and source_checksum.get("bytes") == target_checksum.get("bytes")
             and source_checksum.get("segments") == target_checksum.get("segments")
         )
+        mismatch_fields = []
+        if source_checksum is None:
+            mismatch_fields.append("source_checksum_missing")
+        if target_checksum is None:
+            mismatch_fields.append("target_checksum_missing")
+        if source_checksum is not None and target_checksum is not None:
+            for field_name in ("algorithm", "digest", "bytes", "segments"):
+                if source_checksum.get(field_name) != target_checksum.get(field_name):
+                    mismatch_fields.append(field_name)
         details: dict[str, Any] = {
             "passed": match,
             "source_checksum": source_checksum,
             "target_checksum": target_checksum,
         }
         if not match:
+            details["mismatch_fields"] = mismatch_fields
             details["source_samples"] = source_samples or []
             details["target_samples"] = target_samples or []
         if extra:
