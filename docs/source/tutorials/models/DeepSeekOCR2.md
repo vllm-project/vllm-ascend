@@ -249,6 +249,8 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
   A: Clean up old processes and restart: `pkill -f vLLM*`.
