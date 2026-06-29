@@ -207,7 +207,7 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.lint-and-select-tests.outputs.main_commit }}
-          # - ${{ needs.lint-and-select-tests.outputs.release_tag }}
+          - ${{ needs.lint-and-select-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
