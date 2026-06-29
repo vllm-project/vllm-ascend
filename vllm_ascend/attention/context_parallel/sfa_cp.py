@@ -7,10 +7,19 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
+from vllm_ascend.attention.context_parallel.common_cp import (
+    AscendPCPMetadata,
+    _npu_attention_update,
+    _process_attn_out_lse,
+)
+from vllm_ascend.attention.sfa_v1 import DCPContext, AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
+from vllm_ascend.distributed.utils import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
+)
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -587,14 +596,16 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
     ):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
-        assert self.pcp_size == 0, "AscendSFADCPMetadataBuilder only support DCP, please use AscendSFACP for PCP."
-        
+        assert self.pcp_size == 1, "AscendSFADCPMetadataBuilder only supports DCP without PCP."
+        assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
 
     def build(
         self,
@@ -603,47 +614,51 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         fast_build: bool = False,
         **kwargs,
     ) -> AscendSFAMetadata:
-        metadata = super.build(
-            self, 
-            common_prefix_len: int,
-            common_attn_metadata: AscendCommonAttentionMetadata,
-            fast_build: bool = False,
+        slot_mapping_no_cp = kwargs.get("slot_mapping_no_cp")
+        block_table_no_cp = kwargs.get("block_table_no_cp")
+        if slot_mapping_no_cp is None or block_table_no_cp is None:
+            raise RuntimeError("SFA DCP requires no-CP slot mapping and block table metadata.")
+
+        dcp_slot_mapping = common_attn_metadata.slot_mapping
+        dcp_block_table = common_attn_metadata.block_table_tensor
+        common_attn_metadata.slot_mapping = slot_mapping_no_cp
+        common_attn_metadata.block_table_tensor = block_table_no_cp
+        try:
+            metadata = super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
+        finally:
+            common_attn_metadata.slot_mapping = dcp_slot_mapping
+            common_attn_metadata.block_table_tensor = dcp_block_table
+
+        num_reqs = common_attn_metadata.num_reqs
+        num_input_tokens = common_attn_metadata.num_input_tokens
+        cp_metadata = common_attn_metadata.prefill_context_parallel_metadata
+        num_computed_tokens_of_pcp_dcp = (
+            None if cp_metadata is None else cp_metadata.num_computed_tokens_of_pcp_dcp
         )
-        slot_mapping = kwargs.get("slot_mapping_no_cp")
-        block_table = kwargs.get("block_table_no_cp")
-        num_computed_tokens_of_pcp_dcp = common_attn_metadata.prefill_context_parallel_metadata.num_computed_tokens_of_pcp_dcp
-        local_num_computed_tokens = torch.tensor(num_computed_tokens_of_pcp_dcp).to(self.device).to(dtype=torch.int32)[:, self.pcp_rank, self.dcp_rank]
+        if num_computed_tokens_of_pcp_dcp is None:
+            local_seq_lens = metadata.seq_lens
+        else:
+            local_seq_lens = torch.as_tensor(
+                num_computed_tokens_of_pcp_dcp,
+                dtype=torch.int32,
+                device=self.device,
+            )[:num_reqs, self.pcp_rank, self.dcp_rank]
+
         metadata.dcp_context = DCPContext(
-            slot_mapping = slot_mapping,
-            block_table = block_table,
-            seq_lens = local_num_computed_tokens,
+            slot_mapping=dcp_slot_mapping[:num_input_tokens],
+            block_table=dcp_block_table[:num_reqs],
+            seq_lens=local_seq_lens,
         )
-            
-    
+        return metadata
+
+
 class AscendSFADCPImpl(AscendSFAImpl):
-    def forward(
-        self,
-        layer_name,
-        hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: M,
-        need_gather_q_kv: bool = False,
-        output: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        self.dcp_context = dcp_context
-        return super.forward(
-            self,
-            layer_name,
-            hidden_states: torch.Tensor,  # query in unified attn
-            kv_cache: tuple[torch.Tensor, ...],
-            attn_metadata: M,
-            need_gather_q_kv: bool = False,
-            output: torch.Tensor | None = None,
-        )
-    
     def _execute_sparse_flash_attention_process(
         self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
     ):
+        assert attn_metadata.dcp_context is not None
+        kv = kv_cache[0]
+        key_rope = kv_cache[1]
         sfa_output, softmax_max, softmax_sum = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=ql_nope,
             key=kv,
@@ -651,9 +666,9 @@ class AscendSFADCPImpl(AscendSFAImpl):
             sparse_indices=topk_indices,
             scale_value=self.scale,
             sparse_block_size=1,
-            block_table=self.dcp_context.block_table,
+            block_table=attn_metadata.dcp_context.block_table,
             actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_kv=self.dcp_context.seq_lens,
+            actual_seq_lengths_kv=attn_metadata.dcp_context.seq_lens,
             query_rope=q_pe,
             key_rope=key_rope,
             layout_query="TND",

@@ -170,7 +170,8 @@ def enable_cp():
 @lru_cache(maxsize=1)
 def enable_dcp_replicate_k():
     vllm_config = get_current_vllm_config()
-    if vllm_config.additional_config.get("sfa_dcp_replicate_k", False):
+    additional_config = vllm_config.additional_config or {}
+    if additional_config.get("sfa_dcp_replicate_k", False):
         return vllm_config.parallel_config.decode_context_parallel_size > 1
     return False
 
