@@ -221,6 +221,39 @@ class MLPRowParallelOp(CustomRowParallelOp):
         return output, output_bias
 
 
+class DSV4OProjColumnParallelOp(CustomColumnParallelOp):
+    @property
+    def comm_group(self):
+        return get_otp_group()
+
+    def apply_impl(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        bias = self.bias if not self.skip_bias_add else None
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+        output_bias = self.bias if self.skip_bias_add else None
+        return output_parallel, output_bias
+
+
+class DSV4OProjRowParallelOp(CustomRowParallelOp):
+    @property
+    def comm_group(self):
+        return get_otp_group()
+
+    def apply_impl(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        input_parallel = self.get_input_parallel(input_)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+        output_bias = self.bias if self.skip_bias_add else None
+        return output_parallel, output_bias
+
+
 class OProjRowParallelOp(CustomRowParallelOp):
     def __init__(self, layer):
         super().__init__(layer)
@@ -632,9 +665,18 @@ class ShardedCPColumnParallelOp(CustomColumnParallelOp):
 
 def _get_column_parallel_op(
     prefix, layer
-) -> MLPColumnParallelOp | SequenceColumnParallelOp | ShardedCPColumnParallelOp | Flashcomm2OshardQKVParallelOp | None:
+) -> (
+    MLPColumnParallelOp
+    | DSV4OProjColumnParallelOp
+    | SequenceColumnParallelOp
+    | ShardedCPColumnParallelOp
+    | Flashcomm2OshardQKVParallelOp
+    | None
+):
     if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
         return ShardedCPColumnParallelOp(layer)
+    if "wo_a" in prefix and oproj_tp_enable():
+        return DSV4OProjColumnParallelOp(layer)
     if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPColumnParallelOp(layer)
     if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
@@ -662,12 +704,15 @@ def _get_row_parallel_op(
 ) -> (
     MLPRowParallelOp
     | OProjRowParallelOp
+    | DSV4OProjRowParallelOp
     | Flashcomm2OProjRowParallelOp
     | MatmulAllreduceRowParallelOp
     | SequenceRowParallelOp
     | ShardedCPRowParallelOp
     | None
 ):
+    if "wo_b" in prefix and oproj_tp_enable():
+        return DSV4OProjRowParallelOp(layer)
     if enable_dsa_cp_with_layer_shard() and "o_proj" in prefix:
         return ShardedCPRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
@@ -705,9 +750,11 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         return None, 0, 1
     custom_op: (
         MLPColumnParallelOp
+        | DSV4OProjColumnParallelOp
         | SequenceColumnParallelOp
         | MLPRowParallelOp
         | OProjRowParallelOp
+        | DSV4OProjRowParallelOp
         | Flashcomm2OProjRowParallelOp
         | Flashcomm2OshardQKVParallelOp
         | MatmulAllreduceRowParallelOp

@@ -1114,6 +1114,66 @@ def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = No
         return False
 
 
+def _compute_potential_max_tokens(vllm_config) -> int:
+    """Maximal decode token count, pure arithmetic over config.
+
+    The formula lives in exactly one place; it is evaluated once via
+    set_potential_max_tokens (model runner __init__) and then reused everywhere
+    via get_potential_max_tokens. Cheap (no select_moe_comm_method).
+    """
+    compilation_config = vllm_config.compilation_config
+    scheduler_config = vllm_config.scheduler_config
+    speculative_config = vllm_config.speculative_config
+    uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
+    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
+    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
+
+    # Use max cudagraph capture size if available, otherwise the maximal uniform
+    # decode token count.
+    if compilation_config.cudagraph_capture_sizes:
+        potential_max_tokens = max(
+            compilation_config.max_cudagraph_capture_size,
+            min(
+                scheduler_config.max_num_batched_tokens,
+                scheduler_config.max_num_seqs * uniform_decode_query_len,
+            ),
+        )
+        if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
+            logger.warning_once(
+                "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
+                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
+                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
+                "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
+                "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
+                compilation_config.max_cudagraph_capture_size,
+                potential_max_tokens,
+            )
+    else:
+        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+    return potential_max_tokens
+
+
+# potential_max_tokens is computed once in the model runner __init__ and reused by
+# both the skip-allreduce decision and the o_proj static-exchange buffer sizing, so
+# neither path recomputes it. Mirrors the _mc2_tokens_capacity set/get pattern in
+# ascend_forward_context.py.
+_potential_max_tokens: int | None = None
+
+
+def set_potential_max_tokens(vllm_config) -> None:
+    """Compute and cache potential_max_tokens once (called from model runner __init__)."""
+    global _potential_max_tokens
+    if _potential_max_tokens is not None:
+        return
+    _potential_max_tokens = _compute_potential_max_tokens(vllm_config)
+
+
+def get_potential_max_tokens() -> int:
+    # Set once in NPUModelRunner.__init__ before any caller reads it.
+    assert _potential_max_tokens is not None
+    return _potential_max_tokens
+
+
 def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = False) -> bool:
     """Decide whether to skip the all-reduce across the DP group.
 
@@ -1127,6 +1187,10 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
 
     Returns False when hierarchy comm is enabled because hierarchy requires
     global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
+
+    Recomputed per call (no memoization): potential_max_tokens is a set/get global
+    computed once in init, and select_moe_comm_method is just config lookups, so
+    this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
     if is_hierarchical_communication_enabled():
         return False
@@ -1148,37 +1212,9 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     def needs_mc2(n: int) -> bool:
         return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
 
-    compilation_config = vllm_config.compilation_config
     scheduler_config = vllm_config.scheduler_config
-    speculative_config = vllm_config.speculative_config
-    uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
-    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
-    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
-
-    # Determine whether decode must use MC2. Use max cudagraph capture size
-    # if available, otherwise use the maximal uniform decode token count.
-    if compilation_config.cudagraph_capture_sizes:
-        potential_max_tokens = max(
-            compilation_config.max_cudagraph_capture_size,
-            min(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len,
-            ),
-        )
-        if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
-            logger.warning_once(
-                "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
-                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
-                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
-                "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
-                "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
-                compilation_config.max_cudagraph_capture_size,
-                potential_max_tokens,
-            )
-    else:
-        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
-
-    decode_must_use_mc2 = needs_mc2(potential_max_tokens)
+    # potential_max_tokens is read from the set/get global (computed once in init).
+    decode_must_use_mc2 = needs_mc2(get_potential_max_tokens())
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
     # Skip all-reduce if decode requires MC2 and either prefill also

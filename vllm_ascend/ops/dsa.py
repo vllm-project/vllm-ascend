@@ -166,9 +166,9 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
 
         output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
-        # All DSA forward paths run inside dsa_forward custom op boundary,
-        # which is required for ACL graph capture (registered with
-        # dispatch_key="PrivateUse1").
+        # All DSA forward paths (attention + o_proj, including OTP HCCL
+        # collectives) run inside the dsa_forward custom op, which is required
+        # for ACL graph capture (registered with dispatch_key="PrivateUse1").
         torch.ops.vllm.dsa_forward(hidden_states, need_gather_q_kv, output, self.prefix)
 
         output = output.view(-1, output_shape[-1])
@@ -189,7 +189,9 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata
 
     if attn_metadata is None:
-        output.fill_(0)
+        # Profiling run: forward() handles OTP by running _forward_o_proj on a
+        # zero input so HCCL collectives are captured by the ACL graph.
+        self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, None, None, need_gather_q_kv, output)
         return
 
     kv_cache = _build_kv_cache(self, forward_context)
