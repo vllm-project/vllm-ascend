@@ -25,7 +25,7 @@ The following model variants are available. It is recommended to download the mo
 | Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
 | Qwen3-Omni-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               |  N/A|
 
-the W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
+The W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -38,6 +38,8 @@ Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model struc
 - **MoE routing gate** (mlp.gate): BF16
 - **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
 :::
+
+It is recommended to download the model weight to a shared directory across multiple nodes.
 
 ## 4 Installation
 
@@ -221,7 +223,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 
 PS:Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
 
-### Single-Node Online Deployment
+### 5.1 Single-Node Online Deployment
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and small-to-medium scale inference scenarios. For the Qwen3-Omni-30B-A3B MoE model, Expert Parallelism (EP) is required to distribute experts across NPUs.
 
@@ -274,7 +276,14 @@ For parameter details, refer to:
 
 **Service Verification:**
 
-After the service is started, verify it is running by sending a prompt. Refer to [Section 6](#6-functional-verification) for a usage example.
+If the service starts successfully, the following startup log will be displayed:
+
+```text
+(APIServer pid=<pid>) INFO:     Started server process [<pid>]
+(APIServer pid=<pid>) INFO:     Waiting for application startup.
+(APIServer pid=<pid>) INFO:     Application startup complete.
+```
+
 
 ## 6 Functional Verification
 
@@ -356,8 +365,6 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-Here are accuracy evaluation methods.
-
 ### Using EvalScope
 
 As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
@@ -392,13 +399,13 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
     +-----------------------------+------------+----------+----------+-------+---------+---------+
     ```
 
-## 8 Performance
+## 8 Performance Evaluation
 
 ### Using vLLM Benchmark  
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
 Refer to vllm benchmark for more details.
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -588,12 +595,6 @@ Example AISBench settings for this configuration:
 ### 9.2 Tuning Guidelines
 
 #### 9.2.1 General Tuning Reference
-
-**Content Writing Requirements:**
-
-If no special tuning is involved, directly provide a feature combination table and a link to the public performance tuning documentation.
-
-**Example:**
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
