@@ -6,7 +6,7 @@ PaddleOCR-VL is a SOTA and resource-efficient model tailored for document parsin
 
 This document provides a detailed workflow for the complete deployment and verification of the model, including supported features, environment preparation, single-node deployment, and functional verification. It is designed to help users quickly complete model deployment and verification.
 
-This document is validated and written based on **vLLM-Ascend v0.18.0**. The current model (PaddleOCR-VL) is first supported in this version, and **v0.18.0 and later versions** can run stably.
+This document is validated and written based on **vLLM-Ascend v0.21.0rc1**. The current model (PaddleOCR-VL) is supported in this version. It is recommended to use this version or another updated official version for deployment.
 
 ## 2 Supported Features
 
@@ -361,6 +361,34 @@ For the accuracy evaluation of PaddleOCR-VL, please refer to the official [Model
 For the performance evaluation of PaddleOCR-VL, please refer to the official [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2) for the benchmark methodology and results.
 
 ## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, precision requirements, and actual hardware specifications. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning parameters differ between hardware platforms.
+
+#### Table 1: Scenario Overview
+
+| Scenario | Hardware | *Total NPUs | Weight Version | Key Considerations |
+|----------|----------|------------|---------------|-------------------|
+| High Throughput | A2 series | 1 | PaddleOCR-VL-0.9B | - |
+| High Throughput | Atlas 300 inference products | 1 | PaddleOCR-VL-0.9B | Graph compilation requires **CANN >= 9.0.0** |
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes.
+
+#### Table 2: Detailed Node Configuration
+
+| Scenario | Configuration | NPUs | TP | DP | Max Model Len | Max Num Batched Tokens | Graph Compilation | dtype |
+|----------|-------------|------|----|----|---------------|------------------------|--------------------|-------|
+| High Throughput | A2 series / Single Machine | 1 | — | — | — | 16384 | FULL_DECODE_ONLY | bfloat16 (default) |
+| High Throughput | Atlas 300 inference products / Single Machine | 1 | — | — | 16384 | — | FULL_DECODE_ONLY; otherwise enforce-eager | float16 |
+
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
+
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
 
 For performance tuning, please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, including OS optimization (jemalloc, tcmalloc), `torch_npu` optimization (memory and scheduling), and CANN optimization.
 
