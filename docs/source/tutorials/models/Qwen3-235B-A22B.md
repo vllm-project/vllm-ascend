@@ -577,7 +577,7 @@ python launch_online_dp.py \
     --vllm-start-port 9123
 ```
 
-#### Request Forwarding
+**Request Forwarding:**
 
 Run the proxy on any machine that can reach both nodes. You can get the proxy script from the repository: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
 
