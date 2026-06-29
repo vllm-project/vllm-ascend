@@ -49,6 +49,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     is_moe_model,
     refresh_block_size,
+    update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
     is_310p,
     enable_sp,
@@ -599,6 +600,11 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
+        # MTP: FULL_AND_PIECEWISE is not yet fully supported; downgrade to
+        # PIECEWISE. FULL_DECODE_ONLY is allowed through for FDO graph mode.
+        if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
         # Encoder-decoder models currently only support PIECEWISE mode
         # TODO(Jian Li): Confirm this behavior and explain why
         if (
@@ -652,7 +658,18 @@ class NPUPlatform(Platform):
             # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
             if get_ascend_device_type() == AscendDeviceType.A5:
                 prune_capture_sizes_for_950(vllm_config)
+            update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+        elif (
+            compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            or compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+        ):
+            logger.info(
+                "FULL_DECODE_ONLY compilation enabled on NPU. "
+                "use_inductor not supported - using only ACL Graph mode"
+            )
+            compilation_config.use_inductor = False
+            compilation_config.splitting_ops = []
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,
             # because it will compile multiple times, so we set splitting_ops to empty manually.
