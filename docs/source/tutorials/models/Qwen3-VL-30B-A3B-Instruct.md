@@ -61,12 +61,12 @@ Setup environment variables:
 # Load model from ModelScope to speed up download
 export VLLM_USE_MODELSCOPE=True
 
-# Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+# Use virtual memory to reduce fragmentation under long-running workloads
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 ```
 
 :::{note}
-`max_split_size_mb` prevents the native allocator from splitting blocks larger than this size (in MB). This can reduce fragmentation and may allow some borderline workloads to complete without running out of memory. You can find more details [<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html).
+`expandable_segments:True` enables the virtual memory mode recommended by current vLLM Ascend docs to reduce fragmentation during long-running multimodal workloads. You can find more details [<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html).
 :::
 
 ## Deployment
