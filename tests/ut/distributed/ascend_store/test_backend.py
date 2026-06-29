@@ -188,6 +188,20 @@ class TestMooncakeStoreConfig(unittest.TestCase):
         )
         self.assertTrue(cfg.enable_ssd_prefetch)
 
+    def test_from_file_ssd_prefetch_with_null_values(self):
+        ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
+        self.addCleanup(lambda: os.rmdir(ssd_path))
+        cfg = _make_mooncake_store_config(
+            enable_ssd_offload=True,
+            ssd_offload_path=ssd_path,
+            enable_ssd_prefetch=True,
+            ssd_prefetch_cooldown_sec=None,
+            ssd_prefetch_dedup_ttl_sec=None,
+        )
+        self.assertTrue(cfg.enable_ssd_prefetch)
+        self.assertIsNone(cfg.ssd_prefetch_cooldown_sec)
+        self.assertIsNone(cfg.ssd_prefetch_dedup_ttl_sec)
+
     def test_load_from_env_missing(self):
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("MOONCAKE_CONFIG_PATH", None)

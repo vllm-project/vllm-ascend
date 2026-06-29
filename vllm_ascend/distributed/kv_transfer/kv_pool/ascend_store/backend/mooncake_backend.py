@@ -401,12 +401,12 @@ class MooncakeStoreConfig:
             enable_ssd_prefetch=bool(config.get("enable_ssd_prefetch", False)),
             ssd_prefetch_cooldown_sec=(
                 int(config["ssd_prefetch_cooldown_sec"])
-                if "ssd_prefetch_cooldown_sec" in config
+                if config.get("ssd_prefetch_cooldown_sec") is not None
                 else None
             ),
             ssd_prefetch_dedup_ttl_sec=(
                 int(config["ssd_prefetch_dedup_ttl_sec"])
-                if "ssd_prefetch_dedup_ttl_sec" in config
+                if config.get("ssd_prefetch_dedup_ttl_sec") is not None
                 else None
             ),
         )
