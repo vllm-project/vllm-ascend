@@ -18,6 +18,7 @@
 #
 
 import copy
+import logging
 from collections.abc import Callable
 from itertools import accumulate
 from typing import TYPE_CHECKING, Any
@@ -1179,6 +1180,11 @@ class PCPManager:
                 self.dcp_world_size,
                 self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
             )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[PCP][DFX] num_computed_tokens_of_pcp_dcp=%s",
+                    num_computed_tokens_of_pcp_dcp.tolist(),
+                )
 
             pcp_unpad_mask = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length]
             long_seq_metadata = AscendPrefillContextParallelMetadata(
@@ -1307,6 +1313,16 @@ class PCPManager:
                     long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
                         : pcp_unpad_mask.sum() + self.num_decode_tokens * (self.pcp_world_size - 1)
                     ]
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "[PCP][DFX] long_seq_metadata reorder idx: "
+                            "pcp_allgather_restore_idx=%s, "
+                            "pcp_exit_fa_scatter_idx=%s, "
+                            "pcp_enter_fa_restore_idx=%s",
+                            long_seq_metadata.pcp_allgather_restore_idx.detach().cpu().tolist(),
+                            long_seq_metadata.pcp_exit_fa_scatter_idx.detach().cpu().tolist(),
+                            long_seq_metadata.pcp_enter_fa_restore_idx.detach().cpu().tolist(),
+                        )
                     long_seq_metadata.max_num_tokens_across_pcp = self.max_num_tokens_across_pcp
                     long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
