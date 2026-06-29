@@ -18,15 +18,15 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-require 1 Atlas 800I A2 (64G × 1) node or 1 Atlas 800 A3 (64G × 1) node:
+Require 1 Atlas 800I A2 (64G × 1) node or 1 Atlas 800 A3 (64G × 1) node:
 
-- `Qwen3-VL-2B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
-- `Qwen3-VL-4B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
-- `Qwen3-VL-8B-Instruct`:   [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+- `Qwen3-VL-2B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
+- `Qwen3-VL-4B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
+- `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 
-require 1 Atlas 800I A2 (64G × 2) node or 1 Atlas 800 A3 (64G × 2) node:
+Require 1 Atlas 800I A2 (64G × 2) node or 1 Atlas 800 A3 (64G × 2) node:
 
-- `Qwen3-VL-32B-Instruct`:  [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
+- `Qwen3-VL-32B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 

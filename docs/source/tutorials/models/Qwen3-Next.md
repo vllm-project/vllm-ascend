@@ -20,7 +20,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 8) node:
 
-- `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
+- `Qwen3-Next-80B-A3B-Instruct`: requires **1 Atlas 800 A3 (64G × 16) node** or **2 Atlas 800 A2 (64G × 8) nodes**. Model Weights: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
 
 ## 4 Installation
 
@@ -72,6 +72,20 @@ docker run --rm \
 ```
 
 The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
+
+**Installation Verification:**
+
+```bash
+pip show vllm vllm-ascend
+```
+
+Expected result: The version information for both packages is displayed, confirming a successful installation.
+
+:::{note}
+If deploying a multi-node environment, set up the environment on each node.
+:::
+
+For more details, please refer to the [Installation Guide](../../installation.md).
 
 ### 4.2 Source Code Installation
 
@@ -199,7 +213,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3-Next` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -218,6 +232,8 @@ After about several minutes, you can get the performance evaluation result.
 
 The performance result is:  
 
+```bash
+
 **Hardware**: A3-752T, 2 node
 
 **Deployment**: TP4 + Full Decode Only
@@ -227,6 +243,7 @@ The performance result is:
 **Concurrency**: 32
 
 **Performance**: 580tps, TPOT 54ms
+```
 
 ## 9 Performance Tuning
 
@@ -245,7 +262,7 @@ The performance result is:
 |High Throughput<br>(16K context)|Single-Node Mixed|2 (A3)|Qwen3-Next|Use tp2 for high-resolution text inputs|
 |Long Context<br>(128K, no prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
 |Long Context<br>(128K, with prefix cache)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution text inputs|
-|Multimodal<br>(1080P)|Single-Node Mixed|2 (A3)|Qwen/Qwen3-Next|tp2 for high-resolution visual inputs|
+|Multimodal<br>(1080P)|Single-Node Mixed|2 (A3)|Qwen3-Next|tp2 for high-resolution visual inputs|
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
 
