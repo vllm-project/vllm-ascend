@@ -23,6 +23,7 @@ from vllm_ascend.distributed.utils import (
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+DCP_SPARSE_INDEX_SENTINEL = torch.iinfo(torch.int32).max
 
 
 class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
@@ -653,15 +654,85 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
 
 
 class AscendSFADCPImpl(AscendSFAImpl):
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        **kwargs,
+    ):
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **kwargs,
+        )
+        dcp_group = get_dcp_group()
+        self.dcp_size = dcp_group.world_size
+        self.dcp_rank = dcp_group.rank_in_group if self.dcp_size > 1 else 0
+        self.dcp_group = dcp_group if self.dcp_size > 1 else None
+        self.cp_kv_cache_interleave_size = (
+            self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
+        if self.cp_kv_cache_interleave_size <= 0:
+            raise RuntimeError(
+                "Invalid cp_kv_cache_interleave_size: "
+                f"{self.cp_kv_cache_interleave_size}"
+            )
+
+    def _remap_sparse_indices_for_dcp(self, topk_indices: torch.Tensor) -> torch.Tensor:
+        if self.dcp_size <= 1:
+            return topk_indices
+
+        interleave_size = self.cp_kv_cache_interleave_size
+        local_owner_mask = (topk_indices >= 0) & (
+            (topk_indices // interleave_size) % self.dcp_size == self.dcp_rank
+        )
+        if interleave_size == 1:
+            remapped_indices = topk_indices // self.dcp_size
+        else:
+            local_offsets = topk_indices % interleave_size
+            remapped_indices = topk_indices // (self.dcp_size * interleave_size)
+            remapped_indices = remapped_indices * interleave_size + local_offsets
+        remapped_indices = remapped_indices.masked_fill(
+            ~local_owner_mask, DCP_SPARSE_INDEX_SENTINEL
+        )
+        remapped_indices, _ = torch.sort(remapped_indices, dim=-1)
+        remapped_indices = remapped_indices.masked_fill(
+            remapped_indices == DCP_SPARSE_INDEX_SENTINEL, -1
+        )
+        return remapped_indices
+
     def _execute_sparse_flash_attention_process(
-        self, ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+        self,
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        attn_metadata,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
     ):
         assert attn_metadata.dcp_context is not None
-        dcp_size = get_decode_context_model_parallel_world_size()
-        if dcp_size > 1:
-            local_num_heads = ql_nope.shape[1]
-            ql_nope = get_dcp_group().all_gather(ql_nope.contiguous(), dim=1)
-            q_pe = get_dcp_group().all_gather(q_pe.contiguous(), dim=1)
+        if self.dcp_size > 1:
+            assert self.dcp_group is not None
+            ql_nope = self.dcp_group.all_gather(ql_nope.contiguous(), dim=1)
+            q_pe = self.dcp_group.all_gather(q_pe.contiguous(), dim=1)
+            topk_indices = self._remap_sparse_indices_for_dcp(topk_indices)
         kv = kv_cache[0]
         key_rope = kv_cache[1]
         sfa_output, softmax_max, softmax_sum = torch.ops._C_ascend.npu_sparse_flash_attention(
