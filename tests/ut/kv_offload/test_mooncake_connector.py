@@ -750,7 +750,7 @@ class TestMetadataHandling(unittest.TestCase):
             patch.object(self.thread, "_get_remote_socket") as mock_get_socket,
             patch.object(self.thread, "_return_remote_socket") as mock_return_socket,
         ):
-            mock_socket = MagicMock(spec=zmq.Socket)
+            mock_socket = MagicMock(spec=zmq.Socket)  # type: ignore[attr-defined]
             mock_get_socket.return_value = mock_socket
 
             self.thread._get_remote_metadata("host1", 5555)
@@ -772,7 +772,7 @@ class TestMetadataHandling(unittest.TestCase):
             patch.object(self.thread, "_get_remote_socket") as mock_get_socket,
             patch.object(self.thread, "_return_remote_socket") as mock_return_socket,
         ):
-            mock_socket = MagicMock(spec=zmq.Socket)
+            mock_socket = MagicMock(spec=zmq.Socket)  # type: ignore[attr-defined]
             mock_get_socket.return_value = mock_socket
 
             with self.assertRaises(Exception) as context:
@@ -1280,7 +1280,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_trims_attention_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -1293,7 +1293,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_keeps_state_group(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=True,
@@ -1306,7 +1306,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_uses_compressed_prompt_len(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=32,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -1319,7 +1319,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_trims_sliding_window_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -1332,7 +1332,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_swa_transfer_block_ids_clips_sliding_window_group(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -1345,7 +1345,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_swa_transfer_block_ids_drops_zero_from_sliding_window_tail(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=2,
                 is_state_group=False,
@@ -1358,7 +1358,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_transfer_block_ids_trims_mtp_before_swa_zero_filter(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
