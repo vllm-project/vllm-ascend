@@ -43,7 +43,8 @@ export VLLM_BATCH_INVARIANT=1
 To start a vLLM server with batch invariance enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
+  --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
 ```
 
 Then use the OpenAI-compatible client:
@@ -94,6 +95,7 @@ sampling_params = SamplingParams(
 llm = LLM(
     model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
+    compilation_config={"cudagraph_mode": "PIECEWISE"},
 )
 
 # Outputs will be deterministic regardless of batch size
