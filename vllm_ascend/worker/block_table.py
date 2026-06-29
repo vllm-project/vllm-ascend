@@ -3,7 +3,7 @@ import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
@@ -32,9 +32,11 @@ class BlockTable:
         if (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
-            and hasattr(kv_cache_group.kv_cache_spec, "compress_ratio")
+            and isinstance(kv_cache_group.kv_cache_spec, UniformTypeKVCacheSpecs)
         ):
-            compress_ratio = kv_cache_group.kv_cache_spec.compress_ratio
+            kv_cache_spec = next(iter(kv_cache_group.kv_cache_spec.kv_cache_specs.values()), None)
+            if kv_cache_spec is not None and hasattr(kv_cache_spec, "compress_ratio"):
+                compress_ratio = kv_cache_spec.compress_ratio
         if (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
@@ -272,8 +274,10 @@ class BlockTable:
 
         return np.array(logical_blocks, dtype=np.int32)
 
-    def get_device_tensor(self) -> torch.Tensor:
+    def get_device_tensor(self, num_reqs: int | None = None) -> torch.Tensor:
         """Returns the device tensor of the block table."""
+        if num_reqs is not None:
+            return self.block_table.gpu[:num_reqs]
         return self.block_table.gpu
 
     def get_cpu_tensor(self) -> torch.Tensor:
