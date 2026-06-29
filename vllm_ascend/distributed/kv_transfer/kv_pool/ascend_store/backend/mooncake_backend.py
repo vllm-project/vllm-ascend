@@ -60,6 +60,7 @@ def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
 
 class MooncakeBackend(Backend):
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, contribute_memory: bool = True):
+        self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
@@ -104,7 +105,7 @@ class MooncakeBackend(Backend):
         # Each TP rank must use a separate SSD directory to avoid bucket file
         # collisions (independent BucketStorageBackend instances generate the
         # same bucket_id sequence and would overwrite each other's data).
-        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
+        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path") and self._contribute_memory:
             local_rank = get_world_group().local_rank
             rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{local_rank}")
             try:
