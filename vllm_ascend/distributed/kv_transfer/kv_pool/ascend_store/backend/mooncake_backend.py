@@ -108,7 +108,7 @@ class MooncakeBackend(Backend):
         # rank so that DP/TP/PP/CP replicas never share a directory (dense and
         # MoE alike); only ranks that contribute memory need an offload dir.
         if ssd_kwargs and ssd_kwargs.get("ssd_offload_path") and self._contribute_memory:
-            global_rank = get_global_rank()
+            global_rank = get_global_rank(self.parallel_config)
             rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{global_rank}")
             try:
                 os.makedirs(rank_path, exist_ok=True)
