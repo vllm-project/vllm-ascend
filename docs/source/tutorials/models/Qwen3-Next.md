@@ -83,7 +83,17 @@ Startup Command:
 vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --served-model-name qwen3_next --tensor-parallel-size 4 --max-model-len 32768 --gpu-memory-utilization 0.8 --max-num-batched-tokens 4096 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
-Service Verification:
+If your service start successfully, you can see the info shown below:
+
+```bash
+INFO:     Started server process [2736]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
+## 6 Functional Verification
+
+Once your server is started, you can query the model with input prompts:
 
 ```bash
 curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
@@ -127,37 +137,6 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
         }
     ]
 }
-```
-
-### 5.2 Multi-node Deployment
-
-Single-node deployment is recommended.
-
-### 5.3 Prefill-Decode Disaggregation
-
-We don't need to Prefill-Decode disaggregation
-
-## 6 Functional Verification
-
-If your service start successfully, you can see the info shown below:
-
-```bash
-INFO:     Started server process [87471]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-```
-
-Once your server is started, you can query the model with input prompts:
-
-```shell
-curl http://<node0_ip>:<port>/v1/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "qwen3_next",
-        "prompt": "The future of AI is",
-        "max_completion_tokens": 50,
-        "temperature": 0
-    }'
 ```
 
 ## 7 Accuracy Evaluation
@@ -215,7 +194,12 @@ The performance result is:
 
 ### 9.1 Recommended Configurations
 
-> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.+
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+
+> Qwen3-Next does not support TP>=16 now. Since this model has 16 query heads but only 2 key and value heads, GQA degenerates into MHA when TP >= 16. However, the FIA operator currently fails to function in MHA scenarios with a head dimension of 256 (which is the case for this model).
+
 
 #### Table 1: Scenario Overview
 
@@ -246,5 +230,3 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
-
-1. Qwen3-Next does not support TP>=16 now. Since this model has 16 query heads but only 2 key and value heads, GQA degenerates into MHA when TP >= 16. However, the FIA operator currently fails to function in MHA scenarios with a head dimension of 256 (which is the case for this model).
