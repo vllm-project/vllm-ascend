@@ -1182,9 +1182,9 @@ class PCPManager:
             )
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                        "[PCP][DFX] num_computed_tokens_of_pcp_dcp=%s",
-                        num_computed_tokens_of_pcp_dcp.tolist(),
-                    )
+                    "[PCP][DFX] num_computed_tokens_of_pcp_dcp=%s",
+                    num_computed_tokens_of_pcp_dcp.tolist(),
+                )
 
             pcp_unpad_mask = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length]
             long_seq_metadata = AscendPrefillContextParallelMetadata(
