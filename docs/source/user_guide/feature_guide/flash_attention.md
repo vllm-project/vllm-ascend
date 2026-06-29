@@ -67,7 +67,7 @@ To enable FA3, you need to:
 To start a vLLM server with FA3 enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B --attention-backend FLASH_ATTN
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B --attention-backend FLASH_ATTN --enforce-eager
 ```
 
 Then use the OpenAI-compatible client:
@@ -117,6 +117,7 @@ llm = LLM(
     model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
     attention_backend="FLASH_ATTN",
+    enforce_eager=True,
 )
 
 outputs = llm.generate(prompts, sampling_params)
