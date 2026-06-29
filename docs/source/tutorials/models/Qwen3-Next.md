@@ -10,17 +10,15 @@ The `Qwen3-Next` model is first supported in `vllm-ascend:v0.10.2rc1` and can st
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 8) node:
-
-- `Qwen3-Next-80B-A3B-Instruct`: requires **1 Atlas 800 A3 (64G × 16) node** or **2 Atlas 800 A2 (64G × 8) nodes**. Model Weights: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
+`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64G × 16) node** or **8 cards in 1 Atlas 800 A2 (64G × 8) node**. [Model Weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
 
 ## 4 Installation
 
@@ -28,7 +26,7 @@ require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 8) node:
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-**A3 series**
+**A3 series:**
 
 Start the docker image on your each node.
 
@@ -233,16 +231,11 @@ After about several minutes, you can get the performance evaluation result.
 The performance result is:  
 
 ```bash
-
-**Hardware**: A3-752T, 2 node
-
-**Deployment**: TP4 + Full Decode Only
-
-**Input/Output**: 2k/2k
-
-**Concurrency**: 32
-
-**Performance**: 580tps, TPOT 54ms
+Hardware: A3-752T, 2 node
+Deployment: TP4 + Full Decode Only
+Input/Output: 2k/2k
+Concurrency: 32
+Performance: 580tps, TPOT 54ms
 ```
 
 ## 9 Performance Tuning
@@ -275,6 +268,8 @@ The performance result is:
 |Long Context (128K, with cache)|Server / Single Machine|2|1|1|128K|3|
 |Multimodal (1080P)|Server / Single Machine|2|1|1|~16K|3|
 
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+
 ### 9.2 Tuning Guidelines
 
 #### 9.2.1 General Tuning Reference
@@ -285,4 +280,4 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).

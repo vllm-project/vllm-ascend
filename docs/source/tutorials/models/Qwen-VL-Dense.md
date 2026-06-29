@@ -10,25 +10,25 @@ This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, sh
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-Require 1 Atlas 800I A2 (64G × 1) node or 1 Atlas 800 A3 (64G × 1) node:
+Requires 1 card in 1 Atlas 800I A2 (64G × 8) node or 1 card in 1 Atlas 800 A3 (64G × 16) node:
 
 - `Qwen3-VL-2B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct)
 - `Qwen3-VL-4B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct)
 - `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 
-Require 1 Atlas 800I A2 (64G × 2) node or 1 Atlas 800 A3 (64G × 2) node:
+Requires 2 cards in 1 Atlas 800I A2 (64G × 8) node or 2 cards in 1 Atlas 800 A3 (64G × 16) node:
 
 - `Qwen3-VL-32B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ## 4 Installation
 
@@ -36,7 +36,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-**A3 series**
+**A3 series:**
 
 Start the docker image on each node.
 
@@ -61,7 +61,21 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-After a successful docker run, you can verify the running container service by executing the `docker ps` command.
+**Installation Verification:**
+
+After starting the container, run the following command to verify the installation:
+
+```bash
+docker ps | grep vllm-ascend
+```
+
+Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+
+```bash
+pip show vllm-ascend
+```
+
+Expected result: The version information is displayed, matching the pulled image version.
 
 ### 4.2 Source Code Installation
 
@@ -151,8 +165,6 @@ The service returns HTTP 200 OK.
 
 ## 7 Accuracy Evaluation
 
-Here is one accuracy evaluation method.
-
 ### Using Language Model Evaluation Harness
 
 The accuracy of some models is already within our CI monitoring scope, including:
@@ -182,15 +194,15 @@ As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy e
 
 3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
 
-    |  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
-    |---------|------:|------|-----:|------|---|-----:|---|-----:|
-    |mmmu_val |      0|none  |      |acc   |↑  |0.5389|±  |0.0159|
+    |  Tasks  |Value |Stderr|
+    |---------|---|-----|
+    |mmmu_val |0.5389|0.0159|
 
 ## 8 Performance Evaluation
 
 ### Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -220,6 +232,8 @@ After about several minutes, you can get the performance evaluation result.
 |Long Context<br>(128K, no prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
 |Long Context<br>(128K, with prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
 |Multimodal<br>(1080P)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution visual inputs|
+
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
 
 #### Table 2: Detailed Node Configuration
 

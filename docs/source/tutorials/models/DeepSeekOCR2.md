@@ -10,9 +10,9 @@ This document will show the main verification steps of the model, including supp
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -197,8 +197,6 @@ curl http://<node0_ip>:<port>/v1/completions \
 ```
 
 ## 7 Accuracy Evaluation
-
-Here is an accuracy evaluation method.
 
 ### Using AISBench
 
