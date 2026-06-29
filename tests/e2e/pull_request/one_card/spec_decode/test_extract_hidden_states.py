@@ -34,6 +34,10 @@ from dataclasses import dataclass
 import pytest
 import torch
 from vllm import LLM, SamplingParams
+from vllm_ascend.utils import vllm_version_is
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    example_hidden_states_connector,
+)
 
 from vllm_ascend.utils import vllm_version_is
 
@@ -155,8 +159,12 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
             token_ids = obj["token_ids"]
             assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
 
-        if verify_nonzero:
-            assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
+    if verify_token_ids:
+        token_ids = obj["token_ids"]
+        assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
+
+    if verify_nonzero:
+        assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
 
 
 @pytest.mark.parametrize("case", CASES)
