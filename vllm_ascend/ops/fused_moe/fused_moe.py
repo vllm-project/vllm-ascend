@@ -52,9 +52,6 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE  # noqa: F401
-from vllm.model_executor.layers.fused_moe.layer import MoERunner
-
 if vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 else:
