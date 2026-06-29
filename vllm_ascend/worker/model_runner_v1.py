@@ -20,6 +20,7 @@
 import gc
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -134,6 +135,7 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -604,6 +606,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendEagleProposer
             | AscendDraftModelProposer
             | AscendDflashProposer
+            | AscendGemma4Proposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
@@ -2313,6 +2316,15 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+        # MTP: Record NPU event after target forward completes, so the draft
+        # model can wait on it before reading the KV cache.  Required when
+        # the target model runs in FDO graph mode (_mtp_target_fdo=True)
+        # because reshape_and_cache KV writes are async on the NPU stream.
+        if ((getattr(self, '_mtp_target_fdo', False) or os.path.exists("/tmp/vllm_sync_target_kv"))
+                and hasattr(self, 'drafter') and self.drafter is not None):
+            _target_done = torch.npu.Event()
+            _target_done.record()
+            self.drafter._target_done_event = _target_done
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -3310,11 +3322,16 @@ class NPUModelRunner(GPUModelRunner):
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
                     kv_cache_gid, total_num_scheduled_tokens_compressed_list)  # type: ignore[arg-type]
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
+                if isinstance(self.drafter, AscendEagleProposer | AscendGemma4Proposer | AscendDraftModelProposer | AscendDflashProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
+            # MTP: Capture per-group block tables for multi-group proposers
+            # (Gemma4 MTP). Each KV cache group has its own block_table;
+            # the draft model needs all of them to read the correct KV cache.
+            if self.speculative_config and isinstance(self.drafter, AscendGemma4Proposer):
+                self.drafter.set_per_group_block_table(kv_cache_gid, cm.block_table_tensor)
             if self.enable_hamming_sparse is True:
                 from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
                 build_kvcomp_metadata(self.kvcomp_meta_data, cm)
@@ -3790,6 +3807,27 @@ class NPUModelRunner(GPUModelRunner):
         from vllm.model_executor.offloader.base import get_offloader
         get_offloader().post_init()
 
+        # MTP mode dispatch: VLLM_ASCEND_MTP_MODE controls which model
+        # gets FDO graph capture:
+        #   "target_eager" (default): Target eager, Draft FDO
+        #   "draft_eager":           Target FDO,   Draft eager
+        #   "both_fdo":              Target FDO,   Draft FDO
+        has_spec = (
+            self.speculative_config is not None
+            and (self.speculative_config.use_eagle()
+                 or self.speculative_config.uses_draft_model())
+        )
+        mtp_mode = os.environ.get("VLLM_ASCEND_MTP_MODE", "target_eager")
+        if mtp_mode == "draft_eager":
+            self._mtp_target_fdo = True
+            self._mtp_draft_fdo = False
+        elif mtp_mode == "both_fdo":
+            self._mtp_target_fdo = True
+            self._mtp_draft_fdo = True
+        else:  # "target_eager" (default)
+            self._mtp_target_fdo = False
+            self._mtp_draft_fdo = True
+
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
@@ -3863,11 +3901,21 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer,
+                AscendEagleProposer | AscendGemma4Proposer | AscendDflashProposer | AscendDraftModelProposer,
             )
-            block_size = (self.kernel_block_sizes[0] if isinstance(
-                self.kernel_block_sizes, list) else self.kernel_block_sizes)
-            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            if isinstance(self.drafter, AscendGemma4Proposer):
+                # Gemma4 MTP needs per-group kernel_block_sizes (list of ints),
+                # not a single block_size.  Pass the list directly.
+                kernel_block_sizes = (
+                    self.kernel_block_sizes
+                    if isinstance(self.kernel_block_sizes, list)
+                    else [self.kernel_block_sizes]
+                )
+                self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+            else:
+                block_size = (self.kernel_block_sizes[0] if isinstance(
+                    self.kernel_block_sizes, list) else self.kernel_block_sizes)
+                self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group() and not is_profiling:
             get_kv_transfer_group().register_kv_caches(kv_caches)

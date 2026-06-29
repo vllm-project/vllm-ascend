@@ -172,6 +172,14 @@ class ACLGraphWrapper:
         entry = self.concrete_aclgraph_entries[batch_descriptor]
 
         if entry.aclgraph is None:
+            # MTP: When the current stream is already being captured
+            # (e.g. target model's FDO graph in PIECEWISE mode),
+            # skip this wrapper's capture and run eagerly. Nested NPU
+            # graph captures corrupt the outer graph's workspace.
+            _outer_capturing = torch.npu.is_current_stream_capturing()
+            if _outer_capturing:
+                return self.runnable(*args, **kwargs)
+
             if self.aclgraph_options.debug_log_enable:
                 # Since we capture aclgraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
@@ -324,6 +332,7 @@ class GraphParams:
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
+    attn_params_by_key: dict[int, dict[str, dict]]  # per-num_tokens → attn_key → {params, handle, event}
     conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
     conv1d_handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]  # for causal conv1d params handles
     conv1d_events: dict[int, list[torch.npu.ExternalEvent]]  # for causal conv1d params events
@@ -348,6 +357,7 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
         {size: None for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
+        {size: {} for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
@@ -376,6 +386,7 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
         {size: None for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
+        {size: {} for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
