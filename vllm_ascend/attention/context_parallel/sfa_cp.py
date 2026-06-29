@@ -23,7 +23,6 @@ from vllm_ascend.distributed.utils import (
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 
 M = TypeVar("M", bound=AscendSFAMetadata)
-DCP_SPARSE_INDEX_SENTINEL = torch.iinfo(torch.int32).max
 
 
 class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
@@ -725,14 +724,18 @@ class AscendSFADCPImpl(AscendSFAImpl):
             local_offsets = topk_indices % interleave_size
             remapped_indices = topk_indices // (self.dcp_size * interleave_size)
             remapped_indices = remapped_indices * interleave_size + local_offsets
-        remapped_indices = remapped_indices.masked_fill(
-            ~local_owner_mask, DCP_SPARSE_INDEX_SENTINEL
-        )
-        remapped_indices, _ = torch.sort(remapped_indices, dim=-1)
-        remapped_indices = remapped_indices.masked_fill(
-            remapped_indices == DCP_SPARSE_INDEX_SENTINEL, -1
-        )
-        return remapped_indices
+        remapped_indices = remapped_indices.masked_fill(~local_owner_mask, -1)
+
+        # Compact local indices to the front without changing their top-k order.
+        topk_count = topk_indices.shape[-1]
+        original_order = torch.arange(
+            topk_count,
+            dtype=torch.int32,
+            device=topk_indices.device,
+        ).expand_as(topk_indices)
+        pack_keys = original_order + (~local_owner_mask).to(torch.int32) * topk_count
+        _, pack_order = torch.sort(pack_keys, dim=-1)
+        return torch.gather(remapped_indices, dim=-1, index=pack_order)
 
     def _execute_sparse_flash_attention_process(
         self,
