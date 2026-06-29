@@ -73,7 +73,7 @@ if [ -z "$NAME" ] && [ "$SCENE" = "single_node" ]; then
   fi
 fi
 
-GOOD_TABLE="${GOOD_TABLE:-/root/.cache/nightly/good_table.csv}"
+GOOD_TABLE="${GOOD_TABLE:-/root/.cache/vllm-ascend/main/nightly/good_table.csv}"
 
 BISECT_CMD=(
   python -m tests.e2e.nightly.bisect.auto_bisect

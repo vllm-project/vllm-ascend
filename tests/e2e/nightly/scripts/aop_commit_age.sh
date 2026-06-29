@@ -20,7 +20,7 @@
 set -euo pipefail
 
 CONFIG_NAME="${1:-}"
-CSV_PATH="${GOOD_TABLE:-${2:-/root/.cache/nightly/good_table.csv}}"
+CSV_PATH="${GOOD_TABLE:-${2:-/root/.cache/vllm-ascend/main/nightly/good_table.csv}}"
 
 if [ -z "$CONFIG_NAME" ]; then
   echo "ERROR: no config name provided"

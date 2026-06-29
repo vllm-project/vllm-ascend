@@ -306,7 +306,7 @@ jobs:
         run: |
           bash tests/e2e/nightly/scripts/aop_commit_age.sh \
             "${{ inputs.name || inputs.config_file_path || inputs.tests }}" \
-            "/root/.cache/nightly/good_table.csv"
+            "/root/.cache/vllm-ascend/main/nightly/good_table.csv"
 
       - name: Skip - old commit
         if: >-

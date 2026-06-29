@@ -255,7 +255,7 @@ run_tests_with_log() {
 # Same logic as _e2e_nightly_multi_node.yaml AOP hooks.
 aop_pipeline() {
     local rules="$WORKSPACE/vllm-ascend/tests/e2e/nightly/scripts/rules-env.txt"
-    local table="${GOOD_TABLE:-/root/.cache/nightly/good_table.csv}"
+    local table="${GOOD_TABLE:-/root/.cache/vllm-ascend/main/nightly/good_table.csv}"
     # Strip branch prefix from BENCHMARK_JOB_NAME (e.g. "main-Qwen3.5-27B-w8a8-A2" → "Qwen3.5-27B-w8a8-A2")
     local case_name="${BENCHMARK_JOB_NAME#*-}"
     if [ -z "$case_name" ] || [ "$case_name" = "$BENCHMARK_JOB_NAME" ]; then
