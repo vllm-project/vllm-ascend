@@ -127,7 +127,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-To use the tools_call feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
+To use the tools_calls feature, please ensure that your transformers version is 4.57.6 or lower. If vllm-ascend has been upgraded to v0.21 or later, this requirement no longer applies.
 
 ## 5 Online Service Deployment
 
