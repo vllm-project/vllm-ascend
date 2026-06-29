@@ -77,6 +77,7 @@ _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
 _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
+_IS_ROT_WEIGHT_USED = None
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -1606,3 +1607,15 @@ def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
     if raw is None:
         return None
     return raw.decode(encoding)
+
+
+def is_rot_weight_used(vllm_config: VllmConfig = None):
+    global _IS_ROT_WEIGHT_USED
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+    if _IS_ROT_WEIGHT_USED is None and vllm_config is not None:
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None)
+        _IS_ROT_WEIGHT_USED = quant_description.get("is_rot_used", False) if quant_description is not None else False
+    return _IS_ROT_WEIGHT_USED
