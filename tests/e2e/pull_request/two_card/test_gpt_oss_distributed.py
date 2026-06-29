@@ -24,12 +24,17 @@ Run `pytest tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py`.
 import pytest
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 GPT_OSS_MODELS = [
     "unsloth/gpt-oss-20b-BF16",
 ]
 
 
+@pytest.mark.skipif(
+    not vllm_version_is("0.23.0"),
+    reason="upstream vLLM #45818 fixed",
+)
 @pytest.mark.parametrize("model", GPT_OSS_MODELS)
 def test_gpt_oss_distributed_tp2(model):
     example_prompts = [
