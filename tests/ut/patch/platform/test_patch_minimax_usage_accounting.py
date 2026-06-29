@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.parser.abstract_parser import _WrappedParser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.minimax_m2_reasoning_parser import (
     MiniMaxM2AppendThinkReasoningParser,
@@ -193,18 +192,12 @@ def test_count_reasoning_tokens_accepts_minimax_unified_parser():
 
 
 def test_count_reasoning_tokens_accepts_wrapped_minimax_parser():
-    original_reasoning_parser_cls = _WrappedParser.reasoning_parser_cls
-    original_tool_parser_cls = _WrappedParser.tool_parser_cls
-    try:
-        _WrappedParser.reasoning_parser_cls = MiniMaxM2ReasoningParser
-        _WrappedParser.tool_parser_cls = None
-        parser = _WrappedParser(FakeTokenizer())
+    parser = SimpleNamespace(
+        reasoning_parser=MiniMaxM2ReasoningParser(FakeTokenizer()),
+    )
 
-        assert usage_patch._count_minimax_reasoning_tokens_for_usage([10, 11, 2, 20], parser) == 2
-        assert usage_patch._is_minimax_reasoning_parser(parser)
-    finally:
-        _WrappedParser.reasoning_parser_cls = original_reasoning_parser_cls
-        _WrappedParser.tool_parser_cls = original_tool_parser_cls
+    assert usage_patch._count_minimax_reasoning_tokens_for_usage([10, 11, 2, 20], parser) == 2
+    assert usage_patch._is_minimax_reasoning_parser(parser)
 
 
 def test_count_reasoning_tokens_skips_non_minimax_parser_manager_wrapper():
