@@ -45,13 +45,11 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.attention.msa_m3_triton import (
     SPARSE_BLOCK_SIZE,
+    minimax_m3_index_decode,
+    minimax_m3_index_score,
+    minimax_m3_index_topk,
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
-)
-from vllm_ascend.attention.msa_m3_ops import (
-    minimax_m3_index_decode_torch,
-    minimax_m3_index_score_torch,
-    minimax_m3_index_topk_torch,
 )
 import vllm_ascend.ops.minimax_m3_sparse  # noqa: F401
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
@@ -317,7 +315,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         if index_md.num_decodes > 0:
             d = index_md.decode
             assert d is not None
-            decode_topk = minimax_m3_index_decode_torch(
+            decode_topk = minimax_m3_index_decode(
                 iq[:nd],
                 kv,
                 d.block_table,
@@ -333,7 +331,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         if index_md.num_prefills > 0:
             p = index_md.prefill
             assert p is not None
-            score = minimax_m3_index_score_torch(
+            score = minimax_m3_index_score(
                 iq[nd:],
                 kv,
                 p.block_table,
@@ -341,10 +339,11 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                 p.seq_lens,
                 p.context_lens,
                 p.max_query_len,
+                p.max_seq_len,
                 self.num_kv_heads,
                 self.scale,
             )
-            prefill_topk = minimax_m3_index_topk_torch(
+            prefill_topk = minimax_m3_index_topk(
                 score,
                 p.cu_seqlens_q,
                 p.context_lens,
