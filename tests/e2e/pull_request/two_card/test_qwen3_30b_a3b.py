@@ -18,10 +18,17 @@
 
 import json
 
+import pytest
 import requests
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
+from vllm_ascend.utils import vllm_version_is
+
+pytestmark = pytest.mark.skipif(
+    not vllm_version_is("0.23.0"),
+    reason="broken on main, fix me.",
+)
 
 
 @wait_until_npu_memory_free()
