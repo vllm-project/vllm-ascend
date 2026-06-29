@@ -67,10 +67,10 @@ deployment:
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
         --host 0.0.0.0
         --port $SERVER_PORT
-        --data-parallel-size 2
+        --data-parallel-size 1
         --decode-context-parallel-size 2
         --prefill-context-parallel-size 1
-        --tensor-parallel-size 8
+        --tensor-parallel-size 16
         --cp-kv-cache-interleave-size 128
         --enable-expert-parallel
         --seed 1024
@@ -82,7 +82,6 @@ deployment:
         --gpu-memory-utilization 0.85
         --compilation_config '{"cudagraph_capture_sizes":[4,8,16,32],"cudagraph_mode": "FULL_DECODE_ONLY"}'
         --enable-chunked-prefill
-        --additional-config '{"recompute_scheduler_enable":true}'
         --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
