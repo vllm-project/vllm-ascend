@@ -6,7 +6,7 @@ Qwen3 is the latest generation of large language models in Qwen series, offering
 
 This document will demonstrate the main validation steps for Qwen3-235B-A22B in the vLLM-Ascend environment, including supported features, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-The Qwen3-235B-A22B model is first supported in **v0.8.4rc2**. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use v0.21.0 or a later version.
+The Qwen3-235B-A22B model is first supported in **v0.8.4rc2**. This document is validated and written based on **vLLM-Ascend v0.21.0**. All **v0.21.0 and later versions** can run stably. To use the latest features, it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
@@ -24,7 +24,7 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A5 (112G × 8), 1 Atlas 800I A3 (64G × 16), 1 Atlas 800I A2 (64G × 8)| [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
+| Qwen3-235B-A22B (BF16) | 1 Atlas 800I A3 (64G × 16), 1 Atlas 800I A2 (64G × 8)| [Download](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B) |
 
 **Quantized Version (Pre-converted):**
 
@@ -229,7 +229,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 **Start the server:**
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
-Atlas 800I A2/A3/A5:
+Atlas 800I A2/A3:
 
 ```shell
 export VLLM_USE_MODELSCOPE=True
@@ -577,7 +577,7 @@ python launch_online_dp.py \
     --vllm-start-port 9123
 ```
 
-#### Request Forwarding
+**Request Forwarding:**
 
 Run the proxy on any machine that can reach both nodes. You can get the proxy script from the repository: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
 
@@ -760,7 +760,7 @@ After several minutes, you will get the performance evaluation result.
 
 ### 9.1 Recommended Configurations
 
-> **Important**: The configurations provided in this section are validated in specific test environments and are **not** guaranteed to be globally optimal. Actual performance depends on factors such as input/output length distribution, request rate, prefix cache hit rate, hardware configuration, and precision requirements. It is strongly recommended to use the following as a starting point and refer to [Section 9.2](#92-tuning-guidelines) for tuning based on your own workload.
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
 #### Table 1: Scenario Overview
 
