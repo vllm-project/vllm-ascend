@@ -123,7 +123,7 @@ jobs:
             input_branch="${{ inputs.vllm_ascend_branch }}"
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
-          } >> $GITHUB_OUTPUT
+          } >> "$GITHUB_OUTPUT"
 
   build-image:
     name: Build nightly-a2 image
@@ -191,6 +191,8 @@ jobs:
     secrets:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY }}
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL }}
 
   multi-node-tests:
     name: multi-node
@@ -238,6 +240,8 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY }}
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL }}
 
   generate-accuracy-matrix:
     name: Generate accuracy test matrix
@@ -293,6 +297,11 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       upload: false
+    secrets:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY }}
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL }}
 
   single-node-accuracy-tests-pr-only:
     needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
@@ -322,6 +331,11 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       upload: false
+    secrets:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_API_KEY }}
+      VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_AI_DIAGNOSIS_BASE_URL }}
 
   clear-pre-logs:
     needs: [parse-trigger, multi-node-tests]
