@@ -470,7 +470,7 @@ vllm bench serve \
 | --------------- | ------ | --- | ------------- | ------------ | --------- | --- | ------------ |
 | High Throughput | 1 (A3) | 1   | 37364         | 100          | Off       | Off | -            |
 | Low Latency     | 2 (A3) | 4   | 37364         | 100          | Off       | On  | -            |
-| Long Context    | 2 (A3) | 4   | 131072        | 14           | Off       | On  | YaRN         |
+| Long Context    | 2 (A3) | 4   | 131072        | 14           | Off       | On  | -            |
 
 > For detailed parameter descriptions, please refer to the deployment examples in Section 5.
 
