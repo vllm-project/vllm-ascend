@@ -83,6 +83,8 @@ class AscendDflashProposer(AscendEagleProposer):
 
         self._dflash_num_context = num_context
         self._dflash_hidden_states[:num_context] = target_hidden_states
+        # [batch_size] prepare for dspark
+        self._next_token_ids = next_token_ids
 
         token_indices_to_sample = torch.empty(
             batch_size * self.num_speculative_tokens,

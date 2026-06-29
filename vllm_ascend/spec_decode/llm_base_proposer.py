@@ -1135,21 +1135,34 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                 draft_token_ids = logits.argmax(dim=-1)
         else:
-            logits = self.model.compute_logits(sample_hidden_states)
-            if lmhead_tp_enable():
-                logits, token_indices_to_sample = self._align_tensor_and_indices(
-                    logits,
-                    num_indices,
-                    token_indices_to_sample,
-                    ori_token_indices_to_sample,
-                    is_logits=True,
-                )
-            draft_token_ids = logits.argmax(dim=-1)
+            if hasattr(self.speculative_config.draft_model_config.hf_confif, "markov_head_type"):
+                # [batch_size, self.num_speculative_tokens + 1]
+                draft_token_ids = torch.empty(batch_size, self.num_speculative_tokens + 1, dtype=torch.int64, device=last_hidden_states.device)
+                draft_token_ids[:, 0] = self._next_token_ids
+                logits = self.model.compute_logits(last_hidden_states).view(batch_size, self.num_speculative_tokens + 1, -1)
+                for idx in range(self.num_speculative_tokens):
+                    logits_bias, _ = self.model.model.markov_head(draft_token_ids[:, idx])
+                    logits[:, idx] += logits_bias
+                    draft_token_ids[:, idx + 1] = logits[:, idx].argmax(dim=-1)
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
+                if lmhead_tp_enable():
+                    logits, token_indices_to_sample = self._align_tensor_and_indices(
+                        logits,
+                        num_indices,
+                        token_indices_to_sample,
+                        ori_token_indices_to_sample,
+                        is_logits=True,
+                    )
+                draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            # [batch_size, 1]
-            return draft_token_ids.view(-1, self.num_speculative_tokens)
+            if hasattr(self.speculative_config.draft_model_config.hf_confif, "markov_head_type"):
+                return draft_token_ids[:, 1:]
+            else:
+                # [batch_size, 1]
+                return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.pcp_size * self.dcp_size > 1 and is_prefill:
             draft_token_ids_list = []
