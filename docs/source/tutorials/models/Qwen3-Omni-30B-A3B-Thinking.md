@@ -41,52 +41,165 @@ Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model struc
 
 ## 4 Installation
 
+### 4.1 Docker Image Installation
+
+You can use the official all-in-one Docker image for Qwen3 MoE models.
+
+**Docker Pull:**
+
+```bash
+docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```
+
+**Docker Run:**
+
 :::::{tab-set}
-::::{tab-item} Use docker image
+:sync-group: hardware
 
-You can use our official docker image to run Qwen3-Omni-30B-A3B-Thinking directly
-
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+::::{tab-item} Atlas 800I A3
+:sync: a3
 
 ```{code-block} bash
-  :substitutions:
-# Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
-# Update the vllm-ascend image according to your environment.
-# Note you should download the weight to /root/.cache in advance.
-# Update the vllm-ascend image
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-export NAME=vllm-ascend
+   :substitutions:
 
-# Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
-docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
+docker run \
+    --name vllm-ascend-env \
+    --shm-size=128g \
+    --net=host \
+    --privileged=true \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /home:/home \
+    -v /data:/data \
+    -v /tmp:/tmp \
+    -v /mnt:/mnt \
+    -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
+    -v /root:/host_root \
+    -it -d $IMAGE bash
+```
+
+:::{note}
+A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
+If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
+:::
+
+::::
+
+::::{tab-item} Atlas 800I A2
+:sync: a2
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
+docker run \
+    --name vllm-ascend-env \
+    --shm-size=128g \
+    --net=host \
+    --privileged=true \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /home:/home \
+    -v /data:/data \
+    -v /tmp:/tmp \
+    -v /mnt:/mnt \
+    -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
+    -v /root:/host_root \
+    -it -d $IMAGE bash
 ```
 
 ::::
-::::{tab-item} Build from source
 
-You can build all from source.
-
-- Install `vllm-ascend`, refer to [set up using python](../../installation.md#set-up-using-python).
-
-::::
 :::::
+
+The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
+
+**Installation Verification:**
+
+After starting the container, run the following command to verify the installation:
+
+```bash
+docker ps | grep vllm-ascend-env
+```
+
+Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+
+```bash
+pip show vllm-ascend
+```
+
+Expected result: The version information is displayed, matching the pulled image version.
+
+### 4.2 Source Code Installation
+
+If you prefer not to use the Docker image, you can build from source. Install vLLM from source first:
+
+1. Clone and install vLLM:
+
+   ```bash
+   git clone https://github.com/vllm-project/vllm.git
+   cd vllm
+   pip install -e .
+   ```
+
+2. Clone and install the vLLM-Ascend repository:
+
+   ```bash
+   git clone https://github.com/vllm-project/vllm-ascend.git
+   cd vllm-ascend
+   pip install -e .
+   ```
+
+**Installation Verification:**
+
+```bash
+pip show vllm vllm-ascend
+```
+
+Expected result: The version information for both packages is displayed, confirming a successful installation.
+
+:::{note}
+If deploying a multi-node environment, set up the environment on each node.
+:::
 
 Please install system dependencies
 
