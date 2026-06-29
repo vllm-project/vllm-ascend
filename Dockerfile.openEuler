@@ -47,7 +47,7 @@ RUN pip config set global.index-url ${PIP_INDEX_URL} && \
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.22.1
+ARG VLLM_TAG=v0.23.0
 ARG VLLM_COMMIT=""
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
