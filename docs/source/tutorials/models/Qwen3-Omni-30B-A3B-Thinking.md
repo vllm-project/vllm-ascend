@@ -22,7 +22,8 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                                             | Download                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
+| Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/| Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](Qwen3-Omni
+-30B-A3B)          |
 | Qwen3-Omni-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               |  N/A|
 
 The W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
@@ -30,7 +31,7 @@ The W8A8 quantized weights are not available for direct download, you can obtain
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
 :::{note}
-Qwen3-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model structure):
+Qwen3-Omni-30B-A3B-W8A8 adopts a hybrid quantization strategy (ordered by model structure):
 
 - **Embedding layer**: BF16 (no quantization)
 - **Q/K normalization** (q_norm, k_norm): BF16
