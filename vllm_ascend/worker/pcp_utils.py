@@ -18,7 +18,6 @@
 #
 
 import copy
-import math
 from collections.abc import Callable
 from itertools import accumulate
 from typing import TYPE_CHECKING, Any
@@ -31,6 +30,7 @@ from vllm.logger import logger
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.utils import CpuGpuBuffer
 
+from vllm_ascend.utils import is_pd_decode_recompute_scheduler_enabled
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -72,6 +72,7 @@ class PCPManager:
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
         self.vllm_config = vllm_config
+        self.pd_decode_recompute_scheduler_enabled = is_pd_decode_recompute_scheduler_enabled(vllm_config)
         self.max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.vllm_config.scheduler_config.max_num_seqs
         self.device = device
@@ -150,6 +151,7 @@ class PCPManager:
         self.pcp_padded_tokens_length = 0
         self.num_scheduled_tokens_padded: np.ndarray | None = None
         self.max_num_tokens_across_pcp = 0
+        self.total_pcp_padding_tokens_fla = 0
         self.pcp_tokens_padded = None
         self.total_num_scheduled_tokens = 0
         self._local_num_scheduled_tokens: np.ndarray | None = None
@@ -195,8 +197,8 @@ class PCPManager:
 
         return cu_num_tokens, arange
 
-    @staticmethod
     def classify_decode_request_mask(
+        self,
         num_scheduled_tokens: np.ndarray | torch.Tensor,
         num_computed_tokens: np.ndarray | torch.Tensor,
         num_prompt_tokens: np.ndarray | torch.Tensor,
@@ -209,8 +211,11 @@ class PCPManager:
         """
 
         has_context = num_computed_tokens > 0
-        done_prefilling = num_computed_tokens >= num_prompt_tokens
         is_below_threshold = num_scheduled_tokens <= decode_threshold
+        done_prefilling = num_computed_tokens >= num_prompt_tokens
+        if self.pd_decode_recompute_scheduler_enabled:
+            # PD D + RecomputeScheduler: KV recv leaves num_computed at N-1.
+            done_prefilling = done_prefilling | (num_computed_tokens == num_prompt_tokens - 1)
         return has_context & is_below_threshold & done_prefilling
 
     def init_batch_info(
@@ -250,16 +255,7 @@ class PCPManager:
         if self.num_prefill_reqs <= 0:
             return cu_num_scheduled_tokens
 
-        # Prepend 0 so per-req lengths come out of the diff cleanly. This
-        # also fixes the num_decode_reqs == 0 case, where the raw diff
-        # cu[1:] - cu[:-1] would drop the first req's length and the base
-        # below would index cu[-1] instead of 0.
-        padded_cu = np.concatenate(([0], cu_num_scheduled_tokens))
-        per_req_lens = padded_cu[1:] - padded_cu[:-1]
-
-        prefill_lens = per_req_lens[self.num_decode_reqs :]
-        pad_multiple = self.pcp_world_size * 2
-        prefill_lens = [math.ceil(num / pad_multiple) * pad_multiple for num in prefill_lens]
+        prefill_lens = self.pcp_tokens[self.num_decode_reqs : self.num_decode_reqs + self.num_prefill_reqs]
         pads = copy.deepcopy(num_pcp_pads)
         pads[self.num_decode_reqs :] = np.cumsum(pads[self.num_decode_reqs :])
         base = int(cu_num_scheduled_tokens[self.num_decode_reqs - 1]) if self.num_decode_reqs > 0 else 0
@@ -933,9 +929,10 @@ class PCPManager:
                 hidden_states = F.pad(
                     hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode="constant", value=0
                 )
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states[: self.max_num_tokens_across_pcp].contiguous(), dim=0
+            hidden_states = (
+                hidden_states[: self.max_num_tokens_across_pcp] if self.max_num_tokens_across_pcp > 0 else hidden_states
             )
+            hidden_states = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
             restore_idx = self.pcp_enter_fa_restore_idx[: hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
             return torch.index_select(hidden_states, 0, restore_idx)
 

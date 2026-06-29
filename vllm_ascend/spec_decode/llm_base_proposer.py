@@ -170,6 +170,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
+
+        self._share_mtp_indices = False
+        spec_config = self.vllm_config.speculative_config
+        draft_model_config = getattr(spec_config, "draft_model_config", None)
+        draft_hf_config = draft_model_config.hf_config if draft_model_config is not None else None
+        self._share_mtp_indices = getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
+
         # NOTE:
         # `draft_tensor_parallel_size` does not take effect for Eagle:
         # the draft model uses the same TP size as the target model in practice.
@@ -468,6 +475,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "[spec_decode/base] Detected MTP model with topk_indices_buffer."
                 " Sharing target model topk_indices_buffer with the draft model."
             )
+            target_buffer = target_language_model.model.topk_indices_buffer
+            draft_model = getattr(self.model, "model", None)
+            if target_buffer is not None and draft_model is not None:
+                for _, module in draft_model.named_modules():
+                    if hasattr(module, "topk_indices_buffer"):
+                        module.topk_indices_buffer = target_buffer
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -1027,12 +1040,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if self.method == "mtp":
                     model_kwargs["positions"] = model_positions
 
+        # step 0
+        draft_model = getattr(self.model, "model", None)
+        if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+            draft_model.set_skip_topk(False)
+
         ret_hidden_states = self.model(**model_kwargs)
         if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
             hidden_states = last_hidden_states
         else:
             last_hidden_states, hidden_states = ret_hidden_states
+
+        # step 1+ skip indexer
+        draft_model = getattr(self.model, "model", None)
+        if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+            draft_model.set_skip_topk(True)
 
         if self.method != "dflash":
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
@@ -1054,23 +1077,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self.pcp_size > 1:
             # remove graph padding before all_gather
             hidden_states = hidden_states[:num_input_tokens]
-            hidden_states = get_pcp_group().all_gather(hidden_states, 0)
-            hidden_states = torch.index_select(
-                hidden_states,
-                0,
-                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
-            )
+            if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                hidden_states = self.runner.pcp_manager.get_restore_hidden_states(hidden_states)
+            else:
+                hidden_states = get_pcp_group().all_gather(hidden_states, 0)
+                hidden_states = torch.index_select(
+                    hidden_states,
+                    0,
+                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
+                )
             if self.method == "mtp":
                 last_hidden_states = hidden_states
             else:
                 # eagle and eagle3 need allgather last_hidden_states.
                 last_hidden_states = last_hidden_states[:num_input_tokens]
-                last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
-                last_hidden_states = torch.index_select(
-                    last_hidden_states,
-                    0,
-                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
-                )
+                if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                    last_hidden_states = self.runner.pcp_manager.get_restore_hidden_states(last_hidden_states)
+                else:
+                    last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
+                    last_hidden_states = torch.index_select(
+                        last_hidden_states,
+                        0,
+                        self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
+                    )
 
         if lmhead_tp_enable():
             token_indices_to_sample = nn.functional.pad(
@@ -1323,19 +1352,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 input_ids_p = self.input_ids[num_tokens_d:num_tokens]
                 target_hidden_states_d_padded = target_hidden_states[:num_tokens_d_padded]
                 if num_tokens_d:
-                    # remove padding (from pcp all-gather) in decode part
-                    mask_start_loc = torch.cat(
-                        [
-                            torch.tensor([0], dtype=torch.int32, device=query_lens_d.device),
-                            torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1],
-                        ]
-                    )
-                    mask_len = query_lens_d
-                    mask = []
-                    for req_id in range(num_decode_reqs):
-                        assert None not in (mask_start_loc, mask_len)
-                        mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
-                    target_hidden_states_d = target_hidden_states_d_padded[mask]
+                    if self.runner.pcp_manager.pcp_use_hybrid_attn:
+                        # Hybrid PCP restores decode hidden states rank-major:
+                        # [rank0 all decode tokens, rank1 all decode tokens, ...].
+                        target_hidden_states_d = target_hidden_states_d_padded[:num_tokens_d]
+                    else:
+                        # remove padding (from pcp all-gather) in decode part
+                        mask_start_loc = torch.cat(
+                            [
+                                torch.tensor([0], dtype=torch.int32, device=query_lens_d.device),
+                                torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1],
+                            ]
+                        )
+                        mask_len = query_lens_d
+                        mask = []
+                        for req_id in range(num_decode_reqs):
+                            assert None not in (mask_start_loc, mask_len)
+                            mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
+                        target_hidden_states_d = target_hidden_states_d_padded[mask]
                 else:
                     target_hidden_states_d = target_hidden_states_d_padded
                 target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
@@ -1675,7 +1709,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
-                attn_metadata.decode_meta.dcp_mtp_attn_mask = None
 
         return common_attn_metadata, attn_metadata
 
