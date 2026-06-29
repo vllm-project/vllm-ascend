@@ -42,7 +42,7 @@ def get_rope_shape(org, interpolation_mode, shape):
 
 
 class AscendLearnable2DInterpPosEmbDivided_fixed(nn.Module):
-    def forward(self, x: torch.Tensor, grid_thws: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, grid_thws: torch.Tensor | list) -> torch.Tensor:
         pos_embs = []
         for t, h, w in grid_thws.tolist():
             assert t <= self.num_frames, (
