@@ -153,6 +153,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "dispatch_ffn_combine_w4_a8"
         "dispatch_ffn_combine_bf16"
         "dispatch_gmm_combine_decode"
+        "mega_moe"
         "moe_init_routing_custom"
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
@@ -218,6 +219,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
+        "mega_moe"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
