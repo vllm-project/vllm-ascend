@@ -14,12 +14,19 @@ Refer to [supported features](https://docs.vllm.ai/projects/ascend/zh-cn/latest
 
 Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/index.html) to get the feature's configuration.
 
-## 3 Environment Preparation
-
-Release v0.13.0 or later versions are all acceptable.
+## 3 Prerequisites
 
 ### 3.1 Model Weight
 
+The following model variants are available. It is recommended to download the model weight to a shared directory accessible to all nodes.
+
+| Model                | Hardware Requirement                                                                             | Download                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
+| Qwen3-Omni-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
+| Eagle3 Draft Model   | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |
+
+These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 - `Qwen3-Omni-30B-A3B-Thinking` requires 2 NPU 910B Cards (64G × 2)（or 1 card Ascend910）.[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
