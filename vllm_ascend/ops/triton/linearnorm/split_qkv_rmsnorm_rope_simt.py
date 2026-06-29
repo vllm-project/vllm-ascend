@@ -29,10 +29,10 @@ def precompute_rope_cos_sin_kernel(
         batch_off = off + tl.arange(0, BLOCK_SIZE)
         mask = batch_off < end
 
-        pos = tl.load(positions_gm_ptr + batch_off, mask=mask)
+        pos = tl.load(positions_gm_ptr + batch_off, mask=mask, other=0)
 
         offset = pos[:, None] * ROPE_DIM + sin_cos_range[None, :]
-        sin_cos_val = tl.load(cos_sin_cache_gm_ptr + offset).to(tl.float32)
+        sin_cos_val = tl.load(cos_sin_cache_gm_ptr + offset, mask=mask[:, None], other=0.0).to(tl.float32)
 
         out_offset = batch_off[:, None] * ROPE_DIM + sin_cos_range[None, :]
         out_mask = (batch_off[:, None] < end) & (sin_cos_range[None, :] < ROPE_DIM)
@@ -49,7 +49,7 @@ def split_qkv_rmsnorm_rope_simt_kernel(
     k_weight_ptr,
     k_bias_ptr,
     cos_sin_precomputed_ptr,
-    batch_size,                 # 运行时动态值
+    batch_size,
     q_hidden_size: tl.constexpr,
     kv_hidden_size: tl.constexpr,
     total_hidden_size: tl.constexpr,
@@ -90,7 +90,7 @@ def split_qkv_rmsnorm_rope_simt_kernel(
         mask = mmask[:, None] & (qk_cols[None, :] < total_hidden_size)
 
         idx = batch_indices[:, None] * total_hidden_size + qk_cols[None, :]
-        values_tmp1 = tl.load(input_gm_ptr + idx, mask=mask).reshape(
+        values_tmp1 = tl.load(input_gm_ptr + idx, mask=mask, other=0.0).reshape(
             qk_head_nums_per_iter_per_vec, HEAD_DIM
         ).to(tl.float32)
 
@@ -101,7 +101,8 @@ def split_qkv_rmsnorm_rope_simt_kernel(
         cos_sin_offset = base_batch * ROPE_DIM + tl.arange(0, batch_size_per_iter_per_vec * ROPE_DIM)
         cos_sin_value = tl.load(
             cos_sin_precomputed_ptr + cos_sin_offset,
-            mask=cos_sin_offset < (end * ROPE_DIM)
+            mask=cos_sin_offset < (end * ROPE_DIM),
+            other=0.0
         ).reshape(batch_size_per_iter_per_vec, 1, ROPE_DIM)
 
         cos = extract_slice(cos_sin_value,
@@ -197,7 +198,7 @@ def split_qkv_rmsnorm_rope_simt_kernel(
         mask = mmask[:, None] & nmask[None, :]
 
         idx = batch_indices[:, None] * total_hidden_size + v_cols[None, :]
-        values = tl.load(input_gm_ptr + idx, mask=mask)
+        values = tl.load(input_gm_ptr + idx, mask=mask, other=0.0)
 
         out_nblk_idx = tl.arange(0, kv_hidden_size)
         out_nmask = out_nblk_idx < kv_hidden_size
