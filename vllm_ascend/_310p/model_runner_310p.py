@@ -386,6 +386,7 @@ class NPUModelRunner310(NPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
+        self.query_start_loc.np[num_reqs + 1 :].fill(-1)
         self.query_start_loc.copy_to_gpu()
 
         if self._has_gdn:
@@ -404,7 +405,6 @@ class NPUModelRunner310(NPUModelRunner):
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         self._compute_prev_positions(num_reqs)
 
-        self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
         if self.uses_mrope:
@@ -453,9 +453,9 @@ class NPUModelRunner310(NPUModelRunner):
                 self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
-        else:
-            self.num_accepted_tokens.np.fill(1)
-            self.num_accepted_tokens.gpu.fill_(1)
+        else: 
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
 
         need_async_num_computed_update = (
             self.use_async_spec_decode and self.valid_sampled_token_count_gpu is not None and prev_req_id_to_index
