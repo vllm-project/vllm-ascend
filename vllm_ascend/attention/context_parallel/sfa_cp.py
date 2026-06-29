@@ -605,8 +605,29 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
+        self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
+        self._dcp_metadata_debug_print_count = 0
         assert self.pcp_size == 1, "AscendSFADCPMetadataBuilder only supports DCP without PCP."
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
+        if self.cp_kv_cache_interleave_size <= 0:
+            raise RuntimeError(
+                "Invalid cp_kv_cache_interleave_size: "
+                f"{self.cp_kv_cache_interleave_size}"
+            )
+
+
+    def _get_dcp_local_seq_lens(self, seq_lens: torch.Tensor) -> torch.Tensor:
+        total_cp_size = self.pcp_size * self.dcp_size
+        current_rank = self.pcp_rank * self.dcp_size + self.dcp_rank
+        interleave_size = self.cp_kv_cache_interleave_size
+        base = seq_lens // interleave_size // total_cp_size * interleave_size
+        remainder = seq_lens - base * total_cp_size
+        remainder = torch.clamp(
+            remainder - current_rank * interleave_size,
+            0,
+            interleave_size,
+        )
+        return base + remainder
 
     def build(
         self,
@@ -632,18 +653,14 @@ class AscendSFADCPMetadataBuilder(AscendSFAMetadataBuilder):
 
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        cp_metadata = common_attn_metadata.prefill_context_parallel_metadata
-        num_computed_tokens_of_pcp_dcp = (
-            None if cp_metadata is None else cp_metadata.num_computed_tokens_of_pcp_dcp
+        dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
+        if dcp_local_seq_lens is None:
+            dcp_local_seq_lens = self._get_dcp_local_seq_lens(metadata.seq_lens)
+        local_seq_lens = dcp_local_seq_lens[:num_reqs].to(
+            device=self.device,
+            dtype=torch.int32,
+            non_blocking=True,
         )
-        if num_computed_tokens_of_pcp_dcp is None:
-            local_seq_lens = metadata.seq_lens
-        else:
-            local_seq_lens = torch.as_tensor(
-                num_computed_tokens_of_pcp_dcp,
-                dtype=torch.int32,
-                device=self.device,
-            )[:num_reqs, self.pcp_rank, self.dcp_rank]
 
         metadata.dcp_context = DCPContext(
             slot_mapping=dcp_slot_mapping[:num_input_tokens],
