@@ -89,7 +89,7 @@ def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
     metadata: dict[str, Any] = {
         "engine_id": "engine1",
         "te_rpc_port": 9090,
-        "kv_group2layeridx": {0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0])},
+        "kv_group2layeridx": {0: ({"kv_cache_spec_type": "FullAttentionSpec", "layer_names": ["layer_0"]}, [0])},
         "block_size": 16,
         "kv_caches_base_addr": [[12345678]],
         "block_size_scale": [[1]],
@@ -696,7 +696,10 @@ class TestCoreFunctionality(unittest.TestCase):
             "remote_port_send_num": {6666: 1},
             "all_task_done": True,
         }
-        self.thread.kv_group2layeridx = {0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0])}
+        self.thread.kv_group2layeridx = {
+            0: ({"kv_cache_spec_type": "FullAttentionSpec", "layer_names": ["layer_0"]}, [0])
+        }
+        self.thread.remote_kv_group2layeridx["remote_engine"][6666] = self.thread.kv_group2layeridx
         self.thread.group_compress_ratios = {0: 1}
         self.thread.block_size_scale = [[1]]
         self.thread.task_tracker = MagicMock()
@@ -763,12 +766,14 @@ class TestCoreFunctionality(unittest.TestCase):
             0: (
                 {
                     "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
+                    "layer_names": ["layer_0"],
                     "kv_cache_spec": {"layer_0": {"compress_ratio": 4}},
                 },
                 [0],
             )
         }
         self.thread.group_compress_ratios = {0: 4}
+        self.thread.remote_kv_group2layeridx["remote_engine"][6666] = self.thread.kv_group2layeridx
         with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
             mock_config.return_value.enable_kv_nz = False
             self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
@@ -1034,6 +1039,41 @@ class MockKVCacheConfig:
     def __init__(self, kv_cache_groups=None, num_blocks=10):
         self.kv_cache_groups = kv_cache_groups or [MockKVCacheGroup()]
         self.num_blocks = num_blocks
+
+
+class TestMooncakeConnectorWorkerMetadata(unittest.TestCase):
+    def test_build_kv_group2layeridx_assigns_unique_indices_across_hybrid_groups(self):
+        worker = object.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.total_layers = 4
+        worker.kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["model.layers.0.self_attn.attn"]),
+                MockKVCacheGroup(["model.layers.0.self_attn.compressor.state_cache"]),
+                MockKVCacheGroup(["model.layers.0.self_attn.swa_cache"]),
+            ]
+        )
+
+        group2layeridx = worker._build_kv_group2layeridx()
+
+        self.assertEqual(group2layeridx[0][1], [0])
+        self.assertEqual(group2layeridx[1][1], [4])
+        self.assertEqual(group2layeridx[2][1], [5])
+
+    def test_get_group_kv_caches_filters_by_group_layer_names(self):
+        thread = object.__new__(KVCacheRecvingThread)
+        thread.kv_group2layeridx = {
+            0: ({"layer_names": ["layer.attn", "layer.compressor"]}, [0, 4]),
+            1: ({"layer_names": ["layer.swa"]}, [5]),
+        }
+        thread.kv_caches = {
+            "layer.attn": "attn-cache",
+            "layer.compressor": "compressor-cache",
+            "layer.swa": "swa-cache",
+        }
+
+        self.assertEqual(thread._get_group_kv_caches(0, [4]), {"layer.compressor": "compressor-cache"})
+        self.assertEqual(thread._get_group_kv_caches(1), {"layer.swa": "swa-cache"})
 
 
 class TestKVCacheTaskTracker(unittest.TestCase):
@@ -1681,6 +1721,7 @@ class TestUtils(unittest.TestCase):
         mock_socket.recv.side_effect = zmq.ZMQError("Receive timeout")  # type: ignore
         with self.assertRaises(RuntimeError):
             ensure_zmq_recv(mock_socket, "tcp://localhost:1234", max_retries=2)
+        self.assertEqual(mock_socket.recv.call_count, 2)
 
 
 class MockMooncakeAgentMetadata:
