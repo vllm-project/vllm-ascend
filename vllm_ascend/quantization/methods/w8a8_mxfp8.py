@@ -138,8 +138,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2 + 1, 2)
         else:
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
-        layer.weight.data = layer.weight.data.transpose(0, 1)
-        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
+        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).contiguous()
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -184,7 +184,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         # Current shape: (k_dim//2, n_dim, 2)
         # Target shape: (n_dim, k_dim)
         target_scale = layer.weight_scale.data.transpose(0, 1).reshape(orig_scale_shape).contiguous()
-        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).view(orig_scale_shape)
+        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).reshape(orig_scale_shape)
         layer.weight_scale.data.copy_(target_scale)
 
         # Mark as not transformed (ready for weight loading)
@@ -422,7 +422,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             orig_scale_shape = orig_shapes[scale_key]
 
             target_scale = scale_tensor.data.transpose(1, 2).reshape(orig_scale_shape).contiguous()
-            scale_tensor.data = scale_tensor.data.transpose(1, 2).view(orig_scale_shape)
+            scale_tensor.data = scale_tensor.data.transpose(1, 2).reshape(orig_scale_shape)
             scale_tensor.data.copy_(target_scale)
 
         _restore("w13_weight", "w13_weight_scale")
