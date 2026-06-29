@@ -22,7 +22,7 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                                             | Download                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)<br>Ascend 950 (112GB, 1 card) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
 | Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
 | Eagle3 Draft Model   | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |
 
@@ -238,41 +238,6 @@ vllm serve your_model_path \
     --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
-    --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
-```
-
-**Ascend 950 Products:**
-
-```bash
-export ASCEND_RT_VISIBLE_DEVICES=0
-export HCCL_BUFFSIZE=1024
-export HCCL_CONNECT_TIMEOUT=600
-export HCCL_EXEC_TIMEOUT=600
-export HCCL_ALGO=level0:fullmesh
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export CPU_AFFINITY_CONF=2
-export TASK_QUEUE_ENABLE=1
-export TRITON_DISABLE_FFTS=1
-
-vllm serve your_model_path \
-    --host 0.0.0.0 \
-    --served-model-name qwen3 \
-    --trust-remote-code \
-    --max-num-seqs 200 \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 40960 \
-    --tensor-parallel-size 1 \
-    --port 8000 \
-    --distributed_executor_backend "mp" \
-    --no-enable-prefix-caching \
-    --async-scheduling \
-    --quantization ascend \
-    --gpu-memory-utilization 0.9 \
-    --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config": {"fuse_qknorm_rope": false}}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 9, 18, 27, 54, 108]}' \
     --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
 ```
 
