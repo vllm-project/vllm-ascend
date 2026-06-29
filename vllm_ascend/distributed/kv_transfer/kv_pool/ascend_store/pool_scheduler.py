@@ -86,6 +86,9 @@ class KVPoolScheduler:
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
         self.mamba_group_ids = self._infer_mamba_groups()
+        self.num_speculative_blocks = (
+            vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
+        )
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
@@ -394,6 +397,9 @@ class KVPoolScheduler:
                 allocated_block_ids_by_group=normalize_block_ids_by_group(request.block_ids),
                 num_saved_tokens=0,
                 token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
+                mamba_group_ids=self.mamba_group_ids,
+                num_speculative_blocks=self.num_speculative_blocks,
+                block_sizes=self.grouped_block_size,
             )
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
@@ -438,6 +444,9 @@ class KVPoolScheduler:
                         allocated_block_ids_by_group=normalize_block_ids_by_group(new_block_ids),
                         num_saved_tokens=0,
                         token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
+                        mamba_group_ids=self.mamba_group_ids,
+                        num_speculative_blocks=self.num_speculative_blocks,
+                        block_sizes=self.grouped_block_size,
                     )
                     self._request_trackers[req_id] = request_tracker
                     last_chunk_tokens_num = (
@@ -474,7 +483,7 @@ class KVPoolScheduler:
                     num_computed_token = cached_reqs.num_computed_tokens[i]
                     if num_computed_token >= len(request.prompt_token_ids):
                         continue
-                    request_tracker.update(new_block_ids)
+                    request_tracker.update(new_block_ids, request.num_computed_tokens)
 
                     last_chunk_tokens_num = (
                         self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
@@ -512,6 +521,9 @@ class KVPoolScheduler:
                     token_len=num_tokens_to_compute,
                     allocated_block_ids_by_group=block_ids,
                     num_saved_tokens=0,
+                    mamba_group_ids=self.mamba_group_ids,
+                    num_speculative_blocks=self.num_speculative_blocks,
+                    block_sizes=self.grouped_block_size,
                 )
 
                 self._request_trackers[request_id] = request_tracker
@@ -561,9 +573,9 @@ class KVPoolScheduler:
         hand the connector_output, free non-null mamba blocks and so on.
         """
         meta = connector_output.kv_connector_worker_meta
-        if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
+        if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata) or self._block_pool is None:
             return
-        to_free_block_ids: list[int] = []
+
         for event_id, count in meta.completed_events.items():
             logger.debug("event %s update with %s", event_id, count)
             total = self.sending_events.get(event_id, -1)
@@ -572,15 +584,13 @@ class KVPoolScheduler:
                 continue
             total = total + count
             if total >= self._expected_worker_count:
-                to_free_block_ids.extend(self.sending_blocks.pop(event_id, []))
+                to_free_block_ids = self.sending_blocks.pop(event_id, [])
                 self.sending_events.pop(event_id, None)
+                if to_free_block_ids:
+                    logger.debug("event %s free blocks: %s", event_id, to_free_block_ids)
+                    self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in to_free_block_ids])
             else:
                 self.sending_events[event_id] = total
-
-        if to_free_block_ids:
-            logger.debug("free blocks: %s", to_free_block_ids)
-            assert self._block_pool is not None
-            self._block_pool.free_blocks([self._block_pool.blocks[block_id] for block_id in to_free_block_ids])
 
     def request_finished(
         self,

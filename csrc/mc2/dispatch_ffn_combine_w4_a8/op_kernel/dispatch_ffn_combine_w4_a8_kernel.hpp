@@ -582,7 +582,7 @@ private:
             LayoutA layoutA = params.layoutA.GetTileLayout(inGroupProblemShape.GetCoordMK());
             LayoutB layoutB1 = params.layoutB1;
             LayoutScale layoutScale = params.layoutScale1;
-            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n());
+            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n(), params.problemShape.k());
             blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
             uint32_t coreLoops = blockScheduler.GetCoreLoops();
             // Determine the starting loopIdx of the current core under the current groupIdx
@@ -634,7 +634,7 @@ private:
             if (params.listLen == 1) {
                 gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
             }
-            gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
+            gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.k();
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
         }
 
@@ -1051,14 +1051,14 @@ private:
                 uint32_t rowStartThisCore = dequantSum[syncIdx];
                 MatrixCoord offsetC{rowStartThisCore, 0};
                 MatrixCoord shapeC{curRowNum, params.problemShape.n()};
-                LayoutC layoutC{curRowNum, params.problemShape.n()};
+                LayoutC layoutC{curRowNum, params.problemShape.k()};
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
                 if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
                     blockEpilogue1(gmC[gmOffsetC * 2], shapeC, gmPerTokenScale1[rowStartThisCore], params.ptrMAux1,
                                     gmA2I4_I8[gmOffsetD], cumsumMM, rowStartThisCore, gmPerTokenScale2[rowStartThisCore],
                                     params.expertPerRank, params.EP, gmCGMM1[gmOffsetC], params.rank, params.listLen, resource,
-                                    params.epilogueCoreNum, params.swigluLimit);
+                                    params.epilogueCoreNum, params.swigluLimit, params.problemShape.k());
                 }
             }
             AscendC::SyncAll<true>();
@@ -1223,8 +1223,6 @@ private:
             ptrcumsumMM = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
-
-            workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
             ptrPerTokenScale = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * sizeof(ElementPerTokenScale);
@@ -1234,19 +1232,14 @@ private:
             ptrTokenPerExpert = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
-            ptrC = params.ptrWorkspace + workspaceOffset;  // 7
+            // GMM1 output (ptrC) and GMM2 output (ptrC2) alias — their lifetimes are separated by SYNCFLAGC2V barrier
+            ptrC = params.ptrWorkspace + workspaceOffset;
+            ptrC2 = params.ptrWorkspace + workspaceOffset;
 
             if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
-                workspaceOffset += params.maxOutputSize * params.problemShape.n() * sizeof(ElementC) * 2;
+                workspaceOffset += static_cast<int64_t>(params.maxOutputSize) * (static_cast<int64_t>(params.problemShape.n()) > static_cast<int64_t>(n2) ? static_cast<int64_t>(params.problemShape.n()) : static_cast<int64_t>(n2)) * sizeof(ElementC) * 2;
             } else {
-                workspaceOffset += params.maxOutputSize * params.problemShape.n() * sizeof(ElementC);
-            }
-            ptrC2 = params.ptrWorkspace + workspaceOffset;  // 8
-
-            if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
-                workspaceOffset += params.maxOutputSize * n2 * sizeof(ElementC) * 2;
-            } else {
-                workspaceOffset += params.maxOutputSize * n2 * sizeof(ElementC);
+                workspaceOffset += static_cast<int64_t>(params.maxOutputSize) * (static_cast<int64_t>(params.problemShape.n()) > static_cast<int64_t>(n2) ? static_cast<int64_t>(params.problemShape.n()) : static_cast<int64_t>(n2)) * sizeof(ElementC);
             }
             // ptrA = params.ptrWorkspace + workspaceOffset;  // 9
 
@@ -1255,21 +1248,16 @@ private:
 
             // workspaceOffset += params.maxOutputSize * k2 * sizeof(ElementABefore);
             if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
+                // A1Int4 and A2Int4 alias reuse (same pattern as W8A8 ptrA/ptrPermutedToken):
+                // lifetimes separated by SyncAll barrier after GMM1 loop — GMM1 reads A1Int4 complete
+                // before SwiGLU epilogue writes A2Int4
                 ptrA1Int4 = params.ptrWorkspace + workspaceOffset;
-
-                workspaceOffset += params.maxOutputSize * params.problemShape.k();
                 ptrA2Int4 = params.ptrWorkspace + workspaceOffset;
 
-                workspaceOffset += params.maxOutputSize * k2;
+                workspaceOffset += params.maxOutputSize * (params.problemShape.k() > k2 ? params.problemShape.k() : k2);
 
                 ptrCGMM1 = params.ptrWorkspace + workspaceOffset;
-#ifdef W4A8_DEBUG
-                workspaceOffset += params.maxOutputSize * params.problemShape.n() * sizeof(float);
-#endif
                 ptrCGMM2 = params.ptrWorkspace + workspaceOffset;
-#ifdef W4A8_DEBUG
-                workspaceOffset += params.maxOutputSize * n2 * sizeof(float);
-#endif
             }
             ptrSumBeforeRank = params.ptrWorkspace + workspaceOffset;
             workspaceOffset += params.EP * sizeof(int32_t) * params.expertPerRank;

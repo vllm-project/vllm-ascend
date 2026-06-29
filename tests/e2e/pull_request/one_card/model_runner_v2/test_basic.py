@@ -30,8 +30,8 @@ MAIN_MODELS = ["LLM-Research/Meta-Llama-3.1-8B-Instruct"]
 EGALE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
 
 pytestmark = pytest.mark.skipif(
-    vllm_version_is("0.22.1"),
-    reason="v2 model runner patches not supported on v0.22.1",
+    vllm_version_is("0.23.0"),
+    reason="v2 model runner patches not supported on v0.23.0",
 )
 
 

@@ -24,7 +24,6 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_NUM_BUFFERS,
     packed_broadcast_consumer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
@@ -73,8 +72,11 @@ class HCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     """Update info for HCCL weight transfer backend."""
 
     names: list[str]
+    """Names of the parameters to transfer (e.g. ``model.layers.0.weight``)."""
     dtype_names: list[str]
+    """Torch dtype names (e.g. ``bfloat16``, ``float32``) for each parameter."""
     shapes: list[list[int]]
+    """Shapes of each parameter as integer lists."""
     packed: bool = False
     """Whether to use packed tensor broadcasting for efficiency.
     When True, multiple tensors are batched together before broadcasting
@@ -125,12 +127,8 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
             model: The local model instance which will receive the weights.
-                   Not available on v0.21.0 (base class does not accept it).
         """
-        if vllm_version_is("0.21.0"):
-            super().__init__(config, parallel_config)
-        else:
-            super().__init__(config, parallel_config, model)
+        super().__init__(config, parallel_config, model)
         self.model_update_group: PyHcclCommunicator | None = None
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
