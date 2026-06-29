@@ -1,0 +1,35 @@
+# Qwen3.5-35B-A3B benchmark config for Ascend 910C
+# MoE model (35B total, 3B active); single-card friendly due to small active params.
+
+model:
+  path: /data/models/Qwen3.5-35B-A3B
+  name: Qwen3.5-35B-A3B
+  dtype: bfloat16
+  quantization: null
+  max_model_len: 32768
+  trust_remote_code: true
+
+server:
+  port: 8000
+  tensor_parallel_size: 2
+  pipeline_parallel_size: 1
+  env:
+    ASCEND_RT_VISIBLE_DEVICES: "0,1"
+    VLLM_ASCEND_ENABLE_ACLGRAPH: "1"
+    VLLM_ASCEND_ENABLE_NZ: "1"
+
+workload:
+  input_tokens: 1024
+  output_tokens: 512
+  dataset: random
+
+benchmark:
+  parallel_levels: "1 4 8 16 32 64"
+  requests_per_level: "10 40 80 160 320 640"
+  warmup_requests: 20
+  stream: true
+
+sla:
+  max_p99_ttft_ms: 5000
+  min_success_rate: 0.99
+  min_output_token_throughput: 2500
