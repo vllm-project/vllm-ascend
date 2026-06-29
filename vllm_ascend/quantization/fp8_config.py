@@ -3,7 +3,7 @@ from typing import Any, Optional, cast
 import torch
 from compressed_tensors.quantization import QuantizationArgs
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
@@ -113,7 +113,7 @@ class AscendFp8Config(QuantizationConfig):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "ds_linear", self.packed_modules_mapping)
             quant_method = AscendLinearMethod(scheme)
             return quant_method
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, MoERunner):
             layer.ascend_quant_method = FP8_METHOD
             scheme = create_scheme_for_layer(self.quant_description, prefix, "w4a8_moe", self.packed_modules_mapping)
             quant_method = AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid=tid2eid)

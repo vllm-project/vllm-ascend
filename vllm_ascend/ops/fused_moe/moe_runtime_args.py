@@ -145,7 +145,7 @@ def build_fused_experts_input(
     w2_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
-    swiglu_limit: float = 0.0,
+    swiglu_limit: float | None = None,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -187,7 +187,7 @@ def build_fused_experts_input(
             ),
             is_per_channel_weight=is_per_channel_weight,
         ),
-        swiglu_limit=swiglu_limit,
+        swiglu_limit=swiglu_limit if swiglu_limit is not None else 0.0,
     )
 
 
