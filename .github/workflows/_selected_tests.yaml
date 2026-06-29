@@ -57,7 +57,7 @@ defaults:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: none
 
 jobs:
   selected-tests:
