@@ -300,8 +300,14 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = F
 
 
 def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Config, weight_name: str) -> int | None:
+    # Parses the leading ``mtp.<idx>.`` segment so multi-MTP checkpoints
+    # (e.g. DSpark with ``mtp.[0,1,2].*``) route weights to the correct stage.
+    # Standard single-MTP checkpoints keep ``mtp.0.*`` and continue to return 0.
     if weight_name.startswith("mtp."):
-        return 0
+        try:
+            return int(weight_name.split(".", 2)[1])
+        except (IndexError, ValueError):
+            return 0
     return None
 
 

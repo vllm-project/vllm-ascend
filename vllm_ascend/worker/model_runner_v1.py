@@ -1865,6 +1865,29 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
+            # DSpark hook: pull per-position confidence scores + kept-prefix
+            # lengths after propose so the verify-batch shrink path can read
+            # them. Empty when the drafter isn't DSpark or DSpark is off.
+            # Stored on the runner rather than wired into spec_decode_metadata
+            # yet because the actual verify-batch shrink requires recomputing
+            # attention metadata + cudagraph cache invalidation for the new
+            # draft length — that's the remaining M3.1 sprint.
+            self._dspark_last_confidence = getattr(self.drafter, "last_confidence", None)
+            self._dspark_last_truncated_lengths = getattr(self.drafter, "last_truncated_lengths", None)
+            if self._dspark_last_truncated_lengths is not None and logger.isEnabledFor(20):  # INFO
+                K = self.num_spec_tokens or 1
+                with torch.no_grad():
+                    kept = self._dspark_last_truncated_lengths.float()
+                    saved = (K - kept).clamp_min(0).sum().item()
+                    total = kept.numel() * K
+                if total > 0:
+                    logger.info(
+                        "DSpark would-save: %d / %d verify tokens (%.1f%%) if hard truncation enabled "
+                        "(see M3.1)",
+                        int(saved),
+                        int(total),
+                        100.0 * saved / total,
+                    )
         else:
             raise ValueError(f"Unknown speculative decoding method: {self.speculative_config.method}")
 

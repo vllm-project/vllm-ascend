@@ -128,6 +128,24 @@ class AscendConfig:
                     str(tp_pcp_size),
                     str(vllm_config.scheduler_config.max_num_batched_tokens),
                 )
+        # DSpark (paper arxiv:2606.19348) flags. Mirror VLLM_ASCEND_ENABLE_DSPARK
+        # / VLLM_ASCEND_DSPARK_CONFIDENCE_THRESHOLD env vars so users can wire
+        # them via --additional-config instead of process env.
+        self.enable_dspark = self._get_config_value(
+            additional_config,
+            "enable_dspark",
+            "VLLM_ASCEND_ENABLE_DSPARK",
+            ascend_envs.VLLM_ASCEND_ENABLE_DSPARK,
+        )
+        self.dspark_confidence_threshold = float(
+            self._get_config_value(
+                additional_config,
+                "dspark_confidence_threshold",
+                "VLLM_ASCEND_DSPARK_CONFIDENCE_THRESHOLD",
+                ascend_envs.VLLM_ASCEND_DSPARK_CONFIDENCE_THRESHOLD,
+            )
+        )
+
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
         # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).

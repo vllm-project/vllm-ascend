@@ -3,6 +3,8 @@ from typing import TYPE_CHECKING, Any
 from vllm.config.speculative import SpeculativeConfig
 from vllm.utils.import_utils import LazyLoader
 
+from vllm_ascend import envs
+
 if TYPE_CHECKING:
     import vllm.model_executor.layers.quantization as me_quant
     from transformers import PretrainedConfig
@@ -12,14 +14,33 @@ else:
     me_quant = LazyLoader("model_executor", globals(), "vllm.model_executor.layers.quantization")
 
 
+# DSpark default MTP layer count (matches deepseek-ai/DeepSeek-V4-Flash-DSpark
+# inference/config.json: n_mtp_layers=3). Some HF root config.json files still
+# advertise num_nextn_predict_layers=1 for legacy transformers compat; when
+# DSpark is enabled we force n_predict to this value so the MTP model declares
+# 3 layers and the checkpoint's mtp.[0,1,2].* keys all land.
+DSPARK_DEFAULT_N_MTP_LAYERS = 3
+
+
 def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
     initial_architecture = hf_config.architectures[0]
+    target_model_type = None
     if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "deepseek_v4", "glm_moe_dsa"):
         target_model_type = hf_config.model_type
         hf_config.model_type = "deepseek_mtp"
     if hf_config.model_type == "deepseek_mtp":
         if target_model_type == "deepseek_v4":
-            hf_config.update({"architectures": ["DeepSeekV4MTPModel"]})
+            update_payload: dict[str, Any] = {"architectures": ["DeepSeekV4MTPModel"]}
+            if envs.VLLM_ASCEND_ENABLE_DSPARK:
+                # DSpark advertises 3 MTP layers; override n_predict so the
+                # MTP model builds 3 layers (markov+confidence head live on
+                # the last one).
+                update_payload["n_predict"] = int(
+                    getattr(hf_config, "dspark_n_mtp_layers", None)
+                    or getattr(hf_config, "n_mtp_layers", None)
+                    or DSPARK_DEFAULT_N_MTP_LAYERS
+                )
+            hf_config.update(update_payload)
         else:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update({"n_predict": n_predict, "architectures": ["DeepSeekMTPModel"]})
