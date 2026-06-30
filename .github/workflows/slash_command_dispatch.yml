@@ -35,6 +35,7 @@ jobs:
             e2e
             rerun
             nightly
+            cherry-pick
           permission: none
           issue-type: both
           dispatch-type: repository
@@ -52,6 +53,11 @@ jobs:
               },
               {
                 "command": "nightly",
+                "permission": "none",
+                "issue_type": "pull-request"
+              },
+              {
+                "command": "cherry-pick",
                 "permission": "none",
                 "issue_type": "pull-request"
               }

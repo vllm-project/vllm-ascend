@@ -653,7 +653,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -699,7 +698,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "LogitsProcessor": AscendLogitsProcessor,
         "RMSNorm": AscendRMSNorm,
         "GemmaRMSNorm": AscendGemmaRMSNorm,
-        "FusedMoE": AscendFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
@@ -710,6 +708,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
+    if vllm_version_is("0.23.0"):
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
+
+        REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE
 
     if vllm_config is None:
         try:
@@ -725,7 +727,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
-        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
         from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -748,7 +749,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "RMSNorm": AscendRMSNorm310,
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
                 "RMSNormGated": AscendRMSNormGated310,
-                "FusedMoE": AscendFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
@@ -757,6 +757,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
+        if vllm_version_is("0.23.0"):
+            from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
+
+            REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE310
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -1089,6 +1093,91 @@ def is_hierarchical_communication_enabled():
     ) or get_ascend_config().enable_mc2_hierarchy_comm
 
 
+def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = None) -> bool:
+    """True on PD-disaggregated decode nodes with recompute_scheduler_enable.
+
+    After KV recv, RecomputeScheduler sets num_computed_tokens to N-1 so the
+    decode node recomputes the last prompt token before MTP decode. Worker
+    metadata must not treat that step as prefill.
+    """
+    try:
+        if vllm_config is None:
+            try:
+                from vllm.config import get_current_vllm_config
+
+                vllm_config = get_current_vllm_config()
+            except AssertionError:
+                vllm_config = get_ascend_config().vllm_config
+        if vllm_config is None:
+            return False
+        kv_cfg = vllm_config.kv_transfer_config
+        if kv_cfg is None or not kv_cfg.is_kv_consumer or kv_cfg.is_kv_producer:
+            return False
+        return get_ascend_config().recompute_scheduler_enable
+    except (RuntimeError, AttributeError):
+        return False
+
+
+def _compute_potential_max_tokens(vllm_config) -> int:
+    """Maximal decode token count, pure arithmetic over config.
+
+    The formula lives in exactly one place; it is evaluated once via
+    set_potential_max_tokens (model runner __init__) and then reused everywhere
+    via get_potential_max_tokens. Cheap (no select_moe_comm_method).
+    """
+    compilation_config = vllm_config.compilation_config
+    scheduler_config = vllm_config.scheduler_config
+    speculative_config = vllm_config.speculative_config
+    uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
+    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
+    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
+
+    # Use max cudagraph capture size if available, otherwise the maximal uniform
+    # decode token count.
+    if compilation_config.cudagraph_capture_sizes:
+        potential_max_tokens = max(
+            compilation_config.max_cudagraph_capture_size,
+            min(
+                scheduler_config.max_num_batched_tokens,
+                scheduler_config.max_num_seqs * uniform_decode_query_len,
+            ),
+        )
+        if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
+            logger.warning_once(
+                "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
+                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
+                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
+                "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
+                "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
+                compilation_config.max_cudagraph_capture_size,
+                potential_max_tokens,
+            )
+    else:
+        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+    return potential_max_tokens
+
+
+# potential_max_tokens is computed once in the model runner __init__ and reused by
+# both the skip-allreduce decision and the o_proj static-exchange buffer sizing, so
+# neither path recomputes it. Mirrors the _mc2_tokens_capacity set/get pattern in
+# ascend_forward_context.py.
+_potential_max_tokens: int | None = None
+
+
+def set_potential_max_tokens(vllm_config) -> None:
+    """Compute and cache potential_max_tokens once (called from model runner __init__)."""
+    global _potential_max_tokens
+    if _potential_max_tokens is not None:
+        return
+    _potential_max_tokens = _compute_potential_max_tokens(vllm_config)
+
+
+def get_potential_max_tokens() -> int:
+    # Set once in NPUModelRunner.__init__ before any caller reads it.
+    assert _potential_max_tokens is not None
+    return _potential_max_tokens
+
+
 def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = False) -> bool:
     """Decide whether to skip the all-reduce across the DP group.
 
@@ -1102,6 +1191,10 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
 
     Returns False when hierarchy comm is enabled because hierarchy requires
     global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
+
+    Recomputed per call (no memoization): potential_max_tokens is a set/get global
+    computed once in init, and select_moe_comm_method is just config lookups, so
+    this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
     if is_hierarchical_communication_enabled():
         return False
@@ -1123,37 +1216,9 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     def needs_mc2(n: int) -> bool:
         return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
 
-    compilation_config = vllm_config.compilation_config
     scheduler_config = vllm_config.scheduler_config
-    speculative_config = vllm_config.speculative_config
-    uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
-    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
-    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
-
-    # Determine whether decode must use MC2. Use max cudagraph capture size
-    # if available, otherwise use the maximal uniform decode token count.
-    if compilation_config.cudagraph_capture_sizes:
-        potential_max_tokens = max(
-            compilation_config.max_cudagraph_capture_size,
-            min(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len,
-            ),
-        )
-        if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
-            logger.warning_once(
-                "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
-                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
-                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
-                "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
-                "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
-                compilation_config.max_cudagraph_capture_size,
-                potential_max_tokens,
-            )
-    else:
-        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
-
-    decode_must_use_mc2 = needs_mc2(potential_max_tokens)
+    # potential_max_tokens is read from the set/get global (computed once in init).
+    decode_must_use_mc2 = needs_mc2(get_potential_max_tokens())
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
     # Skip all-reduce if decode requires MC2 and either prefill also
@@ -1553,9 +1618,9 @@ def get_compressed_pos_and_indices(
 
 
 def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
 
 
 def is_hidden_state_cache_spec(spec) -> bool:

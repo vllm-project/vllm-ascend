@@ -8,9 +8,11 @@ if not hasattr(torch, "npu"):
     torch.npu = SimpleNamespace(Event=object)  # type: ignore[attr-defined]
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    LayerMultiBlockReqMeta,
     ReqMeta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreLayerSendingThread,
     KVCacheStoreSendingThread,
 )
 
@@ -40,9 +42,6 @@ class _FakeStore:
 
 
 class _FakeTokenDatabase:
-    # KVTransferThread base __init__ reads len(token_database.group_block_len[0]).
-    group_block_len = {0: [16]}
-
     def process_tokens(self, token_len, block_hashes):
         for i, _ in enumerate(block_hashes):
             yield i * 16, (i + 1) * 16, _FakeKey(f"k{i}")
@@ -88,6 +87,41 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
         put_keys, put_addrs, put_sizes = store.put_calls[0]
         self.assertEqual(put_keys, ["k1", "k3"])
         self.assertEqual(put_addrs, [[1001], [1003]])
+        self.assertEqual(put_sizes, [[16], [16]])
+
+    def test_layer_sending_thread_only_puts_missing_keys(self):
+        store = _FakeStore(exists_result=[1, 0, 1, 0])
+        token_db = _FakeTokenDatabase()
+        thread = KVCacheStoreLayerSendingThread(
+            m_store=store,
+            token_database=token_db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            ready_event=threading.Event(),
+            num_layers=2,
+            enable_kv_event=False,
+        )
+
+        req_meta = LayerMultiBlockReqMeta(
+            req_id="req-2",
+            keys=[_FakeKey("k0"), _FakeKey("k1"), _FakeKey("k2"), _FakeKey("k3")],  # type: ignore[arg-type]
+            starts=[0, 16, 32, 48],
+            ends=[16, 32, 48, 64],
+            block_ids=[0, 1, 2, 3],
+            layer_id=1,
+            is_last_chunk=False,
+            current_event=None,
+        )
+        thread.request_queue.put(req_meta)
+        thread.add_stored_request(req_meta.req_id)
+        thread._handle_request(req_meta)
+
+        self.assertEqual(len(store.put_calls), 1)
+        put_keys, put_addrs, put_sizes = store.put_calls[0]
+        self.assertEqual(put_keys, ["k1", "k3"])
+        self.assertEqual(put_addrs, [[2101], [2103]])
         self.assertEqual(put_sizes, [[16], [16]])
 
 

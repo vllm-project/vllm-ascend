@@ -74,7 +74,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
 
         mock_export_type.Text = "Text"
         mock_profiler_level.Level1 = "Level1"
-        mock_aic_metrics.AiCoreNone = "AiCoreNone"
+        mock_aic_metrics.PipeUtilization = "PipeUtilization"
         mock_profiler_activity.CPU = "CPU"
         mock_profiler_activity.NPU = "NPU"
 
@@ -94,7 +94,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
             "export_type": "Text",
             "profiler_level": "Level1",
             "msprof_tx": False,
-            "aic_metrics": "AiCoreNone",
+            "aic_metrics": "PipeUtilization",
             "l2_cache": False,
             "op_attr": False,
             "data_simplification": True,
@@ -193,7 +193,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
         )
         mock_export_type.Text = "Text"
         mock_profiler_level.Level1 = "Level1"
-        mock_aic_metrics.AiCoreNone = "AiCoreNone"
+        mock_aic_metrics.PipeUtilization = "PipeUtilization"
         mock_profiler_activity.CPU = "CPU"
         mock_profiler_activity.NPU = "NPU"
         mock_profile.return_value = MagicMock()

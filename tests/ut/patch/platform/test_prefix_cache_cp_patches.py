@@ -26,7 +26,6 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
-from vllm_ascend.utils import vllm_version_is
 
 
 def _make_hybrid_kv_cache_config(
@@ -340,10 +339,7 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         dcp_world_size=2,
         pcp_world_size=2,
     )
-    # vLLM main added a required ``scheduler_block_size`` arg to
-    # ``SingleTypeKVCacheManager.__init__``; v0.22.1 has no such parameter.
-    if not vllm_version_is("0.22.1"):
-        manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
+    manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size

@@ -416,3 +416,37 @@ class TestUtils(TestBase):
             result = utils.maybe_trans_nz(weight)
             self.assertIs(result, weight)
             assert_nz_cast(weight)
+
+
+def test_is_pd_decode_recompute_scheduler_enabled_without_config():
+    assert utils.is_pd_decode_recompute_scheduler_enabled() is False
+
+
+def test_is_pd_decode_recompute_scheduler_enabled_kv_producer():
+    vllm_config = mock.MagicMock()
+    vllm_config.kv_transfer_config = mock.MagicMock()
+    vllm_config.kv_transfer_config.is_kv_consumer = False
+    vllm_config.kv_transfer_config.is_kv_producer = True
+    assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer():
+    vllm_config = mock.MagicMock()
+    vllm_config.kv_transfer_config = mock.MagicMock()
+    vllm_config.kv_transfer_config.is_kv_consumer = True
+    vllm_config.kv_transfer_config.is_kv_producer = False
+    ascend_config = mock.MagicMock()
+    ascend_config.recompute_scheduler_enable = True
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
+        assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is True
+
+
+def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
+    vllm_config = mock.MagicMock()
+    vllm_config.kv_transfer_config = mock.MagicMock()
+    vllm_config.kv_transfer_config.is_kv_consumer = True
+    vllm_config.kv_transfer_config.is_kv_producer = False
+    ascend_config = mock.MagicMock()
+    ascend_config.recompute_scheduler_enable = False
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
+        assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
