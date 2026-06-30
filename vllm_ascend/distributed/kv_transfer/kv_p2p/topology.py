@@ -107,6 +107,8 @@ def resolve_pd_topology(vllm_config: VllmConfig) -> PDTopology:
 
 
 def validate_remote_prefill_tp_size(prefill_tp_size: int, decode_tp_size: int) -> None:
+    if decode_tp_size <= 0:
+        raise ValueError(f"decode_tp_size: {decode_tp_size} must be greater than 0.")
     if prefill_tp_size < decode_tp_size:
         raise ValueError(
             f"prefill_tp_size: {prefill_tp_size} must be greater than or equal to decode_tp_size: {decode_tp_size}."

@@ -1488,7 +1488,8 @@ class MooncakeConnectorWorker:
         self._decode_tp_size = topology.decode_tp_size
         self._decode_dp_size = topology.decode_dp_size
         self._decode_pp_size = topology.decode_pp_size
-        assert self._decode_pp_size == 1, "decode pp size must be 1"
+        if self._decode_pp_size != 1:
+            raise ValueError("decode pp size must be 1")
         self._prefill_pp_layer_partition = topology.prefill_pp_layer_partition
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):

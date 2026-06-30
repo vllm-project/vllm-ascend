@@ -1837,7 +1837,8 @@ class MooncakeConnectorWorker:
         self._decode_tp_size = topology.decode_tp_size
         self._decode_dp_size = topology.decode_dp_size
         self._decode_pp_size = topology.decode_pp_size
-        assert self._decode_pp_size == 1, "decode pp size must be 1"
+        if self._decode_pp_size != 1:
+            raise ValueError("decode pp size must be 1")
         self._prefill_pp_layer_partition = topology.prefill_pp_layer_partition
 
     @staticmethod
@@ -2490,9 +2491,8 @@ class MooncakeConnectorWorker:
                     ((remote_ports[0] - remote_base_port) % (prefill_tp_size * prefill_pp_size)) // prefill_tp_size
                 ]
             else:
-                assert len(remote_ports) % tp_num_need_pulls == 0, (
-                    f"tp_num_need_pulls: {tp_num_need_pulls}, remote_ports: {remote_ports}"
-                )
+                if len(remote_ports) % tp_num_need_pulls != 0:
+                    raise ValueError(f"tp_num_need_pulls: {tp_num_need_pulls}, remote_ports: {remote_ports}")
                 remote_tp_offsets = [rank_idx % tp_num_need_pulls for rank_idx in range(len(remote_ports))]
                 prefill_pp_ranks = [
                     ((remote_port - remote_base_port) % (prefill_tp_size * prefill_pp_size)) // prefill_tp_size
@@ -2548,10 +2548,11 @@ class MooncakeConnectorWorker:
 
             num_group_pulls = self._get_attention_group_num_need_pulls(group_spec, prefill_tp_size)
             chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size, prefill_pp_size)
-            assert len(chosen_rank_list) == num_group_pulls * prefill_pp_size, (
-                f"chosen_rank_list({chosen_rank_list}) does not match num_group_pulls({num_group_pulls}) "
-                f"and prefill pp size({prefill_pp_size})."
-            )
+            if len(chosen_rank_list) != num_group_pulls * prefill_pp_size:
+                raise ValueError(
+                    f"chosen_rank_list({chosen_rank_list}) does not match num_group_pulls({num_group_pulls}) "
+                    f"and prefill pp size({prefill_pp_size})."
+                )
             for rank_idx, remote_rank in enumerate(chosen_rank_list):
                 prefill_pp_rank = rank_idx // num_group_pulls
                 add_group_pull(

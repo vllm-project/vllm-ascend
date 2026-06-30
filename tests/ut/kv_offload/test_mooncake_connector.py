@@ -1203,7 +1203,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         delay_free, params = self.scheduler.request_finished(request, ([10, 11],))
 
         self.assertTrue(delay_free)
-        assert params is not None
+        self.assertIsNotNone(params)
         self.assertEqual(params["remote_ptp_size"], self.config.parallel_config.tensor_parallel_size)
         self.assertEqual(params["remote_dp_size"], self.config.parallel_config.data_parallel_size)
         self.assertEqual(params["remote_pp_size"], self.config.parallel_config.pipeline_parallel_size)
@@ -1605,6 +1605,13 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "prefill_tp_size: 2 must be greater than or equal"):
             worker._get_remote_ranks_for_req("test", prefill_tp_size=2)
+
+    def test_decode_tp_zero_raises_clear_error(self):
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker._decode_tp_size = 0
+
+        with self.assertRaisesRegex(ValueError, "decode_tp_size: 0 must be greater than 0"):
+            worker._get_tp_num_need_pulls(prefill_tp_size=4)
 
     def test_remote_port_send_num_covers_unpulled_prefill_ranks_for_unequal_tp(self):
         self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
