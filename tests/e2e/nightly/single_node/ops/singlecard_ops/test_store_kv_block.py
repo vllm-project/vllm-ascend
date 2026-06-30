@@ -127,23 +127,12 @@ def test_myops(num_tokens, num_head, block_size, num_blocks, count):
 
     time.sleep(0.1)
 
-    slot_mapping_list = slot_mapping_cpu.tolist()
-    warm_up = 0
-    for _ in range(warm_up):
-        group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_pre(
-            slot_mapping_npu, slot_mapping_list, block_size
-        )
-        torch.ops._C_ascend.store_kv_block(
-            key_npu, key_cache_npu, group_len, group_key_idx, group_key_cache_idx, block_size
-        )
-    N = 101
-    for zt_i in range(N):
-        group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_pre(
-            slot_mapping_npu, slot_mapping_list, block_size
-        )
-        torch.ops._C_ascend.store_kv_block(
-            key_npu, key_cache_npu, group_len, group_key_idx, group_key_cache_idx, block_size
-        )
+    group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_metadata(
+        slot_mapping_npu, block_size
+    )
+    torch.ops._C_ascend.store_kv_block(
+        key_npu, key_cache_npu, group_len, group_key_idx, group_key_cache_idx, block_size
+    )
 
     torch.testing.assert_close(key_expect, key_cache_npu, atol=0.001, rtol=0.1)
 
