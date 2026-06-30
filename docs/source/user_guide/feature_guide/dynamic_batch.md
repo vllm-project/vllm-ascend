@@ -3,7 +3,7 @@
 Dynamic batch is a technique that dynamically adjusts the chunksize during each inference iteration within the chunked prefilling strategy according to the resources and SLO targets, thereby improving the effective throughput and decreasing the TBT.
 
 Dynamic batch is controlled by the value of the `--SLO_limits_for_dynamic_batch`.
-Notably, only 910 B3 is supported with decode token number scales below 2048 so far.
+Notably, only Atlas A2 inference products are supported with decode token number scales below 2048 so far.
 Especially, the improvements are quite obvious on Qwen, Llama models.
 We are working on further improvements and this feature will support more XPUs in the future.
 
