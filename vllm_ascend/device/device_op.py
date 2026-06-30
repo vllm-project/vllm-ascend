@@ -33,6 +33,9 @@ from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
+DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
+DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
+
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
@@ -519,6 +522,11 @@ class BaseDeviceAdaptor:
     def get_dsa_sparse_attn_base_kwargs():
         """Returns base kwargs for sparse attention (extended by caller)."""
         return {}
+
+    @staticmethod
+    def get_dsa_compressor_slot_mapping_format():
+        """Slot mapping side output format consumed by the DSA scatter op."""
+        return DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
 
     # ===== SWA / Compressor KV Scatter =====
 
@@ -1155,6 +1163,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def get_dsa_sparse_attn_base_kwargs():
         return {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
 
+    @staticmethod
+    def get_dsa_compressor_slot_mapping_format():
+        """A5 kv_compress_epilog consumes flat slot ids."""
+        return DSA_COMPRESSOR_SLOT_MAPPING_FLAT
+
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
@@ -1293,8 +1306,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def pad_dsa_decode_slot_mapping(slot_mapping, num_decode_tokens, compress_ratio, num_decodes):
         """A5: pad slot_mapping to target shape for ACL graph compatibility."""
-        tmp = compress_ratio if compress_ratio != 0 else 1
-        target_shape = min(num_decode_tokens, num_decode_tokens // tmp + num_decodes)
+        effective_compress_ratio = compress_ratio if compress_ratio != 0 else 1
+        target_shape = min(num_decode_tokens, num_decode_tokens // effective_compress_ratio + num_decodes)
         pad_size = target_shape - slot_mapping.shape[0]
         if pad_size > 0:
             if slot_mapping.ndim == 1:

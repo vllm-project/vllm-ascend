@@ -24,7 +24,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -235,15 +235,18 @@ class AscendDSAPrefillMetadata:
     input_positions: torch.Tensor
     query_start_loc: torch.Tensor
     block_table: torch.Tensor
-    slot_mapping: torch.Tensor
+    slot_mapping: torch.Tensor | None
+    block_size: int
     max_query_len: int
     max_seq_lens: int
 
+    num_compressed_tokens: int | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
-    compress_sin: torch.Tensor = None
-    compress_cos: torch.Tensor = None
+    full_compress_sin: torch.Tensor = None
+    full_compress_cos: torch.Tensor = None
     start_pos: torch.Tensor | None = None
+    num_reqs_actual: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
     cu_c4_cmp_seqlen_list: torch.Tensor = None
@@ -261,18 +264,21 @@ class AscendDSADecodeMetadata:
     max_seqlen_q: int
     seq_lens_list: list[int]
     max_seq_lens: int
-    slot_mapping: torch.Tensor
+    slot_mapping: torch.Tensor | None
+    block_size: int
 
+    num_compressed_tokens: int | None = None
     query_start_loc: torch.tensor = None
     query_start_loc_cpu: torch.tensor = None
     attn_mask: torch.Tensor | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
-    compress_sin: torch.Tensor = None
-    compress_cos: torch.Tensor = None
+    full_compress_sin: torch.Tensor = None
+    full_compress_cos: torch.Tensor = None
     cp_seq_len: torch.Tensor = None
     batch_seq_mask: torch.Tensor = None
     start_pos: torch.Tensor = None
+    num_reqs_actual: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
 
@@ -354,7 +360,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     decode_qli_metadata: torch.Tensor | None = None
     prefill_ratio_to_sas_metadata: dict | None = None
     decode_ratio_to_sas_metadata: dict | None = None
-    block_size: int | None = 128
+    block_size: int = 128
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -518,6 +524,21 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ):
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
 
+    def _num_compressor_metadata_rows(
+        self,
+        build_step: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> int:
+        if build_step == BUILD_METADATA_STEP_PREFILL:
+            num_tokens = self.num_prefill_tokens
+            num_reqs = self.num_prefills
+        elif build_step == BUILD_METADATA_STEP_DECODE:
+            num_tokens = self.num_decode_tokens
+            num_reqs = self.num_decodes
+        else:
+            raise ValueError(f"Unsupported DSA metadata build step: {build_step}")
+        return min(num_tokens, num_tokens // self.compressor_ratio + num_reqs)
+
     def build(
         self,
         common_prefix_len: int,
@@ -588,7 +609,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         prefill_metadata = None
         if self.num_prefills > 0:
-            prefill_metadata = self.build_prefill_metadata(common_prefix_len, common_attn_metadata)
+            prefill_metadata = self.build_prefill_metadata(
+                common_prefix_len,
+                common_attn_metadata,
+                num_reqs_actual,
+            )
 
         decode_metadata = None
 
@@ -620,6 +645,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        num_reqs_actual: int | None,
     ) -> AscendDSAPrefillMetadata:
         assert self.prefill_ratio_to_sas_metadata is not None
         assert self.decode_ratio_to_sas_metadata is not None
@@ -670,75 +696,34 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             prefill_seq_lens = self.prefill_ratio_to_sas_metadata["prefill_seq_lens"]
             num_prefill = self.prefill_ratio_to_sas_metadata["num_prefill"]
 
-        def _get_padded_compressed_position(prefill_input_positions, compress_ratio):
-            if compress_ratio <= 1:
-                return prefill_input_positions
-            mask = ((prefill_input_positions + 1) % compress_ratio) == 0
-            input_positions = prefill_input_positions[mask]
-            input_positions = (input_positions + 1) - compress_ratio
-            target_shape = (
-                min(self.num_prefill_tokens, self.num_prefill_tokens // compress_ratio + self.num_prefills),
-            )
-            pad_right = target_shape[0] - input_positions.shape[0]
-            pad_positions = F.pad(input_positions, (0, pad_right), value=0.0)
-            return pad_positions
-
-        def _get_cmp_seq_lens(prefill_seq_lens, compress_ratio):
-            # Note(qcs): some models use compress_ratio=0 as non-compression tag.
-            _cmp_seq_lens = prefill_seq_lens // compress_ratio if compress_ratio >= 1 else prefill_seq_lens
-            return torch.concat(
-                (torch.tensor([0], device=_cmp_seq_lens.device), torch.cumsum(_cmp_seq_lens, -1)), dim=-1
-            )
-
-        def _get_compressed_decode_token_start_and_end(decode_input_positions, compress_ratio):
-            # Note(qcs): some models use compress_ratio=0 as non-compression tag.
-            if compress_ratio == 0:
-                compress_ratio = 1
-            # TODO(yilin): decode_input_positions is a device tensor,
-            # this will introduce sync operation. Refactor me to torch.where instead
-            mask = ((decode_input_positions + 1) % compress_ratio) == 0
-            compressed_decode_num = mask.sum()
-
-            end = min(self.num_prefill_tokens, self.num_prefill_tokens // compress_ratio + self.num_prefills)
-            return compressed_decode_num, end
-
-        if self.prefill_ratio_to_sas_metadata.get(f"c{self.compressor_ratio}_cos", None) is None:
-            compress_cos, compress_sin = get_cos_and_sin_dsa(
-                _get_padded_compressed_position(prefill_input_positions, self.compressor_ratio)
-            )
-            self.prefill_ratio_to_sas_metadata[f"c{self.compressor_ratio}_cos"] = compress_cos
-            self.prefill_ratio_to_sas_metadata[f"c{self.compressor_ratio}_sin"] = compress_sin
-        else:
-            compress_cos = self.prefill_ratio_to_sas_metadata[f"c{self.compressor_ratio}_cos"]
-            compress_sin = self.prefill_ratio_to_sas_metadata[f"c{self.compressor_ratio}_sin"]
-
-        if self.prefill_ratio_to_sas_metadata.get(f"compressed_c{self.compressor_ratio}_tokens_start", None) is None:
-            decode_input_positions = input_positions[:tokens_start]
-            compressed_tokens_start, compressed_tokens_end = _get_compressed_decode_token_start_and_end(
-                decode_input_positions, self.compressor_ratio
-            )
-            self.prefill_ratio_to_sas_metadata[f"compressed_c{self.compressor_ratio}_tokens_start"] = (
-                compressed_tokens_start
-            )
-            self.prefill_ratio_to_sas_metadata[f"compressed_c{self.compressor_ratio}_tokens_ebd"] = (
-                compressed_tokens_end
-            )
-        else:
-            compressed_tokens_start = self.prefill_ratio_to_sas_metadata[
-                f"compressed_c{self.compressor_ratio}_tokens_start"
-            ]
-            compressed_tokens_end = self.prefill_ratio_to_sas_metadata[
-                f"compressed_c{self.compressor_ratio}_tokens_ebd"
-            ]
-
-        prefill_slot_mapping = self.slot_mapping[
-            compressed_tokens_start : compressed_tokens_end + compressed_tokens_start
-        ]
-
         assert self.start_pos_prefill is not None
         self.start_pos_prefill.fill_(0)
         seq_lens_q = prefill_query_start_loc[1:] - prefill_query_start_loc[:-1]
         self.start_pos_prefill[:num_prefill] = self.seq_lens[reqs_start:] - seq_lens_q
+        num_prefills_actual = num_prefill
+        if num_reqs_actual is not None:
+            num_prefills_actual = max(min(num_reqs_actual - reqs_start, num_prefill), 0)
+            if num_prefills_actual < num_prefill:
+                self.start_pos_prefill[num_prefills_actual:num_prefill].fill_(0)
+                self.block_table[
+                    reqs_start + num_prefills_actual : reqs_start + num_prefill,
+                    ...,
+                ].fill_(0)
+
+        layer_name = f"c{self.compressor_ratio}"
+        full_compress_cos, full_compress_sin = None, None
+        if self.compressor_ratio > 1:
+            # Keep only graph inputs here. The compressor metadata op itself is
+            # launched in forward at the real compressor consumer.
+            num_compressed_tokens = self._num_compressor_metadata_rows(
+                BUILD_METADATA_STEP_PREFILL,
+                common_attn_metadata,
+            )
+            full_compress_cos, full_compress_sin = get_full_cos_and_sin_dsa(layer_name)
+            prefill_slot_mapping = None
+        else:
+            num_compressed_tokens = self.num_prefill_tokens
+            prefill_slot_mapping = self.slot_mapping[tokens_start : tokens_start + self.num_prefill_tokens]
 
         tp_size = get_tensor_model_parallel_world_size()
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
@@ -747,7 +732,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_c4_cmp_seqlen_list = None
         cu_c128_cmp_seqlen_list = None
 
-        layer_name = f"c{self.compressor_ratio}"
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         if self.compressor_ratio <= 1:
@@ -860,14 +844,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions=prefill_input_positions,
             block_table=self.block_table[reqs_start:, ...],
             slot_mapping=prefill_slot_mapping,
+            block_size=self.block_size,
+            num_compressed_tokens=num_compressed_tokens,
             max_query_len=max_query_len,
             max_seq_lens=max_seq_lens,
             query_start_loc=prefill_query_start_loc,
             sin=sin,
             cos=cos,
-            compress_sin=compress_sin,
-            compress_cos=compress_cos,
+            full_compress_sin=full_compress_sin,
+            full_compress_cos=full_compress_cos,
             start_pos=self.start_pos_prefill[:num_prefill],
+            num_reqs_actual=num_prefills_actual,
             sas_metadata=sas_metadata,
             qli_metadata=qli_metadata,
             cu_c4_cmp_seqlen_list=cu_c4_cmp_seqlen_list,
@@ -891,7 +878,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.decode_ratio_to_sas_metadata["sin"] = sin
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: self.num_decodes + 1]
-            input_positions_cpu = common_attn_metadata.positions_cpu[: self.num_decode_tokens].long()
 
             # Prefer _seq_lens_cpu (always available, updated during draft
             # iterations) over seq_lens_cpu (None in async spec decode mode).
@@ -902,10 +888,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             else:
                 _seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             max_seq_lens = _seq_lens_cpu[: self.num_decodes].max().item()
-            decode_input_positions = input_positions_cpu
             seq_lens_list = _seq_lens_cpu[: self.num_decodes].tolist()
             self.decode_ratio_to_sas_metadata["query_start_loc_cpu"] = query_start_loc_cpu
-            self.decode_ratio_to_sas_metadata["decode_input_positions"] = decode_input_positions
             self.decode_ratio_to_sas_metadata["max_seq_lens"] = max_seq_lens
             self.decode_ratio_to_sas_metadata["seq_lens_list"] = seq_lens_list
 
@@ -923,7 +907,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos = self.decode_ratio_to_sas_metadata["cos"]
             sin = self.decode_ratio_to_sas_metadata["sin"]
             query_start_loc_cpu = self.decode_ratio_to_sas_metadata["query_start_loc_cpu"]
-            decode_input_positions = self.decode_ratio_to_sas_metadata["decode_input_positions"]
             max_seq_lens = self.decode_ratio_to_sas_metadata["max_seq_lens"]
             seq_lens_list = self.decode_ratio_to_sas_metadata["seq_lens_list"]
             max_seqlen_kv = self.decode_ratio_to_sas_metadata["max_seqlen_kv"]
@@ -934,56 +917,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         cp_seq_len, batch_seq_mask = None, None
 
-        def _get_padded_compressed_position(decode_input_positions, compress_ratio, device):
-            if compress_ratio <= 1:
-                return decode_input_positions
-            mask = ((decode_input_positions + 1) % compress_ratio) == 0
-            input_positions = decode_input_positions[mask]
-            input_positions = (input_positions + 1) - compress_ratio
-            target_shape = (min(self.num_decode_tokens, self.num_decode_tokens // compress_ratio + self.num_decodes),)
-            pad_right = target_shape[0] - input_positions.shape[0]
-            pad_positions = F.pad(input_positions, (0, pad_right), value=0.0)
-            gpu_pad_positions = pad_positions.pin_memory().to(device, non_blocking=True)
-            return gpu_pad_positions
-
-        layer_name = f"c{self.compressor_ratio}"
-        if self.decode_ratio_to_sas_metadata.get(layer_name + "_cos", None) is None:
-            compress_cos, compress_sin = get_cos_and_sin_dsa(
-                {
-                    layer_name: _get_padded_compressed_position(
-                        decode_input_positions, self.compressor_ratio, input_positions.device
-                    )
-                },
-                use_cache=True,
-            )
-            self.decode_ratio_to_sas_metadata[layer_name + "_cos"] = compress_cos
-            self.decode_ratio_to_sas_metadata[layer_name + "_sin"] = compress_sin
-        else:
-            compress_cos = self.decode_ratio_to_sas_metadata[layer_name + "_cos"]
-            compress_sin = self.decode_ratio_to_sas_metadata[layer_name + "_sin"]
-
-        def _get_compressed_decode_token_start(decode_input_positions, compress_ratio):
-            # Note(qcs): some models use compress_ratio=0 as non-compression tag.
-            if compress_ratio == 0:
-                compress_ratio = 1
-            mask = ((decode_input_positions + 1) % compress_ratio) == 0
-            compressed_decode_num = mask.sum().item()
-            return compressed_decode_num
-
-        if self.decode_ratio_to_sas_metadata.get("compressed_tokens_start_" + str(self.compressor_ratio), None) is None:
-            compressed_tokens_start = _get_compressed_decode_token_start(decode_input_positions, self.compressor_ratio)
-            self.decode_ratio_to_sas_metadata["compressed_tokens_start_" + str(self.compressor_ratio)] = (
-                compressed_tokens_start
-            )
-        else:
-            compressed_tokens_start = self.decode_ratio_to_sas_metadata[
-                "compressed_tokens_start_" + str(self.compressor_ratio)
-            ]
-
-        slot_mapping = DeviceOperator.pad_dsa_decode_slot_mapping(
-            self.slot_mapping[:compressed_tokens_start], self.num_decode_tokens, self.compressor_ratio, self.num_decodes
-        )
-
         assert self.start_pos_decode is not None
         self.start_pos_decode.fill_(0)
         self.start_pos_decode[: self.num_decodes] = start_pos_decode
@@ -991,6 +924,27 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if num_reqs_actual is not None and num_reqs_actual < self.num_decodes:
             self.start_pos_decode[num_reqs_actual:].fill_(0)
             self.block_table[num_reqs_actual : self.num_decodes, ...].fill_(0)
+        num_decodes_actual = min(num_reqs_actual, self.num_decodes) if num_reqs_actual is not None else self.num_decodes
+
+        layer_name = f"c{self.compressor_ratio}"
+        full_compress_cos, full_compress_sin = None, None
+        if self.compressor_ratio > 1:
+            # Keep only graph inputs here. The compressor metadata op itself is
+            # launched in forward at the real compressor consumer.
+            num_compressed_tokens = self._num_compressor_metadata_rows(
+                BUILD_METADATA_STEP_DECODE,
+                common_attn_metadata,
+            )
+            full_compress_cos, full_compress_sin = get_full_cos_and_sin_dsa(layer_name)
+            slot_mapping = None
+        else:
+            num_compressed_tokens = self.num_decode_tokens
+            slot_mapping = DeviceOperator.pad_dsa_decode_slot_mapping(
+                self.slot_mapping[: self.num_decode_tokens],
+                self.num_decode_tokens,
+                self.compressor_ratio,
+                self.num_decodes,
+            )
 
         tp_size = get_tensor_model_parallel_world_size()
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
@@ -1116,6 +1070,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions=input_positions,
             block_table=self.block_table[:block_table_size, ...],
             slot_mapping=slot_mapping,
+            block_size=self.block_size,
+            num_compressed_tokens=num_compressed_tokens,
             seq_lens=self.seq_lens[: self.num_decodes],  # cached
             seq_lens_list=seq_lens_list,
             max_seq_lens=max_seq_lens,
@@ -1126,11 +1082,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc_cpu=query_start_loc_cpu,
             sin=sin[: self.num_decode_tokens, ...],
             cos=cos[: self.num_decode_tokens, ...],
-            compress_sin=compress_sin,
-            compress_cos=compress_cos,
+            full_compress_sin=full_compress_sin,
+            full_compress_cos=full_compress_cos,
             cp_seq_len=cp_seq_len,
             batch_seq_mask=batch_seq_mask,
             start_pos=self.start_pos_decode[: self.num_decodes],  # cached
+            num_reqs_actual=num_decodes_actual,
             sas_metadata=self.decode_sas_metadata,
             qli_metadata=self.decode_qli_metadata,
         )
@@ -1259,13 +1216,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions=None,  # type: ignore[arg-type]
             block_table=block_table[reqs_start:, ...],
             slot_mapping=prefill_slot_mapping,
+            block_size=self.block_size,
             max_query_len=None,  # type: ignore[arg-type]
             max_seq_lens=None,  # type: ignore[arg-type]
             query_start_loc=prefill_query_start_loc,
             sin=sin,
             cos=cos,
-            compress_sin=None,
-            compress_cos=None,
             start_pos=None,
             sas_metadata=sas_metadata,
             qli_metadata=None,
@@ -1338,6 +1294,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             input_positions=None,
             block_table=block_table[:num_decodes, ...],
             slot_mapping=slot_mapping,
+            block_size=self.block_size,
             seq_lens=seq_lens[:num_decodes],
             seq_lens_list=None,  # type: ignore[arg-type]
             max_seq_lens=None,  # type: ignore[arg-type]
@@ -1348,8 +1305,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             query_start_loc_cpu=None,
             sin=sin[:num_decode_tokens, ...],
             cos=cos[:num_decode_tokens, ...],
-            compress_sin=None,
-            compress_cos=None,
             cp_seq_len=None,
             batch_seq_mask=None,
             start_pos=None,
@@ -1516,6 +1471,36 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert topk_indices_to_cache.shape[1] == 1
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
         topk_indices_buffer.copy_(topk_indices_to_cache)
+
+    def _compute_compressor_metadata(
+        self,
+        metadata: AscendDSAPrefillMetadata | AscendDSADecodeMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert metadata.full_compress_cos is not None
+        assert metadata.full_compress_sin is not None
+        assert metadata.num_compressed_tokens is not None
+        assert metadata.start_pos is not None
+        assert metadata.num_reqs_actual is not None
+        full_compress_cos = metadata.full_compress_cos.view(
+            metadata.full_compress_cos.shape[0],
+            metadata.full_compress_cos.shape[-1],
+        )
+        full_compress_sin = metadata.full_compress_sin.view(
+            metadata.full_compress_sin.shape[0],
+            metadata.full_compress_sin.shape[-1],
+        )
+        return torch.ops._C_ascend.compressor_metadata(
+            full_compress_cos,
+            full_compress_sin,
+            metadata.query_start_loc,
+            metadata.start_pos,
+            metadata.block_table,
+            metadata.block_size,
+            DeviceOperator.get_dsa_compressor_slot_mapping_format(),
+            self.compress_ratio,
+            metadata.num_compressed_tokens,
+            metadata.num_reqs_actual,
+        )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Attention impls are not walked by vllm's process_weights_after_loading
@@ -1929,9 +1914,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             # swa exec kv
             DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_prefill_metadata.slot_mapping)
 
-        compress_cos = common_prefill_metadata.compress_cos[layer_name]
-        compress_sin = common_prefill_metadata.compress_sin[layer_name]
-
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
         DeviceOperator.add_dsa_sparse_attn_extra_kwargs(extra_attn_kwargs, cu_seqlens_ori_kv=actual_seq_lengths_query)
@@ -1977,8 +1959,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             attn_metadata=attn_metadata,
                             cos=cos,
                             sin=sin,
-                            compressed_cos=compress_cos,
-                            compressed_sin=compress_sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             with_prefill=True,
                         )
@@ -1990,8 +1970,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             attn_metadata=attn_metadata,
                             cos=cos,
                             sin=sin,
-                            compressed_cos=compress_cos,
-                            compressed_sin=compress_sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=True,
@@ -1999,6 +1977,9 @@ class AscendDSAImpl(DSAAttentionImpl):
                         )
 
             coff = 2 if self.compressor_overlap else 1
+            compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
+                compressor_prefill_metadata,
+            )
 
             # Inline compressor + scatter (c128, c4 non-dual)
             compressed_kv = torch.ops._C_ascend.compressor(
@@ -2022,9 +2003,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 cache_mode=1,
             )
 
-            if compressed_kv.numel() == 0:
-                compressed_kv = None
-
             # For multistream_dsv4_dsa_overlap with compress_ratio=4:
             # aux_stream: indexer_weights_proj (parallel with main q_quant + kv_scatter)
             # main stream: compressed_kv -> q_quant -> kv_scatter -> wait aux_stream -> lightning_indexer
@@ -2038,9 +2016,10 @@ class AscendDSAImpl(DSAAttentionImpl):
                 # Main stream: q_quant (between compressed_kv and kv_scatter)
                 q_quant, q_scale = DeviceOperator.indexer_quantize_query(indexer_q)
 
-            DeviceOperator.dsa_kv_compress_scatter(
-                compress_kv_cache, compressed_kv, compressor_prefill_metadata.slot_mapping
-            )
+            # A zero-row compressor output has no KV writes. Skip scatter
+            # instead of passing None; A5 scatter dereferences x.view().
+            if compressed_kv.shape[0] > 0:
+                DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
 
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
                 # Wait aux_stream weights_proj done, then compute dot
@@ -2255,8 +2234,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         if self.compress_ratio > 1:
             compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)
             compressor_state_decode_metadata = _require_decode_metadata(compressor_kv_state_metadata)
-            compress_cos = common_decode_metadata.compress_cos[layer_name]
-            compress_sin = common_decode_metadata.compress_sin[layer_name]
             compress_topk_idxs = None
             if self.compress_ratio == 4:
                 # IndexCache: decode segment occupies buffer[:num_decode_tokens]
@@ -2272,8 +2249,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             attn_metadata=attn_metadata,
                             cos=cos,
                             sin=sin,
-                            compressed_cos=compress_cos,
-                            compressed_sin=compress_sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             with_prefill=False,
                             qr_pertoken_scale=qr_pertoken_scale,
@@ -2286,8 +2261,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                             attn_metadata=attn_metadata,
                             cos=cos,
                             sin=sin,
-                            compressed_cos=compress_cos,
-                            compressed_sin=compress_sin,
                             actual_seq_lengths_query=actual_seq_lengths_query,
                             actual_seq_lengths_key=actual_seq_lengths_key,
                             with_prefill=False,
@@ -2295,6 +2268,9 @@ class AscendDSAImpl(DSAAttentionImpl):
                         )
 
             coff = 2 if self.compressor_overlap else 1
+            compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
+                compressor_decode_metadata,
+            )
 
             # Inline compressor + scatter (c128, c4 non-dual)
             compressed_kv = torch.ops._C_ascend.compressor(
@@ -2331,9 +2307,10 @@ class AscendDSAImpl(DSAAttentionImpl):
                 # Main stream: q_quant (between compressed_kv and kv_scatter)
                 q_quant, q_scale = DeviceOperator.indexer_quantize_query(indexer_q)
 
-            DeviceOperator.dsa_kv_compress_scatter(
-                compress_kv_cache, compressed_kv, compressor_decode_metadata.slot_mapping
-            )
+            # A zero-row compressor output has no KV writes. Skip scatter
+            # instead of passing None; A5 scatter dereferences x.view().
+            if compressed_kv.shape[0] > 0:
+                DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
 
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
                 # Wait aux_stream weights_proj done
@@ -2444,8 +2421,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         attn_metadata: DSAMetadataList,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        compressed_cos: torch.Tensor,
-        compressed_sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
@@ -2494,11 +2469,17 @@ class AscendDSAImpl(DSAAttentionImpl):
             indexer_scale_prefill_metadata = _require_prefill_metadata(indexer_kv_scale_metadata)
             kv_block_table = indexer_state_prefill_metadata.block_table
             start_pos = indexer_scale_prefill_metadata.start_pos
+            compressed_cos, compressed_sin, indexer_slot_mapping = self._compute_compressor_metadata(
+                indexer_scale_prefill_metadata,
+            )
         else:
             indexer_state_decode_metadata = _require_decode_metadata(indexer_kv_state_metadata)
             indexer_scale_decode_metadata = _require_decode_metadata(indexer_kv_scale_metadata)
             kv_block_table = indexer_state_decode_metadata.block_table
             start_pos = indexer_scale_decode_metadata.start_pos
+            compressed_cos, compressed_sin, indexer_slot_mapping = self._compute_compressor_metadata(
+                indexer_scale_decode_metadata,
+            )
 
         kv = torch.ops._C_ascend.compressor(
             x,
@@ -2534,6 +2515,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             indexer_full_cache,
             indexer_kv_state_metadata,
             indexer_kv_scale_metadata,
+            indexer_slot_mapping,
             with_prefill,
         )
 
@@ -2547,6 +2529,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         indexer_full_cache: torch.Tensor | None,
         indexer_kv_state_metadata,
         indexer_kv_scale_metadata,
+        indexer_slot_mapping: torch.Tensor,
         with_prefill: bool,
     ):
         q, q_scale, kv, kv_scale = self._indexer_quant_scatter(
@@ -2555,8 +2538,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             indexer_k_cache,
             indexer_scale_cache,
             indexer_full_cache,
-            indexer_kv_scale_metadata,
-            with_prefill,
+            indexer_slot_mapping,
         )
         return self._indexer_qli(
             q,
@@ -2575,14 +2557,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         indexer_k_cache: torch.Tensor,
         indexer_scale_cache: torch.Tensor,
         indexer_full_cache: torch.Tensor | None,
-        indexer_kv_scale_metadata,
-        with_prefill: bool,
+        slot_mapping: torch.Tensor,
     ):
-        slot_mapping = (
-            indexer_kv_scale_metadata.prefill.slot_mapping
-            if with_prefill
-            else indexer_kv_scale_metadata.decode.slot_mapping
-        )
         return DeviceOperator.indexer_quant_scatter(
             q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping
         )
@@ -2641,22 +2617,18 @@ class AscendDSAImpl(DSAAttentionImpl):
         attn_metadata: DSAMetadataList,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        compressed_cos: torch.Tensor,
-        compressed_sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor | None = None,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
     ):
-        q, kv, ik, isc, ifc, indexer_kv_state_meta, isc_meta, wp = self._indexer_qkv_prepare(
+        q, kv, ik, isc, ifc, indexer_kv_state_meta, isc_meta, indexer_slot_mapping, wp = self._indexer_qkv_prepare(
             x,
             qr,
             kv_cache,
             attn_metadata,
             cos,
             sin,
-            compressed_cos,
-            compressed_sin,
             actual_seq_lengths_query,
             with_prefill,
             qr_pertoken_scale,
@@ -2664,7 +2636,18 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
 
-        return self._indexer_qli_finish(q, kv, weights, ik, isc, ifc, indexer_kv_state_meta, isc_meta, wp)
+        return self._indexer_qli_finish(
+            q,
+            kv,
+            weights,
+            ik,
+            isc,
+            ifc,
+            indexer_kv_state_meta,
+            isc_meta,
+            indexer_slot_mapping,
+            wp,
+        )
 
     def cv_indexer_select_qli(
         self,
@@ -2674,8 +2657,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         attn_metadata: DSAMetadataList,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        compressed_cos: torch.Tensor,
-        compressed_sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
@@ -2714,11 +2695,17 @@ class AscendDSAImpl(DSAAttentionImpl):
             indexer_scale_prefill_metadata = _require_prefill_metadata(indexer_kv_scale_metadata)
             kv_block_table = indexer_state_prefill_metadata.block_table
             start_pos = indexer_scale_prefill_metadata.start_pos
+            compressed_cos, compressed_sin, slot_mapping_indexer = self._compute_compressor_metadata(
+                indexer_scale_prefill_metadata,
+            )
         else:
             indexer_state_decode_metadata = _require_decode_metadata(indexer_kv_state_metadata)
             indexer_scale_decode_metadata = _require_decode_metadata(indexer_kv_scale_metadata)
             kv_block_table = indexer_state_decode_metadata.block_table
             start_pos = indexer_scale_decode_metadata.start_pos
+            compressed_cos, compressed_sin, slot_mapping_indexer = self._compute_compressor_metadata(
+                indexer_scale_decode_metadata,
+            )
 
         kv = torch.ops._C_ascend.compressor(
             x,
@@ -2752,11 +2739,6 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # Aux: kv_quant + scatter_k_cache (parallel with main matmul + rope)
         if kv is not None:
-            slot_mapping_indexer = (
-                indexer_scale_prefill_metadata.slot_mapping
-                if with_prefill
-                else indexer_scale_decode_metadata.slot_mapping
-            )
             with npu_stream_switch(aux_stream, enabled=True):
                 torch.npu.current_stream().wait_event(e_kv_ready)
                 kv, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
@@ -2801,16 +2783,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         # and scale_cache in one fused operation, so Part3 is skipped
         # (kv_scale is None on A5 from indexer_quant_scatter_part1).
         if kv is not None and kv_scale is not None:
-            slot_mapping_indexer_part3 = (
-                indexer_scale_prefill_metadata.slot_mapping
-                if with_prefill
-                else indexer_scale_decode_metadata.slot_mapping
-            )
             with npu_stream_switch(aux_stream, enabled=True):
                 torch.npu.current_stream().wait_event(e_rope_done)
-                DeviceOperator.dsa_indexer_scatter_scale_part3(
-                    kv_scale, indexer_scale_cache, slot_mapping_indexer_part3
-                )
+                DeviceOperator.dsa_indexer_scatter_scale_part3(kv_scale, indexer_scale_cache, slot_mapping_indexer)
 
         # Main: q_hadamard[Part1 - linear] (directly submit, C/AIV different engines dispatch naturally)
         # Part1: F.linear - parallel with aux_stream kv_scatter

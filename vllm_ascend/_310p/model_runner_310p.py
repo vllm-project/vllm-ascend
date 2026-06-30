@@ -244,7 +244,7 @@ class NPUModelRunner310(NPUModelRunner):
         self,
         scheduler_output: SchedulerOutput,
         num_scheduled_tokens: np.ndarray,
-    ) -> tuple[torch.Tensor, SpecDecodeMetadata | None, int, list[np.ndarray[Any, Any]] | None]:
+    ) -> tuple[torch.Tensor, SpecDecodeMetadata | None, int]:
         """
         310P cannot use the Triton slot-mapping kernel or the generic NPU Add
         kernels used by the base runner for decode metadata. Keep those pieces
@@ -578,7 +578,6 @@ class NPUModelRunner310(NPUModelRunner):
             logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
-            None,  # num_scheduled_tokens_compressed_list (not used in 310P)
         )
 
     @torch.inference_mode()

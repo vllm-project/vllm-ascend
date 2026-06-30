@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 
 class RopeGlobalState:
     def __init__(self):
-        self.static_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self.full_rope_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         self.runtime_buffer: dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]] = {}
         self.layer_info: dict[str, tuple[str, list[str]]] = {}
         self.registry_summary: dict[str, set] = {}
@@ -67,9 +67,9 @@ def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_c
     batch_result: dict[Any, Any] = {}
 
     for config_key, registered_groups in _ROPE_STATE.registry_summary.items():
-        if config_key not in _ROPE_STATE.static_cache:
+        if config_key not in _ROPE_STATE.full_rope_cache:
             continue
-        static_cos, static_sin = _ROPE_STATE.static_cache[config_key]
+        full_rope_cos, full_rope_sin = _ROPE_STATE.full_rope_cache[config_key]
 
         batch_result[config_key] = {}
 
@@ -77,8 +77,8 @@ def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_c
             if group_name not in registered_groups:
                 continue
 
-            curr_cos = static_cos[pos_tensor]
-            curr_sin = static_sin[pos_tensor]
+            curr_cos = full_rope_cos[pos_tensor]
+            curr_sin = full_rope_sin[pos_tensor]
 
             if use_cache:
                 group_buffers = _ROPE_STATE.runtime_buffer.get(config_key, {}).get(group_name)
@@ -97,6 +97,30 @@ def get_cos_and_sin_dsa(positions: torch.Tensor | dict[str, torch.Tensor], use_c
                 batch_result[config_key][group_name] = (curr_cos, curr_sin)
 
     return RopeDataProxy(batch_result, is_cos=True), RopeDataProxy(batch_result, is_cos=False)
+
+
+def get_full_cos_and_sin_dsa(group_name: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the full precomputed RoPE cache for a registered DSA RoPE group.
+
+    Unlike get_cos_and_sin_dsa(), this does not index by token positions on
+    Python side. The compressor metadata op consumes the full cache and selects
+    compressed-row RoPE positions on device.
+    """
+    config_keys = [
+        config_key
+        for config_key, registered_groups in _ROPE_STATE.registry_summary.items()
+        if group_name in registered_groups
+    ]
+    if not config_keys:
+        raise KeyError(f"RoPE group {group_name} is not registered.")
+    if len(config_keys) > 1:
+        raise KeyError(f"RoPE group {group_name} is registered with multiple configs: {config_keys}.")
+
+    config_key = config_keys[0]
+    if config_key not in _ROPE_STATE.full_rope_cache:
+        raise KeyError(f"Rope cache for group {group_name} is not initialized.")
+
+    return _ROPE_STATE.full_rope_cache[config_key]
 
 
 class ComplexExpRotaryEmbedding(nn.Module):
@@ -130,7 +154,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
         for grp in rope_groups:
             _ROPE_STATE.registry_summary[config_key].add(grp)
 
-        if config_key not in _ROPE_STATE.static_cache:
+        if config_key not in _ROPE_STATE.full_rope_cache:
             inv_freq = self.precompute_freqs_cis(
                 rotary_dim, max_position_embeddings, max_position_embeddings, base, scaling_factor, beta_fast, beta_slow
             )
@@ -145,7 +169,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
             cos = cos.to(current_platform.device_type)
             sin = sin.to(current_platform.device_type)
 
-            _ROPE_STATE.static_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
+            _ROPE_STATE.full_rope_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
 
         if config_key not in _ROPE_STATE.runtime_buffer:
             _ROPE_STATE.runtime_buffer[config_key] = {}
