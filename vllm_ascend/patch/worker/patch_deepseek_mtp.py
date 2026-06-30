@@ -75,9 +75,7 @@ class AscendDeepSeekMTP(DeepSeekMTP):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states = self.model(
-            input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
-        )
+        hidden_states = self.model(input_ids, positions, hidden_states, inputs_embeds, spec_step_idx)
         return hidden_states
 
 class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
