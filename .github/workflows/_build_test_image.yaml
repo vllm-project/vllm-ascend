@@ -81,69 +81,68 @@ jobs:
             soc: "ascend910b1"
             arch: arm64
             mode: device
-            # runner: linux-arm64-cpu-16
-            runner: ubuntu-arm-22.04
+            runner: linux-arm64-cpu-16
             vllm_label: main
             vllm_version: ${{ inputs.vllm_main_commit }}
-          # - npu_type: a2
-          #   cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
-          #   soc: "ascend910b1"
-          #   arch: arm64
-          #   mode: device
-          #   runner: linux-arm64-cpu-16
-          #   vllm_label: release
-          #   vllm_version: ${{ inputs.vllm_release_tag }}
-          # # A3 (ARM64, device)
-          # - npu_type: a3
-          #   cann_tag: "9.0.0-a3-ubuntu22.04-py3.12"
-          #   soc: "ascend910_9391"
-          #   arch: arm64
-          #   mode: device
-          #   runner: linux-arm64-cpu-16
-          #   vllm_label: main
-          #   vllm_version: ${{ inputs.vllm_main_commit }}
-          # - npu_type: a3
-          #   cann_tag: "9.0.0-a3-ubuntu22.04-py3.12"
-          #   soc: "ascend910_9391"
-          #   arch: arm64
-          #   mode: device
-          #   runner: linux-arm64-cpu-16
-          #   vllm_label: release
-          #   vllm_version: ${{ inputs.vllm_release_tag }}
-          # # 310P (ARM64, device)
-          # - npu_type: 310p
-          #   cann_tag: "9.1.0-beta.1-310p-ubuntu22.04-py3.12"
-          #   soc: "ascend310p1"
-          #   arch: arm64
-          #   mode: device
-          #   runner: linux-arm64-cpu-16
-          #   vllm_label: main
-          #   vllm_version: ${{ inputs.vllm_main_commit }}
-          # - npu_type: 310p
-          #   cann_tag: "9.1.0-beta.1-310p-ubuntu22.04-py3.12"
-          #   soc: "ascend310p1"
-          #   arch: arm64
-          #   mode: device
-          #   runner: linux-arm64-cpu-16
-          #   vllm_label: release
-          #   vllm_version: ${{ inputs.vllm_release_tag }}
-          # # CPU (AMD64, nodevice)
-          # - npu_type: cpu
-          #   cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
-          #   soc: "ascend910b1"
-          #   arch: amd64
-          #   mode: nodevice
-          #   runner: linux-amd64-cpu-16-hk
-          #   vllm_label: main
-          #   vllm_version: ${{ inputs.vllm_main_commit }}
-          # - npu_type: cpu
-          #   cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
-          #   soc: "ascend910b1"
-          #   arch: amd64
-          #   mode: nodevice
-          #   runner: linux-amd64-cpu-16-hk
-          #   vllm_label: release
-          #   vllm_version: ${{ inputs.vllm_release_tag }}
+          - npu_type: a2
+            cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
+            soc: "ascend910b1"
+            arch: arm64
+            mode: device
+            runner: linux-arm64-cpu-16
+            vllm_label: release
+            vllm_version: ${{ inputs.vllm_release_tag }}
+          # A3 (ARM64, device)
+          - npu_type: a3
+            cann_tag: "9.0.0-a3-ubuntu22.04-py3.12"
+            soc: "ascend910_9391"
+            arch: arm64
+            mode: device
+            runner: linux-arm64-cpu-16
+            vllm_label: main
+            vllm_version: ${{ inputs.vllm_main_commit }}
+          - npu_type: a3
+            cann_tag: "9.0.0-a3-ubuntu22.04-py3.12"
+            soc: "ascend910_9391"
+            arch: arm64
+            mode: device
+            runner: linux-arm64-cpu-16
+            vllm_label: release
+            vllm_version: ${{ inputs.vllm_release_tag }}
+          # 310P (ARM64, device)
+          - npu_type: 310p
+            cann_tag: "9.1.0-beta.1-310p-ubuntu22.04-py3.12"
+            soc: "ascend310p1"
+            arch: arm64
+            mode: device
+            runner: linux-arm64-cpu-16
+            vllm_label: main
+            vllm_version: ${{ inputs.vllm_main_commit }}
+          - npu_type: 310p
+            cann_tag: "9.1.0-beta.1-310p-ubuntu22.04-py3.12"
+            soc: "ascend310p1"
+            arch: arm64
+            mode: device
+            runner: linux-arm64-cpu-16
+            vllm_label: release
+            vllm_version: ${{ inputs.vllm_release_tag }}
+          # CPU (AMD64, nodevice)
+          - npu_type: cpu
+            cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
+            soc: "ascend910b1"
+            arch: amd64
+            mode: nodevice
+            runner: linux-amd64-cpu-16-hk
+            vllm_label: main
+            vllm_version: ${{ inputs.vllm_main_commit }}
+          - npu_type: cpu
+            cann_tag: "9.0.0-910b-ubuntu22.04-py3.12"
+            soc: "ascend910b1"
+            arch: amd64
+            mode: nodevice
+            runner: linux-amd64-cpu-16-hk
+            vllm_label: release
+            vllm_version: ${{ inputs.vllm_release_tag }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
