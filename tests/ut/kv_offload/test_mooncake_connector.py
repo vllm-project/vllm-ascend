@@ -14,6 +14,7 @@ import msgspec
 import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -293,6 +294,145 @@ class TestKVCacheSendingThread(unittest.TestCase):
         reformatted_k_cache, reformatted_v_cache = group_kv_caches["layer.0"]
         torch.testing.assert_close(reformatted_k_cache, expected)
         torch.testing.assert_close(reformatted_v_cache, expected)
+
+
+class TestMooncakeTransferGroups(unittest.TestCase):
+    def test_build_kv_group2layeridx_splits_uniform_group_by_kv_heads(self):
+        mla_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        qga_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        layer_specs = {
+            "model.layers.0.self_attn": mla_spec,
+            "model.layers.1.self_attn": qga_spec,
+        }
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs(layer_specs)
+        assert uniform_spec is not None
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.total_layers = 32
+        worker.kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    layer_names=list(layer_specs),
+                    kv_cache_spec=uniform_spec,
+                )
+            ]
+        )
+
+        kv_group2layeridx = worker._build_kv_group2layeridx()
+
+        self.assertEqual(len(kv_group2layeridx), 2)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_group_id"], 0)
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_group_id"], 0)
+        self.assertEqual(worker._get_attention_group_num_key_value_heads(kv_group2layeridx[0][0]), 1)
+        self.assertEqual(worker._get_attention_group_num_key_value_heads(kv_group2layeridx[1][0]), 8)
+
+    def test_hybrid_rank_pulls_use_transfer_group_kv_heads(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.vllm_config.model_config.is_deepseek_mla = True
+        worker.tp_rank = 0
+        worker.tp_size = 4
+        worker._decode_tp_size = 4
+        worker._prefill_tp_size = 8
+        worker._prefill_pp_size = 1
+        worker.num_key_value_heads = 128
+        worker.use_sparse = False
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
+                    "kv_cache_group_id": 0,
+                    "kv_cache_spec": {"model.layers.0.self_attn": {"num_kv_heads": 1}},
+                },
+                [0],
+            ),
+            1: (
+                {
+                    "kv_cache_spec_type": "UniformTypeKVCacheSpecs",
+                    "kv_cache_group_id": 0,
+                    "kv_cache_spec": {"model.layers.1.self_attn": {"num_kv_heads": 8}},
+                },
+                [1],
+            ),
+        }
+
+        _, rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls("req-1", prefill_tp_size=8)
+        pulls = [pull for group_pulls in rank_group_pulls.values() for pull in group_pulls]
+        mla_pulls = [pull for pull in pulls if pull.group_id == 0]
+        qga_pulls = [pull for pull in pulls if pull.group_id == 1]
+
+        self.assertEqual(len(mla_pulls), 1)
+        self.assertEqual(mla_pulls[0].num_group_pulls, 1)
+        self.assertEqual(len(qga_pulls), 2)
+        self.assertTrue(all(pull.num_group_pulls == 2 for pull in qga_pulls))
+
+    def test_hybrid_group_pulls_metadata_filters_groups_per_remote_card(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.vllm_config.model_config.is_deepseek_mla = True
+        worker._is_hma_required = True
+        worker.tp_rank = 0
+        worker.tp_size = 4
+        worker._decode_tp_size = 4
+        worker._prefill_tp_size = 8
+        worker._prefill_pp_size = 1
+        worker.num_key_value_heads = 128
+        worker.use_sparse = False
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "kv_cache_group_id": 0,
+                    "kv_cache_spec": {"num_kv_heads": 1},
+                },
+                [0],
+            ),
+            1: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "kv_cache_group_id": 0,
+                    "kv_cache_spec": {"num_kv_heads": 8},
+                },
+                [1],
+            ),
+        }
+        req_id = "req-1"
+        remote_base_port = 30000
+        remote_handshake_port_list = [[remote_base_port + rank] for rank in range(8)]
+
+        _, expected_rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size=8)
+        group_pulls_list = worker._get_group_pulls_metadata(
+            req_id,
+            remote_handshake_port_list,
+            prefill_tp_size=8,
+            remote_base_port=remote_base_port,
+        )
+
+        group_ids_by_rank = [
+            [group_pull.group_id for group_pull in group_pulls_list[rank][0]]
+            for rank in range(len(remote_handshake_port_list))
+        ]
+        expected_group_ids_by_rank = [
+            [group_pull.group_id for group_pull in expected_rank_group_pulls.get(rank, [])]
+            for rank in range(len(remote_handshake_port_list))
+        ]
+
+        self.assertEqual(group_ids_by_rank, expected_group_ids_by_rank)
+        self.assertTrue(any(set(group_ids) != {0, 1} for group_ids in group_ids_by_rank))
+        self.assertFalse(all(set(group_ids) == {0, 1} for group_ids in group_ids_by_rank))
 
 
 class TestKVCacheRecvingThreadBasic(unittest.TestCase):
