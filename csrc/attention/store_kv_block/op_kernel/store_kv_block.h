@@ -113,9 +113,9 @@ public:
         for (uint32_t i = 0; i < corePerNum; i++) {
             uint32_t idx = (coreId+i*blockNum);
          
-            // if( groupLenGt.GetValue(idx)<= 0 || groupKeyIdxGt.GetValue(idx)<0 || groupKeyCacheIdxGt.GetValue(idx)<0){
-            //     continue;
-            // }
+            if( groupLenGt.GetValue(idx)<= 0 || groupKeyIdxGt.GetValue(idx)<0 || groupKeyCacheIdxGt.GetValue(idx)<0){
+                continue;
+            }
            
             copyParams.blockLen = groupLenGt.GetValue(idx)*tokenByteSize; // in bytes
             DataCopyPad(tokenLocal, keyInputGt[ groupKeyIdxGt.GetValue(idx)*tokenSize], copyParams, padParams); // note: offset order
