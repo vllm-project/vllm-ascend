@@ -406,7 +406,6 @@ class NPUModelRunner310(NPUModelRunner):
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         self._compute_prev_positions(num_reqs)
 
-
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
         if self.uses_mrope:
             self._calc_mrope_positions(scheduler_output)
@@ -454,7 +453,7 @@ class NPUModelRunner310(NPUModelRunner):
                 self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
-        else: 
+        else:
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
 
@@ -494,12 +493,16 @@ class NPUModelRunner310(NPUModelRunner):
         )
         if need_async_num_computed_update:
             self.seq_lens[:num_reqs] = self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+            tail_len = self.seq_lens.shape[0] - num_reqs
+            if tail_len > 0:
+                self.seq_lens[num_reqs:].copy_(
+                    self.optimistic_seq_lens_cpu[num_reqs:].to(self.device, non_blocking=True),
+                )
         else:
-            self.seq_lens[:num_reqs].copy_(
-                self.optimistic_seq_lens_cpu[:num_reqs],
+            self.seq_lens.copy_(
+                self.optimistic_seq_lens_cpu[: self.seq_lens.shape[0]],
                 non_blocking=True,
             )
-        self.seq_lens[num_reqs:].fill_(0)
 
         if (
             self._needs_seq_lens_cpu_sync
