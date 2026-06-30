@@ -68,6 +68,10 @@ class MooncakeBackend(Backend):
         self.store: Any | None = None
         self.local_seg: str | None = None
         self._use_fabric_mem = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
+        # ASCEND_GLOBAL_RESOURCE_CONFIG: dual-protocol / RoCE Store path where the store
+        # operates independently of the global transfer engine; setup goes through store
+        # and buffers are registered via store.register_buffer() instead of global_te.
+        self._use_store_independent_te = bool(os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG"))
         self._lazy_init = lazy_init and self._use_fabric_mem
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
@@ -114,7 +118,8 @@ class MooncakeBackend(Backend):
         # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
         # and only can be used for 800 I/T A3 series.
         # Required supporting hardware versions are as follows:
-        if not self._use_fabric_mem:
+        # ASCEND_GLOBAL_RESOURCE_CONFIG takes the same store-independent-TE setup path as fabric-mem.
+        if not self._use_fabric_mem and not self._use_store_independent_te:
             transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
             self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
             ret = store.setup(
@@ -162,7 +167,18 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-        if not self._use_fabric_mem:
+        if self._use_store_independent_te:
+            assert self.store is not None
+            for ptr, length in zip(ptrs, lengths):
+                ret = self.store.register_buffer(ptr, length)
+                if ret != 0:
+                    logger.error(
+                        "Failed to register buffer via store: ptr=%s, length=%s, ret=%s",
+                        ptr,
+                        length,
+                        ret,
+                    )
+        elif not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)
             global_te.register_buffer(ptrs, lengths)
