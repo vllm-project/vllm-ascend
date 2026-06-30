@@ -104,5 +104,6 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         ):
             self.assertEqual(coord.load_mask(_hashes(16), 2048), ([True] * 4,))
 
+
 if __name__ == "__main__":
     unittest.main()

@@ -537,6 +537,7 @@ class KVPoolScheduler:
                     skip_save=None,
                     block_hashes=request.block_hashes,
                     discard_partial_chunks=self._discard_partial_chunks,
+                    original_block_size=self.original_block_size,
                     kv_cache_group_families=self.kv_cache_group_families,
                 )
                 if req_meta is not None:

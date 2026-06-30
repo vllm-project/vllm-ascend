@@ -559,9 +559,7 @@ class KVPoolWorker:
                     block_ids = request.block_ids_by_group[group_id]
                     group_block_size = self.grouped_block_size[group_id]
                     mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
-                    skip_null = (
-                        group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
-                    )
+                    skip_null = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
                     for start, end, key, block_id in self.token_database.process_tokens_with_block_ids(
                         token_len,
                         request.block_hashes,
