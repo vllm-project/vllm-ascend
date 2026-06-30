@@ -1,6 +1,7 @@
-import torch
 import numpy as np
+import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+
 
 def compute_causal_conv1d_metadata(
     query_start_loc_p_cpu: torch.Tensor,
@@ -30,22 +31,16 @@ def compute_causal_conv1d_metadata(
         for idx, num in enumerate(nums):
             offsetlist.extend(range(num))
         offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
-        
+
         if batch_ptr is None or batch_ptr.numel() < MAX_NUM_PROGRAMS:
-            batch_ptr_cpu = torch.full(
-                (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32
-            )
-            token_chunk_offset_ptr_cpu = torch.full(
-                (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32
-            )
+            batch_ptr_cpu = torch.full((MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32)
+            token_chunk_offset_ptr_cpu = torch.full((MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32)
             if device.type == "cpu":
                 batch_ptr = batch_ptr_cpu
                 token_chunk_offset_ptr = token_chunk_offset_ptr_cpu
             else:
                 batch_ptr = batch_ptr_cpu.to(device, non_blocking=False)
-                token_chunk_offset_ptr = token_chunk_offset_ptr_cpu.to(
-                    device, non_blocking=False
-                )
+                token_chunk_offset_ptr = token_chunk_offset_ptr_cpu.to(device, non_blocking=False)
         else:
             batch_ptr_cpu.fill_(PAD_SLOT_ID)
             token_chunk_offset_ptr_cpu.fill_(PAD_SLOT_ID)
