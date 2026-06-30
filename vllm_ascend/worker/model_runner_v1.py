@@ -3640,6 +3640,22 @@ class NPUModelRunner(GPUModelRunner):
                 if "sink" in name:
                     self._has_sinks = True
                     break
+            # [EVS] Mirror GPUModelRunner.load_model: enable the multimodal
+            # pruning (EVS) runner codepath when the model supports it and the
+            # user passed --video-pruning-rate q>0. Without this, the ascend
+            # runner leaves is_multimodal_pruning_enabled at its __init__
+            # default (False), so recompute_mrope_positions is never called
+            # and the 5 EVS position channels are not stripped before
+            # embed_input_ids (shape mismatch hidden+5 vs hidden).
+            from vllm.model_executor.models.interfaces import (
+                supports_multimodal_pruning,
+            )
+            mm_config = self.model_config.multimodal_config
+            self.is_multimodal_pruning_enabled: bool = bool(
+                supports_multimodal_pruning(self.model)
+                and mm_config is not None
+                and mm_config.is_multimodal_pruning_enabled()
+            )
             if self.dynamic_eplb:
                 model_register(self.model)
             if self.drafter:
