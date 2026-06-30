@@ -90,6 +90,60 @@ if not vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 
 
+def _use_torch_hc_fallback(vllm_config: VllmConfig) -> bool:
+    return bool((vllm_config.additional_config or {}).get("deepseek_v4_use_torch_hc", False))
+
+
+def _sinkhorn_normalize_torch(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:
+    x = x.softmax(dim=-1) + eps
+    x = x / (x.sum(dim=-2, keepdim=True) + eps)
+    for _ in range(max(repeat - 1, 0)):
+        x = x / (x.sum(dim=-1, keepdim=True) + eps)
+        x = x / (x.sum(dim=-2, keepdim=True) + eps)
+    return x
+
+
+def _hc_pre_torch(
+    x: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    hc_mult: int,
+    hc_sinkhorn_iters: int,
+    norm_eps: float,
+    hc_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    shape, dtype = x.shape, x.dtype
+    x_float = x.float()
+    x_flat = x_float.flatten(-2, -1)
+    inv_rms = torch.rsqrt(x_flat.square().mean(dim=-1, keepdim=True) + norm_eps)
+    mixes = F.linear(x_flat, hc_fn) * inv_rms
+
+    pre = torch.sigmoid(mixes[..., :hc_mult] * hc_scale[0] + hc_base[:hc_mult]) + hc_eps
+    post = torch.sigmoid(
+        mixes[..., hc_mult : 2 * hc_mult] * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult]
+    ) * 2.0
+    comb = mixes[..., 2 * hc_mult :].view(*shape[:-2], hc_mult, hc_mult)
+    comb = comb * hc_scale[2] + hc_base[2 * hc_mult :].view(hc_mult, hc_mult)
+    comb = _sinkhorn_normalize_torch(comb, hc_sinkhorn_iters, hc_eps)
+
+    y = (x_float * pre.unsqueeze(-1)).sum(dim=-2).to(dtype)
+    return y, post, comb
+
+
+def _hc_post_torch(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+) -> torch.Tensor:
+    if post.dim() == residual.dim():
+        post = post.squeeze(-1)
+    mixed_residual = torch.matmul(comb.transpose(-1, -2), residual.float())
+    out = x.float().unsqueeze(-2) * post.float().unsqueeze(-1) + mixed_residual
+    return out.to(residual.dtype)
+
+
 def _get_ascend_dsa_backend():
     # Keep this lazy to avoid vLLM model-inspection circular imports.
     from vllm_ascend.attention.dsa_v1 import AscendDSABackend
@@ -966,14 +1020,28 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+        self.use_torch_hc = _use_torch_hc_fallback(vllm_config)
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
+        if self.use_torch_hc:
+            return _hc_pre_torch(
+                x,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                self.hc_mult,
+                self.hc_sinkhorn_iters,
+                self.norm_eps,
+                self.hc_eps,
+            )
         y = torch.ops._C_ascend.npu_hc_pre_v2(
             x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps
         )
         return y
 
     def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
+        if self.use_torch_hc:
+            return _hc_post_torch(x, residual, post, comb)
         y = torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(dim=0), residual.unsqueeze(dim=0), post.unsqueeze(dim=0), comb.unsqueeze(dim=0)
         )
@@ -1085,6 +1153,14 @@ class DeepseekV4Model(nn.Module):
             dtype=vllm_config.model_config.dtype,
             device=self.device,
         )
+        self._dspark_target_layer_ids = list(getattr(config, "dspark_target_layer_ids", []) or [])
+        if self._dspark_target_layer_ids:
+            self._dspark_hidden_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                len(self._dspark_target_layer_ids) * config.hidden_size,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1130,8 +1206,12 @@ class DeepseekV4Model(nn.Module):
 
         if get_pp_group().is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
+        dspark_hiddens: list[torch.Tensor] = []
+        dspark_target_ids = set(self._dspark_target_layer_ids)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+            if layer.layer_idx in dspark_target_ids:
+                dspark_hiddens.append(hidden_states.mean(dim=1))
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
         # When FlashComm1 (sequence parallelism) is enabled, tokens are
@@ -1153,6 +1233,14 @@ class DeepseekV4Model(nn.Module):
         else:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+        if self._dspark_target_layer_ids and dspark_hiddens:
+            dspark_states = torch.cat(dspark_hiddens, dim=-1)
+            if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
+                dspark_states = tensor_model_parallel_all_gather(dspark_states, dim=0)
+                pad_size = forward_ctx.pad_size
+                if pad_size > 0:
+                    dspark_states = dspark_states[:-pad_size]
+            self._dspark_hidden_buffer[: dspark_states.shape[0]].copy_(dspark_states)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1305,6 +1393,8 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,
         hc_mult * hidden_size) for the MTP draft model. Populated by
         forward(); valid after each target step."""
+        if getattr(self.model, "_dspark_target_layer_ids", None):
+            return getattr(self.model, "_dspark_hidden_buffer", None)
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
