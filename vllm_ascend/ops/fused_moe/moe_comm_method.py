@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 from __future__ import annotations
 
+import importlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -23,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -46,6 +48,75 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+
+_CANN_ACL_INT8 = 258
+_CANN_ACL_INT4 = 285
+_CANN_TORCH_FLOAT8_E4M3FN = 24
+
+_CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
+_CANN_MEGA_MOE_QUANT_MODE_MX = 4
+
+_DISPATCH_FFN_COMBINE_MODE = 1
+_CANN_MEGA_MOE_FUSED_MC2_MODE = 2
+_CANN_MEGA_MOE_MODULE_NAME = "cann_ops_transformer.ops.mega_moe"
+
+
+def _as_tensor_list(value: torch.Tensor | list[torch.Tensor], name: str) -> list[torch.Tensor]:
+    if isinstance(value, list):
+        if not value:
+            raise ValueError(f"{name} cannot be an empty list for CANN MegaMoe.")
+        return value
+    return [value]
+
+
+def _as_optional_tensor_list(value: torch.Tensor | list[torch.Tensor] | None) -> list[torch.Tensor] | None:
+    if value is None:
+        return None
+    return _as_tensor_list(value, "optional CANN MegaMoe tensor list")
+
+
+def _infer_intermediate_hidden(weight1: torch.Tensor, weight2: torch.Tensor, hidden: int) -> int:
+    if weight2.dim() >= 2:
+        if weight2.shape[-1] == hidden:
+            return int(weight2.shape[-2])
+        if weight2.shape[-2] == hidden:
+            return int(weight2.shape[-1])
+    if weight1.dim() < 2:
+        return hidden
+    if weight1.shape[-1] == hidden:
+        combined_intermediate = int(weight1.shape[-2])
+    elif weight1.shape[-2] == hidden:
+        combined_intermediate = int(weight1.shape[-1])
+    else:
+        combined_intermediate = int(weight1.shape[-2])
+    if combined_intermediate > 1 and combined_intermediate % 2 == 0:
+        return combined_intermediate // 2
+    return combined_intermediate
+
+
+def _normalize_cann_activation(activation) -> str:
+    activation_value = getattr(activation, "value", activation)
+    activation_value = "swiglu" if activation_value is None else str(activation_value)
+    return "swiglu" if activation_value in ("silu", "swiglu") else activation_value
+
+
+def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:
+    # CANN 9.1 docs name this argument dispatch_quant_out_dtype and show
+    # torch.int8, while the installed Python wrapper still accepts ACL dtype
+    # enum ints. Keep the enum values until the wrapper schema changes.
+    if quant_type == QuantType.W8A8:
+        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8)
+    if quant_type == QuantType.W4A8:
+        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4)
+    if quant_type == QuantType.MXFP8:
+        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_TORCH_FLOAT8_E4M3FN, None)
+    if quant_type == QuantType.W4A8MXFP:
+        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_TORCH_FLOAT8_E4M3FN, None)
+    raise RuntimeError(
+        "CANN 9.1 MegaMoe integration supports W8A8/W4A8 INT on A2/A3 and MXFP on FP8-capable "
+        "MegaMoe platforms. "
+        f"Unsupported quant type: {quant_type}."
+    )
 
 
 def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
@@ -268,7 +339,9 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
-        if get_ascend_config().enable_fused_mc2 == 1:
+        self._cann_mega_moe_ops = None
+        self._cann_symm_buffers = {}
+        if get_ascend_config().enable_fused_mc2 == _DISPATCH_FFN_COMBINE_MODE:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -281,6 +354,130 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
+
+    def _load_cann_mega_moe_ops(self):
+        if self._cann_mega_moe_ops is None:
+            try:
+                module = importlib.import_module(_CANN_MEGA_MOE_MODULE_NAME)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Failed to import CANN 9.1 official MegaMoe. Source "
+                    "/usr/local/Ascend/cann-9.1.0/set_env.sh before starting vLLM."
+                ) from exc
+            self._cann_mega_moe_ops = (module.get_symm_buffer_for_mega_moe, module.mega_moe)
+        return self._cann_mega_moe_ops
+
+    def _get_cann_symm_buffer(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+        topk_ids: torch.Tensor,
+        weight1: list[torch.Tensor],
+        weight2: list[torch.Tensor],
+        dispatch_quant_mode: int,
+        dispatch_quant_out_dtype: int | None,
+    ):
+        get_symm_buffer_for_mega_moe, _ = self._load_cann_mega_moe_ops()
+        group = get_mc2_group().device_group
+        hidden = int(fused_experts_input.hidden_states.shape[-1])
+        intermediate_hidden = _infer_intermediate_hidden(weight1[0], weight2[0], hidden)
+        if self.token_dispatcher.global_bs > 0:
+            num_max_tokens_per_rank = max(
+                1,
+                int(self.token_dispatcher.global_bs // self.token_dispatcher.ep_world_size),
+            )
+        else:
+            num_max_tokens_per_rank = max(
+                1,
+                int(
+                    getattr(self.token_dispatcher, "max_num_tokens_per_rank", 0)
+                    or fused_experts_input.hidden_states.shape[0]
+                ),
+            )
+        num_topk = int(topk_ids.shape[-1])
+        redundant_experts = int(fused_experts_input.routing.global_redundant_expert_num)
+        if fused_experts_input.routing.expert_map is not None:
+            num_experts = int(fused_experts_input.routing.expert_map.numel()) + redundant_experts
+        else:
+            num_experts = int(self.moe_config.num_experts) + redundant_experts
+        expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
+        max_recv_token_num = max(
+            1,
+            num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
+        )
+        key = (
+            id(group),
+            num_experts,
+            num_max_tokens_per_rank,
+            max_recv_token_num,
+            num_topk,
+            hidden,
+            intermediate_hidden,
+            dispatch_quant_mode,
+            dispatch_quant_out_dtype,
+        )
+        if key not in self._cann_symm_buffers:
+            self._cann_symm_buffers[key] = get_symm_buffer_for_mega_moe(
+                group,
+                num_experts,
+                num_max_tokens_per_rank,
+                num_topk,
+                hidden,
+                intermediate_hidden,
+                max_recv_token_num=max_recv_token_num,
+                dispatch_quant_mode=dispatch_quant_mode,
+                dispatch_quant_out_dtype=dispatch_quant_out_dtype,
+                combine_quant_mode=0,
+                comm_alg="",
+            )
+        return self._cann_symm_buffers[key]
+
+    def _apply_cann_mega_moe(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+        topk_ids: torch.Tensor,
+    ):
+        assert fused_experts_input.weights.w1_scale is not None
+        assert fused_experts_input.weights.w2_scale is not None
+
+        _, mega_moe = self._load_cann_mega_moe_ops()
+        dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = _get_cann_mega_moe_quant_settings(
+            fused_experts_input.quant.quant_type
+        )
+        weight1 = _as_tensor_list(fused_experts_input.weights.w1, "w1")
+        weight2 = _as_tensor_list(fused_experts_input.weights.w2, "w2")
+        weight_scales1 = _as_tensor_list(fused_experts_input.weights.w1_scale, "w1_scale")
+        weight_scales2 = _as_tensor_list(fused_experts_input.weights.w2_scale, "w2_scale")
+        sym_buffer = self._get_cann_symm_buffer(
+            fused_experts_input,
+            topk_ids,
+            weight1,
+            weight2,
+            dispatch_quant_mode,
+            dispatch_quant_out_dtype,
+        )
+        activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
+        x_active_mask = None
+        if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
+            x_active_mask = fused_experts_input.routing.mc2_mask.to(torch.int8).contiguous()
+        out, expert_tokens = mega_moe(
+            fused_experts_input.hidden_states,
+            topk_ids.to(torch.int32),
+            fused_experts_input.topk_weights.to(torch.float32),
+            weight1,
+            weight2,
+            sym_buffer,
+            l1_weights_sf=weight_scales1,
+            l2_weights_sf=weight_scales2,
+            l1_bias=_as_optional_tensor_list(fused_experts_input.weights.w1_bias),
+            l2_bias=_as_optional_tensor_list(fused_experts_input.weights.w2_bias),
+            x_active_mask=x_active_mask,
+            activation=_normalize_cann_activation(fused_experts_input.activation),
+            activation_clamp=activation_clamp,
+            weight1_type=weight_type,
+            weight2_type=weight_type,
+        )
+        self.expert_token_nums = expert_tokens
+        return out, expert_tokens
 
     def fused_experts(
         self,
@@ -300,7 +497,7 @@ class FusedMC2CommImpl(MoECommMethod):
             topk_ids = fused_experts_input.routing.log2phy[topk_ids]
 
         expert_tokens = None
-        if get_ascend_config().enable_fused_mc2 == 1:
+        if get_ascend_config().enable_fused_mc2 == _DISPATCH_FFN_COMBINE_MODE:
             assert not (
                 fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
             ), "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
@@ -324,23 +521,8 @@ class FusedMC2CommImpl(MoECommMethod):
                 expert_token_nums=self.expert_token_nums,
             )
             expert_tokens = self.expert_token_nums
-        elif get_ascend_config().enable_fused_mc2 == 2:
-            assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
-            out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
-                x=fused_experts_input.hidden_states,
-                expert_ids=topk_ids,
-                gmm1_permuted_weight=fused_experts_input.weights.w1,
-                gmm1_permuted_weight_scale=fused_experts_input.weights.w1_scale,
-                gmm2_weight=fused_experts_input.weights.w2,
-                gmm2_weight_scale=fused_experts_input.weights.w2_scale,
-                expert_smooth_scales=None,
-                expert_scales=fused_experts_input.topk_weights.to(torch.float32),
-                group_ep=self.token_dispatcher.moe_all_to_all_group_name,
-                ep_rank_size=self.token_dispatcher.ep_world_size,
-                ep_rank_id=self.token_dispatcher.ep_rank_id,
-                moe_expert_num=self.moe_config.num_experts,
-                global_bs=self.token_dispatcher.global_bs,
-            )
+        elif get_ascend_config().enable_fused_mc2 == _CANN_MEGA_MOE_FUSED_MC2_MODE:
+            out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
         else:
             raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")
         return FusedExpertsResult(

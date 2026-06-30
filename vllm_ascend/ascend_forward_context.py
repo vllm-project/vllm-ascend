@@ -20,7 +20,6 @@ from vllm_ascend.utils import (
     has_layer_idx,
     is_drafter_moe_model,
     is_moe_model,
-    speculative_enable_dispatch_gmm_combine_decode,
 )
 
 
@@ -32,6 +31,14 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+_CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
+    "w8a8",
+    "w4a8",
+    "w8a8_dynamic",
+    "w4a8_dynamic",
+    "quanttype.w8a8",
+    "quanttype.w4a8",
+}
 
 
 @contextmanager
@@ -52,6 +59,22 @@ def override_mrv2_in_profile_run(enabled: bool):
 
 def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
+
+
+def _cann_megamoe_supported_by_config(vllm_config: VllmConfig, quant_type: Any) -> bool:
+    hf_text_config = vllm_config.model_config.hf_text_config
+    hidden_size = getattr(hf_text_config, "hidden_size", None)
+    if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+        hidden_size = vllm_config.model_config.get_hidden_size()
+    if hidden_size is None:
+        return False
+    hidden_size = int(hidden_size)
+    if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
+        return False
+    if quant_type is None:
+        return True
+    quant_name = str(getattr(quant_type, "name", quant_type)).lower()
+    return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
 
 
 @contextmanager
@@ -95,7 +118,12 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
+        moe_comm_type = select_moe_comm_method(
+            max_num_tokens,
+            vllm_config,
+            is_draft_model,
+            in_profile_run=in_profile_run,
+        )
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
@@ -234,7 +262,12 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    is_draft_model=False,
+    in_profile_run: bool = False,
+) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, token count, and quantization.
 
@@ -286,24 +319,25 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     elif soc_version in {AscendDeviceType.A3}:
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-        # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
         fused_mc2_enable = get_ascend_config().enable_fused_mc2
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
+        fused_decode_guard = get_ep_group().world_size <= 32 and (not is_draft_model)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if fused_mc2_enable == 1:
-                fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
+                fused_decode_enable = fused_mc2_enable and fused_decode_guard
             elif fused_mc2_enable == 2:
                 fused_decode_enable = (
                     fused_mc2_enable
-                    and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
-                    and quant_type == "w8a8_dynamic"
+                    and fused_decode_guard
+                    and _cann_megamoe_supported_by_config(vllm_config, quant_type)
                 )
+                if in_profile_run and fused_decode_enable:
+                    fused_decode_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
             if fused_mc2_enable == 1:
-                fused_prefill_enable = fused_mc2_enable and dispatch_ffn_combine_enable
+                fused_prefill_enable = fused_mc2_enable and fused_decode_guard
             elif fused_mc2_enable == 2:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
