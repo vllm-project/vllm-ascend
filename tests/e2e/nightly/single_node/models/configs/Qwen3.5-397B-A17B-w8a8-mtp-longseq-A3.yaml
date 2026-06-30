@@ -23,7 +23,7 @@ test_cases:
       - "1"
       - "--prefill-context-parallel-size"
       - "2"
-      - "--prefill-context-parallel-size"
+      - "--decode-context-parallel-size"
       - "4"
       - "--enable-expert-parallel"
       - "--no-async-scheduling"
