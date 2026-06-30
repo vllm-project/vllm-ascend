@@ -149,9 +149,10 @@ checkout_src() {
     echo "====> Checkout source code"
     mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
-    pip uninstall -y vllm-ascend || true
+    # pip uninstall -y vllm-ascend || true
     cp -r "$WORKSPACE/vllm-ascend/benchmark" /tmp/aisbench-backup || true
     rm -rf "$WORKSPACE/vllm-ascend"
+    cp /vllm-workspace/vllm-ascend/vllm_ascend/_build_info.py /tmp/_build_info_backup.py 2>/dev/null || true
 
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
         echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
@@ -181,6 +182,7 @@ install_aisbench() {
     BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
 
     cp -r /tmp/aisbench-backup "$BENCH_DIR"
+    cp /tmp/_build_info_backup.py /vllm-workspace/vllm-ascend/vllm_ascend/_build_info.py 2>/dev/null || true
 
     cd "$BENCH_DIR"
     pip install -e . \
