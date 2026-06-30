@@ -47,6 +47,8 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: AOP_MULTI_ENABLED
                 value: "{{ aop_multi_enabled | default("false") }}"
+              - name: GOOD_TABLE
+                value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
             command:
               - sh
               - -c
@@ -120,6 +122,8 @@ spec:
                 value: {{ runner | default("linux-aarch64-a3-0") }}
               - name: AOP_MULTI_ENABLED
                 value: "{{ aop_multi_enabled | default("false") }}"
+              - name: GOOD_TABLE
+                value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
             command:
               - sh
               - -c

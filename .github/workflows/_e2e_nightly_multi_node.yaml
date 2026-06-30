@@ -231,6 +231,7 @@ jobs:
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
             -D aop_multi_enabled="${{ inputs.aop_multi_enabled || 'false' }}" \
+            -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv" \
             --outfile lws.yaml
 
           kubectl apply -f ./lws.yaml
