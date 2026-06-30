@@ -232,9 +232,9 @@ jobs:
       vllm_release_tag: ${{ needs.prepare-build.outputs.vllm_release_tag }}
       pr_number: ${{ github.event.pull_request.number }}
       ascend_ref: ${{ github.event.pull_request.head.sha }}
-      quay_temp_username: ${{ vars.QUAY_TEMP_USERNAME }}
+      quay_temp_username: atlas-ci+atlas_test_bot
     secrets:
-      QUAY_TEMP_PASSWORD: ${{ secrets.QUAY_TEMP_PASSWORD }}
+      QUAY_TEMP_PASSWORD: KUMHSMHBH165QQSBBJYRUD6P9M2ESMR7XH01LPKX4OA4NXLLX06JO9XVVKZ766Q2
 
   run-selected-tests:
     needs: lint-and-select-tests
