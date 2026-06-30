@@ -338,6 +338,25 @@ class KVPoolWorker:
         self.group_block_stride[group_id] = group_block_strides
         self.group_num_layers[group_id] = len(layer_names)
 
+    def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
+        """
+        In hybrid scenario, where a KVCacheTensor is shared by multiple layers,
+        but sometimes, layers cannot be evenly distributed among multiple groups,
+        the layers sharing the KVCacheTensor may not completely occupy all the space of the KVCacheTensor.
+        This results in the calculated start address not being the previously aligned address.
+        Therefore, we down-align the start address to meet the 2MB alignment requirement.
+        """
+        if not self.use_hybrid:
+            return
+        alignment = 2 * 1024 * 1024
+        for storage_key in registered_regions:
+            start, end = registered_regions[storage_key]
+            new_start = start // alignment * alignment
+            # Because the addresses of raw tensors are aligned to 2MB,
+            # all shared sub-tensors, when aligned downwards, should theoretically not exceed the address bounds.
+            assert new_start >= storage_key, "invalid kv cache tensor, raw tensor ptr must be align to 2MB"
+            registered_regions[storage_key] = (new_start, end)
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
@@ -380,6 +399,7 @@ class KVPoolWorker:
                 else:
                     registered_regions[storage_key] = (start, end)
 
+        self._align_kv_ptrs(registered_regions)
         ptrs = [start for start, _ in registered_regions.values()]
         lengths = [end - start for start, end in registered_regions.values()]
 
@@ -560,13 +580,31 @@ class KVPoolWorker:
                             block_id_list_c,
                             ret,
                         )
-                        self._invalid_block_ids.update(missing_block_ids)
+                        if len(request.block_ids_by_group) == 1:
+                            self._invalid_block_ids.update(missing_block_ids)
+                        elif missing_block_ids:
+                            logger.error(
+                                "KV load failed for hybrid request %s. "
+                                "Skip invalid-block fallback to avoid scheduler crash. "
+                                "failed_blocks=%s",
+                                request.req_id,
+                                missing_block_ids,
+                            )
                     elif ret is None:
                         missing_block_ids = record_failed_blocks(
                             block_id_list_c,
                             [1] * len(block_id_list_c),
                         )
-                        self._invalid_block_ids.update(missing_block_ids)
+                        if len(request.block_ids_by_group) == 1:
+                            self._invalid_block_ids.update(missing_block_ids)
+                        elif missing_block_ids:
+                            logger.error(
+                                "KV load failed for hybrid request %s. "
+                                "Skip invalid-block fallback to avoid scheduler crash. "
+                                "failed_blocks=%s",
+                                request.req_id,
+                                missing_block_ids,
+                            )
                     logger.debug(
                         "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
                         request.req_id,

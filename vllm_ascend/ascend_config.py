@@ -139,8 +139,29 @@ class AscendConfig:
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
         # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
+        # DSV4 oproj / embedding fine-grained TP (oproj_tensor_parallel_size /
+        # embedding_tensor_parallel_size) use static, graph-stable exchange
+        # buffers and run cross-DP HCCL collectives (all_to_all / all_gather /
+        # reduce_scatter) that require uniform num_tokens across all DP ranks.
+        # Only the recompute scheduler balances num_tokens across DP ranks; the
+        # MC2 uneven-token skip path leaves each rank at its own num_tokens and
+        # would deadlock these collectives on a shape mismatch. So bind both
+        # features to recompute_scheduler_enable: they are only supported when
+        # recompute is on.
+        if (
+            self.finegrained_tp_config.oproj_tensor_parallel_size > 0
+            or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
+        ) and not self.recompute_scheduler_enable:
+            raise AssertionError(
+                "oproj_tensor_parallel_size / embedding_tensor_parallel_size "
+                "require recompute_scheduler_enable=true: their cross-DP HCCL "
+                "collectives need uniform num_tokens across DP ranks, which is "
+                "only guaranteed when the recompute scheduler is enabled."
+            )
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
+        self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
+
         self.enable_matmul_allreduce = self._get_config_value(
             additional_config,
             "enable_matmul_allreduce",
@@ -445,8 +466,22 @@ class FinegrainedTPConfig:
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
-            # dummy_run does not run the entire attention module in eager mode,
-            # so the o_proj tp split can only be used in graph mode.
+            # wo_a/wo_b are sharded solely by the OTP group (which splits DP,
+            # orthogonal to the standard TP group), but _forward_o_proj reshapes
+            # the attention output with n_local_groups = n_groups // tp_size
+            # (standard TP). When tp_size > 1 the weight-shard and input-shard
+            # operate on different axes of the rank grid and no longer align,
+            # so oproj TP currently requires standard tp_size == 1.
+            if vllm_config.parallel_config.tensor_parallel_size > 1:
+                raise AssertionError(
+                    "oproj_tensor_parallel_size currently requires "
+                    "tensor_parallel_size == 1, got "
+                    f"{vllm_config.parallel_config.tensor_parallel_size}."
+                )
+            # The static all_to_all / reduce_scatter exchange buffers used by
+            # _forward_o_proj are sized for graph replay and require ACL graph
+            # capture; dummy_run does not run the entire attention module in
+            # eager mode, so o_proj tp split can only be used in graph mode.
             if vllm_config.model_config and vllm_config.model_config.enforce_eager:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
@@ -569,10 +604,8 @@ class XliteGraphConfig:
         self.enabled = xlite_graph_config.get("enabled", False)
         self.full_mode = xlite_graph_config.get("full_mode", False)
         if self.enabled:
-            if bool(vllm_config.speculative_config):
-                raise RuntimeError(
-                    "Xlite graph mode is not compatible with speculative decoding. Please disable speculative decoding."
-                )
+            if bool(vllm_config.speculative_config) and vllm_config.speculative_config.num_speculative_tokens != 1:
+                raise RuntimeError("Xlite graph mode only support speculative decoding with num_speculative_tokens=1.")
             if vllm_config.parallel_config.pipeline_parallel_size > 1:
                 raise RuntimeError(
                     "Xlite graph mode is not compatible with pipeline parallelism. "
@@ -633,6 +666,7 @@ class ProfilingChunkConfig:
         # the start to skip online calibration entirely and rely solely on
         # the startup profiling model (avoids per-step sync overhead).
         self.need_timing: bool = config.get("need_timing", self.enabled)
+        self.max_fit_chunk: int = int(config.get("max_fit_chunk", 30))
         self._validate()
 
     def _validate(self):
@@ -640,6 +674,8 @@ class ProfilingChunkConfig:
             raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
         if self.min_chunk <= 0:
             raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
+        if self.max_fit_chunk <= 5:
+            raise ValueError(f"Recommend to use at least 30 data points for fitting, got {self.max_fit_chunk}")
 
 
 class RejectionSamplerConfig:
@@ -718,11 +754,12 @@ class EplbConfig:
     _defaults = {
         "dynamic_eplb": False,
         "expert_map_path": None,
-        "expert_heat_collection_interval": 400,
-        "algorithm_execution_interval": 30,
+        "expert_heat_collection_interval": 600,
+        "algorithm_execution_interval": 50,
         "expert_map_record_path": None,
         "num_redundant_experts": 0,
-        "eplb_policy_type": 1,
+        "eplb_policy_type": 2,
+        "eplb_heat_collection_stage": "all",
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -768,6 +805,8 @@ class EplbConfig:
                 os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
                 or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
             ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
+        if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
+            raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
