@@ -120,9 +120,7 @@ def _hc_pre_torch(
     mixes = F.linear(x_flat, hc_fn) * inv_rms
 
     pre = torch.sigmoid(mixes[..., :hc_mult] * hc_scale[0] + hc_base[:hc_mult]) + hc_eps
-    post = torch.sigmoid(
-        mixes[..., hc_mult : 2 * hc_mult] * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult]
-    ) * 2.0
+    post = torch.sigmoid(mixes[..., hc_mult : 2 * hc_mult] * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult]) * 2.0
     comb = mixes[..., 2 * hc_mult :].view(*shape[:-2], hc_mult, hc_mult)
     comb = comb * hc_scale[2] + hc_base[2 * hc_mult :].view(hc_mult, hc_mult)
     comb = _sinkhorn_normalize_torch(comb, hc_sinkhorn_iters, hc_eps)
