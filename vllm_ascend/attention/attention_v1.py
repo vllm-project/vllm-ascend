@@ -52,7 +52,6 @@ from vllm_ascend.attention.kvcomp_attn.attention_utils import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_cp,
-    needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
     using_paged_attention,
@@ -65,7 +64,6 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
 
