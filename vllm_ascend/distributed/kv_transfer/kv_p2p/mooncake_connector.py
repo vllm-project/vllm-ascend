@@ -1913,7 +1913,7 @@ class MooncakeConnectorWorker:
 
     @classmethod
     def _get_kv_transfer_spec_key(cls, spec: Any) -> tuple[str, int | None]:
-        # TODO: Extand this key with KV cache layout fields (for example num_dims) 
+        # TODO: Extand this key with KV cache layout fields (for example num_dims)
         # if a future model has layers with the same number of kv heads but incompatiible
         # cache shapes.
         return (type(spec).__name__, cls._get_spec_num_key_value_heads(spec))
