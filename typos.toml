@@ -45,6 +45,7 @@ depthwise_seperable_CNN = "depthwise_seperable_CNN"
 mata = "mata"
 iy = "iy"
 tendencias = "tendencias"
+PARD = "PARD"
 # intel cpu features
 tme = "tme"
 dout = "dout"
