@@ -339,6 +339,87 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         self.assertEqual(worker._get_attention_group_num_key_value_heads(kv_group2layeridx[0][0]), 1)
         self.assertEqual(worker._get_attention_group_num_key_value_heads(kv_group2layeridx[1][0]), 8)
 
+    def test_build_kv_group2layeridx_splits_uniform_group_by_head_dim(self):
+        narrow_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        wide_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        layer_specs = {
+            "model.layers.0.self_attn": narrow_spec,
+            "model.layers.1.self_attn": wide_spec,
+        }
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs(layer_specs)
+        assert uniform_spec is not None
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.total_layers = 32
+        worker.kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    layer_names=list(layer_specs),
+                    kv_cache_spec=uniform_spec,
+                )
+            ]
+        )
+
+        kv_group2layeridx = worker._build_kv_group2layeridx()
+
+        self.assertEqual(len(kv_group2layeridx), 2)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_group_id"], 0)
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_group_id"], 0)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec"]["head_dim"], 64)
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec"]["head_dim"], 128)
+
+    def test_build_kv_group2layeridx_does_not_split_by_unrelated_spec_fields(self):
+        fp16_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        fp32_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float32,
+        )
+        layer_specs = {
+            "model.layers.0.self_attn": fp16_spec,
+            "model.layers.1.self_attn": fp32_spec,
+        }
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs(layer_specs)
+        assert uniform_spec is not None
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.total_layers = 32
+        worker.kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    layer_names=list(layer_specs),
+                    kv_cache_spec=uniform_spec,
+                )
+            ]
+        )
+
+        kv_group2layeridx = worker._build_kv_group2layeridx()
+
+        self.assertEqual(len(kv_group2layeridx), 1)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec"]["head_dim"], 64)
+
     def test_hybrid_rank_pulls_use_transfer_group_kv_heads(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.vllm_config = MockVllmConfig()
@@ -1892,6 +1973,61 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             get_kv_split_metadata(False, 1, 1, 8, 1, 0, 8, 2, 8, 30000, [1], [1], 0, 16),
             get_kv_split_metadata(False, 1, 1, 8, 1, 0, 16, 2, 8, 30000, [1], [1], 0),
         )
+
+    def test_get_kv_split_metadata_uses_kv_cache_group_id_for_split_transfer_groups(self):
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker.use_mla = False
+        worker.use_sparse = False
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.tp_size = 4
+        worker.tp_rank = 0
+        worker.pcp_rank = 0
+        worker.dcp_rank = 0
+        worker._prefill_tp_size = 4
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.block_size = 16
+        worker.num_key_value_heads = 8
+        worker.side_channel_port = 5000
+        worker.handshake_port = 5000
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "kv_cache_group_id": 0,
+                    "kv_cache_spec": {"num_kv_heads": 8, "head_dim": 64},
+                },
+                [0],
+            ),
+            1: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "kv_cache_group_id": 0,
+                    "kv_cache_spec": {"num_kv_heads": 8, "head_dim": 128},
+                },
+                [1],
+            ),
+        }
+        meta = types.SimpleNamespace(
+            remote_pcp_size=2,
+            remote_dcp_size=1,
+            remote_ptp_size=4,
+            remote_port=30000,
+            remote_block_ids=([10, 11, 12, 13],),
+            local_block_ids=([20, 21, 22, 23],),
+            num_external_tokens=4 * worker.block_size,
+            num_prompt_blocks=4,
+            remote_engine_id="remote_split_transfer_groups",
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping={},
+        )
+
+        ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_split_groups", cast(ReqMeta, meta))
+
+        self.assertEqual(ports, [[30000], [30004]])
+        self.assertEqual(local_ids, [([20, 21], [20, 21]), ([22, 23], [22, 23])])
+        self.assertEqual(remote_ids, [([10, 11], [10, 11]), ([10, 11], [10, 11])])
 
     def _build_worker_for_pd_case(self, case, tp_rank, pcp_rank=0, dcp_rank=0):
         with patch.object(
