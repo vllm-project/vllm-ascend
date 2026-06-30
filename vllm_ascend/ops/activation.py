@@ -25,7 +25,7 @@ from vllm.model_executor.layers.activation import (
     SwigluStepAndMul,
 )
 
-from vllm_ascend.utils import get_weight_prefetch_method
+from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
 
 
 class AscendQuickGELU(QuickGELU):
@@ -72,6 +72,13 @@ class AscendSwigluStepAndMul:
         if limit is None:
             raise ValueError("SwigluStepAndMul requires limit to be set.")
 
+        if enable_custom_op():
+            gate, up = x.chunk(2, dim=-1)
+            return torch.ops._C_ascend.npu_swiglustep(gate.contiguous(), up.contiguous(), limit)
+
+        # Fallback when custom ops are disabled (e.g. Ascend 950 / A5, where enable_custom_op()
+        # returns False): vllm's SwigluStepAndMul.forward_native — same pattern as
+        # AscendSwigluOAIAndMul.swiglu_oai_forward, numerically equivalent to the fused kernel.
         class MinimalSwigluStepAndMul:
             def __init__(self):
                 self.limit = limit
