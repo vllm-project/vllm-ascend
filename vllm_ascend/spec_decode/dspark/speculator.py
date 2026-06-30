@@ -198,27 +198,97 @@ class AscendDsparkSpeculator(AscendDflashProposer):
 
     @torch.inference_mode()
     def _propose(self, *args, **kwargs):
-        """Reset per-block state, then run the parent's parallel backbone.
+        """Reset per-block state, run DFlash backbone, replace argmax sample
+        with the Markov serial loop.
 
-        M1 framework: DFlash parallel backbone borrowed verbatim from
-        ``AscendDflashProposer._propose``. The Markov bias / serial sample
-        loop hook (``_sample_with_markov``) is still **not wired** into the
-        actual sample call site inside the parent's _propose. The follow-up
-        sprint will replace the parent's ``_sample_from_logits`` invocation
-        with the Markov loop so the returned tokens carry intra-block
-        dependency.
+        Implementation strategy (alternative to fully copy-pasting fork's
+        700-line ``_propose``): we monkey-patch ``self.model.compute_logits``
+        on the way in so the parent proposer's argmax step receives one-hot
+        logits over our Markov-sampled token ids. The base proposer's call
+        site (llm_base_proposer.py L1065-1074, parallel_drafting=True branch)
+        is::
 
-        For now this method is identical to DFlash's propose path with the
-        DSpark draft model loaded — the architecture is in place but the
-        signature Markov-bias step does not yet fire.
+            logits = self.model.compute_logits(sample_hidden_states)
+            draft_token_ids = logits.argmax(dim=-1)
+            if ... or self.parallel_drafting:
+                return draft_token_ids.view(-1, self.num_speculative_tokens)
+
+        The argmax on a one-hot row recovers the original sampled token id,
+        so this trick lets us swap parallel argmax for the Markov serial
+        loop without rewriting the entire propose path.
+
+        ``next_token_ids`` (per-request bonus token from the previous
+        verification round) is the anchor for step 0 — pulled from kwargs
+        (or args[3] under the documented positional signature).
         """
         self._markov_embeds_buffer = []
         self.last_confidence = None
-        draft_token_ids = super()._propose(*args, **kwargs)
-        logger.warning_once(
-            "AscendDsparkSpeculator._propose: Markov sample loop NOT wired "
-            "yet (sprint follow-up). Returned draft tokens match DFlash "
-            "parallel sampling without the intra-block Markov bias; "
-            "confidence head inactive."
-        )
+
+        # Pull next_token_ids (positional index 3 in fork _propose signature
+        # or kw alias) to seed the Markov anchor for step 0.
+        anchor_tokens = kwargs.get("next_token_ids")
+        if anchor_tokens is None and len(args) >= 4:
+            anchor_tokens = args[3]
+
+        if self._dspark_model is None or anchor_tokens is None:
+            # Not yet a DSpark setup (e.g. profile run before load) — fall
+            # back to parent behaviour with a warning.
+            logger.warning_once(
+                "AscendDsparkSpeculator._propose: skipping Markov serial "
+                "sample (dspark_model=%s, anchor=%s); falling back to DFlash "
+                "parallel sample.",
+                "loaded" if self._dspark_model is not None else "none",
+                "set" if anchor_tokens is not None else "none",
+            )
+            return super()._propose(*args, **kwargs)
+
+        original_compute_logits = self.model.compute_logits
+        markov_state = {"anchor": anchor_tokens}
+
+        def _markov_compute_logits(sample_hidden_states, *cl_args, **cl_kwargs):
+            """Replace argmax-on-logits with Markov serial sample.
+
+            Returns a fake one-hot logits tensor so the caller's
+            ``.argmax(dim=-1)`` recovers the Markov-sampled token id.
+            """
+            # Original logits computation is still needed once — we feed it
+            # through _sample_sequential which calls model.compute_logits
+            # itself. Make sure we don't recurse: temporarily restore the
+            # original binding inside the call.
+            self.model.compute_logits = original_compute_logits
+            try:
+                num_sample = sample_hidden_states.shape[0]
+                num_reqs = markov_state["anchor"].shape[0]
+                n_spec = self.num_speculative_tokens
+                if num_sample != num_reqs * n_spec:
+                    # Padded / mismatched call (e.g. profiling) — fall back
+                    # to the raw logits so argmax still works.
+                    return original_compute_logits(sample_hidden_states, *cl_args, **cl_kwargs)
+                draft_tokens = self._sample_sequential(
+                    num_reqs=num_reqs,
+                    head_hidden=sample_hidden_states,
+                    anchor_tokens=markov_state["anchor"],
+                )  # [num_reqs, N] int64
+                flat = draft_tokens.reshape(-1)
+                # Build a fake logits where argmax returns flat[i] for row i.
+                vocab_size = original_compute_logits(sample_hidden_states[:1], *cl_args, **cl_kwargs).shape[-1]
+                fake = torch.full(
+                    (num_sample, vocab_size),
+                    -1.0e30,
+                    dtype=torch.float32,
+                    device=sample_hidden_states.device,
+                )
+                fake.scatter_(1, flat.unsqueeze(1), 1.0)
+                return fake
+            finally:
+                # Restore the patched compute_logits so any nested DFlash
+                # iterations later in _propose still go through it.
+                self.model.compute_logits = _markov_compute_logits
+
+        self.model.compute_logits = _markov_compute_logits
+        try:
+            draft_token_ids = super()._propose(*args, **kwargs)
+        finally:
+            self.model.compute_logits = original_compute_logits
+
         return draft_token_ids
