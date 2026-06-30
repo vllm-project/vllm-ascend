@@ -26,7 +26,6 @@ test_cases:
       - "--decode-context-parallel-size"
       - "4"
       - "--enable-expert-parallel"
-      - "--no-async-scheduling"
       - "--port"
       - "$SERVER_PORT"
       - "--max-num-seqs"
