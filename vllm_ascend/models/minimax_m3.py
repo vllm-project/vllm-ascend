@@ -398,7 +398,8 @@ class MiniMaxM3Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        
+        v = v.contiguous()
+
         q, k = self._qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
         
