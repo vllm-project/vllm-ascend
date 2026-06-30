@@ -60,6 +60,20 @@ class AscendDflashProposer(AscendEagleProposer):
 
         self.parallel_drafting_hidden_state_tensor = None
 
+        # DSpark Markov-chain drafting needs cudagraph-safe persistent buffers: a seed buffer
+        # (Markov position 0, copied in by set_inputs_first_pass) and a rolling draft-token
+        # buffer. Fixed addresses let the captured draft graph replay correctly — the original
+        # PR allocated a fresh torch.empty and read a per-step-reassigned next_token_ids, so the
+        # graph kept reading stale capture-time memory and accept length collapsed.
+        hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        if hasattr(hf_config, "markov_head_type"):
+            blk = 1 + self.num_speculative_tokens
+            self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
+            self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
+        else:
+            self._dspark_seed_buffer = None
+            self._dspark_draft_buffer = None
+
     def set_inputs_first_pass(
         self,
         target_token_ids: torch.Tensor,
@@ -85,6 +99,13 @@ class AscendDflashProposer(AscendEagleProposer):
         self._dflash_hidden_states[:num_context] = target_hidden_states
         # [batch_size] prepare for dspark
         self._next_token_ids = next_token_ids
+        if self._dspark_seed_buffer is not None:
+            # Cudagraph-safe Markov seed: copy the real next tokens into a fixed-address buffer
+            # so the captured draft graph reads fresh seeds each step (not a stale tensor addr).
+            n = next_token_ids.shape[0]
+            self._dspark_seed_buffer[:n].copy_(next_token_ids)
+            if n < self._dspark_seed_buffer.shape[0]:
+                self._dspark_seed_buffer[n:].fill_(0)
 
         token_indices_to_sample = torch.empty(
             batch_size * self.num_speculative_tokens,
