@@ -10,7 +10,7 @@ Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to de
 
 ### Physical Layer Requirements
 
-- The physical machines must be located on the same WLAN, with network connectivity.
+- The physical machines must be located on the same LAN, with network connectivity.
 - All NPUs must be interconnected. Intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA.
 
 ### Verification Process
