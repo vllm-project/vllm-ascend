@@ -435,7 +435,7 @@ class MinimaxM3ToolParser(ToolParser):
         if delta_tool_calls or content_before:
             return DeltaMessage(
                 content=content_before,
-                tool_calls=delta_tool_calls if delta_tool_calls else None,
+                tool_calls=delta_tool_calls if delta_tool_calls else [],
             )
 
         return None
