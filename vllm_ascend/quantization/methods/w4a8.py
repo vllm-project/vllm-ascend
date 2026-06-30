@@ -25,7 +25,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -551,6 +551,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         topk_weights = topk_weights.to(x.dtype)
 
+        cann_mega_moe_flag = (
+            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
+            and get_ascend_config().enable_fused_mc2 == 2
+        )
         if self.dynamic_eplb:
             w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
             w1_scale = layer.w13_weight_scale_list
@@ -558,6 +562,19 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_scale = layer.w2_weight_scale_list
             w1_scale_bias = layer.w13_scale_bias_list
             w2_scale_bias = layer.w2_scale_bias_list
+        elif cann_mega_moe_flag and hasattr(layer, "cann_mega_moe_w13_weight_list"):
+            # CANN MegaMoe requires per-expert tensor lists. The lists below are
+            # built once in process_weights_after_loading and share storage with
+            # the original packed-int32 layer.w13_weight / layer.w2_weight, so
+            # there's no extra memory cost. W4A8 carries real per-expert
+            # scale_bias correction terms, which are forwarded as MegaMoe l*_bias
+            # in _apply_cann_mega_moe.
+            w1 = layer.cann_mega_moe_w13_weight_list
+            w1_scale = layer.cann_mega_moe_w13_weight_scale_list
+            w2 = layer.cann_mega_moe_w2_weight_list
+            w2_scale = layer.cann_mega_moe_w2_weight_scale_list
+            w1_scale_bias = getattr(layer, "cann_mega_moe_w13_scale_bias_list", None)
+            w2_scale_bias = getattr(layer, "cann_mega_moe_w2_scale_bias_list", None)
         else:
             w1 = [layer.w13_weight]
             w1_scale = [layer.w13_weight_scale]
@@ -724,6 +741,29 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
         layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
 
+        self._maybe_build_cann_mega_moe_lists(layer)
+
+    def _maybe_build_cann_mega_moe_lists(self, layer):
+        """Build per-expert tensor lists for the CANN MegaMoe path.
+
+        Activated when ``enable_fused_mc2 == 2`` and dynamic EPLB is disabled.
+        The lists are views into the existing packed weight/scale tensors
+        (no extra memory) and are consumed by the ``cann_mega_moe_flag``
+        branch in :meth:`apply`. Scale-bias lists are built only when the
+        corresponding bias parameter exists (it does for W4A8; W8A8 dynamic
+        has no scale_bias on this method's layers).
+        """
+        if get_ascend_config().enable_fused_mc2 != 2 or self.dynamic_eplb:
+            return
+        layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+        layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
+        layer.cann_mega_moe_w13_weight_scale_list = list(layer.w13_weight_scale.data.unbind(dim=0))
+        layer.cann_mega_moe_w2_weight_scale_list = list(layer.w2_weight_scale.data.unbind(dim=0))
+        if hasattr(layer, "w13_scale_bias"):
+            layer.cann_mega_moe_w13_scale_bias_list = list(layer.w13_scale_bias.data.unbind(dim=0))
+        if hasattr(layer, "w2_scale_bias"):
+            layer.cann_mega_moe_w2_scale_bias_list = list(layer.w2_scale_bias.data.unbind(dim=0))
+
     def process_weights_after_loading_modelslim(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
@@ -776,3 +816,4 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         else:
             layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
             layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
+            self._maybe_build_cann_mega_moe_lists(layer)

@@ -75,6 +75,32 @@ def _as_optional_tensor_list(value: torch.Tensor | list[torch.Tensor] | None) ->
     return _as_tensor_list(value, "optional CANN MegaMoe tensor list")
 
 
+def _pick_mega_moe_bias(
+    scale_bias: torch.Tensor | list[torch.Tensor] | None,
+    fallback_bias: torch.Tensor | list[torch.Tensor] | None,
+) -> list[torch.Tensor] | None:
+    """Pick the correct per-expert bias list to forward to CANN MegaMoe.
+
+    W4A8 emits a real per-expert ``w*_scale_bias`` list (the 8 * sum
+    correction term computed in AscendW4A8DynamicFusedMoEMethod) that must
+    be passed to MegaMoe as ``l*_bias``. The older ``dispatch_ffn_combine``
+    path (``enable_fused_mc2 == 1``) historically stuffed
+    ``w*_scale_bias`` with empty placeholder tensors so the C++ op's
+    positional signature was satisfied — MegaMoe does NOT tolerate that
+    placeholder, so empty entries are treated as "no bias" here.
+
+    Order of preference:
+        1. ``scale_bias`` if it is a non-empty list of real (numel > 0) tensors.
+        2. ``fallback_bias`` (the model's ``w*_bias``, rarely set for MoE).
+        3. ``None``.
+    """
+    if scale_bias is not None:
+        items = scale_bias if isinstance(scale_bias, list) else [scale_bias]
+        if items and not all(getattr(t, "numel", lambda: 0)() == 0 for t in items):
+            return list(items)
+    return _as_optional_tensor_list(fallback_bias)
+
+
 def _infer_intermediate_hidden(weight1: torch.Tensor, weight2: torch.Tensor, hidden: int) -> int:
     if weight2.dim() >= 2:
         if weight2.shape[-1] == hidden:
@@ -468,8 +494,14 @@ class FusedMC2CommImpl(MoECommMethod):
             sym_buffer,
             l1_weights_sf=weight_scales1,
             l2_weights_sf=weight_scales2,
-            l1_bias=_as_optional_tensor_list(fused_experts_input.weights.w1_bias),
-            l2_bias=_as_optional_tensor_list(fused_experts_input.weights.w2_bias),
+            l1_bias=_pick_mega_moe_bias(
+                fused_experts_input.weights.w1_scale_bias,
+                fused_experts_input.weights.w1_bias,
+            ),
+            l2_bias=_pick_mega_moe_bias(
+                fused_experts_input.weights.w2_scale_bias,
+                fused_experts_input.weights.w2_bias,
+            ),
             x_active_mask=x_active_mask,
             activation=_normalize_cann_activation(fused_experts_input.activation),
             activation_clamp=activation_clamp,
