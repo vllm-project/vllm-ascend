@@ -337,7 +337,7 @@ aop_pipeline() {
 
     # Only consider success rows
     local success_rows
-    success_rows=$(grep -F "^${case_name}," "$table" | grep -F ',success,' || true)
+    success_rows=$(grep "^${case_name}," "$table" | grep -F ',success,' || true)
     if [ -z "$success_rows" ]; then
         echo "  No success row found for '${case_name}'"
         echo "  Decision: no success entry → SKIP"

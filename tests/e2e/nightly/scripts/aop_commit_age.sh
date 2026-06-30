@@ -39,7 +39,7 @@ if [ ! -f "$CSV_PATH" ]; then
 fi
 
 # Find matching rows, only consider success rows (match name column only)
-ROWS=$(grep -F "^${CONFIG_NAME}," "$CSV_PATH" | grep -F ',success,' || true)
+ROWS=$(grep "^${CONFIG_NAME}," "$CSV_PATH" | grep -F ',success,' || true)
 
 if [ -z "$ROWS" ]; then
   echo ">>> No success row for '${CONFIG_NAME}' → skip"
