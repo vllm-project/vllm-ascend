@@ -18,7 +18,8 @@ from unittest.mock import patch
 from vllm.config import VllmConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.ascend_config import clear_ascend_config, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import (LapsConfig, clear_ascend_config,
+                                       get_ascend_config, init_ascend_config)
 
 
 class TestAscendConfig(TestBase):
@@ -112,3 +113,65 @@ class TestAscendConfig(TestBase):
         clear_ascend_config()
         with self.assertRaises(RuntimeError):
             get_ascend_config()
+
+
+class TestLapsConfig(TestBase):
+    def test_default_is_disabled(self):
+        cfg = LapsConfig({})
+        self.assertFalse(cfg.enabled)
+        self.assertEqual(cfg.threshold, 256)
+        self.assertEqual(cfg.long_max_wait_ms, 0.0)
+        self.assertEqual(cfg.long_token_reservation, 0.0)
+        self.assertEqual(cfg.long_burst_steps, 4)
+        self.assertEqual(cfg.stats_log_interval_s, 0.0)
+
+    def test_explicit_config(self):
+        cfg = LapsConfig({
+            "enabled": True,
+            "threshold": 512,
+            "long_max_wait_ms": 2000,
+            "long_token_reservation": 0.2,
+            "long_burst_steps": 8,
+            "stats_log_interval_s": 5,
+        })
+        self.assertTrue(cfg.enabled)
+        self.assertEqual(cfg.threshold, 512)
+        self.assertEqual(cfg.long_max_wait_ms, 2000.0)
+        self.assertEqual(cfg.long_token_reservation, 0.2)
+        self.assertEqual(cfg.long_burst_steps, 8)
+        self.assertEqual(cfg.stats_log_interval_s, 5.0)
+
+    def test_unknown_key_rejected(self):
+        with self.assertRaises(ValueError):
+            LapsConfig({"foo": 1})
+
+    def test_validation_rejects_out_of_range(self):
+        with self.assertRaises(ValueError):
+            LapsConfig({"long_token_reservation": 1.5})
+        with self.assertRaises(ValueError):
+            LapsConfig({"threshold": -1})
+        with self.assertRaises(ValueError):
+            LapsConfig({"long_max_wait_ms": -1})
+        with self.assertRaises(ValueError):
+            LapsConfig({"long_burst_steps": 0})
+        with self.assertRaises(ValueError):
+            LapsConfig({"stats_log_interval_s": -1})
+
+    def test_aging_requires_positive_reservation(self):
+        # long_max_wait_ms > 0 (aging on) with reservation == 0 is rejected: the
+        # token bucket is the only aged-long admission channel, so a zero
+        # reservation would make aging inert / degenerate to long-first.
+        with self.assertRaises(ValueError):
+            LapsConfig({"long_max_wait_ms": 2000})
+        with self.assertRaises(ValueError):
+            LapsConfig({"long_max_wait_ms": 2000, "long_token_reservation": 0.0})
+        # With a positive reservation it is accepted.
+        cfg = LapsConfig({"long_max_wait_ms": 2000, "long_token_reservation": 0.1})
+        self.assertEqual(cfg.long_max_wait_ms, 2000.0)
+        self.assertEqual(cfg.long_token_reservation, 0.1)
+
+    def test_none_config_is_disabled(self):
+        # No block at all (None) -> defaults, scheduling disabled.
+        cfg = LapsConfig(None)
+        self.assertFalse(cfg.enabled)
+        self.assertEqual(cfg.threshold, 256)

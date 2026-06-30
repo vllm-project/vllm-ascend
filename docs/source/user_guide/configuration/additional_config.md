@@ -46,6 +46,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `layer_sharding`                    | dict | `{}`    | Configuration options for Layer Sharding Linear. In PD-disaggregated deployments, it is supported only on P nodes with `kv_role="kv_producer"`. |
 | `enable_sparse_c8`                  | bool | `False` | Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and GLM5). Not supported on Ascend 950 devices now |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
+| `laps_config`                       | dict | `{}`    | Configuration options for LAPS length-aware prefill scheduling. Requires `recompute_scheduler_enable=true`. |
 
 The details of each configuration option are as follows:
 
@@ -93,6 +94,19 @@ The details of each configuration option are as follows:
 | `algorithm_execution_interval`   | int | `30`   | The forward iterations when the EPLB worker will finish CPU tasks. |
 | `expert_map_record_path`         | str | `None` | Save the expert load calculation results to a new expert table in the specified directory.|
 | `num_redundant_experts`          | int | `0`    | Specify redundant experts during initialization. |
+
+**laps_config**
+
+LAPS-style length-aware prefill scheduling (triple-queue + token-bucket anti-starvation aging). Only takes effect together with `recompute_scheduler_enable=true` and the FCFS scheduler policy.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled`                | bool  | `False` | Whether to enable LAPS scheduling. |
+| `threshold`              | int   | `256`   | Prompt-length threshold (tokens). Requests with `num_prompt_tokens <= threshold` are treated as short prefills and prioritized over long prefills. |
+| `long_max_wait_ms`       | float | `0.0`   | Anti-starvation aging bound for long prefills, in milliseconds. A long request that has waited longer than this becomes eligible for promotion ahead of short prefills, admitted only through the token-reservation bucket (no unconditional deadline bypass). `0` disables aging (strict short-priority). When `> 0`, requires `long_token_reservation > 0`. |
+| `long_token_reservation` | float | `0.0`   | Average fraction of token throughput reserved for admitting aged-long prefills ahead of waiting shorts (token-bucket smoothing) — the only channel that promotes aged longs. Must be in `[0.0, 1.0]` (out-of-range values are rejected). Must be `> 0` whenever `long_max_wait_ms > 0`. |
+| `long_burst_steps`       | int   | `4`     | Burst window (scheduling steps) the aged-long token bucket may accumulate; bucket capacity = `long_token_reservation * per-step token budget * long_burst_steps`. Advanced knob; must be `>= 1`. |
+| `stats_log_interval_s`   | float | `0.0`   | Periodic LAPS stats logging interval, in seconds. `0` disables it. |
 
 ### Example
 

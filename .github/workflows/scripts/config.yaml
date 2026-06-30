@@ -15,6 +15,8 @@ e2e-singlecard:
   estimated_time: 187
 - name: tests/e2e/singlecard/test_async_scheduling.py
   estimated_time: 252
+- name: tests/e2e/singlecard/test_laps_scheduling.py
+  estimated_time: 150
 - name: tests/e2e/singlecard/test_batch_invariant.py
   estimated_time: 506
 - name: tests/e2e/singlecard/test_camem.py
