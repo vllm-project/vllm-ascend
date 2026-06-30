@@ -132,6 +132,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         else:
             max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        # Surface the per-rank capacity for CANN MegaMoe's get_symm_buffer
+        # sizing (used by FusedMC2CommImpl._get_cann_symm_buffer). Without
+        # this, MegaMoe falls back to hidden_states.shape[0] which jitters
+        # under eager mode and forces sym-buffer rebuilds every step.
+        self.max_num_tokens_per_rank = num_tokens_per_tp_rank
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:

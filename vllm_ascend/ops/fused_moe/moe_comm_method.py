@@ -120,10 +120,24 @@ def _infer_intermediate_hidden(weight1: torch.Tensor, weight2: torch.Tensor, hid
     return combined_intermediate
 
 
+_CANN_MEGA_MOE_SUPPORTED_ACTIVATIONS = {"silu", "swiglu"}
+
+
 def _normalize_cann_activation(activation) -> str:
+    # ``MoEFusedExpertsInput.activation`` is typed ``str`` (default "silu"),
+    # but historically some call sites pass an enum-style object; preserve
+    # the ``getattr(..., "value", ...)`` shim for compatibility.
     activation_value = getattr(activation, "value", activation)
-    activation_value = "swiglu" if activation_value is None else str(activation_value)
-    return "swiglu" if activation_value in ("silu", "swiglu") else activation_value
+    if activation_value is None:
+        return "swiglu"
+    activation_value = str(activation_value).lower()
+    if activation_value in _CANN_MEGA_MOE_SUPPORTED_ACTIVATIONS:
+        return "swiglu"
+    raise ValueError(
+        f"CANN MegaMoe only supports {sorted(_CANN_MEGA_MOE_SUPPORTED_ACTIVATIONS)} "
+        f"activations; got {activation!r}. Disable enable_fused_mc2 (set to 0) or "
+        f"avoid running CANN MegaMoe with this activation."
+    )
 
 
 def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:

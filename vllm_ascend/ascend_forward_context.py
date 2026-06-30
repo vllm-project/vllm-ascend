@@ -307,12 +307,30 @@ def select_moe_comm_method(
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A2}:
+        # A2 historically lacked the dispatch_ffn_combine fused op
+        # (enable_fused_mc2 == 1, A3 only). CANN 9.1 MegaMoe
+        # (enable_fused_mc2 == 2) is the first fused MC2 path validated on A2,
+        # so opt-in here for the decode-shaped batch only. Prefill on A2 keeps
+        # the existing ALLGATHER path until MegaMoe is validated for large M.
+        fused_mc2_enable = get_ascend_config().enable_fused_mc2
+        fused_decode_guard = get_ep_group().world_size <= 32 and (not is_draft_model)
         num_experts = vllm_config.model_config.get_num_experts()
         ep_world_size = (
             vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
         )
         num_experts_per_device = num_experts // ep_world_size
-        if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
+
+        fused_mc2_eligible = (
+            fused_mc2_enable == 2
+            and fused_decode_guard
+            and _cann_megamoe_supported_by_config(vllm_config, quant_type)
+        )
+        if in_profile_run and fused_mc2_eligible:
+            fused_mc2_eligible = False
+
+        if fused_mc2_eligible and num_tokens <= mc2_tokens_capacity:
+            moe_comm_type = MoECommType.FUSED_MC2
+        elif num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
             moe_comm_type = MoECommType.MC2
         else:
             moe_comm_type = MoECommType.ALLGATHER
