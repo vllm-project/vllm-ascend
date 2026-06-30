@@ -154,7 +154,7 @@ def _dspark_post_init(self):
     _orig_post_init(self)
     draft_model_config = getattr(self, "draft_model_config", None)
     draft_hf_config = getattr(draft_model_config, "hf_config", None)
-    if draft_hf_config is None or not getattr(draft_hf_config, "dspark_block_size", 0):
+    if draft_model_config is None or draft_hf_config is None or not getattr(draft_hf_config, "dspark_block_size", 0):
         return
     self.method = "mtp"
     self.parallel_drafting = True
