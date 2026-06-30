@@ -991,6 +991,48 @@ class AscendMLAImpl(MLAAttentionImpl):
             if is_hidden_layer(layer):
                 post_process_after_loading_for_shard_weight_series(layer)
 
+    def reload_derived_weights_after_restore(self, act_dtype: torch.dtype) -> None:
+        """[snapshot] Re-derive non-persistent decode-path weights after a
+        ``state_dict`` restore.
+
+        ``W_UV`` / ``W_UK_T`` (and the mlapo / fa-quant derived tensors) are
+        computed from persistent parameters inside
+        :meth:`process_weights_after_loading` and are **not** registered as
+        parameters or buffers, so they are absent from the checkpoint produced
+        by ``dump_model`` (which only serializes ``state_dict``). After
+        suspend/resume the device memory backing these attributes is stale,
+        which collapses the MLA *decode* output to zero (prefill keeps working
+        because it uses ``kv_b_proj`` directly). Re-running the derivation from
+        the freshly restored ``kv_b_proj.weight`` repairs them. The ACL graph
+        is re-captured after restore, so reallocating these tensors is safe.
+        """
+        if getattr(self, "kv_b_proj", None) is None:
+            return
+        if not isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod):
+            return
+        kv_b_proj_weight = torch_npu.npu_format_cast(self.kv_b_proj.weight.data, ACL_FORMAT_FRACTAL_ND).T
+        kv_b_proj_weight = kv_b_proj_weight.view(
+            self.kv_lora_rank,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+        W_UK, W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        # Reproduce the cold-start derivation exactly (fresh tensors). Address
+        # stability is not required here because the graph is re-captured after
+        # restore via recapture_graph().
+        self.W_UV = W_UV.transpose(0, 1).contiguous()
+        self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
+
+        if self.enable_mlapo:
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                self._process_weights_for_fused_mlapo_a5(act_dtype)
+            else:
+                self._process_weights_for_fused_mlapo(act_dtype)
+        elif self.fa_quant_layer:
+            self._process_weights_for_fused_fa_quant()
+        else:
+            self.W_UK_T = maybe_trans_nz(self.W_UK_T)
+
     def _process_weights_for_fused_fa_quant(self):
         if get_ascend_device_type() == AscendDeviceType.A5:
             layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]

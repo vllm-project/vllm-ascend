@@ -3657,6 +3657,95 @@ class NPUModelRunner(GPUModelRunner):
         elapse = time.time() - start
         logger.info("[restore model] restore model ckpt from %s, elapse %.4f s", model_save_path, elapse)
 
+        # [snapshot] Re-derive decode-path weights that are NOT part of
+        # ``state_dict`` (e.g. the MLA absorbed weights ``W_UV`` / ``W_UK_T``).
+        # These are computed once from persistent parameters inside
+        # ``process_weights_after_loading`` and are plain attributes (not
+        # parameters/buffers), so ``dump_model`` never serializes them. After
+        # suspend/resume the device memory backing them is stale, which
+        # collapses the MLA *decode* attention output to zero (prefill still
+        # works because it uses ``kv_b_proj`` directly). Recomputing them from
+        # the freshly restored weights repairs the decode path. The ACL graph
+        # is re-captured after restore, so reallocating these tensors is safe.
+        self._reload_non_persistent_derived_weights()
+
+    def _reload_non_persistent_derived_weights(self) -> None:
+        model = self.get_model()
+        act_dtype = self.model_config.dtype
+        reloaded = 0
+        failed: list[str] = []
+        # Minimal regression guard: the resume bug manifested as the MLA decode
+        # absorbed weights (W_UV / W_UK_T) collapsing to zero. After recompute
+        # they must be non-zero; track the worst (smallest) norm and the layers
+        # that still look degenerate so a regression is loud and obvious.
+        min_norm = float("inf")
+        min_norm_where = ""
+        zero_norm_modules: list[str] = []
+        # NOTE: MLA implementations are stored on attention modules as
+        # ``module.impl`` (plain Python object, not nn.Module), so scanning
+        # ``named_modules()`` alone misses them. Include both module itself and
+        # its impl target to ensure reload is actually applied.
+        reload_targets: list[tuple[str, object]] = []
+        for name, module in model.named_modules():
+            reload_targets.append((name, module))
+            impl = getattr(module, "impl", None)
+            if impl is not None:
+                reload_targets.append((f"{name}.impl", impl))
+
+        seen_ids: set[int] = set()
+        for name, target in reload_targets:
+            target_id = id(target)
+            if target_id in seen_ids:
+                continue
+            seen_ids.add(target_id)
+
+            reload_fn = getattr(target, "reload_derived_weights_after_restore", None)
+            if not callable(reload_fn):
+                continue
+            try:
+                reload_fn(act_dtype)
+                reloaded += 1
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{name}:{type(exc).__name__}:{exc}")
+                continue
+            for attr in ("W_UV", "W_UK_T"):
+                tensor = getattr(target, attr, None)
+                if tensor is None:
+                    continue
+                try:
+                    norm = float(tensor.detach().float().norm().item())
+                except Exception:  # noqa: BLE001
+                    continue
+                if norm < min_norm:
+                    min_norm = norm
+                    min_norm_where = f"{name}.{attr}"
+                if norm == 0.0:
+                    zero_norm_modules.append(f"{name}.{attr}")
+        logger.info(
+            "[restore model] reloaded non-persistent derived weights for %d modules%s",
+            reloaded,
+            "" if not failed else f", failed={failed[: min(8, len(failed))]}",
+        )
+        if reloaded == 0:
+            logger.warning(
+                "[restore model] no non-persistent derived-weight reload targets found; "
+                "MLA decode may still use stale absorbed weights",
+            )
+        if reloaded and min_norm != float("inf"):
+            if zero_norm_modules:
+                logger.error(
+                    "[restore model] REGRESSION: %d derived weight tensors are still "
+                    "zero after restore, MLA decode will be broken. preview=%s",
+                    len(zero_norm_modules),
+                    zero_norm_modules[: min(8, len(zero_norm_modules))],
+                )
+            else:
+                logger.info(
+                    "[restore model] derived-weight sanity ok: min_norm=%.6f at %s",
+                    min_norm,
+                    min_norm_where,
+                )
+
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
 
