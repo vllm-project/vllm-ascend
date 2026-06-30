@@ -169,6 +169,8 @@ def _ensure_schedule_wrapped(scheduler):
     cls = type(scheduler)
     _original_schedule = cls.schedule
 
+    if vllm_version_is("0.23.0"):
+
     def _wrapped_schedule(self, throttle_prefills: bool = False):
         if vllm_version_is("0.23.0"):
             output = _original_schedule(self)
