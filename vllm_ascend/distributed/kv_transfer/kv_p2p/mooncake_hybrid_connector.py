@@ -1670,8 +1670,10 @@ class MooncakeConnectorWorker:
                 len(meta.remote_block_ids),
             )
 
-            prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
-            prefill_pp_size = meta.remote_pp_size if getattr(meta, "remote_pp_size", None) else self._prefill_pp_size
+            remote_ptp_size = meta.remote_ptp_size
+            remote_pp_size = meta.remote_pp_size
+            prefill_tp_size: int = remote_ptp_size if remote_ptp_size is not None else self._prefill_tp_size
+            prefill_pp_size: int = remote_pp_size if remote_pp_size is not None else self._prefill_pp_size
             tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
             remote_req_id = meta.remote_request_id
             remote_port_send_num = self._get_remote_port_send_num_for_req(
