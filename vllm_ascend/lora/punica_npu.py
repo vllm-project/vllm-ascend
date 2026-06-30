@@ -3,10 +3,15 @@
 from collections.abc import Callable
 
 import torch
+from vllm.logger import logger
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+# Valid values for VLLM_ASCEND_MOE_LORA_KERNEL. See vllm_ascend/envs.py.
+_MOE_LORA_KERNELS = ("bgmv", "bgmv_per_expert", "torch", "ascendc")
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -350,3 +355,349 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
 
         y = y.view_as(y_org)
+
+    # ------------------------------------------------------------------
+    # MoE-LoRA primitives (v1 reference implementation)
+    # ------------------------------------------------------------------
+    # NPU does not yet have a fused MoE-LoRA kernel equivalent to the
+    # upstream Triton `fused_moe_lora`. v1 ships a torch-based reference
+    # implementation: correct-by-construction, suitable for functional
+    # verification on real adapters. A fused AscendC kernel is planned
+    # for v2.
+
+    def moe_lora_align_block_size(
+        self,
+        topk_ids: torch.Tensor,
+        num_tokens: int,
+        block_size: int,
+        num_experts: int,
+        max_loras: int,
+        adapter_enabled: torch.Tensor,
+        expert_map: torch.Tensor | None = None,
+        pad_sorted_ids: bool = False,
+        naive_block_assignment: bool = False,
+    ):
+        """Aligns tokens and experts for MoE-LoRA execution.
+
+        v1 NPU implementation always returns the naive layout (one row per
+        (orig_token, k) replica) — the equivalent of upstream GPU's
+        `naive_block_assignment=True` branch. The caller (AscendFusedMoEWithLoRA)
+        does not currently consume `sorted_token_ids` / `num_tokens_post_padded`,
+        so we leave them as None to avoid extra allocations.
+
+        Returns:
+            tuple(token_lora_mapping, sorted_token_ids, expert_ids,
+                  num_tokens_post_padded)
+            * token_lora_mapping: 1D LongTensor[num_tokens] of LoRA slot id per
+              original token. -1 means "no LoRA".
+            * sorted_token_ids: always None in v1.
+            * expert_ids: flat 1D LongTensor[num_tokens * top_k]; the expert id
+              each (token, k) replica is routed to. Translated by expert_map if
+              provided.
+            * num_tokens_post_padded: always None in v1.
+        """
+        del block_size, num_experts, max_loras, pad_sorted_ids
+        del naive_block_assignment  # always naive in v1
+        token_lora_mapping = self.token_lora_indices[:num_tokens]
+        expert_ids = topk_ids.reshape(-1)
+        if expert_map is not None:
+            expert_ids = expert_map[expert_ids]
+        return token_lora_mapping, None, expert_ids, None
+
+    def add_lora_fused_moe(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        topk_weights: torch.Tensor | None,
+        sorted_token_ids: torch.Tensor | None,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor | None,
+        max_lora_rank: int,
+        top_k_num: int,
+        shrink_config,
+        expand_config,
+        adapter_enabled: torch.Tensor,
+        mul_routed_weight: bool = False,
+        fully_sharded: bool = False,
+        offset: int = 0,
+        token_lora_mapping: torch.Tensor | None = None,
+    ):
+        """In-place adds the MoE-LoRA delta to `y`.
+
+        Dispatches to one of four implementations selected by
+        ``VLLM_ASCEND_MOE_LORA_KERNEL`` (default ``"bgmv"``):
+
+        * ``bgmv``            - combined-index two-call bgmv. Production
+                                default. ~30-50x vs torch.
+        * ``bgmv_per_expert`` - per-expert loop calling bgmv for each
+                                bucket. ~5-10x vs torch. Intermediate
+                                debugging tier; semantics 1:1 with the
+                                original "loop over local experts, call
+                                bgmv per expert" sketch.
+        * ``torch``           - torch.matmul double-loop reference. Slow
+                                but numerically identical; A/B ground truth.
+        * ``ascendc``         - reserved for a future fused AscendC kernel
+                                (v2). Raises NotImplementedError today.
+
+        All implementations share the same shared-arg unpacking and
+        early-out path below; only the inner kernel differs.
+        """
+        del sorted_token_ids, num_tokens_post_padded
+        del max_lora_rank, top_k_num, shrink_config, expand_config
+        del fully_sharded  # not needed on the permuted-domain Ascend path
+
+        if mul_routed_weight:
+            raise NotImplementedError(
+                "mul_routed_weight=True is not supported on the Ascend MoE-LoRA "
+                "path (LoRA is applied to permuted activations before combine)."
+            )
+        if token_lora_mapping is None:
+            token_lora_mapping = self.token_lora_indices[: x.size(0)]
+
+        # Early-out: prefill metadata explicitly tagged no LoRA in this batch.
+        if self.no_lora:
+            return
+
+        kernel = envs_ascend.VLLM_ASCEND_MOE_LORA_KERNEL
+        if kernel not in _MOE_LORA_KERNELS:
+            logger.warning_once(
+                "Unknown VLLM_ASCEND_MOE_LORA_KERNEL=%r; falling back to 'bgmv'. Valid values: %s",
+                kernel,
+                _MOE_LORA_KERNELS,
+            )
+            kernel = "bgmv"
+
+        if kernel == "bgmv":
+            return self._add_lora_fused_moe_bgmv(
+                y,
+                x,
+                lora_a_stacked,
+                lora_b_stacked,
+                expert_ids,
+                adapter_enabled,
+                offset,
+                token_lora_mapping,
+            )
+        elif kernel == "bgmv_per_expert":
+            return self._add_lora_fused_moe_bgmv_per_expert(
+                y,
+                x,
+                lora_a_stacked,
+                lora_b_stacked,
+                expert_ids,
+                adapter_enabled,
+                offset,
+                token_lora_mapping,
+            )
+        elif kernel == "torch":
+            return self._add_lora_fused_moe_torch_ref(
+                y,
+                x,
+                lora_a_stacked,
+                lora_b_stacked,
+                expert_ids,
+                adapter_enabled,
+                offset,
+                token_lora_mapping,
+            )
+        elif kernel == "ascendc":
+            raise NotImplementedError(
+                "VLLM_ASCEND_MOE_LORA_KERNEL='ascendc' is reserved for a future "
+                "fused AscendC MoE-LoRA kernel (v2 roadmap). Use 'bgmv' (default) "
+                "for production or 'torch'/'bgmv_per_expert' for debugging."
+            )
+
+    def _add_lora_fused_moe_bgmv(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        expert_ids: torch.Tensor,
+        adapter_enabled: torch.Tensor,
+        offset: int,
+        token_lora_mapping: torch.Tensor,
+    ):
+        """Combined-index bgmv: two bgmv calls per slice, no Python loop.
+
+        Trick: bgmv expects 3D weights ``[num_loras, out, in]`` and a 1D
+        ``lora_indices`` of length N. Our per-expert LoRA weights are 4D
+        ``[max_loras, local_E, rank/slice, in]``. We fold ``(lora_id,
+        expert_id)`` into a single virtual index ``e * max_loras + l`` and
+        reshape the weights into ``[max_loras*local_E, ...]`` via
+        ``permute(1, 0, 2, 3).reshape(...)``. Disabled / unmapped rows are
+        clamped into the [0, max_loras) range; their shrink buffer is then
+        zeroed before expand, so they contribute nothing without any host
+        sync.
+
+        IMPORTANT: stacked tensor ``shape[0]`` is exactly ``max_loras``;
+        the upstream FusedMoEWithLoRA._create_lora_a_weights allocates it
+        without the +1 sentinel that ``adapter_enabled`` carries.
+        ``adapter_enabled.shape[0] == max_loras + 1`` (the extra slot is
+        for the "no-LoRA" sentinel and is always 0). We MUST read
+        max_loras from the stacked tensor itself, not from adapter_enabled.
+        """
+        # Stacked tensor shape[0] is the actual max_loras; adapter_enabled
+        # has one extra sentinel slot but the LoRA weights do not.
+        max_loras = lora_a_stacked[0].shape[0]
+        local_E = lora_a_stacked[0].shape[1]
+
+        # adapter_enabled[token_lora_mapping] needs clamp(min=0, max=max_loras)
+        # to avoid out-of-bounds; values out of [0, max_loras) get masked out
+        # by valid_mask below.
+        tlm_clamped = token_lora_mapping.clamp(min=0, max=max_loras)
+        valid_mask = (token_lora_mapping >= 0) & (token_lora_mapping < max_loras) & (adapter_enabled[tlm_clamped] != 0)
+        # Sentinel routing: invalid rows go to (lora=0, expert=0); their
+        # shrink buffer is zeroed below before expand, so they contribute 0.
+        safe_lora = torch.where(valid_mask, tlm_clamped, torch.zeros_like(tlm_clamped))
+        # Cap to [0, max_loras) explicitly so virtual_idx stays in
+        # [0, max_loras * local_E) range that A_flat / B_flat span.
+        safe_lora = safe_lora.clamp(max=max_loras - 1)
+        safe_expert = expert_ids.clamp(min=0).to(torch.long)
+        virtual_idx = safe_expert * max_loras + safe_lora.to(torch.long)
+
+        for slice_idx in range(len(lora_a_stacked)):
+            A = lora_a_stacked[slice_idx]  # [max_loras, local_E, rank, in]
+            B = lora_b_stacked[slice_idx]  # [max_loras, local_E, slice, rank]
+            rank = A.shape[2]
+            slice_out = B.shape[2]
+            col_start = offset + slice_idx * slice_out
+
+            A_flat = A.permute(1, 0, 2, 3).reshape(local_E * max_loras, rank, A.shape[-1]).contiguous()
+            B_flat = B.permute(1, 0, 2, 3).reshape(local_E * max_loras, slice_out, rank).contiguous()
+
+            buffer = torch.zeros((x.size(0), rank), dtype=torch.float32, device=x.device)
+            self.bgmv_shrink(x, A_flat, buffer, virtual_idx, 1.0)
+            buffer.mul_(valid_mask.unsqueeze(-1).to(buffer.dtype))
+            self.bgmv_expand_slice(buffer, B_flat, y, virtual_idx, col_start, slice_out, True)
+
+    def _add_lora_fused_moe_bgmv_per_expert(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        expert_ids: torch.Tensor,
+        adapter_enabled: torch.Tensor,
+        offset: int,
+        token_lora_mapping: torch.Tensor,
+    ):
+        """Per-expert bgmv loop (intermediate debugging tier).
+
+        Direct realization of the original "loop over local experts and call
+        bgmv per expert" sketch. For each (slice, expert) bucket:
+            x_sub = x[mask]                             # gather rows for this expert
+            buf = bgmv_shrink(x_sub, A[:, e], lora_ids_sub, 1.0)
+            out = bgmv_expand_slice(buf, B[:, e], lora_ids_sub, 0, slice_out)
+            y[mask, col_start:col_end] += out           # scatter back
+
+        Slower than the combined-index `bgmv` kernel because:
+          * local_E Python iterations (Qwen3-30B = 128 per slice)
+          * One host sync per bucket (`mask.any().item()`)
+          * local_E * 2 bgmv kernel launches per slice (vs 2 total)
+          * Each iteration allocates a small temp output buffer
+
+        Kept as a useful debugging tier: semantics are 1:1 with the
+        narrative description, easier to step through with print/pdb than
+        the combined-index version's reshape + virtual_idx tricks.
+        """
+        local_E = lora_a_stacked[0].shape[1]
+
+        tlm_clamped = token_lora_mapping.clamp(min=0)
+        valid_mask = (token_lora_mapping >= 0) & (adapter_enabled[tlm_clamped] != 0)
+        # Per-bucket lora_ids will be sliced from this safe view, so invalid
+        # rows route to slot 0 — but they're filtered out by `mask` before
+        # gather, so the value at -1 positions is never read.
+        safe_lora = torch.where(valid_mask, tlm_clamped, torch.zeros_like(tlm_clamped)).to(torch.long)
+        safe_expert = expert_ids.clamp(min=0).to(torch.long)
+
+        for slice_idx in range(len(lora_a_stacked)):
+            A = lora_a_stacked[slice_idx]  # [max_loras+1, local_E, rank, in]
+            B = lora_b_stacked[slice_idx]  # [max_loras+1, local_E, slice, rank]
+            rank = A.shape[2]
+            slice_out = B.shape[2]
+            col_start = offset + slice_idx * slice_out
+            col_end = col_start + slice_out
+
+            for e in range(local_E):
+                # mask: which permuted rows are routed to expert `e` AND have
+                # a valid+enabled lora slot.
+                mask = (safe_expert == e) & valid_mask
+                # Per-bucket host sync — accepted as the cost of this tier.
+                if not bool(mask.any().item()):
+                    continue
+
+                x_sub = x[mask]
+                lora_ids_sub = safe_lora[mask]
+                n_sub = x_sub.size(0)
+
+                # Per-expert weight slices (contiguous to satisfy bgmv layout).
+                A_e = A[:, e].contiguous()  # [max_loras+1, rank, in]
+                B_e = B[:, e].contiguous()  # [max_loras+1, slice_out, rank]
+
+                # Shrink to fp32 rank buffer (parity with combined-index path).
+                rank_buf = torch.zeros((n_sub, rank), dtype=torch.float32, device=x.device)
+                self.bgmv_shrink(x_sub, A_e, rank_buf, lora_ids_sub, 1.0)
+
+                # Expand into a compact [n_sub, slice_out] temporary, then
+                # scatter-add back into y. We use expand_slice (not expand)
+                # because the wrapper passes slice_offset/slice_size to the
+                # AscendC op explicitly.
+                out_buf = torch.zeros((n_sub, slice_out), dtype=y.dtype, device=x.device)
+                self.bgmv_expand_slice(rank_buf, B_e, out_buf, lora_ids_sub, 0, slice_out, True)
+
+                y[mask, col_start:col_end] += out_buf
+
+    def _add_lora_fused_moe_torch_ref(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        expert_ids: torch.Tensor,
+        adapter_enabled: torch.Tensor,
+        offset: int,
+        token_lora_mapping: torch.Tensor,
+    ):
+        """torch.matmul double-loop reference implementation (DEBUG ONLY).
+
+        Semantics:
+            for slice_idx, (A, B) in enumerate(zip(lora_a_stacked, lora_b_stacked)):
+                slice_out = B.shape[2]
+                col_start = offset + slice_idx * slice_out
+                for each permuted row i:
+                    l = token_lora_mapping[i]; e = expert_ids[i]
+                    if l == -1 or adapter_enabled[l] == 0: continue
+                    buf = (x[i] @ A[l, e].T) * 1.0          # shrink
+                    y[i, col_start:col_start+slice_out] += buf @ B[l, e].T
+
+        Walks (lora_id, expert_id) buckets in Python with per-bucket
+        ``.item()`` host sync. O(max_loras * local_E) masked matmuls per
+        call. Used as a numerical ground-truth for the bgmv fast path
+        when debugging accuracy issues; NEVER use in production.
+        """
+        max_loras = int(adapter_enabled.shape[0]) - 1
+        for slice_idx in range(len(lora_a_stacked)):
+            A = lora_a_stacked[slice_idx]  # [max_loras+1, local_E, rank, in]
+            B = lora_b_stacked[slice_idx]  # [max_loras+1, local_E, slice, rank]
+            slice_out = B.shape[2]
+            local_E = A.shape[1]
+            col_start = offset + slice_idx * slice_out
+            col_end = col_start + slice_out
+
+            for lora_idx in range(max_loras):
+                if int(adapter_enabled[lora_idx].item()) == 0:
+                    continue
+                lora_mask = token_lora_mapping == lora_idx
+                if not bool(lora_mask.any().item()):
+                    continue
+                for e in range(local_E):
+                    mask = lora_mask & (expert_ids == e)
+                    if not bool(mask.any().item()):
+                        continue
+                    x_sub = x[mask].to(torch.float32)
+                    buf = x_sub @ A[lora_idx, e].t().to(torch.float32)
+                    delta = buf @ B[lora_idx, e].t().to(torch.float32)
+                    y[mask, col_start:col_end] += delta.to(y.dtype)

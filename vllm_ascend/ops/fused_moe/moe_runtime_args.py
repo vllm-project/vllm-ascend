@@ -214,6 +214,10 @@ def build_mlp_compute_input(
     if fused_experts_input.quant.is_mxfp and fused_experts_input.quant.mxfp is None:
         raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
 
+    # MoE-LoRA needs perm_row -> orig_token mapping; AllGather's combine_metadata
+    # carries expanded_row_idx. MC2 / All2All metadata classes do not expose it
+    # in the same form; pass None and let the LoRA hook fall back.
+    expanded_row_idx = getattr(token_dispatch_output.combine_metadata, "expanded_row_idx", None)
     return MoEMlpComputeInput(
         hidden_states=token_dispatch_output.hidden_states,
         group_list=token_dispatch_output.group_list,
@@ -227,6 +231,8 @@ def build_mlp_compute_input(
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,
         swiglu_limit=fused_experts_input.swiglu_limit,
+        expanded_row_idx=expanded_row_idx,
+        topk_ids=fused_experts_input.topk_ids,
     )
 
 

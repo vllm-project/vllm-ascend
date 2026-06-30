@@ -8,6 +8,7 @@ from vllm.lora.layers import (
     QKVParallelLinearWithLoRA,
     QKVParallelLinearWithShardedLoRA,
 )
+from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
 from vllm_ascend.ops.linear import (
@@ -74,9 +75,24 @@ def refresh_all_lora_classes():
         AscendMergedQKVParallelLinearWithShardedLoRA,
         AscendQKVParallelLinearWithShardedLoRA,
     )
+
+    # MoE LoRA: drop upstream Triton-based wrappers (they assert on TritonExperts
+    # in __init__ which does not exist on Ascend) and register Ascend variants.
+    # Imported lazily to avoid pulling in torch_npu at module-import time.
+    from vllm_ascend.lora.fused_moe import (
+        AscendFusedMoE3DWithLoRA,
+        AscendFusedMoEWithLoRA,
+    )
+
+    moe_ascend_classes = (
+        AscendFusedMoEWithLoRA,
+        AscendFusedMoE3DWithLoRA,
+    )
+
     # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
-    # Append the Ascend classes in a deterministic order.
+    # Filter out upstream Triton-based MoE wrappers and append the Ascend classes.
     vllm.lora.utils._all_lora_classes = (
-        *vllm.lora.utils._all_lora_classes,
-        *ascend_classes,
+        tuple(cls for cls in vllm.lora.utils._all_lora_classes if cls not in (FusedMoEWithLoRA, FusedMoE3DWithLoRA))
+        + ascend_classes
+        + moe_ascend_classes
     )
