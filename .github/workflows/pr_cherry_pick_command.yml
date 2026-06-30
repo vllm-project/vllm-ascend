@@ -129,6 +129,8 @@ jobs:
           PR_TITLE='${{ github.event.client_payload.pull_request.title }}'
           PR_BODY='${{ github.event.client_payload.pull_request.body }}'
           PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
+          PR_BASE_SHA='${{ github.event.client_payload.pull_request.base.sha }}'
+          PR_HEAD_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
           TARGET_BRANCH='${{ steps.parse.outputs.target_branch }}'
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
 
@@ -137,9 +139,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
 
-          # Fetch target branch and PR head
-          git fetch origin "$TARGET_BRANCH"
-          git fetch origin "pull/${PR_NUMBER}/head:pr-${PR_NUMBER}"
+          # Fetch target branch and PR's base/head SHAs
+          git fetch origin "$TARGET_BRANCH" "$PR_BASE_SHA" "$PR_HEAD_SHA" 2>/dev/null || true
 
           # Verify target branch exists
           if ! git rev-parse --verify "origin/$TARGET_BRANCH" >/dev/null 2>&1; then
@@ -153,17 +154,35 @@ jobs:
           CHERRY_BRANCH="cherry-pick/pr-${PR_NUMBER}-to-${SANITIZED_TARGET}"
           git checkout -b "$CHERRY_BRANCH" "origin/$TARGET_BRANCH"
 
-          # Cherry-pick the PR's commits.
-          # Use the merge-base between the target branch and the PR head to identify
-          # only the PR's unique commits, not commits already on the target branch.
-          MERGE_BASE=$(git merge-base "origin/$TARGET_BRANCH" "pr-${PR_NUMBER}")
-          echo "Merge base: $MERGE_BASE"
+          # Apply the PR's changes as a single commit.
+          # Using git diff (PR base vs PR head) avoids picking up unrelated
+          # merge commits from the base branch, which works for both merged
+          # and unmerged PRs.
+          echo "PR base: $PR_BASE_SHA"
+          echo "PR head: $PR_HEAD_SHA"
 
-          if ! git cherry-pick "$MERGE_BASE..pr-${PR_NUMBER}"; then
-            echo "::error::Cherry-pick conflict detected."
+          # Generate the diff to a temp file (avoids shell variable size limits
+          # for large PRs) so we can check emptiness and apply it.
+          DIFF_FILE=/tmp/cherry_diff.patch
+          git diff "$PR_BASE_SHA".."$PR_HEAD_SHA" > "$DIFF_FILE"
+
+          if [ ! -s "$DIFF_FILE" ]; then
+            echo "Diff is empty, changes already included in target branch."
+            echo "cherry_status=already_included" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Apply the diff with 3-way merge for better conflict resolution
+          APPLY_LOG=/tmp/cherry_apply_err
+          if ! git apply --3way "$DIFF_FILE" 2>"$APPLY_LOG"; then
+            echo "::error::git apply failed. See details below:"
+            cat "$APPLY_LOG"
             echo "cherry_status=conflict" >> "$GITHUB_OUTPUT"
             exit 1
           fi
+
+          # Commit the applied changes as a single commit with PR metadata
+          git commit -m "$PR_TITLE" -m "Cherry-pick of PR #${PR_NUMBER} by @${PR_AUTHOR}"
 
           # Push the new branch (force-push in case branch already exists from a previous run)
           git push -f origin "$CHERRY_BRANCH"
@@ -193,6 +212,17 @@ jobs:
             [Bot]: cherry-pick completed successfully. New PR created: ${{ steps.cherry.outputs.new_pr_url }}
           reactions: hooray
 
+      - name: Comment already included
+        if: steps.cherry.outputs.cherry_status == 'already_included'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: cherry-pick skipped: the changes from this PR are already included in the target branch `${{ steps.parse.outputs.target_branch }}`.
+          reactions: eyes
+
       - name: Comment conflict failure
         if: failure() && steps.cherry.outputs.cherry_status == 'conflict'
         uses: peter-evans/create-or-update-comment@v5
@@ -205,7 +235,7 @@ jobs:
           reactions: confused
 
       - name: Comment generic failure
-        if: failure() && steps.cherry.outputs.cherry_status != 'conflict' && steps.cherry.outputs.cherry_status != 'success'
+        if: failure() && steps.cherry.outputs.cherry_status != 'conflict' && steps.cherry.outputs.cherry_status != 'success' && steps.cherry.outputs.cherry_status != 'already_included'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
