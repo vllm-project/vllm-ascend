@@ -254,7 +254,7 @@ Startup Command:
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
-local_ip="xxxx"
+local_ip="141.xx.xx.1"
 
 # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxxx"
@@ -319,7 +319,7 @@ Startup Command:
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxx"
-local_ip="xxx"
+local_ip="141.xx.xx.2"
 
 # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxxx"
@@ -975,7 +975,7 @@ Run performance evaluation of `Kimi-K2.5-w4a8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-There are three `vllm benchmark` subcommands:
+There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
