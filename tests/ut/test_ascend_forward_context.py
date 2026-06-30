@@ -29,12 +29,14 @@ def _make_vllm_config(
     cudagraph_capture_sizes: list[int] | None = None,
     max_cudagraph_capture_size: int = 0,
     max_num_batched_tokens: int = 0,
+    hidden_size: int = 2048,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
         hf_text_config_attrs["quantize"] = quant_type
     if num_experts_per_tok is not None:
         hf_text_config_attrs["num_experts_per_tok"] = num_experts_per_tok
+    hf_text_config_attrs["hidden_size"] = hidden_size
 
     model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(**hf_text_config_attrs),
@@ -66,13 +68,18 @@ def _patch_select_moe_comm_method_deps(
     capacity: int = 128,
     ep_world_size: int = 8,
     enable_fused_mc2: int = 0,
+    enable_prefill_mc2: int = 0,
     is_moe: bool = True,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2))
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, enable_prefill_mc2=enable_prefill_mc2),
+    )
 
 
 def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
@@ -163,9 +170,9 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
     ("num_tokens", "ep_world_size", "expected"),
     [
         (128, 8, MoECommType.FUSED_MC2),
-        (128, 64, MoECommType.MC2),
-        (129, 8, MoECommType.FUSED_MC2),
-        (129, 64, MoECommType.ALLTOALL),
+        (128, 128, MoECommType.ALLTOALL),
+        (4097, 8, MoECommType.ALLTOALL),
+        (4097, 128, MoECommType.ALLTOALL),
     ],
 )
 def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
@@ -182,7 +189,9 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
         enable_fused_mc2=1,
     )
 
-    assert afc.select_moe_comm_method(num_tokens, _make_vllm_config()) == expected
+    vllm_config = _make_vllm_config(quant_type="w4a8")
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
 @pytest.mark.parametrize(
@@ -201,8 +210,130 @@ def test_select_moe_comm_method_a3_without_fused_mc2(
         monkeypatch,
         device_type=afc.AscendDeviceType.A3,
         capacity=128,
+        enable_prefill_mc2=1,
     )
     vllm_config = _make_vllm_config()
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "ep_world_size", "expected"),
+    [
+        (128, 8, MoECommType.MC2),
+    ],
+)
+def test_select_moe_comm_method_a3_quant_w4a16(
+    monkeypatch,
+    num_tokens,
+    ep_world_size,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=ep_world_size,
+        enable_fused_mc2=1,
+        enable_prefill_mc2=1,
+    )
+
+    vllm_config = _make_vllm_config(quant_type="w4a16")
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "ep_world_size", "expected"),
+    [
+        (128, 8, MoECommType.FUSED_MC2),
+    ],
+)
+def test_select_moe_comm_method_a3_quant_w4a8(
+    monkeypatch,
+    num_tokens,
+    ep_world_size,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=ep_world_size,
+        enable_fused_mc2=1,
+        enable_prefill_mc2=1,
+    )
+
+    vllm_config = _make_vllm_config(quant_type="w4a8")
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "ep_world_size", "expected"),
+    [
+        (128, 8, MoECommType.FUSED_MC2),
+    ],
+)
+def test_select_moe_comm_method_a3_quant_w8a8(
+    monkeypatch,
+    num_tokens,
+    ep_world_size,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=ep_world_size,
+        enable_fused_mc2=1,
+        enable_prefill_mc2=1,
+    )
+
+    vllm_config = _make_vllm_config(quant_type="w8a8")
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("quant_type", "expected"),
+    [
+        ("w4a8", True),
+        ("w8a8", True),
+        ("w8a16", False),
+    ],
+)
+def test_cann_megamoe_supported_by_config_quant_type(
+    quant_type,
+    expected,
+):
+    vllm_config = _make_vllm_config(quant_type=quant_type)
+
+    assert afc._cann_megamoe_supported_by_config(vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "ep_world_size", "expected"),
+    [
+        (128, 8, MoECommType.ALLTOALL),
+    ],
+)
+def test_select_moe_comm_method_a3_mc2_invalid_hidden_size(
+    monkeypatch,
+    num_tokens,
+    ep_world_size,
+    expected,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=ep_world_size,
+        enable_fused_mc2=1,
+        enable_prefill_mc2=0,
+    )
+
+    vllm_config = _make_vllm_config(quant_type="w4a8", hidden_size=512)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 

@@ -960,7 +960,6 @@ class NPUPlatform(Platform):
         moe_comm_type = select_moe_comm_method(
             num_tokens,
             vllm_config,
-            is_draft_model=is_draft_model,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
