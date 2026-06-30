@@ -1170,8 +1170,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(q_pe.shape[1], self.impl.num_heads)
         self.assertEqual(q_pe.shape[2], self.impl.qk_rope_head_dim)
 
-    @patch("vllm_ascend.attention.mla_v1.interleave_rope_by_cache")
-    def test_rope_single(self, mock_interleave_rope_by_cache):
+    @patch("vllm_ascend.attention.mla_v1.npu_mla_interleave_rope_from_cache")
+    def test_rope_single(self, mock_interleave_rope_from_cache):
         batch_size = 2
         seq_len = 10
         dim = 32
@@ -1179,16 +1179,18 @@ class TestAscendMLAImpl(TestBase):
         x = torch.randn(batch_size, seq_len, dim)
         positions = torch.arange(batch_size)
 
-        mock_interleave_rope_by_cache.return_value = torch.randn(batch_size, seq_len, 1, dim)
+        mock_interleave_rope_from_cache.return_value = torch.randn(batch_size, seq_len, 1, dim)
 
         result = self.impl.rope_single(x, positions)
 
         self.assertEqual(result.shape, (batch_size, seq_len, dim))
-        mock_interleave_rope_by_cache.assert_called_once()
+        mock_interleave_rope_from_cache.assert_called_once()
 
     @patch("torch_npu.npu_interleave_rope")
-    @patch("vllm_ascend.attention.mla_v1.interleave_rope_by_cache")
-    def test_rope_single_uses_by_cache_for_deepseek_pp(self, mock_interleave_rope_by_cache, mock_npu_interleave_rope):
+    @patch("vllm_ascend.attention.mla_v1.npu_mla_interleave_rope_from_cache")
+    def test_rope_single_uses_cache_wrapper_for_deepseek_pp(
+        self, mock_interleave_rope_from_cache, mock_npu_interleave_rope
+    ):
         self.impl.vllm_config.model_config.is_deepseek_mla = True
         self.impl.vllm_config.parallel_config.pipeline_parallel_size = 2
         self.impl.vllm_config.compilation_config.cudagraph_mode = "NONE"
@@ -1198,13 +1200,13 @@ class TestAscendMLAImpl(TestBase):
         x = torch.randn(batch_size, num_heads, dim)
         positions = torch.tensor([1, 3], dtype=torch.long)
         self.impl.rotary_emb = MagicMock()
-        mock_interleave_rope_by_cache.return_value = torch.randn(batch_size, num_heads, 1, dim)
+        mock_interleave_rope_from_cache.return_value = torch.randn(batch_size, num_heads, 1, dim)
 
         result = self.impl.rope_single(x, positions)
 
         self.assertEqual(result.shape, (batch_size, num_heads, dim))
-        mock_interleave_rope_by_cache.assert_called_once()
-        rope_arg, positions_arg, rotary_arg = mock_interleave_rope_by_cache.call_args.args
+        mock_interleave_rope_from_cache.assert_called_once()
+        rope_arg, positions_arg, rotary_arg = mock_interleave_rope_from_cache.call_args.args
         self.assertEqual(rope_arg.shape, (batch_size, num_heads, 1, dim))
         self.assertIs(positions_arg, positions)
         self.assertIs(rotary_arg, self.impl.rotary_emb)
@@ -1212,9 +1214,9 @@ class TestAscendMLAImpl(TestBase):
 
     @patch("vllm_ascend.attention.mla_v1._EXTRA_CTX")
     @patch("torch_npu.npu_interleave_rope")
-    @patch("vllm_ascend.attention.mla_v1.interleave_rope_by_cache")
-    def test_rope_single_uses_by_cache_for_deepseek_context_parallel(
-        self, mock_interleave_rope_by_cache, mock_npu_interleave_rope, mock_extra_ctx
+    @patch("vllm_ascend.attention.mla_v1.npu_mla_interleave_rope_from_cache")
+    def test_rope_single_uses_cache_wrapper_for_deepseek_context_parallel(
+        self, mock_interleave_rope_from_cache, mock_npu_interleave_rope, mock_extra_ctx
     ):
         mock_extra_ctx.capturing = False
         self.impl.vllm_config.model_config.is_deepseek_mla = True
@@ -1227,12 +1229,12 @@ class TestAscendMLAImpl(TestBase):
         x = torch.randn(batch_size, num_heads, dim)
         positions = torch.arange(batch_size)
         self.impl.rotary_emb = MagicMock()
-        mock_interleave_rope_by_cache.return_value = torch.randn(batch_size, num_heads, 1, dim)
+        mock_interleave_rope_from_cache.return_value = torch.randn(batch_size, num_heads, 1, dim)
 
         result = self.impl.rope_single(x, positions)
 
         self.assertEqual(result.shape, (batch_size, num_heads, dim))
-        mock_interleave_rope_by_cache.assert_called_once()
+        mock_interleave_rope_from_cache.assert_called_once()
         mock_npu_interleave_rope.assert_not_called()
 
     def test_forward_mha_not_implemented(self):
@@ -2233,7 +2235,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)
 
-    @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_by_cache")
+    @patch("vllm_ascend.attention.mla_v1.npu_mla_kv_rmsnorm_rope_cache_from_cache")
     def test_exec_kv_prefill(self, mock_kv_rmsnorm_rope_cache):
         B = 2
         N = self.impl.num_kv_heads
@@ -2258,7 +2260,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
-    @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_by_cache")
+    @patch("vllm_ascend.attention.mla_v1.npu_mla_kv_rmsnorm_rope_cache_from_cache")
     def test_exec_kv_prefill_with_fa_quant(self, mock_kv_rmsnorm_rope_cache):
         # if fa_quant_layer is True
         B = 2
@@ -2287,7 +2289,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
-    @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_by_cache")
+    @patch("vllm_ascend.attention.mla_v1.npu_mla_kv_rmsnorm_rope_cache_from_cache")
     def test_exec_kv_decode(self, mock_kv_rmsnorm_rope_cache):
         B = 2
         N = self.impl.num_kv_heads
@@ -2312,11 +2314,9 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
-    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    @patch("vllm_ascend.attention.mla_v1.npu_mla_kv_rmsnorm_rope_cache_from_cache")
     @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_by_cache")
-    def test_exec_kv_uses_by_cache_for_deepseek_cp_and_pp(
-        self, mock_kv_rmsnorm_rope_cache, mock_materialized_kv_rmsnorm_rope_cache
-    ):
+    def test_exec_kv_uses_cache_wrapper_for_deepseek_cp_and_pp(self, mock_kv_rmsnorm_rope_cache, mock_cache_wrapper):
         B = 2
         N = self.impl.num_kv_heads
         D = self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
@@ -2337,8 +2337,8 @@ class TestAscendMLAImpl(TestBase):
                 self.impl.vllm_config.parallel_config.decode_context_parallel_size = dcp_size
                 self.impl.vllm_config.parallel_config.pipeline_parallel_size = pp_size
                 mock_kv_rmsnorm_rope_cache.reset_mock()
-                mock_materialized_kv_rmsnorm_rope_cache.reset_mock()
-                mock_kv_rmsnorm_rope_cache.side_effect = [
+                mock_cache_wrapper.reset_mock()
+                mock_cache_wrapper.side_effect = [
                     (
                         torch.randn(B, N, 1, self.impl.qk_rope_head_dim),
                         torch.randn(B, N, 1, self.impl.kv_lora_rank),
@@ -2360,12 +2360,11 @@ class TestAscendMLAImpl(TestBase):
                 self.assertEqual(decode_k_nope.shape[-1], self.impl.kv_lora_rank)
                 self.assertEqual(prefill_k_pe.shape[-1], self.impl.qk_rope_head_dim)
                 self.assertEqual(prefill_k_nope.shape[-1], self.impl.kv_lora_rank)
-                self.assertEqual(mock_kv_rmsnorm_rope_cache.call_count, 2)
-                mock_materialized_kv_rmsnorm_rope_cache.assert_not_called()
+                self.assertEqual(mock_cache_wrapper.call_count, 2)
+                mock_kv_rmsnorm_rope_cache.assert_not_called()
 
-    @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_and_interleave_by_cache")
     @patch("vllm_ascend.attention.mla_v1._EXTRA_CTX")
-    def test_try_exec_q_kv_skips_fused_path_during_aclgraph_capture(self, mock_extra_ctx, mock_fused_op):
+    def test_try_exec_q_kv_skips_fused_path_during_aclgraph_capture(self, mock_extra_ctx):
         mock_extra_ctx.capturing = True
         B = 2
         N = self.impl.num_kv_heads
@@ -2381,10 +2380,8 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertIsNone(decode_result)
         self.assertIsNone(prefill_result)
-        mock_fused_op.assert_not_called()
 
-    @patch("vllm_ascend.attention.mla_v1.kv_rmsnorm_rope_cache_and_interleave_by_cache")
-    def test_try_exec_q_kv_skips_fused_path_when_aclgraph_mode_configured(self, mock_fused_op):
+    def test_try_exec_q_kv_skips_fused_path_when_aclgraph_mode_configured(self):
         self.impl.vllm_config.compilation_config.cudagraph_mode = "FULL_AND_PIECEWISE"
         B = 2
         N = self.impl.num_kv_heads
@@ -2400,7 +2397,6 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertIsNone(decode_result)
         self.assertIsNone(prefill_result)
-        mock_fused_op.assert_not_called()
 
     @patch("vllm_ascend.attention.mla_v1._EXTRA_CTX")
     def test_prefill_mlapo_raw_q_backend_skips_aclgraph_capture(self, mock_extra_ctx):

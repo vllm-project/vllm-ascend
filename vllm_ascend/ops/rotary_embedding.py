@@ -76,6 +76,7 @@ def select_cos_sin_from_cache(
     *,
     layout: str = "T11D",
     expand_rope_dim: bool = True,
+    is_neox_style_override: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Resolve materialized cos/sin from rotary_emb for legacy NPU ops.
 
@@ -85,15 +86,21 @@ def select_cos_sin_from_cache(
     layout values:
     - "TD": [num_tokens, rotary_dim]
     - "T11D": [num_tokens, 1, 1, rotary_dim]
+    - "T1D": [num_tokens, 1, rotary_dim]
     - "1T1D": [1, num_tokens, 1, rotary_dim]
     """
     cos_sin = select_cos_sin_cache(rotary_emb, positions, ref_tensor)
     cos, sin = cos_sin.chunk(2, dim=-1)
     if expand_rope_dim:
-        cos, sin = _expand_rope_dim(cos, sin, is_neox_style=getattr(rotary_emb, "is_neox_style", True))
+        is_neox_style = (
+            getattr(rotary_emb, "is_neox_style", True) if is_neox_style_override is None else is_neox_style_override
+        )
+        cos, sin = _expand_rope_dim(cos, sin, is_neox_style=is_neox_style)
 
     if layout == "TD":
         return cos.contiguous().view(positions.shape[-1], -1), sin.contiguous().view(positions.shape[-1], -1)
+    if layout == "T1D":
+        return cos.contiguous().view(positions.shape[-1], 1, -1), sin.contiguous().view(positions.shape[-1], 1, -1)
     if layout == "T11D":
         return cos.contiguous().view(positions.shape[-1], 1, 1, -1), sin.contiguous().view(
             positions.shape[-1], 1, 1, -1
@@ -103,6 +110,159 @@ def select_cos_sin_from_cache(
             1, positions.shape[-1], 1, -1
         )
     raise ValueError(f"Unsupported RoPE cache layout: {layout}")
+
+
+def select_mla_cos_sin_from_cache(
+    rotary_emb,
+    positions: torch.Tensor,
+    ref_tensor: torch.Tensor,
+    *,
+    layout: str = "T11D",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resolve cos/sin for legacy MLA NPU ops from internal RoPE cache."""
+    return select_cos_sin_from_cache(
+        rotary_emb,
+        positions,
+        ref_tensor,
+        layout=layout,
+        is_neox_style_override=True,
+    )
+
+
+def npu_mla_kv_rmsnorm_rope_cache_from_cache(
+    kv_no_split: torch.Tensor,
+    gamma: torch.Tensor,
+    positions: torch.Tensor,
+    rotary_emb,
+    slots: torch.Tensor,
+    k_cache: torch.Tensor,
+    c_cache: torch.Tensor,
+    *,
+    c_kv_scale=None,
+    epsilon: float,
+    cache_mode: str,
+    is_output_kv: bool | None = None,
+):
+    """Call legacy MLA KV rmsnorm+RoPE op without exposing cos/sin upstream."""
+    cos, sin = select_mla_cos_sin_from_cache(
+        rotary_emb,
+        positions,
+        kv_no_split,
+        layout="T11D",
+    )
+    kwargs = {
+        "c_kv_scale": c_kv_scale,
+        "epsilon": epsilon,
+        "cache_mode": cache_mode,
+    }
+    if is_output_kv is not None:
+        kwargs["is_output_kv"] = is_output_kv
+    return torch_npu.npu_kv_rmsnorm_rope_cache(
+        kv_no_split,
+        gamma,
+        cos,
+        sin,
+        slots.to(torch.int64).contiguous(),
+        k_cache,
+        c_cache,
+        **kwargs,
+    )
+
+
+def npu_mla_interleave_rope_from_cache(
+    x: torch.Tensor,
+    positions: torch.Tensor,
+    rotary_emb,
+) -> torch.Tensor:
+    """Call legacy MLA interleave RoPE op without exposing cos/sin upstream."""
+    cos, sin = select_mla_cos_sin_from_cache(
+        rotary_emb,
+        positions,
+        x,
+        layout="T11D",
+    )
+    return torch_npu.npu_interleave_rope(x, cos, sin)
+
+
+def npu_mla_prolog_v2_from_cache(
+    token_x: torch.Tensor,
+    weight_dq: torch.Tensor,
+    weight_uq_qr: torch.Tensor,
+    weight_uk: torch.Tensor,
+    weight_dkv_kr: torch.Tensor,
+    rmsnorm_gamma_cq: torch.Tensor,
+    rmsnorm_gamma_ckv: torch.Tensor,
+    positions: torch.Tensor,
+    rotary_emb,
+    ref_tensor: torch.Tensor,
+    cache_index: torch.Tensor,
+    kv_cache: torch.Tensor,
+    kr_cache: torch.Tensor,
+    **kwargs,
+):
+    """Call legacy MLA prolog v2 without exposing cos/sin upstream."""
+    cos, sin = select_mla_cos_sin_from_cache(
+        rotary_emb,
+        positions,
+        ref_tensor,
+        layout="TD",
+    )
+    return torch_npu.npu_mla_prolog_v2(
+        token_x,
+        weight_dq,
+        weight_uq_qr,
+        weight_uk,
+        weight_dkv_kr,
+        rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv,
+        sin,
+        cos,
+        cache_index,
+        kv_cache,
+        kr_cache,
+        **kwargs,
+    )
+
+
+def npu_mla_prolog_v3_from_cache(
+    *,
+    token_x: torch.Tensor,
+    weight_dq: torch.Tensor,
+    weight_uq_qr: torch.Tensor,
+    weight_uk: torch.Tensor,
+    weight_dkv_kr: torch.Tensor,
+    rmsnorm_gamma_cq: torch.Tensor,
+    rmsnorm_gamma_ckv: torch.Tensor,
+    positions: torch.Tensor,
+    rotary_emb,
+    ref_tensor: torch.Tensor,
+    kv_cache: torch.Tensor,
+    kr_cache: torch.Tensor,
+    cache_index: torch.Tensor,
+    **kwargs,
+):
+    """Call legacy MLA prolog v3 without exposing cos/sin upstream."""
+    cos, sin = select_mla_cos_sin_from_cache(
+        rotary_emb,
+        positions,
+        ref_tensor,
+        layout="T1D",
+    )
+    return torch_npu.npu_mla_prolog_v3(
+        token_x=token_x,
+        weight_dq=weight_dq,
+        weight_uq_qr=weight_uq_qr,
+        weight_uk=weight_uk,
+        weight_dkv_kr=weight_dkv_kr,
+        rmsnorm_gamma_cq=rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv=rmsnorm_gamma_ckv,
+        rope_sin=sin,
+        rope_cos=cos,
+        kv_cache=kv_cache,
+        kr_cache=kr_cache,
+        cache_index=cache_index,
+        **kwargs,
+    )
 
 
 def rope_forward_oot(
