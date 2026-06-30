@@ -897,6 +897,31 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             str(ctx.exception),
         )
 
+    def test_graph_stable_tensor_refreshes_all_matching_buffers(self):
+        builder = AscendMLAMetadataBuilder(
+            kv_cache_spec=self.kv_cache_spec,
+            layer_names=["layer_0", "layer_1"],
+            vllm_config=self.mock_vllm_config,
+            device=self.mock_device,
+        )
+
+        tensor = torch.tensor([1, 2], dtype=torch.int64)
+        builder._graph_mode_configured = False
+        self.assertIs(builder._graph_stable_tensor("decode_input_positions", tensor), tensor)
+
+        builder._graph_mode_configured = True
+        small = builder._graph_stable_tensor("decode_input_positions", torch.tensor([1, 2], dtype=torch.int64))
+        large = builder._graph_stable_tensor("decode_input_positions", torch.tensor([3, 4, 5, 6], dtype=torch.int64))
+        updated = builder._graph_stable_tensor("decode_input_positions", torch.tensor([7, 8], dtype=torch.int64))
+
+        key = ("decode_input_positions", torch.int64, torch.device("cpu"))
+        buffers = sorted(builder._graph_tensor_buffers[key], key=lambda buffer: buffer.numel())
+        self.assertEqual([buffer.numel() for buffer in buffers], [2, 4])
+        self.assertEqual(updated.data_ptr(), small.data_ptr())
+        self.assertNotEqual(updated.data_ptr(), large.data_ptr())
+        self.assertTrue(torch.equal(buffers[0], torch.tensor([7, 8], dtype=torch.int64)))
+        self.assertTrue(torch.equal(buffers[1][:2], torch.tensor([7, 8], dtype=torch.int64)))
+
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
     def test_build_with_seq_lens_only(self, mock_get_pcp_group, mock_get_pcp_group_mask):

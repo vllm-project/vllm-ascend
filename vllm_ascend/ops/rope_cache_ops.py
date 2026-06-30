@@ -663,7 +663,8 @@ def interleave_rope_by_cache(
     rotary_emb,
 ) -> torch.Tensor:
     positions = _normalize_positions_1d(positions, x.shape[0], "interleave_rope_by_cache")
-    torch_npu_op = _get_torch_npu_op("npu_interleave_rope_by_cache")
+    is_neox_style = _is_neox_style(rotary_emb)
+    torch_npu_op = _get_torch_npu_op("npu_interleave_rope_by_cache") if is_neox_style else None
     if torch_npu_op is not None:
         cos_sin_cache = get_rope_cache(rotary_emb, x)
         return torch_npu_op(
@@ -671,7 +672,7 @@ def interleave_rope_by_cache(
             positions,
             cos_sin_cache,
             rope_dim=_rope_dim(rotary_emb, x),
-            is_neox_style=_is_neox_style(rotary_emb),
+            is_neox_style=is_neox_style,
         )
 
     native_output = _try_c_ascend_interleave_rope_by_cache(
@@ -689,6 +690,17 @@ def interleave_rope_by_cache(
     )
     if triton_output is not None:
         return triton_output
+
+    torch_npu_op = None if is_neox_style else _get_torch_npu_op("npu_interleave_rope_by_cache")
+    if torch_npu_op is not None:
+        cos_sin_cache = get_rope_cache(rotary_emb, x)
+        return torch_npu_op(
+            x,
+            positions,
+            cos_sin_cache,
+            rope_dim=_rope_dim(rotary_emb, x),
+            is_neox_style=is_neox_style,
+        )
 
     _raise_missing_true_by_cache_backend("interleave_rope_by_cache")
 

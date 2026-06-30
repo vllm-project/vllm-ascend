@@ -405,7 +405,7 @@ def test_interleave_rope_by_cache_prefers_torch_npu_by_cache(monkeypatch):
 
     x = torch.zeros(2, 1, 1, 32)
     positions = torch.tensor([0, 1], dtype=torch.int64)
-    rotary = SimpleNamespace(cos_sin_cache=torch.zeros(4, 32), rotary_dim=32, is_neox_style=False)
+    rotary = SimpleNamespace(cos_sin_cache=torch.zeros(4, 32), rotary_dim=32, is_neox_style=True)
 
     out = rope_cache_ops.interleave_rope_by_cache(x, positions, rotary)
 
@@ -413,8 +413,45 @@ def test_interleave_rope_by_cache_prefers_torch_npu_by_cache(monkeypatch):
     assert torch.equal(calls["positions"], positions)
     assert calls["cos_sin_cache"] is rotary.cos_sin_cache
     assert calls["rope_dim"] == 32
-    assert calls["is_neox_style"] is False
+    assert calls["is_neox_style"] is True
     assert torch.equal(out, x + 1)
+
+
+def test_interleave_rope_by_cache_prefers_c_backend_for_non_neox(monkeypatch):
+    calls = {}
+
+    def fake_torch_npu_op(*args, **kwargs):
+        raise AssertionError("non-NeoX MLA should use the verified C backend first")
+
+    def fake_native(qk, positions, cos_sin_cache, rope_dim, is_neox_style):
+        calls["qk"] = qk
+        calls["positions"] = positions
+        calls["cos_sin_cache"] = cos_sin_cache
+        calls["rope_dim"] = rope_dim
+        calls["is_neox_style"] = is_neox_style
+        return qk + 1
+
+    monkeypatch.setattr(rope_cache_ops, "_get_torch_npu_op", lambda name: fake_torch_npu_op)
+    monkeypatch.setattr(rope_cache_ops, "_get_c_ascend_op", lambda name: fake_native)
+    monkeypatch.setattr(
+        rope_cache_ops,
+        "_get_triton_interleave_rope_by_cache",
+        lambda: (_ for _ in ()).throw(AssertionError("Triton should not be used when C backend is available")),
+    )
+    monkeypatch.setattr(rope_cache_ops, "get_rope_cache", lambda rotary_emb, ref_tensor: rotary_emb.cos_sin_cache)
+
+    x = torch.zeros(2, 1, 1, 32)
+    positions = torch.tensor([0, 1], dtype=torch.int64)
+    rotary = SimpleNamespace(cos_sin_cache=torch.zeros(4, 32), rotary_dim=32, is_neox_style=False)
+
+    out = rope_cache_ops.interleave_rope_by_cache(x, positions, rotary)
+
+    assert calls["qk"].shape == (2, 1, 32)
+    assert calls["positions"] is positions
+    assert calls["cos_sin_cache"] is rotary.cos_sin_cache
+    assert calls["rope_dim"] == 32
+    assert calls["is_neox_style"] is False
+    assert torch.equal(out, (calls["qk"] + 1).reshape(x.shape))
 
 
 def test_kv_rmsnorm_rope_cache_by_cache_does_not_fallback_to_materialized_native(monkeypatch):
@@ -843,21 +880,29 @@ def _interleave_rope_reference(
     x: torch.Tensor,
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
+    *,
+    is_neox_style: bool,
 ) -> torch.Tensor:
     rope_dim = x.shape[-1]
     half_dim = rope_dim // 2
     cache = cos_sin_cache[positions].to(torch.float32)
     cos, sin = cache[:, :half_dim], cache[:, half_dim:rope_dim]
-    even = x[..., 0::2].to(torch.float32)
-    odd = x[..., 1::2].to(torch.float32)
+    x_fp32 = x.to(torch.float32)
 
-    out = torch.empty_like(x)
-    out[..., :half_dim] = (even * cos[:, None, :] - odd * sin[:, None, :]).to(x.dtype)
-    out[..., half_dim:] = (odd * cos[:, None, :] + even * sin[:, None, :]).to(x.dtype)
-    return out
+    if is_neox_style:
+        first = x_fp32[..., :half_dim]
+        second = x_fp32[..., half_dim:]
+    else:
+        first = x_fp32[..., 0::2]
+        second = x_fp32[..., 1::2]
+
+    out_first = first * cos[:, None, :] - second * sin[:, None, :]
+    out_second = second * cos[:, None, :] + first * sin[:, None, :]
+    return torch.cat((out_first, out_second), dim=-1).to(x.dtype)
 
 
-def test_c_interleave_rope_by_cache_matches_native_layout(monkeypatch):
+@pytest.mark.parametrize("is_neox_style", [False, True])
+def test_c_interleave_rope_by_cache_matches_legacy_mla_layout(monkeypatch, is_neox_style):
     _require_real_npu()
     rope_cache_ops.clear_rope_cache_op_capability_cache()
     if rope_cache_ops._get_c_ascend_op("interleave_rope_by_cache") is None:
@@ -876,16 +921,54 @@ def test_c_interleave_rope_by_cache_matches_native_layout(monkeypatch):
     x = (x.reshape(num_tokens, num_heads, 1, rope_dim) / 127).to(dtype)
     positions = torch.tensor([0, 3, 1, 7, 2], device="npu", dtype=torch.int64)
     cos_sin_cache = _make_cos_sin_cache(8, rope_dim, dtype)
-    rotary = SimpleNamespace(cos_sin_cache=cos_sin_cache, rotary_dim=rope_dim, is_neox_style=False)
+    rotary = SimpleNamespace(cos_sin_cache=cos_sin_cache, rotary_dim=rope_dim, is_neox_style=is_neox_style)
 
     actual = rope_cache_ops.interleave_rope_by_cache(x, positions, rotary)
-    expected = _interleave_rope_reference(x.squeeze(2), positions, cos_sin_cache).reshape_as(x)
+    expected = _interleave_rope_reference(
+        x.squeeze(2),
+        positions,
+        cos_sin_cache,
+        is_neox_style=is_neox_style,
+    ).reshape_as(x)
     torch.npu.synchronize()
 
     torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
 
 
-def test_c_kv_rmsnorm_rope_cache_by_cache_matches_native_layout(monkeypatch):
+@pytest.mark.parametrize("is_neox_style", [False, True])
+def test_triton_interleave_rope_by_cache_matches_legacy_mla_layout(monkeypatch, is_neox_style):
+    _require_real_npu()
+    rope_cache_ops.clear_rope_cache_op_capability_cache()
+    triton_op = rope_cache_ops._get_triton_interleave_rope_by_cache()
+    if triton_op is None:
+        pytest.skip("Triton interleave_rope_by_cache op is unavailable")
+
+    monkeypatch.setattr(rope_cache_ops, "_get_torch_npu_op", lambda name: None)
+    monkeypatch.setattr(rope_cache_ops, "_get_c_ascend_op", lambda name: None)
+    monkeypatch.setattr(rope_cache_ops, "_get_triton_interleave_rope_by_cache", lambda: triton_op)
+
+    dtype = torch.float16
+    num_tokens, num_heads, rope_dim = 5, 3, 16
+    x = torch.arange(num_tokens * num_heads * rope_dim, device="npu", dtype=torch.float32)
+    x = (x.reshape(num_tokens, num_heads, 1, rope_dim) / 127).to(dtype)
+    positions = torch.tensor([0, 3, 1, 7, 2], device="npu", dtype=torch.int64)
+    cos_sin_cache = _make_cos_sin_cache(8, rope_dim, dtype)
+    rotary = SimpleNamespace(cos_sin_cache=cos_sin_cache, rotary_dim=rope_dim, is_neox_style=is_neox_style)
+
+    actual = rope_cache_ops.interleave_rope_by_cache(x, positions, rotary)
+    expected = _interleave_rope_reference(
+        x.squeeze(2),
+        positions,
+        cos_sin_cache,
+        is_neox_style=is_neox_style,
+    ).reshape_as(x)
+    torch.npu.synchronize()
+
+    torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("is_neox_style", [False, True])
+def test_c_kv_rmsnorm_rope_cache_by_cache_matches_legacy_mla_layout(monkeypatch, is_neox_style):
     _require_real_npu()
     rope_cache_ops.clear_rope_cache_op_capability_cache()
     if rope_cache_ops._get_c_ascend_op("kv_rmsnorm_rope_cache_by_cache") is None:
@@ -907,7 +990,7 @@ def test_c_kv_rmsnorm_rope_cache_by_cache_matches_native_layout(monkeypatch):
     positions = torch.tensor([2, 0, 5, 1], device="npu", dtype=torch.int32)
     slots = torch.tensor([0, 3, 4, 7], device="npu", dtype=torch.int32)
     cos_sin_cache = _make_cos_sin_cache(8, rope_dim, dtype)
-    rotary = SimpleNamespace(cos_sin_cache=cos_sin_cache, rotary_dim=rope_dim, is_neox_style=False)
+    rotary = SimpleNamespace(cos_sin_cache=cos_sin_cache, rotary_dim=rope_dim, is_neox_style=is_neox_style)
     kv_cache_rope = torch.full((2, 4, 1, rope_dim), -9, device="npu", dtype=dtype)
     kv_cache_nope = torch.full((2, 4, 1, nope_dim), -9, device="npu", dtype=dtype)
 
@@ -928,7 +1011,12 @@ def test_c_kv_rmsnorm_rope_cache_by_cache_matches_native_layout(monkeypatch):
     rstd = torch.rsqrt(nope_in.square().mean(dim=-1, keepdim=True) + epsilon)
     expected_nope = (nope_in * weight.to(torch.float32) * rstd).to(dtype)
     rope_in = kv[:, 0, 0, nope_dim:]
-    expected_rope = _interleave_rope_reference(rope_in[:, None, :], positions, cos_sin_cache).squeeze(1)
+    expected_rope = _interleave_rope_reference(
+        rope_in[:, None, :],
+        positions,
+        cos_sin_cache,
+        is_neox_style=is_neox_style,
+    ).squeeze(1)
     expected_out_rope = expected_rope.reshape_as(out_rope)
     expected_out_nope = expected_nope.reshape_as(out_nope)
     flat_cache_rope = kv_cache_rope.reshape(-1, 1, rope_dim)[:, 0, :]
@@ -963,7 +1051,134 @@ def test_c_kv_rmsnorm_rope_cache_by_cache_matches_native_layout(monkeypatch):
     )
 
 
-def test_c_kv_rmsnorm_rope_cache_and_interleave_by_cache_matches_native_layout():
+@pytest.mark.parametrize("is_neox_style", [False, True])
+def test_c_kv_rmsnorm_rope_cache_by_cache_negative_slots_skip_cache(monkeypatch, is_neox_style):
+    _require_real_npu()
+    rope_cache_ops.clear_rope_cache_op_capability_cache()
+    if rope_cache_ops._get_c_ascend_op("kv_rmsnorm_rope_cache_by_cache") is None:
+        pytest.skip("C Ascend kv_rmsnorm_rope_cache_by_cache op is unavailable")
+
+    monkeypatch.setattr(rope_cache_ops, "_get_torch_npu_op", lambda name: None)
+    monkeypatch.setattr(
+        rope_cache_ops,
+        "_get_triton_kv_rmsnorm_rope_cache_by_cache",
+        lambda: (_ for _ in ()).throw(AssertionError("C backend should be used")),
+    )
+
+    dtype = torch.float16
+    num_tokens, nope_dim, rope_dim = 4, 32, 64
+    epsilon = 1e-6
+    kv = torch.arange(num_tokens * (nope_dim + rope_dim), device="npu", dtype=torch.float32)
+    kv = (kv.reshape(num_tokens, 1, 1, nope_dim + rope_dim) / 113).to(dtype)
+    weight = torch.linspace(0.7, 1.3, nope_dim, device="npu", dtype=torch.float32).to(dtype)
+    positions = torch.tensor([2, 0, 5, 1], device="npu", dtype=torch.int32)
+    slots = torch.full((num_tokens,), -1, device="npu", dtype=torch.int64)
+    cos_sin_cache = _make_cos_sin_cache(8, rope_dim, dtype)
+    rotary = SimpleNamespace(cos_sin_cache=cos_sin_cache, rotary_dim=rope_dim, is_neox_style=is_neox_style)
+    kv_cache_rope = torch.full((2, 4, 1, rope_dim), -9, device="npu", dtype=dtype)
+    kv_cache_nope = torch.full((2, 4, 1, nope_dim), -9, device="npu", dtype=dtype)
+    expected_cache_rope = kv_cache_rope.clone()
+    expected_cache_nope = kv_cache_nope.clone()
+
+    cache_rope, cache_nope, out_rope, out_nope = rope_cache_ops.kv_rmsnorm_rope_cache_by_cache(
+        kv,
+        weight,
+        positions,
+        rotary,
+        slots,
+        kv_cache_rope,
+        kv_cache_nope,
+        epsilon=epsilon,
+        is_output_kv=True,
+        allow_negative_slots=True,
+    )
+    torch.npu.synchronize()
+
+    nope_in = kv[:, 0, 0, :nope_dim].to(torch.float32)
+    rstd = torch.rsqrt(nope_in.square().mean(dim=-1, keepdim=True) + epsilon)
+    expected_nope = (nope_in * weight.to(torch.float32) * rstd).to(dtype).reshape_as(out_nope)
+    rope_in = kv[:, 0, 0, nope_dim:]
+    expected_rope = _interleave_rope_reference(
+        rope_in[:, None, :],
+        positions,
+        cos_sin_cache,
+        is_neox_style=is_neox_style,
+    ).reshape_as(out_rope)
+
+    torch.testing.assert_close(out_rope, expected_rope, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(out_nope, expected_nope, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(cache_rope, expected_cache_rope, rtol=0, atol=0)
+    torch.testing.assert_close(cache_nope, expected_cache_nope, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("is_neox_style", [False, True])
+def test_triton_kv_rmsnorm_rope_cache_by_cache_matches_legacy_mla_layout(monkeypatch, is_neox_style):
+    _require_real_npu()
+    rope_cache_ops.clear_rope_cache_op_capability_cache()
+    triton_op = rope_cache_ops._get_triton_kv_rmsnorm_rope_cache_by_cache()
+    if triton_op is None:
+        pytest.skip("Triton kv_rmsnorm_rope_cache_by_cache op is unavailable")
+
+    monkeypatch.setattr(rope_cache_ops, "_get_torch_npu_op", lambda name: None)
+    monkeypatch.setattr(rope_cache_ops, "_get_c_ascend_op", lambda name: None)
+    monkeypatch.setattr(rope_cache_ops, "_get_triton_kv_rmsnorm_rope_cache_by_cache", lambda: triton_op)
+
+    dtype = torch.float16
+    num_tokens, nope_dim, rope_dim = 4, 8, 16
+    epsilon = 1e-6
+    kv = torch.arange(num_tokens * (nope_dim + rope_dim), device="npu", dtype=torch.float32)
+    kv = (kv.reshape(num_tokens, 1, 1, nope_dim + rope_dim) / 113).to(dtype)
+    weight = torch.linspace(0.7, 1.3, nope_dim, device="npu", dtype=torch.float32).to(dtype)
+    positions = torch.tensor([2, 0, 5, 1], device="npu", dtype=torch.int32)
+    slots = torch.tensor([0, 3, 4, 7], device="npu", dtype=torch.int32)
+    cos_sin_cache = _make_cos_sin_cache(8, rope_dim, dtype)
+    rotary = SimpleNamespace(cos_sin_cache=cos_sin_cache, rotary_dim=rope_dim, is_neox_style=is_neox_style)
+    kv_cache_rope = torch.full((2, 4, 1, rope_dim), -9, device="npu", dtype=dtype)
+    kv_cache_nope = torch.full((2, 4, 1, nope_dim), -9, device="npu", dtype=dtype)
+
+    cache_rope, cache_nope, out_rope, out_nope = rope_cache_ops.kv_rmsnorm_rope_cache_by_cache(
+        kv,
+        weight,
+        positions,
+        rotary,
+        slots,
+        kv_cache_rope,
+        kv_cache_nope,
+        epsilon=epsilon,
+        is_output_kv=True,
+    )
+    torch.npu.synchronize()
+
+    nope_in = kv[:, 0, 0, :nope_dim].to(torch.float32)
+    rstd = torch.rsqrt(nope_in.square().mean(dim=-1, keepdim=True) + epsilon)
+    expected_nope = (nope_in * weight.to(torch.float32) * rstd).to(dtype)
+    rope_in = kv[:, 0, 0, nope_dim:]
+    expected_rope = _interleave_rope_reference(
+        rope_in[:, None, :],
+        positions,
+        cos_sin_cache,
+        is_neox_style=is_neox_style,
+    ).squeeze(1)
+    slot_indices = slots.cpu()
+
+    torch.testing.assert_close(out_rope, expected_rope.reshape_as(out_rope), rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(out_nope, expected_nope.reshape_as(out_nope), rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(
+        cache_rope.reshape(-1, 1, rope_dim)[slot_indices, 0],
+        expected_rope,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+    torch.testing.assert_close(
+        cache_nope.reshape(-1, 1, nope_dim)[slot_indices, 0],
+        expected_nope,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+
+@pytest.mark.parametrize("is_neox_style", [False, True])
+def test_c_kv_rmsnorm_rope_cache_and_interleave_by_cache_matches_legacy_mla_layout(is_neox_style):
     _require_real_npu()
     rope_cache_ops.clear_rope_cache_op_capability_cache()
     if rope_cache_ops._get_c_ascend_op("kv_rmsnorm_rope_cache_and_interleave_by_cache") is None:
@@ -980,7 +1195,7 @@ def test_c_kv_rmsnorm_rope_cache_and_interleave_by_cache_matches_native_layout()
     positions = torch.tensor([2, 0, 5, 1], device="npu", dtype=torch.int64)
     slots = torch.tensor([0, 3, 4, 7], device="npu", dtype=torch.int32)
     cos_sin_cache = _make_cos_sin_cache(8, rope_dim, dtype)
-    rotary = SimpleNamespace(cos_sin_cache=cos_sin_cache, rotary_dim=rope_dim, is_neox_style=False)
+    rotary = SimpleNamespace(cos_sin_cache=cos_sin_cache, rotary_dim=rope_dim, is_neox_style=is_neox_style)
     kv_cache_rope = torch.full((2, 4, 1, rope_dim), -9, device="npu", dtype=dtype)
     kv_cache_nope = torch.full((2, 4, 1, nope_dim), -9, device="npu", dtype=dtype)
 
@@ -1002,8 +1217,13 @@ def test_c_kv_rmsnorm_rope_cache_and_interleave_by_cache_matches_native_layout()
     rstd = torch.rsqrt(nope_in.square().mean(dim=-1, keepdim=True) + epsilon)
     expected_nope = (nope_in * weight.to(torch.float32) * rstd).to(dtype)
     rope_in = kv[:, 0, 0, nope_dim:]
-    expected_q = _interleave_rope_reference(q, positions, cos_sin_cache)
-    expected_rope = _interleave_rope_reference(rope_in[:, None, :], positions, cos_sin_cache).squeeze(1)
+    expected_q = _interleave_rope_reference(q, positions, cos_sin_cache, is_neox_style=is_neox_style)
+    expected_rope = _interleave_rope_reference(
+        rope_in[:, None, :],
+        positions,
+        cos_sin_cache,
+        is_neox_style=is_neox_style,
+    ).squeeze(1)
     slot_indices = slots.cpu()
 
     torch.testing.assert_close(q_out, expected_q, rtol=1e-3, atol=1e-3)

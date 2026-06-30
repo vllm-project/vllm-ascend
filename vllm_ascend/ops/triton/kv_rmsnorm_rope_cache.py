@@ -83,11 +83,17 @@ def _kv_rmsnorm_rope_cache_by_cache_kernel(
         cos_row = tl.load(cos_sin_row + half_offsets, mask=half_mask, other=0.0).to(tl.float32)
         sin_row = tl.load(cos_sin_row + half_rope_dim + half_offsets, mask=half_mask, other=0.0).to(tl.float32)
 
-        pair_offsets = nope_dim + 2 * half_offsets[:, None] + tl.arange(0, 2)[None, :]
-        rope_pair = tl.load(kv_row_ptr + pair_offsets, mask=half_mask[:, None], other=0.0).to(tl.float32)
-        rope_even, rope_odd = tl.split(rope_pair)
-        rope_first = rope_even * cos_row - rope_odd * sin_row
-        rope_second = rope_odd * cos_row + rope_even * sin_row
+        if is_neox_style:
+            rope_first_offsets = nope_dim + half_offsets
+            rope_second_offsets = rope_first_offsets + half_rope_dim
+            rope_in_first = tl.load(kv_row_ptr + rope_first_offsets, mask=half_mask, other=0.0).to(tl.float32)
+            rope_in_second = tl.load(kv_row_ptr + rope_second_offsets, mask=half_mask, other=0.0).to(tl.float32)
+        else:
+            pair_offsets = nope_dim + 2 * half_offsets[:, None] + tl.arange(0, 2)[None, :]
+            rope_pair = tl.load(kv_row_ptr + pair_offsets, mask=half_mask[:, None], other=0.0).to(tl.float32)
+            rope_in_first, rope_in_second = tl.split(rope_pair)
+        rope_first = rope_in_first * cos_row - rope_in_second * sin_row
+        rope_second = rope_in_second * cos_row + rope_in_first * sin_row
 
         if cache_mode_is_nz:
             rope_first_dims = half_offsets

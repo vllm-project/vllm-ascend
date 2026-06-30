@@ -50,7 +50,7 @@ public:
         qk_row_stride_ = qk_row_stride;
         qk_head_stride_ = qk_head_stride;
         cos_sin_row_stride_ = cos_sin_row_stride;
-        (void)is_neox_style;
+        is_neox_style_ = is_neox_style;
 
         pipe_.InitBuffer(qk_queue_, 1, head_dim_ * sizeof(scalar_t));
         pipe_.InitBuffer(cache_queue_, 1, head_dim_ * sizeof(scalar_t));
@@ -110,9 +110,16 @@ private:
         AscendC::LocalTensor<float> out_first_fp32 = out_first_fp32_buf_.Get<float>();
         AscendC::LocalTensor<float> out_second_fp32 = out_second_fp32_buf_.Get<float>();
 
-        for (int64_t dim = 0; dim < half_dim_; ++dim) {
-            even_local.SetValue(dim, qk_local.GetValue(2 * dim));
-            odd_local.SetValue(dim, qk_local.GetValue(2 * dim + 1));
+        if (is_neox_style_) {
+            for (int64_t dim = 0; dim < half_dim_; ++dim) {
+                even_local.SetValue(dim, qk_local.GetValue(dim));
+                odd_local.SetValue(dim, qk_local.GetValue(half_dim_ + dim));
+            }
+        } else {
+            for (int64_t dim = 0; dim < half_dim_; ++dim) {
+                even_local.SetValue(dim, qk_local.GetValue(2 * dim));
+                odd_local.SetValue(dim, qk_local.GetValue(2 * dim + 1));
+            }
         }
 
         AscendC::Cast(even_fp32, even_local, AscendC::RoundMode::CAST_NONE, half_dim_);
@@ -177,6 +184,7 @@ private:
     int64_t qk_row_stride_;
     int64_t qk_head_stride_;
     int64_t cos_sin_row_stride_;
+    bool is_neox_style_;
 };
 
 #define INTERLEAVE_ROPE_BY_CACHE_TYPE_DECLARE(TYPE, POS_TYPE, SUFFIX)                                                \

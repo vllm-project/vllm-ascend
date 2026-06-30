@@ -299,6 +299,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         self.reorder_batch_threshold = self.decode_threshold
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
+        self._graph_mode_configured = self._is_cudagraph_mode_configured(vllm_config)
 
         self.chunk_seq_lens: torch.Tensor = None
         self.cu_seq_lens_cpu: torch.Tensor = None
@@ -313,9 +314,42 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.block_table: torch.Tensor = None
         self.slot_mapping: torch.Tensor = None
         self.graph_pad_size = 0
+        self._graph_tensor_buffers: dict[tuple, list[torch.Tensor]] = {}
         self.query_lens: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+
+    @staticmethod
+    def _is_cudagraph_mode_configured(vllm_config: VllmConfig) -> bool:
+        compilation_config = getattr(vllm_config, "compilation_config", None)
+        cudagraph_mode = getattr(compilation_config, "cudagraph_mode", CUDAGraphMode.NONE)
+        if cudagraph_mode is None or cudagraph_mode == CUDAGraphMode.NONE:
+            return False
+        if isinstance(cudagraph_mode, CUDAGraphMode):
+            return True
+        if isinstance(cudagraph_mode, str):
+            return cudagraph_mode.upper() != "NONE"
+        return bool(cudagraph_mode)
+
+    def _graph_stable_tensor(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        if not self._graph_mode_configured or not isinstance(tensor, torch.Tensor):
+            return tensor
+
+        key = (name, tensor.dtype, tensor.device)
+        buffers = self._graph_tensor_buffers.setdefault(key, [])
+        numel = tensor.numel()
+        matching_buffers = [buffer for buffer in buffers if buffer.numel() >= numel]
+        if not matching_buffers:
+            buffer = torch.empty(numel, dtype=tensor.dtype, device=tensor.device)
+            buffers.append(buffer)
+            matching_buffers = [buffer]
+
+        source = tensor.reshape(-1).contiguous()
+        for buffer in matching_buffers:
+            buffer[:numel].copy_(source)
+
+        stable_buffer = min(matching_buffers, key=lambda buffer: buffer.numel())
+        return stable_buffer[:numel].view_as(tensor)
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -591,6 +625,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         prefill_query_start_loc = query_start_loc[reqs_start:] - query_start_loc[reqs_start]
 
         prefill_input_positions = input_positions[tokens_start:]
+        prefill_input_positions = self._graph_stable_tensor("prefill_input_positions", prefill_input_positions)
         prefill_query_lens = self.query_lens[reqs_start:].to(torch.int32)
         actual_seq_lengths_q = torch.cumsum(prefill_query_lens, dim=0).tolist()
         return AscendMLAPrefillMetadata(
@@ -674,6 +709,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
                 )
 
+        input_positions = self._graph_stable_tensor("decode_input_positions", input_positions)
+        self.slot_mapping = self._graph_stable_tensor("slot_mapping", self.slot_mapping)
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
             block_table=self.block_table,

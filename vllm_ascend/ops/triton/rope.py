@@ -296,8 +296,12 @@ def _triton_interleave_rope_by_cache(
         dims = tl.arange(0, pad_rope_dim // 2)
         mask = (heads[:, None] < n_h) & (dims[None, :] < half_dim)
 
-        even_offsets = heads[:, None] * qk_head_stride + (2 * dims[None, :]) * qk_dim_stride
-        odd_offsets = even_offsets + qk_dim_stride
+        if IS_NEOX_STYLE:
+            first_offsets = heads[:, None] * qk_head_stride + dims[None, :] * qk_dim_stride
+            second_offsets = first_offsets + half_dim * qk_dim_stride
+        else:
+            first_offsets = heads[:, None] * qk_head_stride + (2 * dims[None, :]) * qk_dim_stride
+            second_offsets = first_offsets + qk_dim_stride
         out_first_offsets = heads[:, None] * out_head_stride + dims[None, :] * out_dim_stride
         out_second_offsets = out_first_offsets + half_dim * out_dim_stride
 
@@ -306,11 +310,11 @@ def _triton_interleave_rope_by_cache(
         cos_row = tl.load(cos_sin_start_ptr + dims, mask=cache_mask, other=0).to(tl.float32)
         sin_row = tl.load(cos_sin_start_ptr + half_dim + dims, mask=cache_mask, other=0).to(tl.float32)
 
-        qk_even = tl.load(qk_start_ptr + even_offsets, mask=mask, other=0).to(tl.float32)
-        qk_odd = tl.load(qk_start_ptr + odd_offsets, mask=mask, other=0).to(tl.float32)
+        qk_first = tl.load(qk_start_ptr + first_offsets, mask=mask, other=0).to(tl.float32)
+        qk_second = tl.load(qk_start_ptr + second_offsets, mask=mask, other=0).to(tl.float32)
 
-        out_first = qk_even * cos_row[None, :] - qk_odd * sin_row[None, :]
-        out_second = qk_odd * cos_row[None, :] + qk_even * sin_row[None, :]
+        out_first = qk_first * cos_row[None, :] - qk_second * sin_row[None, :]
+        out_second = qk_second * cos_row[None, :] + qk_first * sin_row[None, :]
         tl.store(out_start_ptr + out_first_offsets, out_first, mask=mask)
         tl.store(out_start_ptr + out_second_offsets, out_second, mask=mask)
 

@@ -67,7 +67,7 @@ public:
         total_dim_ = nope_dim + rope_dim;
         half_rope_dim_ = rope_dim / 2;
         epsilon_ = epsilon;
-        (void)is_neox_style;
+        is_neox_style_ = is_neox_style;
         is_output_kv_ = is_output_kv;
         cache_mode_is_nz_ = cache_mode_is_nz;
 
@@ -154,9 +154,16 @@ protected:
     {
         AscendC::LocalTensor<scalar_t> even_local = even_buf_.Get<scalar_t>();
         AscendC::LocalTensor<scalar_t> odd_local = odd_buf_.Get<scalar_t>();
-        for (int64_t dim = 0; dim < half_rope_dim_; ++dim) {
-            even_local.SetValue(dim, rope_in.GetValue(2 * dim));
-            odd_local.SetValue(dim, rope_in.GetValue(2 * dim + 1));
+        if (is_neox_style_) {
+            for (int64_t dim = 0; dim < half_rope_dim_; ++dim) {
+                even_local.SetValue(dim, rope_in.GetValue(dim));
+                odd_local.SetValue(dim, rope_in.GetValue(half_rope_dim_ + dim));
+            }
+        } else {
+            for (int64_t dim = 0; dim < half_rope_dim_; ++dim) {
+                even_local.SetValue(dim, rope_in.GetValue(2 * dim));
+                odd_local.SetValue(dim, rope_in.GetValue(2 * dim + 1));
+            }
         }
     }
 
@@ -326,6 +333,7 @@ protected:
     int64_t total_dim_;
     int64_t half_rope_dim_;
     float epsilon_;
+    bool is_neox_style_;
     bool is_output_kv_;
     bool cache_mode_is_nz_;
 };
