@@ -120,7 +120,9 @@ Start the online serving service with the following command:
   --port 11223 > ${LOG_PATH} 2>&1 &
   ```
 
-**Note**: In the script above, `max-num-seqs` is set to 16, which represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business
+**Note**: In the script above, `max-num-seqs` is set to 16, which represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business.
+
+For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2}'` for two-image requests, and use `--limit-mm-per-prompt '{"video":1}'` for one-video requests.
 
 ### A2 Deployment Examples
 
@@ -382,6 +384,129 @@ The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `LOG_PATH`, `loc
 
   预期返回答案C。
 
+- Single image
+
+  Replace `${IMAGE_PATH}` with a local image path on the client side.
+  Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1}'`.
+
+  ```bash
+  IMAGE_PATH=/path/to/image.jpg
+  IMAGE_BASE64="$(base64 -w 0 "${IMAGE_PATH}")"
+
+  curl http://127.0.0.1:11223/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"model\": \"minimax-m3\",
+      \"messages\": [
+        {
+          \"role\": \"user\",
+          \"content\": [
+            {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,${IMAGE_BASE64}\"}},
+            {\"type\": \"text\", \"text\": \"请简要描述这张图片。\"}
+          ]
+        }
+      ],
+      \"max_tokens\": 512,
+      \"temperature\": 0
+    }"
+  ```
+
+- Multiple images
+
+  Start the service with a matching image limit. For the following two-image request, use `--limit-mm-per-prompt '{"image":2}'`.
+
+  ```bash
+  IMAGE1_BASE64="$(base64 -w 0 /path/to/image1.jpg)"
+  IMAGE2_BASE64="$(base64 -w 0 /path/to/image2.jpg)"
+
+  curl http://127.0.0.1:11223/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"model\": \"minimax-m3\",
+      \"messages\": [
+        {
+          \"role\": \"user\",
+          \"content\": [
+            {\"type\": \"text\", \"text\": \"请按顺序分别描述这两张图片，并说明它们是否相同。\"},
+            {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,${IMAGE1_BASE64}\"}},
+            {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,${IMAGE2_BASE64}\"}}
+          ]
+        }
+      ],
+      \"max_tokens\": 512,
+      \"temperature\": 0
+    }"
+  ```
+
+- Single video
+
+  Start the service with video input enabled, for example `--limit-mm-per-prompt '{"video":1}'`.
+
+  vLLM defaults to sampling 32 frames for video input. For regular functional verification, it is recommended to specify a smaller frame count with `media_io_kwargs`, for example 8 or 16 frames.
+
+  ```bash
+  curl http://127.0.0.1:11223/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "minimax-m3",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "video_url",
+              "video_url": {
+                "url": "file:///path/to/video.mp4"
+              }
+            },
+            {
+              "type": "text",
+              "text": "请简要描述这个视频的主要内容。"
+            }
+          ]
+        }
+      ],
+      "media_io_kwargs": {
+        "video": {
+          "num_frames": 8
+        }
+      },
+      "max_tokens": 512,
+      "temperature": 0
+    }'
+  ```
+
+- Image and video mixed request
+
+  Start the service with both image and video input enabled. For the following request, use `--limit-mm-per-prompt '{"image":1,"video":1}'`.
+
+  ```bash
+  IMAGE_BASE64="$(base64 -w 0 /path/to/image.jpg)"
+
+  curl http://127.0.0.1:11223/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"model\": \"minimax-m3\",
+      \"messages\": [
+        {
+          \"role\": \"user\",
+          \"content\": [
+            {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64,${IMAGE_BASE64}\"}},
+            {\"type\": \"video_url\", \"video_url\": {\"url\": \"file:///path/to/video.mp4\"}},
+            {\"type\": \"text\", \"text\": \"请分别描述图片和视频，并说明二者是否有关联。\"}
+          ]
+        }
+      ],
+      \"media_io_kwargs\": {
+        \"video\": {
+          \"num_frames\": 8
+        }
+      },
+      \"max_tokens\": 512,
+      \"temperature\": 0
+    }"
+  ```
+
 ## Supported Feature
 
 | Model                         | Supported Hardware | BF16 | W8A8 | MXFP8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | Thinking | Tool Call | Image | Video | Max Model Len |
@@ -453,6 +578,40 @@ The examples below use Ascend A2 servers. Update `WEIGHT_PATH`, `LOG_PATH`, `loc
       cls = CONFIG_MAPPING.get(model_type, PretrainedConfig)
       return cls(**sub_config)
   ```
+
+- Q: 发送视频请求时，没有指定 `media_io_kwargs.video.num_frames`，请求耗时较长或触发执行超时，怎么办？
+
+  A: vLLM 的视频读取默认抽取 32 帧。MiniMax-M3 每帧会产生较多视觉 token，32 帧视频会显著增加 prefill 计算量。普通功能验证建议显式指定 8 或 16 帧：
+
+  ```json
+  {
+    "media_io_kwargs": {
+      "video": {
+        "num_frames": 8
+      }
+    }
+  }
+  ```
+
+  在 vLLM 0.23.0 + vLLM Ascend main 同步后的代码路径下，默认 32 帧请求已验证可在 `FULL_AND_PIECEWISE` graph 模式跑通：
+
+  ```bash
+  --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8]}'
+  ```
+
+  如果使用旧版本代码或仍遇到 32 帧长 prefill 超时，可使用 eager 模式和更小的 batch token 作为排障/兼容配置：
+
+  ```bash
+  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200
+  export VLLM_ENGINE_ITERATION_TIMEOUT_S=1200
+
+  vllm serve ${WEIGHT_PATH} \
+    ... \
+    --enforce-eager \
+    --max-num-batched-tokens 1024
+  ```
+
+  如果日志中反复出现 `No available shared memory broadcast block found in 60 seconds`，通常表示 EngineCore 正在等待 worker 完成长耗时任务，例如图编译、权重量化、KV cache 量化或大 prefill 执行；它不是视频解码阶段的直接报错。
 
 ## 声明
 1）当前仅为尝鲜体验，性能优化中。<br>
