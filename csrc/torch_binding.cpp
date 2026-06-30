@@ -2118,7 +2118,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h(
     c10::optional<bool> transpose_state_layout)
 {
     bool output_final_state_ = output_final_state.has_value() ? output_final_state.value() : false;
-    const at::Tensor &initial_state_ = c10::value_or_else(initial_state, [] { return at::Tensor(); });
     int64_t chunk_size_ = chunk_size.has_value() ? chunk_size.value() : 64;
     const at::Tensor &g_ = c10::value_or_else(g, [] { return at::Tensor(); });
     const at::Tensor &gk_ = c10::value_or_else(gk, [] { return at::Tensor(); });
@@ -2130,6 +2129,34 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h(
     int T = k_sizes[2];
     int HV = u_sizes[1];
     int V = u_sizes[3];
+
+    at::Tensor initial_state_for_kernel;
+    if (initial_state.has_value()) {
+        const at::Tensor &initial_state_value = initial_state.value();
+        if (initial_state_value.defined() && initial_state_value.numel() > 0) {
+            if (initial_state_value.dim() == 4) {
+                int64_t N = cu_seqlens.has_value() ? cu_seqlens->size() - 1 : B;
+                TORCH_CHECK(
+                    initial_state_value.size(0) == N && initial_state_value.size(1) == HV &&
+                    initial_state_value.size(2) == K && initial_state_value.size(3) == V,
+                    "chunk_gated_delta_rule_fwd_h expected 4D initial_state shape [N, HV, K, V] "
+                    "or 5D initial_state shape [shape_batch, HV, token_batch, K, V], but got ",
+                    initial_state_value.sizes());
+                TORCH_CHECK(B > 0 && N % B == 0,
+                    "chunk_gated_delta_rule_fwd_h expected N to be divisible by B for 4D initial_state, got N=",
+                    N, ", B=", B);
+                initial_state_for_kernel = initial_state_value.view({B, HV, N / B, K, V});
+            } else {
+                TORCH_CHECK(
+                    initial_state_value.dim() == 5,
+                    "chunk_gated_delta_rule_fwd_h expected 4D initial_state shape [N, HV, K, V] "
+                    "or 5D initial_state shape [shape_batch, HV, token_batch, K, V], but got ",
+                    initial_state_value.sizes());
+                initial_state_for_kernel = initial_state_value;
+            }
+        }
+    }
+    at::Tensor initial_state_ = initial_state_for_kernel.defined() ? initial_state_for_kernel : at::Tensor();
 
     int NT = 0;
     if (chunk_indices.has_value()) {
@@ -2188,9 +2215,31 @@ at::Tensor chunk_fwd_o(
     (void)g_gamma;
     (void)transpose_state_layout;
 
+    at::Tensor h_for_kernel = h;
+    if (h.dim() == 4) {
+        auto q_sizes = q.sizes();
+        auto v_sizes = v.sizes();
+        int64_t B = q_sizes[0];
+        int64_t T = q_sizes[2];
+        int64_t K = q_sizes[3];
+        int64_t HV = v_sizes[1];
+        int64_t V = v_sizes[3];
+        int64_t NT = (T + chunk_size_ - 1) / chunk_size_;
+        TORCH_CHECK(
+            h.size(0) == B && h.size(1) == HV && h.size(2) == NT * K && h.size(3) == V,
+            "chunk_fwd_o expected 4D h shape [B, HV, NT * K, V] or 5D h shape [B, HV, NT, K, V], but got ",
+            h.sizes());
+        h_for_kernel = h.view({B, HV, NT, K, V});
+    } else {
+        TORCH_CHECK(
+            h.dim() == 5,
+            "chunk_fwd_o expected 4D h shape [B, HV, NT * K, V] or 5D h shape [B, HV, NT, K, V], but got ",
+            h.sizes());
+    }
+
     EXEC_NPU_CMD(
         aclnnChunkFwdO,
-        q, k, v, h, g_,
+        q, k, v, h_for_kernel, g_,
         cu_seqlens, chunk_indices, scale, chunk_size_,
         o
     );
