@@ -1860,11 +1860,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         if self.pcp_size * self.dcp_size > 1:
-            kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
-            if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
-                attn_metadata.decode.cp_seq_len = cp_seq_len
+            if isinstance(attn_metadata_builder, AscendSFADCPMetadataBuilder):
+                assert attn_metadata.dcp_context is not None
+                dcp_seq_lens = attn_metadata.dcp_context.seq_lens
+                sfa_cp_seq_len = cp_seq_len.to(
+                    device=dcp_seq_lens.device,
+                    dtype=dcp_seq_lens.dtype,
+                    non_blocking=True,
+                )
+                dcp_seq_lens[: sfa_cp_seq_len.shape[0]].copy_(
+                    sfa_cp_seq_len, non_blocking=True
+                )
+                dcp_seq_lens[sfa_cp_seq_len.shape[0] :].fill_(0)
             else:
-                attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
+                kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
+                if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+                    attn_metadata.decode.cp_seq_len = cp_seq_len
+                else:
+                    attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
 
         return common_attn_metadata, attn_metadata
 
