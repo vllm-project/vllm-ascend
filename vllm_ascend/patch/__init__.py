@@ -144,39 +144,26 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 7. File: platform/patch_chat_usage_accounting.py**
+# ** 7. File: platform/patch_minimax_usage_accounting.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.reasoning.minimax_m2_reasoning_parser`
 #    Why:
-#       Chat usage accounting needs to report
+#       MiniMax-M2 chat usage accounting needs to report
 #       `completion_tokens_details.reasoning_tokens` for both streaming and
-#       non-streaming chat completions.
+#       non-streaming chat completions without slowing other reasoning models.
 #    How：
-#       Extend `UsageInfo` and update chat usage construction to count reasoning
-#       tokens from raw output token ids when the active reasoning parser
-#       supports token counting.
+#       Monkey-patch MiniMax reasoning token counters and bind usage-accounting
+#       wrappers only on MiniMax chat-serving instances.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37955
+#       https://github.com/vllm-project/vllm/pull/45701
+#       https://github.com/vllm-project/vllm/pull/45802
 #    Future Plan:
-#       Remove this patch once the runtime vLLM version contains the upstream
-#       reasoning usage-accounting support.
+#       Remove this patch after both upstream vLLM PRs are merged and the
+#       supported vLLM revision used by vLLM Ascend includes them through the
+#       regular main-to-main sync.
 #
-# ** 7a. File: platform/patch_minimax_usage_accounting.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.reasoning.minimax_m2_reasoning_parser`
-#    Why:
-#       MiniMax-M2 reasoning parsers need token-count support for the generic
-#       chat usage-accounting wrapper.
-#    How：
-#       Monkey-patch MiniMax reasoning token counters so usage accounting can
-#       derive reasoning-token counts from raw output token ids.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37955
-#    Future Plan:
-#       Remove this patch once the runtime vLLM version contains the upstream
-#       MiniMax reasoning-token counting fix.
-#
-# ** 7b. File: platform/patch_glm_tool_call_streaming.py**
+# ** 7a. File: platform/patch_glm_tool_call_streaming.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
 #    Why:
@@ -196,7 +183,7 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM tool-call final chunk fixes.
 #
-# ** 7c. File: platform/patch_glm47_tool_call_parser.py**
+# ** 7b. File: platform/patch_glm47_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tool_parsers.glm47_moe_tool_parser.Glm47MoeModelToolParser`
 #    Why:
@@ -214,7 +201,7 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM47 inline zero-argument streaming parser fix.
 #
-# ** 7d. File: platform/patch_anthropic_system_message.py**
+# ** 7c. File: platform/patch_anthropic_system_message.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.anthropic.protocol.AnthropicMessage`
 #      `vllm.entrypoints.anthropic.serving.AnthropicServingMessages`
@@ -424,6 +411,29 @@
 #    Future Plan:
 #       Remove this patch when upstream vLLM relaxes the Literal type to str or
 #       provides an extension point for out-of-tree weight transfer backends.
+#   2. `vllm.distributed.weight_transfer.factory.WeightTransferEngineFactory._registry["ipc"]`
+#    Why:
+#       The "ipc" backend must resolve to NPUIPCWeightTransferEngine on Ascend NPU.
+#       However, this patch runs during global plugin patching - extremely early in
+#       startup, before any weight transfer backend is selected. Importing the IPC
+#       engine eagerly pulls in vllm.distributed.weight_transfer.ipc_engine, which
+#       does `import ray` at module top level. Since ray is an optional dependency,
+#       its absence aborts the whole vllm_ascend plugin load and crashes every
+#       `vllm serve` invocation - even workloads that never use weight transfer.
+#    How：
+#       Register a lazy loader function (instead of an eager import) that imports
+#       and returns NPUIPCWeightTransferEngine only when create_engine() is invoked
+#       for the "ipc" backend. This matches the factory's zero-arg-callable
+#       lazy-loading contract, so the ray-importing module is loaded only when ipc
+#       is actually requested. (HCCL keeps its eager import - it never imports ray.)
+#    Related PR (if no, explain why):
+#       No.  The eager `import ray` lives in upstream vLLM's ipc_engine module; the
+#       lazy loader is a local workaround until upstream defers that import.
+#    Future Plan:
+#       Remove this workaround once upstream vLLM stops importing ray at module top
+#       level in vllm.distributed.weight_transfer.ipc_engine (e.g. defers it into
+#       the code path that actually needs ray), so importing the IPC engine no
+#       longer requires the optional ray dependency.
 #
 # ** 15. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
