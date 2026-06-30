@@ -226,8 +226,7 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
-        from vllm_ascend.ops.rope_cache_ops import mla_preprocess_by_cache
-        from vllm_ascend.ops.rotary_embedding import npu_mla_prolog_v2_from_cache
+        from vllm_ascend.ops.rope_cache_ops import mla_preprocess_by_cache, mla_prolog_v2_by_cache
 
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz]
@@ -237,7 +236,7 @@ class BaseDeviceAdaptor:
         dequant_scale_q_nope = None
         if atten_obj.fa_quant_layer:
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = npu_mla_prolog_v2_from_cache(
+            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = mla_prolog_v2_by_cache(
                 quantized_x,
                 atten_obj.wd_q,
                 atten_obj.wu_q,
@@ -247,10 +246,10 @@ class BaseDeviceAdaptor:
                 atten_obj.gamma2,
                 positions,
                 atten_obj.rotary_emb,
-                hidden_states,
                 attn_metadata.slot_mapping[:bsz].to(torch.int64),
                 decode_k_nope,
                 decode_k_pe,
+                ref_tensor=hidden_states,
                 dequant_scale_x=pertoken_scale.view(-1, 1),
                 dequant_scale_w_dq=atten_obj.dequant_scale_w_dq,
                 dequant_scale_w_uq_qr=atten_obj.dequant_scale_w_uq_qr,
@@ -1059,7 +1058,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
-        from vllm_ascend.ops.rotary_embedding import npu_mla_prolog_v3_from_cache
+        from vllm_ascend.ops.rope_cache_ops import mla_prolog_v3_by_cache
 
         bsz = attn_metadata.num_decode_tokens
         hidden_states = hidden_states[:bsz]
@@ -1069,7 +1068,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
         dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0] * hidden_states.shape[1], -1)
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
-        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = npu_mla_prolog_v3_from_cache(
+        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = mla_prolog_v3_by_cache(
             token_x=hidden_states,
             weight_dq=atten_obj.weight_dq,
             weight_uq_qr=atten_obj.weight_uq_qr,

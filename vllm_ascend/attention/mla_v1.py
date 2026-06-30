@@ -56,12 +56,9 @@ from vllm_ascend.ops.rope_cache_ops import (
     has_mla_preprocess_by_cache_kernel,
     has_mla_prolog_v2_by_cache_kernel,
     has_mla_prolog_v3_by_cache_kernel,
+    interleave_rope_by_cache,
     kv_rmsnorm_rope_cache_by_cache,
     mla_preprocess_by_cache,
-)
-from vllm_ascend.ops.rotary_embedding import (
-    npu_mla_interleave_rope_from_cache,
-    npu_mla_kv_rmsnorm_rope_cache_from_cache,
 )
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
@@ -1378,7 +1375,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         c_kv_scale = None
         if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
-        k_pe, k_nope, _, _ = npu_mla_kv_rmsnorm_rope_cache_from_cache(
+        k_pe, k_nope, _, _ = kv_rmsnorm_rope_cache_by_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,  # type: ignore[union-attr]
             positions,
@@ -1427,7 +1424,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 allow_negative_slots=allow_negative_slots,
             )
             return k_pe, k_nope
-        _, _, k_pe, k_nope = npu_mla_kv_rmsnorm_rope_cache_from_cache(
+        _, _, k_pe, k_nope = kv_rmsnorm_rope_cache_by_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,  # type: ignore[union-attr]
             positions,
@@ -1608,7 +1605,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
-        x = npu_mla_interleave_rope_from_cache(x, positions, self.rotary_emb)
+        x = interleave_rope_by_cache(x, positions, self.rotary_emb)
         return x.view(B, N, D)
 
     def _forward_decode(

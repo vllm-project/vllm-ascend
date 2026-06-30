@@ -272,35 +272,12 @@ public:
     __aicore__ inline int64_t LoadPosition(const AscendC::LocalTensor<BUF_TYPE> &scratch, uint64_t localStartAddr,
                                            uint64_t tokenIndex)
     {
-        // DataCopyPad requires a 32-byte aligned UB destination.
-        constexpr uint64_t POSITION_UB_ALIGN_BYTES = 32;
-        uint64_t positionByteOffset =
-            (localStartAddr * sizeof(BUF_TYPE) + POSITION_UB_ALIGN_BYTES - 1) / POSITION_UB_ALIGN_BYTES *
-            POSITION_UB_ALIGN_BYTES;
+        (void)scratch;
+        (void)localStartAddr;
         if (positionsDtype_ == 0) {
-            AscendC::LocalTensor<int32_t> positionTensor =
-                scratch.template ReinterpretCast<int32_t>()[positionByteOffset / sizeof(int32_t)];
-            AscendC::DataCopyExtParams copyParams{1, static_cast<uint32_t>(sizeof(int32_t)), 0, 0, 0};
-            AscendC::DataCopyPadExtParams<int32_t> padParams{false, 0, 0, 0};
-            AscendC::DataCopyPad(positionTensor, this->positionsGmInt32_[tokenIndex], copyParams, padParams);
-            SET_FLAG(MTE2, S, EVENT_ID0);
-            WAIT_FLAG(MTE2, S, EVENT_ID0);
-            int64_t position = static_cast<int64_t>(positionTensor.GetValue(0));
-            SET_FLAG(S, MTE2, EVENT_ID0);
-            WAIT_FLAG(S, MTE2, EVENT_ID0);
-            return position;
+            return static_cast<int64_t>(this->positionsGmInt32_.GetValue(tokenIndex));
         }
-        AscendC::LocalTensor<int64_t> positionTensor =
-            scratch.template ReinterpretCast<int64_t>()[positionByteOffset / sizeof(int64_t)];
-        AscendC::DataCopyExtParams copyParams{1, static_cast<uint32_t>(sizeof(int64_t)), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<int64_t> padParams{false, 0, 0, 0};
-        AscendC::DataCopyPad(positionTensor, this->positionsGmInt64_[tokenIndex], copyParams, padParams);
-        SET_FLAG(MTE2, S, EVENT_ID0);
-        WAIT_FLAG(MTE2, S, EVENT_ID0);
-        int64_t position = positionTensor.GetValue(0);
-        SET_FLAG(S, MTE2, EVENT_ID0);
-        WAIT_FLAG(S, MTE2, EVENT_ID0);
-        return position;
+        return this->positionsGmInt64_.GetValue(tokenIndex);
     }
 
 private:
@@ -2275,28 +2252,11 @@ private:
     template <class T1>
     __aicore__ inline int64_t LoadPosition(const AscendC::LocalTensor<T1> &scratch, uint64_t tokenIndex)
     {
+        (void)scratch;
         if (mlaParams.positionsDtype == 0) {
-            AscendC::LocalTensor<int32_t> positionTensor = scratch.template ReinterpretCast<int32_t>();
-            AscendC::DataCopyExtParams copyParams{1, static_cast<uint32_t>(sizeof(int32_t)), 0, 0, 0};
-            AscendC::DataCopyPadExtParams<int32_t> padParams{false, 0, 0, 0};
-            AscendC::DataCopyPad(positionTensor, positionsGmTensorInt32[tokenIndex], copyParams, padParams);
-            SET_FLAG(MTE2, S, EVENT_ID2);
-            WAIT_FLAG(MTE2, S, EVENT_ID2);
-            int64_t position = static_cast<int64_t>(positionTensor.GetValue(0));
-            SET_FLAG(S, MTE2, EVENT_ID2);
-            WAIT_FLAG(S, MTE2, EVENT_ID2);
-            return position;
+            return static_cast<int64_t>(positionsGmTensorInt32.GetValue(tokenIndex));
         }
-        AscendC::LocalTensor<int64_t> positionTensor = scratch.template ReinterpretCast<int64_t>();
-        AscendC::DataCopyExtParams copyParams{1, static_cast<uint32_t>(sizeof(int64_t)), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<int64_t> padParams{false, 0, 0, 0};
-        AscendC::DataCopyPad(positionTensor, positionsGmTensor[tokenIndex], copyParams, padParams);
-        SET_FLAG(MTE2, S, EVENT_ID2);
-        WAIT_FLAG(MTE2, S, EVENT_ID2);
-        int64_t position = positionTensor.GetValue(0);
-        SET_FLAG(S, MTE2, EVENT_ID2);
-        WAIT_FLAG(S, MTE2, EVENT_ID2);
-        return position;
+        return positionsGmTensor.GetValue(tokenIndex);
     }
 
     template <class T1>

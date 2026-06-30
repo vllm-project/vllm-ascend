@@ -663,6 +663,17 @@ def interleave_rope_by_cache(
     rotary_emb,
 ) -> torch.Tensor:
     positions = _normalize_positions_1d(positions, x.shape[0], "interleave_rope_by_cache")
+    torch_npu_op = _get_torch_npu_op("npu_interleave_rope_by_cache")
+    if torch_npu_op is not None:
+        cos_sin_cache = get_rope_cache(rotary_emb, x)
+        return torch_npu_op(
+            x,
+            positions,
+            cos_sin_cache,
+            rope_dim=_rope_dim(rotary_emb, x),
+            is_neox_style=_is_neox_style(rotary_emb),
+        )
+
     native_output = _try_c_ascend_interleave_rope_by_cache(
         x,
         positions,
@@ -678,17 +689,6 @@ def interleave_rope_by_cache(
     )
     if triton_output is not None:
         return triton_output
-
-    torch_npu_op = _get_torch_npu_op("npu_interleave_rope_by_cache")
-    if torch_npu_op is not None:
-        cos_sin_cache = get_rope_cache(rotary_emb, x)
-        return torch_npu_op(
-            x,
-            positions,
-            cos_sin_cache,
-            rope_dim=_rope_dim(rotary_emb, x),
-            is_neox_style=_is_neox_style(rotary_emb),
-        )
 
     _raise_missing_true_by_cache_backend("interleave_rope_by_cache")
 
@@ -1069,7 +1069,6 @@ def mla_prolog_v2_by_cache(
     kr_cache: torch.Tensor,
     *,
     ref_tensor: torch.Tensor,
-    layout: str = "TD",
     **kwargs,
 ):
     native_op = _get_torch_npu_op("npu_mla_prolog_v2_by_cache")
@@ -1108,7 +1107,6 @@ def mla_prolog_v3_by_cache(
     kr_cache: torch.Tensor,
     cache_index: torch.Tensor,
     ref_tensor: torch.Tensor,
-    layout: str = "T11D",
     **kwargs,
 ):
     native_op = _get_torch_npu_op("npu_mla_prolog_v3_by_cache")
@@ -1131,14 +1129,6 @@ def mla_prolog_v3_by_cache(
         )
 
     _raise_missing_true_by_cache_backend("mla_prolog_v3_by_cache")
-
-
-def mla_prolog_decode_by_cache(*args, version: int = 2, **kwargs):
-    if version == 2:
-        return mla_prolog_v2_by_cache(*args, **kwargs)
-    if version == 3:
-        return mla_prolog_v3_by_cache(*args, **kwargs)
-    raise ValueError(f"Unsupported MLA prolog version: {version}")
 
 
 def inplace_partial_rotary_mul_by_cache(

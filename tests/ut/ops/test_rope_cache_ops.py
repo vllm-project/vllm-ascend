@@ -8,7 +8,7 @@ import torch
 from vllm_ascend.ops import rope_cache_ops
 
 
-def test_mla_prolog_decode_by_cache_version3_accepts_positional_args(monkeypatch):
+def test_mla_prolog_v3_by_cache_uses_true_by_cache_op(monkeypatch):
     calls = {}
 
     def fake_native_op(**kwargs):
@@ -40,21 +40,20 @@ def test_mla_prolog_decode_by_cache_version3_accepts_positional_args(monkeypatch
     kr_cache = torch.empty(1, 1)
     cache_index = torch.tensor([0], dtype=torch.long)
 
-    result = rope_cache_ops.mla_prolog_decode_by_cache(
-        token_x,
-        weight_dq,
-        weight_uq_qr,
-        weight_uk,
-        weight_dkv_kr,
-        rmsnorm_gamma_cq,
-        rmsnorm_gamma_ckv,
-        positions,
-        rotary,
-        kv_cache,
-        kr_cache,
-        cache_index,
+    result = rope_cache_ops.mla_prolog_v3_by_cache(
+        token_x=token_x,
+        weight_dq=weight_dq,
+        weight_uq_qr=weight_uq_qr,
+        weight_uk=weight_uk,
+        weight_dkv_kr=weight_dkv_kr,
+        rmsnorm_gamma_cq=rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv=rmsnorm_gamma_ckv,
+        positions=positions,
+        rotary_emb=rotary,
+        kv_cache=kv_cache,
+        kr_cache=kr_cache,
+        cache_index=cache_index,
         ref_tensor=token_x,
-        version=3,
         cache_mode="PA_BSND",
     )
 
@@ -148,7 +147,7 @@ def test_interleave_rope_by_cache_passes_strided_view_to_triton(monkeypatch):
     monkeypatch.setattr(
         rope_cache_ops,
         "_get_torch_npu_op",
-        lambda name: (_ for _ in ()).throw(AssertionError("torch_npu fallback should not be used before Triton")),
+        lambda name: None,
     )
     monkeypatch.setattr(rope_cache_ops, "_get_c_ascend_op", lambda name: None)
     monkeypatch.setattr(rope_cache_ops, "_get_triton_interleave_rope_by_cache", lambda: fake_interleave)
@@ -169,7 +168,7 @@ def test_interleave_rope_by_cache_passes_strided_view_to_triton(monkeypatch):
     assert torch.equal(out, (calls["qk"].contiguous() + 1).reshape(x.shape))
 
 
-def test_interleave_rope_by_cache_prefers_c_ascend_by_cache(monkeypatch):
+def test_interleave_rope_by_cache_falls_back_to_c_ascend_by_cache(monkeypatch):
     calls = {}
 
     def fake_native(qk, positions, cos_sin_cache, rope_dim, is_neox_style):
@@ -192,7 +191,7 @@ def test_interleave_rope_by_cache_prefers_c_ascend_by_cache(monkeypatch):
     monkeypatch.setattr(
         rope_cache_ops,
         "_get_torch_npu_op",
-        lambda name: (_ for _ in ()).throw(AssertionError("torch_npu fallback should not be used before C Ascend")),
+        lambda name: None,
     )
     monkeypatch.setattr(rope_cache_ops, "_get_c_ascend_op", fake_get_c_ascend_op)
     monkeypatch.setattr(
@@ -234,7 +233,7 @@ def test_interleave_rope_by_cache_skips_native_for_unaligned_half_rope_dim(monke
     monkeypatch.setattr(
         rope_cache_ops,
         "_get_torch_npu_op",
-        lambda name: (_ for _ in ()).throw(AssertionError("torch_npu fallback should not be used before Triton")),
+        lambda name: None,
     )
     monkeypatch.setattr(rope_cache_ops, "_get_c_ascend_op", lambda name: fake_native)
     monkeypatch.setattr(rope_cache_ops, "_get_triton_interleave_rope_by_cache", lambda: fake_triton)
@@ -250,7 +249,7 @@ def test_interleave_rope_by_cache_skips_native_for_unaligned_half_rope_dim(monke
     assert torch.equal(out, (calls["qk"].contiguous() + 1).reshape(x.shape))
 
 
-def test_interleave_rope_by_cache_uses_native_by_cache_for_non_neox(monkeypatch):
+def test_interleave_rope_by_cache_falls_back_to_native_by_cache_for_non_neox(monkeypatch):
     calls = {}
 
     def fake_native(qk, positions, cos_sin_cache, rope_dim, is_neox_style):
@@ -264,7 +263,7 @@ def test_interleave_rope_by_cache_uses_native_by_cache_for_non_neox(monkeypatch)
     monkeypatch.setattr(
         rope_cache_ops,
         "_get_torch_npu_op",
-        lambda name: (_ for _ in ()).throw(AssertionError("torch_npu fallback should not be used before C Ascend")),
+        lambda name: None,
     )
     monkeypatch.setattr(rope_cache_ops, "_get_c_ascend_op", lambda name: fake_native)
     monkeypatch.setattr(
@@ -376,7 +375,7 @@ def test_interleave_rope_by_cache_does_not_fallback_to_materialized_native(monke
     assert queried_ops == ["npu_interleave_rope_by_cache"]
 
 
-def test_interleave_rope_by_cache_uses_torch_npu_by_cache_as_last_fallback(monkeypatch):
+def test_interleave_rope_by_cache_prefers_torch_npu_by_cache(monkeypatch):
     calls = {}
 
     def fake_torch_npu_op(qk, positions, cos_sin_cache, rope_dim, is_neox_style):
@@ -392,8 +391,16 @@ def test_interleave_rope_by_cache_uses_torch_npu_by_cache_as_last_fallback(monke
         return fake_torch_npu_op
 
     monkeypatch.setattr(rope_cache_ops, "_get_torch_npu_op", fake_get_torch_npu_op)
-    monkeypatch.setattr(rope_cache_ops, "_get_c_ascend_op", lambda name: None)
-    monkeypatch.setattr(rope_cache_ops, "_get_triton_interleave_rope_by_cache", lambda: None)
+    monkeypatch.setattr(
+        rope_cache_ops,
+        "_get_c_ascend_op",
+        lambda name: (_ for _ in ()).throw(AssertionError("C Ascend should not be used before torch_npu")),
+    )
+    monkeypatch.setattr(
+        rope_cache_ops,
+        "_get_triton_interleave_rope_by_cache",
+        lambda: (_ for _ in ()).throw(AssertionError("Triton should not be used before torch_npu")),
+    )
     monkeypatch.setattr(rope_cache_ops, "get_rope_cache", lambda rotary_emb, ref_tensor: rotary_emb.cos_sin_cache)
 
     x = torch.zeros(2, 1, 1, 32)
