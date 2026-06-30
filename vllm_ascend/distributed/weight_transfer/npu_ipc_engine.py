@@ -116,8 +116,13 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
 
-    def __init__(self, config: WeightTransferConfig, parallel_config: ParallelConfig) -> None:
-        super().__init__(config, parallel_config)
+    def __init__(
+        self,
+        config: WeightTransferConfig,
+        parallel_config: ParallelConfig,
+        model: torch.nn.Module | None = None,
+    ) -> None:
+        super().__init__(config, parallel_config, model)
 
     def parse_update_info(self, update_dict: dict[str, Any]) -> NPUIPCWeightTransferUpdateInfo:
         """Parse update dict, deserializing pickled IPC handles if present.
@@ -177,6 +182,10 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
             )
             load_weights(weights)
         else:
+            # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
+            # must not be imported at module load time on non-NPU hosts.
+            from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
+
             assert isinstance(update_info.ipc_handles, list)
             weights = []
             for name, ipc_handle in zip(
@@ -191,14 +200,14 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
                         f"not co-located on the same physical NPU (node)."
                     )
 
-                func, args = ipc_handle[physical_npu_id]
+                args = ipc_handle[physical_npu_id]
                 list_args = list(args)
                 # Index 6 is the device_index parameter in torch's
                 # IPC handle tuple (rebuild_npu_tensor). Update it
                 # to the current device since the logical index can
                 # differ between sender and receiver.
                 list_args[6] = device_index
-                weight = func(*list_args)
+                weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
             load_weights(weights)
@@ -306,6 +315,9 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
 
             weight = tensor.detach().contiguous()
             weight_refs.append(weight)
+            # Store only the rebuild args (drop the func); the consumer rebuilds
+            # with the well-known ``rebuild_npu_tensor``, mirroring upstream's
+            # CUDA IPC engine.
             _, ipc_args = reduce_tensor(weight)
             ipc_handles.append({npu_uuid: ipc_args})
 

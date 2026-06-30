@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import scipy  # type: ignore
 import torch
@@ -30,7 +30,6 @@ from vllm_ascend.attention.utils import (
     ascend_chunked_prefill_workspace_size,
     enable_cp,
     maybe_save_kv_layer_to_connector,
-    notify_kv_cache_written,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
@@ -38,9 +37,6 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.memcache_comm_fence import (
-    record_attention_compute_start,
-)
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
     post_process_after_loading_for_shard_weight_series,
@@ -77,6 +73,30 @@ O_PROJ_ACLNN_INPUT_PARAMS = (
     "aclnn_input_offset",
 )
 O_PROJ_INPUT_SHARDED_QUANT_PARAMS = ("weight_scale_second", "weight_scale")
+
+
+def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
+    for config in configs:
+        if config is None:
+            continue
+        indexer_types = getattr(config, "indexer_types", None)
+        if indexer_types is not None:
+            return indexer_types
+    return None
+
+
+def _has_shared_indexer_layers(configs: tuple[Any, ...]) -> bool:
+    indexer_types = _get_indexer_types(configs)
+    if indexer_types is None:
+        return False
+    return any(isinstance(indexer_type, str) and indexer_type.lower() == "shared" for indexer_type in indexer_types)
+
+
+def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
+    for config in configs:
+        if config is not None and hasattr(config, attr):
+            return bool(getattr(config, attr))
+    return False
 
 
 class AscendSFABackend(AttentionBackend):
@@ -495,26 +515,47 @@ class AscendSFAImpl(MLAAttentionImpl):
         # NOTE: it imposes a limit on the number of input tokens and conflicts with FlashComm
         self.enable_mlapo = get_ascend_config().enable_mlapo
 
-        assert self.indexer is not None, "Indexer is required for DSA."
-
         self.local_num_heads = self.num_heads
         self.vllm_config = get_current_vllm_config()
-        self.use_index_cache = self.skip_topk or getattr(
-            self.vllm_config.model_config.hf_config,
+        self.layer_name = kwargs.get("layer_name")
+        hf_config = self.vllm_config.model_config.hf_config
+        hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
+        config_candidates = (hf_config, hf_text_config)
+        self.index_cache_enabled = _get_config_bool(
+            config_candidates,
             "use_index_cache",
-            False,
-        )
+        ) or _has_shared_indexer_layers(config_candidates)
+        self.use_index_cache = self.skip_topk or self.index_cache_enabled
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
-        self.layer_name = kwargs.get("layer_name")
+
+        self.has_indexer = self.indexer is not None
+        if not self.has_indexer and not self.skip_topk:
+            raise ValueError(
+                "Indexer is required for DSA unless skip_topk is enabled. "
+                f"Got indexer=None, skip_topk={self.skip_topk}, "
+                f"layer_name={self.layer_name}."
+            )
+        if not self.has_indexer and self.topk_indices_buffer is None:
+            raise ValueError(
+                "topk_indices_buffer is required when indexer is None and "
+                f"skip_topk is enabled. layer_name={self.layer_name}."
+            )
 
         # indexer param
-        self.n_head: int = self.indexer.n_head  # 64
-        self.head_dim: int = self.indexer.head_dim  # 128
-        self.wq_b = self.indexer.wq_b
-        self.wk_weights_proj = self.indexer.wk_weights_proj
-        self.k_norm = self.indexer.k_norm
+        if self.has_indexer:
+            self.n_head: int = self.indexer.n_head  # 64
+            self.head_dim: int = self.indexer.head_dim  # 128
+            self.wq_b = self.indexer.wq_b
+            self.wk_weights_proj = self.indexer.wk_weights_proj
+            self.k_norm = self.indexer.k_norm
+        else:
+            self.n_head = getattr(hf_config, "index_n_heads", 0)
+            self.head_dim = getattr(hf_config, "index_head_dim", 0)
+            self.wq_b = None
+            self.wk_weights_proj = None
+            self.k_norm = None
         self.cp_size = 1
         self.is_rope_neox_style = True
         self.use_torch_npu_lightning_indexer = False
@@ -523,7 +564,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.use_torch_npu_lightning_indexer = True
 
         # dsa c8
-        self.use_sparse_c8_indexer = ascend_config.is_sparse_c8_layer(self.layer_name)
+        self.use_sparse_c8_indexer = self.has_indexer and ascend_config.is_sparse_c8_layer(self.layer_name)
         self.use_a5_sparse_c8_indexer = self.use_sparse_c8_indexer and (get_ascend_device_type() == AscendDeviceType.A5)
         if self.use_sparse_c8_indexer:
             if get_ascend_device_type() == AscendDeviceType.A5:
@@ -1077,6 +1118,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ):
+        if not self.has_indexer:
+            raise RuntimeError(
+                f"indexer_select_pre_process should not be called when indexer is None. layer_name={self.layer_name}."
+            )
+
+        assert self.wk_weights_proj is not None
+        assert self.k_norm is not None
+
         kw, _ = self.wk_weights_proj(x)
         k_li = kw[:, : self.head_dim]
         k_li = self.k_norm(k_li).unsqueeze(1)
@@ -1123,6 +1172,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
+        if not self.has_indexer:
+            raise RuntimeError(
+                f"indexer_select_post_process should not be called when indexer is None. layer_name={self.layer_name}."
+            )
+
+        assert self.wk_weights_proj is not None
+        assert self.wq_b is not None
+
         kw, _ = self.wk_weights_proj(x)
         weights = kw[:, self.head_dim :]
         if isinstance(q_c, tuple):
@@ -1169,7 +1226,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
-        record_attention_compute_start()
         return DeviceOperator.indexer_select_post_process(
             self,
             q_li,
@@ -1278,7 +1334,14 @@ class AscendSFAImpl(MLAAttentionImpl):
                 slot_mapping=slot_mapping,
                 num_input_tokens=num_input_tokens,
             )
-            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            if self.has_indexer:
+                k_li, k_li_scale = self.indexer_select_pre_process(
+                    x=hidden_states,
+                    cos=cos,
+                    sin=sin,
+                )
+            else:
+                k_li, k_li_scale = None, None
             wait_for_kv_layer_from_connector(layer_name)
         # native
         else:
@@ -1299,7 +1362,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
 
-            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            if self.has_indexer:
+                k_li, k_li_scale = self.indexer_select_pre_process(
+                    x=hidden_states,
+                    cos=cos,
+                    sin=sin,
+                )
+            else:
+                k_li, k_li_scale = None, None
 
             wait_for_kv_layer_from_connector(layer_name)
 
@@ -1314,10 +1384,23 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.enable_dsa_cp:
                 assert k_pe is not None
                 assert k_nope is not None
-                assert k_li is not None
                 async_op = self.enable_dsa_cp_with_layer_shard or full_gather_o_proj_enabled
+
                 # support all_gather kv async for communication calculation overlap
-                if not self.use_sparse_c8_indexer:
+                if not self.has_indexer:
+                    fused_kv_no_split, kv_ag_handle = all_gather_async(
+                        torch.cat(
+                            [
+                                k_pe.view(-1, k_pe.shape[-1]),
+                                k_nope.view(-1, k_nope.shape[-1]),
+                            ],
+                            dim=1,
+                        ),
+                        get_tp_group(),
+                        async_op=async_op,
+                    )
+                elif not self.use_sparse_c8_indexer:
+                    assert k_li is not None
                     fused_kv_no_split, kv_ag_handle = all_gather_async(
                         torch.cat(
                             [
@@ -1358,6 +1441,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     )
                 else:
                     # due to different dtypes, we have to split commu pass
+                    assert k_li is not None
                     assert k_li_scale is not None
                     fused_kv_no_split, _ = all_gather_async(
                         torch.cat(
@@ -1409,9 +1493,15 @@ class AscendSFAImpl(MLAAttentionImpl):
 
                 if kv_cache is not None:
                     assert fused_kv_no_split is not None
-                    if not self.use_sparse_c8_indexer:
+                    if not self.has_indexer:
+                        k_pe, k_nope = fused_kv_no_split.split(
+                            [self.qk_rope_head_dim, self.kv_lora_rank],
+                            dim=-1,
+                        )
+                    elif not self.use_sparse_c8_indexer:
                         k_pe, k_nope, k_li = fused_kv_no_split.split(
-                            [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim], dim=-1
+                            [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim],
+                            dim=-1,
                         )
                     elif self.use_a5_sparse_c8_indexer:
                         torch_npu.npu_scatter_nd_update_(
@@ -1422,8 +1512,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                         k_pe = None
                         k_nope = None
                     else:
-                        k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
+                        k_pe, k_nope = fused_kv_no_split.split(
+                            [self.qk_rope_head_dim, self.kv_lora_rank],
+                            dim=-1,
+                        )
                     if not self.use_a5_sparse_c8_indexer:
+                        assert k_pe is not None
+                        assert k_nope is not None
                         k_nope = k_nope.view(k_nope.shape[0], 1, -1)
                         k_pe = k_pe.view(k_pe.shape[0], 1, -1)
                         DeviceOperator.reshape_and_cache(
@@ -1434,9 +1529,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                             slot_mapping=slot_mapping[: attn_metadata.num_actual_tokens],
                         )
 
-            k_li = self._get_full_kv(k_li, attn_metadata)
+            if self.has_indexer:
+                assert k_li is not None
+                k_li = self._get_full_kv(k_li, attn_metadata)
 
-        if kv_cache is not None:
+        if kv_cache is not None and self.is_kv_producer:
+            attn_metadata.reshape_cache_event = torch.npu.Event()
+
+        if kv_cache is not None and self.has_indexer:
+            assert k_li is not None
             if self.use_sparse_c8_indexer and get_ascend_device_type() == AscendDeviceType.A5:
                 dsa_k_cache_idx = 1
                 dsa_k_scale_cache_idx = 2
@@ -1480,7 +1581,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                             slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
-            notify_kv_cache_written(self.layer_name or "")
+
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event.record()
 
         if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
             topk_num_tokens = attn_metadata.dsa_cp_context.local_end_with_pad - attn_metadata.dsa_cp_context.local_start
@@ -1489,6 +1592,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
         else:
+            if not self.has_indexer:
+                raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
             topk_indices = self.indexer_select_post_process(
                 x=hidden_states,
                 q_c=q_c,
