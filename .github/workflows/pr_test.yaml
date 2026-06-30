@@ -202,7 +202,7 @@ jobs:
 
   prepare-build:
     name: Prepare build inputs
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       vllm_main_commit: ${{ steps.vllm.outputs.main_commit }}
       vllm_release_tag: ${{ steps.vllm.outputs.release_tag }}
